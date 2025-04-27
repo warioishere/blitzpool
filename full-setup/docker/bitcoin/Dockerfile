@@ -1,7 +1,7 @@
 # Use an official Ubuntu as a parent image
 FROM ubuntu:22.04 AS build
 
-ARG BITCOIN_CORE_VER=25.1
+ARG BITCOIN_CORE_VER=29.0
 
 # Install Bitcoin Core
 RUN apt-get update && \
