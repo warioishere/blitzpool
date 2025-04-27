@@ -35,15 +35,15 @@ export class TelegramService implements OnModuleInit {
         this.bot.onText(/\/subscribe/, async (msg) => {
             const address = msg.text.split('/subscribe ')[1];
             if (validate(address) == false) {
-                this.bot.sendMessage(msg.chat.id, "Invalid address.");
+                this.bot.sendMessage(msg.chat.id, "Ungueltige Adresse.");
                 return;
             }
             await this.telegramSubscriptionsService.saveSubscription(msg.chat.id, address);
-            this.bot.sendMessage(msg.chat.id, "Subscribed!");
+            this.bot.sendMessage(msg.chat.id, "Benachrichtigung aktiviert!");
         });
 
         this.bot.onText(/\/start/, (msg) => {
-            this.bot.sendMessage(msg.chat.id, "Welcome to the public-pool bot. /subscribe <address> to get notified.");
+            this.bot.sendMessage(msg.chat.id, "Willkommen beim BlitzPool Status Bot. Gib `/subscribe <wallet_address>` ein, um bei einem Blockhit benachrichtigt zu werden!");
         });
 
         this.bot.on('message', (msg) => {
@@ -58,7 +58,7 @@ export class TelegramService implements OnModuleInit {
 
         const subscribers = await this.telegramSubscriptionsService.getSubscriptions(address);
         subscribers.forEach(subscriber => {
-            this.bot.sendMessage(subscriber.telegramChatId, `Block Found! Result: ${message}, Height: ${height}`);
+            this.bot.sendMessage(subscriber.telegramChatId, `Block gefunden! Result: ${message}, Height: ${height}`);
         });
     }
 }
