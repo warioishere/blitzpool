@@ -36,6 +36,13 @@ export class TelegramService implements OnModuleInit {
     async onModuleInit(): Promise<void> {
         if (!this.bot) return;
 
+	//Hier: Telegram Menübefehle registrieren
+        await this.bot.setMyCommands([
+            { command: '/start', description: 'Zeigt Willkommensnachricht' },
+            { command: '/subscribe', description: 'Benachrichtigung bei Blockhit aktivieren' },
+            { command: '/difficulty', description: 'Zeigt aktuelle Netzwerk-Difficulty' }
+        ]);
+
         this.bot.onText(/\/subscribe/, async (msg) => {
             const address = msg.text.split('/subscribe ')[1];
             if (!validate(address)) {
@@ -64,7 +71,7 @@ Du kannst mir:
 1. Lesst euch die README durch: https://github.com/warioishere/blitzpool-message-encryptor-for-TG/blob/master/README.md
 2a. Ladet den python Script für Linux und Mac herrunter: https://cloud.yourdevice.ch/s/TbqdwE24jTRmtRp
 2b. Oder für Windows: https://github.com/warioishere/blitzpool-message-encryptor-for-TG/releases/tag/v1.0.0
-3a. Führt den Script auf Windows/Mac im Terminal aus mit ./blitzpool-message-encryptor.py
+3a. Führt den Script auf Windows/Mac im Terminal aus mit ./encrypt-message.py
 3b. Oder auf Windows mit dem Doppelklick auf die exe
 4. Gebt den subscribe Textbefehl ein, z.B: /subscribe bc1qxxxx
 3. Sende den erzeugten verschlüsselten Text direkt an mich.
@@ -72,6 +79,21 @@ Du kannst mir:
 Ich entschlüssle ihn und reagiere genau wie bei Klartext. 🔒`
             );
         });
+	
+	this.bot.onText(/\/difficulty/, async (msg) => {
+            const chatId = msg.chat.id;
+
+        try {
+            const res = await fetch('https://mempool.space/api/v1/mining/hashrate/3d');
+            const json = await res.json();
+            const difficulty = (json.currentDifficulty / 1e12).toFixed(2);
+            this.bot.sendMessage(chatId, `Aktuelle Difficulty: ${difficulty} T`);
+        } catch (e) {
+            this.bot.sendMessage(chatId, "Konnte die Difficulty nicht abrufen.");
+            console.error(e);
+        }
+    });
+
 
         this.bot.on('message', async (msg) => {
             if (!msg.text) return;
