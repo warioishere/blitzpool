@@ -35,6 +35,7 @@ services:
     volumes:
       - "./data/mainnet/public-pool:/public-pool/DB"
       - "./public-pool-mainnet.env:/public-pool/.env:ro"
+      - "/home/blitzpool/public-pool-keys:/app/keys"
     environment:
       - NODE_ENV=production
 

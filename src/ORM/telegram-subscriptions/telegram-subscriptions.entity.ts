@@ -15,5 +15,6 @@ export class TelegramSubscriptionsEntity extends TrackedEntity {
     @Column()
     telegramChatId: number;
 
-
+    @Column({ default: true }) // <--- genau das hier ist wichtig!
+    bestDiffNotificationsEnabled: boolean;
 }
