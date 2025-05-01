@@ -5,8 +5,9 @@ import { Block } from 'bitcoinjs-lib';
 import * as TelegramBot from 'node-telegram-bot-api';
 import { NumberSuffix } from '../utils/NumberSuffix';
 import { decryptMessageIfNeeded } from '../utils/message-decryptor';
-
 import { TelegramSubscriptionsService } from '../ORM/telegram-subscriptions/telegram-subscriptions.service';
+import { ClientService } from '../ORM/client/client.service';
+import { AddressSettingsService } from '../ORM/address-settings/address-settings.service';
 
 @Injectable()
 export class TelegramService implements OnModuleInit {
@@ -17,7 +18,9 @@ export class TelegramService implements OnModuleInit {
 
     constructor(
         private readonly configService: ConfigService,
-        private readonly telegramSubscriptionsService: TelegramSubscriptionsService
+        private readonly telegramSubscriptionsService: TelegramSubscriptionsService,
+	private readonly clientService: ClientService,
+        private readonly addressSettingsService: AddressSettingsService
     ) {
         const token: string | null = this.configService.get('TELEGRAM_BOT_TOKEN');
 
@@ -42,7 +45,8 @@ export class TelegramService implements OnModuleInit {
             { command: '/subscribe', description: 'Benachrichtigung bei Blockhit aktivieren' },
             { command: '/subscribe_bestdiff', description: 'Best-Diff Benachrichtigungen (on/off, Standard: on)' },
             { command: '/difficulty', description: 'Zeigt aktuelle Netzwerk-Difficulty' },
-            { command: '/next_difficulty', description: 'Zeigt erwartete Änderung der Netzwerk-Difficulty' }
+            { command: '/next_difficulty', description: 'Zeigt erwartete Änderung der Netzwerk-Difficulty' },
+	    { command: '/stats', description: 'Zeigt die Stats für deine Miner Adresse an' }
         ]);
 
         this.bot.onText(/\/subscribe (.+)/, async (msg, match) => {
@@ -101,7 +105,7 @@ Du kannst mir:
 – direkt schreiben (z. B. /subscribe BitcoinAdresse)
 – oder verschlüsselt senden (z. B. über das Verschlüsselungstool)
 
-🔐 Wenn du mir vertrauliche Infos schicken willst:
+🔐 Du kannst mir die BTC Worker Adresse auch verschlüsselt senden:
 1. Lesst euch die README durch: https://github.com/warioishere/blitzpool-message-encryptor-for-TG/blob/master/README.md
 2a. Ladet den Python-Script für Linux und Mac herunter: https://cloud.yourdevice.ch/s/TbqdwE24jTRmtRp
 2b. Oder für Windows: https://github.com/warioishere/blitzpool-message-encryptor-for-TG/releases/tag/v1.0.0
@@ -109,6 +113,7 @@ Du kannst mir:
 3b. Oder auf Windows mit Doppelklick auf die .exe
 4. Gebt eure BTC-Adresse ein.
 5. Sende '/subscribe <verschlüsselte Adresse>' direkt an mich.
+6. Sende '/stats <verschlüsselte Adresse>' für deine Statistiken.
 
 Ich entschlüssle ihn und reagiere genau wie bei Klartext. 🔒`);
         });
@@ -149,6 +154,51 @@ Ich entschlüssle ihn und reagiere genau wie bei Klartext. 🔒`);
             } catch (err) {
                 console.error("Fehler bei /next_difficulty:", err);
                 this.bot.sendMessage(chatId, "Konnte die nächste Difficulty-Anpassung nicht abrufen.");
+            }
+        });
+
+	this.bot.onText(/\/stats (.+)/, async (msg, match) => {
+            const chatId = msg.chat.id;
+            const raw = match?.[1]?.trim();
+
+            if (!raw) {
+                this.bot.sendMessage(chatId, "Bitte gib eine BTC-Adresse an.");
+                return;
+            }
+
+            let address = raw;
+            const decrypted = decryptMessageIfNeeded(raw);
+            if (decrypted) {
+                console.log("Entschlüsselt (Stats):", decrypted);
+                address = decrypted.trim();
+            }
+
+            if (!validate(address)) {
+                this.bot.sendMessage(chatId, "Ungültige Adresse.");
+                return;
+            }
+
+            try {
+                const workers = await this.clientService.getByAddress(address);
+                const addressSettings = await this.addressSettingsService.getSettings(address, false);
+
+                if (!workers || workers.length === 0) {
+                    this.bot.sendMessage(chatId, "Keine aktiven Worker für diese Adresse gefunden.");
+                    return;
+                }
+
+                const totalHashrate = workers.reduce((sum, w) => sum + (w.hashRate ?? 0), 0);
+                const lastSeenSeconds = Math.floor((Date.now() - new Date(workers[0].updatedAt).getTime()) / 1000);
+                const bestDifficulty = addressSettings?.bestDifficulty?.toFixed(2) ?? "0.00";
+
+                this.bot.sendMessage(chatId,
+`📈 Stats für deine Adresse:
+- Aktuelle Hashrate: ${totalHashrate.toFixed(2)} TH/s
+- Letzter Share: vor ${lastSeenSeconds} Sekunden
+- Beste Difficulty: ${bestDifficulty}`);
+        } catch (err) {
+                console.error("Fehler bei /stats:", err);
+                this.bot.sendMessage(chatId, "Fehler beim Abrufen der Statistiken.");
             }
         });
 
