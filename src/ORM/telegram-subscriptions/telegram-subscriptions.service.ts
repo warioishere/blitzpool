@@ -10,12 +10,10 @@ export class TelegramSubscriptionsService {
     constructor(
         @InjectRepository(TelegramSubscriptionsEntity)
         private telegramSubscriptions: Repository<TelegramSubscriptionsEntity>
-    ) {
-
-    }
+    ) {}
 
     public async getSubscriptions(address: string) {
-        return await this.telegramSubscriptions.find({ where: { address } })
+        return await this.telegramSubscriptions.find({ where: { address } });
     }
 
     public async saveSubscription(chatId: number, address: string) {
@@ -23,5 +21,12 @@ export class TelegramSubscriptionsService {
             telegramChatId: chatId,
             address
         });
+    }
+
+    public async updateBestDiffNotification(chatId: number, enabled: boolean): Promise<void> {
+        await this.telegramSubscriptions.update(
+            { telegramChatId: chatId },
+            { bestDiffNotificationsEnabled: enabled }
+        );
     }
 }

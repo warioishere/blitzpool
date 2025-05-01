@@ -10,10 +10,10 @@ import { TelegramSubscriptionsService } from '../ORM/telegram-subscriptions/tele
 
 @Injectable()
 export class TelegramService implements OnModuleInit {
-
     private bot: TelegramBot;
     private diffNotifications: boolean;
     private numberSuffix: NumberSuffix;
+    private bestDiffCache: Map<string, number> = new Map();
 
     constructor(
         private readonly configService: ConfigService,
@@ -40,53 +40,61 @@ export class TelegramService implements OnModuleInit {
         await this.bot.setMyCommands([
             { command: '/start', description: 'Zeigt Willkommensnachricht' },
             { command: '/subscribe', description: 'Benachrichtigung bei Blockhit aktivieren' },
-	    { command: '/unsubscribe_bestdiff', description: 'Deaktiviert "best difficulty"-Benachrichtigungen' },
-            { command: '/difficulty', description: 'Zeigt aktuelle Netzwerk-Difficulty' }
+            { command: '/subscribe_bestdiff', description: 'Best-Diff Benachrichtigungen (on/off, Standard: on)' },
+            { command: '/difficulty', description: 'Zeigt aktuelle Netzwerk-Difficulty' },
+            { command: '/next_difficulty', description: 'Zeigt erwartete Änderung der Netzwerk-Difficulty' }
         ]);
 
-	// /subscribe mit verschlüsselter ODER unverschlüsselter Adresse
-    this.bot.onText(/\/subscribe (.+)/, async (msg, match) => {
-        const raw = match?.[1]?.trim();
-        if (!raw) {
-            this.bot.sendMessage(msg.chat.id, "Bitte gib eine Adresse an.");
-            return;
-        }
+        this.bot.onText(/\/subscribe (.+)/, async (msg, match) => {
+            const raw = match?.[1]?.trim();
+            if (!raw) {
+                this.bot.sendMessage(msg.chat.id, "Bitte gib eine Adresse an.");
+                return;
+            }
 
-        let address = raw;
-        const decrypted = decryptMessageIfNeeded(raw);
-        if (decrypted) {
-            console.log("Entschlüsselt:", decrypted);
-            address = decrypted.trim();
-        }
+            let address = raw;
+            const decrypted = decryptMessageIfNeeded(raw);
+            if (decrypted) {
+                console.log("Entschlüsselt:", decrypted);
+                address = decrypted.trim();
+            }
 
-        if (!validate(address)) {
-            this.bot.sendMessage(msg.chat.id, "Ungültige Adresse.");
-            return;
-        }
+            if (!validate(address)) {
+                this.bot.sendMessage(msg.chat.id, "Ungültige Adresse.");
+                return;
+            }
 
-        const subscribers = await this.telegramSubscriptionsService.getSubscriptions(address);
-        if (subscribers.length === 0) {
-            await this.telegramSubscriptionsService.saveSubscription(msg.chat.id, address);
-            this.bot.sendMessage(msg.chat.id, "Benachrichtigung aktiviert!");
-        } else {
-            this.bot.sendMessage(msg.chat.id, "Bereits registriert!");
-        }
-    });	
+            const subscribers = await this.telegramSubscriptionsService.getSubscriptions(address);
+            if (subscribers.length === 0) {
+                await this.telegramSubscriptionsService.saveSubscription(msg.chat.id, address);
+                this.bot.sendMessage(msg.chat.id, "Benachrichtigung aktiviert!");
+            } else {
+                this.bot.sendMessage(msg.chat.id, "Bereits registriert!");
+            }
+        });
 
-    this.bot.onText(/\/unsubscribe_bestdiff/, async (msg) => {
-        const chatId = msg.chat.id;
+        this.bot.onText(/\/subscribe_bestdiff (on|off)/i, async (msg, match) => {
+            const chatId = msg.chat.id;
+            const value = match?.[1]?.toLowerCase();
 
-        try {
-            await this.telegramSubscriptionsService.updateBestDiffNotification(chatId, false);
-            this.bot.sendMessage(chatId, "Du hast die 'best difficulty'-Benachrichtigungen erfolgreich deaktiviert.");
-        } catch (error) {
-            console.error("Fehler beim Deaktivieren der 'best difficulty'-Benachrichtigungen:", error);
-            this.bot.sendMessage(chatId, "Es ist ein Fehler aufgetreten. Bitte versuche es später erneut.");
-        }
-    });
+            if (!value) {
+                this.bot.sendMessage(chatId, "Bitte gib 'on' oder 'off' an.");
+                return;
+            }
 
-    this.bot.onText(/\/start/, (msg) => {
-       this.bot.sendMessage(msg.chat.id,
+            const enable = value === 'on';
+
+            try {
+                await this.telegramSubscriptionsService.updateBestDiffNotification(chatId, enable);
+                this.bot.sendMessage(chatId, `Best Difficulty Benachrichtigungen wurden ${enable ? 'aktiviert' : 'deaktiviert'}.`);
+            } catch (error) {
+                console.error("Fehler bei /subscribe_bestdiff:", error);
+                this.bot.sendMessage(chatId, "Fehler beim Setzen der Einstellung. Bitte später erneut versuchen.");
+            }
+        });
+
+        this.bot.onText(/\/start/, (msg) => {
+            this.bot.sendMessage(msg.chat.id,
 `Willkommen beim BlitzPool Status Bot! 💡
 
 Du kannst mir:
@@ -102,10 +110,9 @@ Du kannst mir:
 4. Gebt eure BTC-Adresse ein.
 5. Sende '/subscribe <verschlüsselte Adresse>' direkt an mich.
 
-Ich entschlüssle ihn und reagiere genau wie bei Klartext. 🔒`
-       );
-   });
-        // Netzwerk-Difficulty anzeigen
+Ich entschlüssle ihn und reagiere genau wie bei Klartext. 🔒`);
+        });
+
         this.bot.onText(/\/difficulty/, async (msg) => {
             const chatId = msg.chat.id;
 
@@ -120,18 +127,43 @@ Ich entschlüssle ihn und reagiere genau wie bei Klartext. 🔒`
             }
         });
 
-        // Andere Nachrichten ignorieren bzw. loggen
+        this.bot.onText(/\/next_difficulty/, async (msg) => {
+            const chatId = msg.chat.id;
+
+            try {
+                const res = await fetch('https://mempool.space/api/v1/difficulty-adjustment');
+                const data = await res.json();
+
+                const progress = data.progressPercent.toFixed(2);
+                const change = data.difficultyChange.toFixed(2);
+                const estimatedDate = new Date(data.estimatedRetargetDate * 1000).toLocaleString('de-CH');
+
+                const changeText = change >= 0 ? `📈 +${change}%` : `📉 ${change}%`;
+
+                this.bot.sendMessage(chatId,
+`📊 Nächste Difficulty-Anpassung:
+
+• Fortschritt: ${progress}%
+• Geschätzt: ${estimatedDate}
+• Erwartete Änderung: ${changeText}`);
+            } catch (err) {
+                console.error("Fehler bei /next_difficulty:", err);
+                this.bot.sendMessage(chatId, "Konnte die nächste Difficulty-Anpassung nicht abrufen.");
+            }
+        });
+
         this.bot.on('message', async (msg) => {
             if (!msg.text) return;
 
             const text = msg.text.trim();
 
-            // bekannte Befehle ignorieren
             if (
                 text.startsWith('/subscribe ') ||
+                text.startsWith('/subscribe_bestdiff') ||
                 text === '/subscribe' ||
                 text === '/start' ||
-                text === '/difficulty'
+                text === '/difficulty' ||
+                text === '/next_difficulty'
             ) {
                 return;
             }
@@ -154,17 +186,22 @@ Ich entschlüssle ihn und reagiere genau wie bei Klartext. 🔒`
     public async notifySubscribersBestDiff(address: string, submissionDifficulty: number) {
         if (!this.bot || !this.diffNotifications) return;
 
-        const subscribers = await this.telegramSubscriptionsService.getSubscriptions(address);
-        const subscriberMessages = subscribers
-            .filter(subscriber => subscriber.bestDiffNotificationsEnabled)
-            .map(subscriber => {
-                return this.bot.sendMessage(
-                    subscriber.telegramChatId,
-                    `Neue beste Difficulty! Ergebnis: ${this.numberSuffix.to(submissionDifficulty)}`
-                );
-            });
+        const currentBest = this.bestDiffCache.get(address) ?? 0;
 
-        Promise.all(subscriberMessages).then();
+        if (submissionDifficulty > currentBest) {
+            this.bestDiffCache.set(address, submissionDifficulty);
+
+            const subscribers = await this.telegramSubscriptionsService.getSubscriptions(address);
+            const subscriberMessages = subscribers
+                .filter(subscriber => subscriber.bestDiffNotificationsEnabled)
+                .map(subscriber => {
+                    return this.bot.sendMessage(
+                        subscriber.telegramChatId,
+                        `🏆 Neue beste Difficulty für deine Adresse!\nWert: ${this.numberSuffix.to(submissionDifficulty)}`
+                    );
+                });
+
+            Promise.all(subscriberMessages).then();
+        }
     }
-
 }
