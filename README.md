@@ -50,7 +50,7 @@ https://github.com/warioishere/blitzpool-message-encryptor-for-TG
 
 For updates, support, and to join the community, reach out via:
 
-    Matrix: @blitzpool:yourdevice.ch
+    Matrix: @blitzpool:matrix.yourdevice.ch
 
     Telegram: https://t.me/blitzpool_official_switzerland
 
