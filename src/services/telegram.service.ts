@@ -188,14 +188,18 @@ Ich entschlüssle ihn und reagiere genau wie bei Klartext. 🔒`);
                 }
 
                 const totalHashrate = workers.reduce((sum, w) => sum + (w.hashRate ?? 0), 0);
-                const lastSeenSeconds = Math.floor((Date.now() - new Date(workers[0].updatedAt).getTime()) / 1000);
-                const bestDifficulty = addressSettings?.bestDifficulty?.toFixed(2) ?? "0.00";
+                const totalHashrateTH = totalHashrate / 1e12;
 
-                this.bot.sendMessage(chatId,
+                const lastSeenSeconds = Math.floor((Date.now() - new Date(workers[0].updatedAt).getTime()) / 1000);
+
+                const bestDiffRaw = addressSettings?.bestDifficulty ?? 0;
+                const bestDifficultyG = bestDiffRaw / 1e9;
+
+        this.bot.sendMessage(chatId,
 `📈 Stats für deine Adresse:
-- Aktuelle Hashrate: ${totalHashrate.toFixed(2)} TH/s
+- Aktuelle Hashrate: ${totalHashrateTH.toFixed(2)} TH/s
 - Letzter Share: vor ${lastSeenSeconds} Sekunden
-- Beste Difficulty: ${bestDifficulty}`);
+- Beste Difficulty: ${bestDifficultyG.toFixed(2)} G`);
         } catch (err) {
                 console.error("Fehler bei /stats:", err);
                 this.bot.sendMessage(chatId, "Fehler beim Abrufen der Statistiken.");
