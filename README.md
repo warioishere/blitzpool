@@ -21,16 +21,16 @@ BlitzPool extends the original `public-pool` implementation in multiple ways to 
 
 The BlitzPool Telegram bot offers real-time interaction and notification options via the following commands:
 Command	Description
-- /start	Displays a welcome message and usage instructions
-- /subscribe	Subscribe to receive block found notifications for your mining address
+- /start	            Displays a welcome message and usage instructions
+- /subscribe	        Subscribe to receive block found notifications for your mining address
 - /subscribe_bestdiff	Toggle Best-Diff notifications on or off (default: on)
-- /difficulty	Shows the current Bitcoin network difficulty
-- /next_difficulty	Estimates the next network difficulty adjustment
-- /stats	Displays detailed mining stats for your subscribed Bitcoin address
+- /difficulty	        Shows the current Bitcoin network difficulty
+- /next_difficulty	    Estimates the next network difficulty adjustment
+- /stats	            Displays detailed mining stats for your subscribed Bitcoin address
 
-➡️ Subscriptions are address-based and persistent – no account or login needed.
-➡️ For Stats, worker addresse need to be given on every command. 
-➡️ btc worker addresse can be send encrypted with an own tool, pls see next steps:
+- ➡️ Subscriptions are address-based and persistent – no account or login needed.
+- ➡️ For Stats, worker addresse need to be given on every command. 
+- ➡️ btc worker addresse can be send encrypted with an own tool, pls see next steps:
 
 #### 🔐 Encrypted Address Tracking
 - Subscribe with **encrypted BTC addresses** for enhanced privacy
