@@ -1,89 +1,61 @@
-## Description
+# ⚡️ BlitzPool – Bitcoin Mining Pool
 
-A Nestjs and Typescript Bitcoin stratum mining server.
+Welcome to **BlitzPool**, a lightweight and open-source Bitcoin mining pool based on the [public-pool](https://github.com/benjamin-wilson/public-pool) project – extended with powerful new features and real-world integrations.
 
-## Installation
+🌐 **Live Pool:** [https://blitzpool.yourdevice.ch/#/](https://blitzpool.yourdevice.ch/#/)
 
-```bash
-$ npm install
-```
+---
 
-create an new .env file in the root directory and configure it with the parameters in .env.example
+## ✨ What's Special About BlitzPool?
 
-## Running the app
+BlitzPool extends the original `public-pool` implementation in multiple ways to enhance usability, automation, and miner transparency:
 
-```bash
-# development
-$ npm run start
+### ✅ Core Features
+- Lightweight, performant Node.js mining pool
+- Full support for Bitcoin mainnet, testnet, and regtest
+- Stratum V1 protocol support
 
-# watch mode
-$ npm run start:dev
+### 🚀 Extended Features by BlitzPool
 
-# production build
-$ npm run build
-```
+### 🤖 Telegram Bot Commands
 
-## Test
+The BlitzPool Telegram bot offers real-time interaction and notification options via the following commands:
+Command	Description
+/start	Displays a welcome message and usage instructions
+/subscribe	Subscribe to receive block found notifications for your mining address
+/subscribe_bestdiff	Toggle Best-Diff notifications on or off (default: on)
+/difficulty	Shows the current Bitcoin network difficulty
+/next_difficulty	Estimates the next network difficulty adjustment
+/stats	Displays detailed mining stats for your subscribed Bitcoin address
 
-```bash
-# unit tests
-$ npm run test
+➡️ Subscriptions are address-based and persistent – no account or login needed.
 
-# test coverage
-$ npm run test:cov
-```
+#### 🔐 Encrypted Address Tracking
+- Subscribe with **encrypted BTC addresses** for enhanced privacy
+- Addresses are decrypted internally and securely matched to your mining activity
 
-## Web interface
+Use our Encryption tool for btc worker addresses here:
 
-See [public-pool-ui](https://github.com/benjamin-wilson/public-pool-ui)
+https://github.com/warioishere/blitzpool-message-encryptor-for-TG
 
-## Deployment
+#### 🛠️ Extra Services
+- Integrated `blockTemplateInterval` configuration
+- Hashrate corrections and updated statistics endpoints
+- Telegram bot subscriptions managed via a custom ORM
 
-Install pm2 (https://pm2.keymetrics.io/)
+---
+💬 Contact
 
-```bash
-$ pm2 start dist/main.js
-```
+For updates, support, and to join the community, reach out via:
 
-## Docker
+    Matrix: @blitzpool:yourdevice.ch
 
-Build container:
+    Telegram: https://t.me/blitzpool_official_switzerland
 
-```bash
-$ docker build -t public-pool .
-```
+🙏 Credits
 
-Run container:
+This project is a fork of the excellent public-pool by benjamin-wilson, extended and maintained by the BlitzPool team at yourdevice.ch.
 
-```bash
-$ docker container run --name public-pool --rm -p 3333:3333 -p 3334:3334 -p 8332:8332 -v .env:/public-pool/.env public-pool
-```
 
-### Docker Compose
 
-Build container:
-```bash
-$ docker compose build
-```
 
-Run container:
-```bash
-$ docker compose up -d
-```
-
-The docker-compose binds to `127.0.0.1` by default. To expose the Stratum services on your server change:
-```diff
-    ports:
--      - "127.0.0.1:3333:3333/tcp"
--      - "127.0.0.1:3334:3334/tcp"
-+      - "3333"
-+      - "3334"
-```
-
-**note**: To successfully connect to the bitcoin RPC you will need to add
-
-```
-rpcallowip=172.16.0.0/12
-```
-
-to your bitcoin.conf.
