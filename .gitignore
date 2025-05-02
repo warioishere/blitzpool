@@ -28,7 +28,8 @@ lerna-debug.log*
 *.sublime-workspace
 .env
 settings.json
-./full-setup/*.env
+# safer wildcard version
+full-setup/public-pool-*.env
 
 # IDE - VSCode
 .vscode/*
