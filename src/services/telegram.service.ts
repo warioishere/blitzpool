@@ -46,7 +46,8 @@ export class TelegramService implements OnModuleInit {
             { command: '/subscribe_bestdiff', description: 'Best-Diff Benachrichtigungen (on/off, Standard: on)' },
             { command: '/difficulty', description: 'Zeigt aktuelle Netzwerk-Difficulty' },
             { command: '/next_difficulty', description: 'Zeigt erwartete Änderung der Netzwerk-Difficulty' },
-	    { command: '/stats', description: 'Zeigt die Stats für deine Miner Adresse an' }
+            { command: '/stats', description: 'Zeigt die Stats für deine Miner Adresse an' },
+            { command: '/poolhashrate', description: 'Zeigt die aktuelle Pool-Hashrate' }
         ]);
 
         this.bot.onText(/\/subscribe (.+)/, async (msg, match) => {
@@ -154,6 +155,21 @@ Ich entschlüssle ihn und reagiere genau wie bei Klartext. 🔒`);
             } catch (err) {
                 console.error("Fehler bei /next_difficulty:", err);
                 this.bot.sendMessage(chatId, "Konnte die nächste Difficulty-Anpassung nicht abrufen.");
+            }
+        });
+
+        this.bot.onText(/\/poolhashrate/, async (msg) => {
+            const chatId = msg.chat.id;
+
+            try {
+                const apiPort = process.env.API_PORT || '3334';
+                const res = await fetch(`http://localhost:${apiPort}/api/pool`);
+                const data = await res.json();
+                const hashrateTH = (data.totalHashRate / 1e12).toFixed(2);
+                this.bot.sendMessage(chatId, `Aktuelle Pool-Hashrate: ${hashrateTH} TH/s`);
+            } catch (err) {
+                console.error('Fehler bei /poolhashrate:', err);
+                this.bot.sendMessage(chatId, 'Konnte die Pool-Hashrate nicht abrufen.');
             }
         });
 

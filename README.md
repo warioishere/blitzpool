@@ -27,6 +27,7 @@ Command	Description
 - /difficulty	        Shows the current Bitcoin network difficulty
 - /next_difficulty	    Estimates the next network difficulty adjustment
 - /stats	            Displays detailed mining stats for your subscribed Bitcoin address
+- /poolhashrate          Shows the current pool hashrate
 
 - ➡️ Subscriptions are address-based and persistent – no account or login needed.
 - ➡️ For Stats, worker addresse need to be given on every command. 
