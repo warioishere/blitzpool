@@ -251,6 +251,26 @@ export class ClientStatisticsService {
 
     }
 
+    public async getTotalSharesForAddress(address: string): Promise<number> {
+        const result = await this.clientStatisticsRepository
+            .createQueryBuilder('entry')
+            .select('SUM(entry.shares)', 'total')
+            .where('entry.address = :address', { address })
+            .getRawOne();
+        return result?.total ? parseFloat(result.total) : 0;
+    }
+
+    public async getTotalSharesForWorkers(address: string): Promise<Array<{ clientName: string, total: number }>> {
+        const results = await this.clientStatisticsRepository
+            .createQueryBuilder('entry')
+            .select('entry.clientName', 'clientName')
+            .addSelect('SUM(entry.shares)', 'total')
+            .where('entry.address = :address', { address })
+            .groupBy('entry.clientName')
+            .getRawMany();
+        return results.map(r => ({ clientName: r.clientName, total: parseFloat(r.total) }));
+    }
+
     public async deleteAll() {
         return await this.clientStatisticsRepository.delete({})
     }
