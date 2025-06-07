@@ -142,7 +142,7 @@ Ich entschlüssle ihn und reagiere genau wie bei Klartext. 🔒`);
 
                 const progress = data.progressPercent.toFixed(2);
                 const change = data.difficultyChange.toFixed(2);
-                const estimatedDate = new Date(data.estimatedRetargetDate * 1000).toLocaleString('de-CH');
+                const estimatedDate = new Date(data.estimatedRetargetDate).toLocaleString('de-CH');
 
                 const changeText = change >= 0 ? `📈 +${change}%` : `📉 ${change}%`;
 
