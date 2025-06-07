@@ -46,6 +46,18 @@ export class ClientController {
         return chartData;
     }
 
+    @Get(':address/shares')
+    async getAddressShares(@Param('address') address: string) {
+        const totalShares = await this.clientStatisticsService.getTotalSharesForAddress(address);
+        return { totalShares };
+    }
+
+    @Get(':address/worker-shares')
+    async getWorkerShares(@Param('address') address: string) {
+        const workerShares = await this.clientStatisticsService.getTotalSharesForWorkers(address);
+        return workerShares.map(ws => ({ workerName: ws.clientName, totalShares: ws.total }));
+    }
+
     @Get(':address/:workerName')
     async getWorkerGroupInfo(@Param('address') address: string, @Param('workerName') workerName: string) {
 
