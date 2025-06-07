@@ -12,7 +12,7 @@ BlitzPool extends the original `public-pool` implementation in multiple ways to 
 
 ### ✅ Core Features
 - Lightweight, performant Node.js mining pool
-- Full support for Bitcoin mainnet, testnet, and regtest
+- Full support for Bitcoin mainnet
 - Stratum V1 protocol support
 
 ### 🚀 Extended Features by BlitzPool
