@@ -14,6 +14,7 @@ BlitzPool extends the original `public-pool` implementation in multiple ways to 
 - Lightweight, performant Node.js mining pool
 - Full support for Bitcoin mainnet
 - Stratum V1 protocol support
+- loads of Telegram Bot Commands to get basic mining infos
 
 ### 🚀 Extended Features by BlitzPool
 
@@ -45,6 +46,17 @@ https://github.com/warioishere/blitzpool-message-encryptor-for-TG
 - Integrated `blockTemplateInterval` configuration
 - Hashrate corrections and updated statistics endpoints
 - Telegram bot subscriptions managed via a custom ORM
+
+#### Blitzpool-UI
+
+Blitzpool UI can be found here:
+
+https://github.com/warioishere/blitzpool-ui/tree/blitzpool-ui-master
+
+Blitzpool UI has additional Features to show
+
+- total Shares per address
+- total shares per Worker
 
 ---
 💬 Contact
