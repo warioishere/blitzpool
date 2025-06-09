@@ -38,19 +38,101 @@ export class ClientStatisticsService {
     }
 
     public async deleteOldStatistics() {
-        const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        const now = Date.now();
+        const detailCutoff = new Date(now - 1 * 24 * 60 * 60 * 1000);
+        const halfYearCutoff = new Date(now - 180 * 24 * 60 * 60 * 1000);
+        const yearCutoff = new Date(now - 365 * 24 * 60 * 60 * 1000);
 
-        return await this.clientStatisticsRepository
-            .createQueryBuilder()
-            .delete()
-            .from(ClientStatisticsEntity)
-            .where('time < :time', { time: oneDayAgo.getTime() })
-            .execute();
+        // Aggregate old statistics so that only pool hashrate and worker totals are retained
+        await this.clientStatisticsRepository.query(`
+            INSERT INTO client_statistics_entity (
+                address,
+                clientName,
+                sessionId,
+                time,
+                shares,
+                acceptedCount,
+                "createdAt",
+                "updatedAt"
+            )
+            SELECT
+                'POOL',
+                'POOL',
+                'POOL',
+                time,
+                SUM(shares),
+                SUM(acceptedCount),
+                datetime('now'),
+                datetime('now')
+            FROM client_statistics_entity
+            WHERE time < ${detailCutoff.getTime()} AND NOT (address = 'POOL' AND clientName = 'POOL' AND sessionId = 'POOL') AND sessionId != 'AGG'
+            GROUP BY time;
+        `);
+
+        await this.clientStatisticsRepository.query(`
+            INSERT INTO client_statistics_entity (
+                address,
+                clientName,
+                sessionId,
+                time,
+                shares,
+                acceptedCount,
+                "createdAt",
+                "updatedAt"
+            )
+            SELECT
+                address,
+                clientName,
+                'AGG',
+                ${detailCutoff.getTime()},
+                SUM(shares),
+                SUM(acceptedCount),
+                datetime('now'),
+                datetime('now')
+            FROM client_statistics_entity
+            WHERE time < ${detailCutoff.getTime()} AND NOT (sessionId = 'AGG' OR (address = 'POOL' AND clientName = 'POOL' AND sessionId = 'POOL'))
+            GROUP BY address, clientName;
+        `);
+
+        // Delete detailed records older than one day
+        await this.clientStatisticsRepository.query(`
+            DELETE FROM client_statistics_entity
+            WHERE time < ${detailCutoff.getTime()} AND NOT (sessionId = 'AGG' OR (address = 'POOL' AND clientName = 'POOL' AND sessionId = 'POOL'));
+        `);
+
+        // Remove worker aggregates older than six months
+        await this.clientStatisticsRepository.query(`
+            DELETE FROM client_statistics_entity
+            WHERE time < ${halfYearCutoff.getTime()} AND sessionId = 'AGG';
+        `);
+
+        // Remove pool aggregates older than one year
+        await this.clientStatisticsRepository.query(`
+            DELETE FROM client_statistics_entity
+            WHERE time < ${yearCutoff.getTime()} AND address = 'POOL' AND clientName = 'POOL' AND sessionId = 'POOL';
+        `);
     }
 
-    public async getChartDataForSite() {
+    public async getChartDataForSite(range: '1d' | '1m' | '6m' | '12m' = '1d') {
 
-        var yesterday = new Date(new Date().getTime() - (24 * 60 * 60 * 1000));
+        let diffDays = 1;
+
+        switch (range) {
+            case '1m':
+                diffDays = 30;
+                break;
+            case '6m':
+                diffDays = 180;
+                break;
+            case '12m':
+                diffDays = 365;
+                break;
+            default:
+                diffDays = 1;
+        }
+
+        const since = new Date(Date.now() - diffDays * 24 * 60 * 60 * 1000);
+        const limit = diffDays * 144;
 
         const query = `
             SELECT
@@ -59,12 +141,12 @@ export class ClientStatisticsService {
             FROM
                 client_statistics_entity AS entry
             WHERE
-                entry.time > ${yesterday.getTime()}
+                entry.time > ${since.getTime()} AND entry.sessionId != 'AGG'
             GROUP BY
                 time
             ORDER BY
                 time
-            LIMIT 144;
+            LIMIT ${limit};
 
     `;
 
