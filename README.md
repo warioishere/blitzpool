@@ -45,6 +45,8 @@ https://github.com/warioishere/blitzpool-message-encryptor-for-TG
 #### 🛠️ Extra Services
 - Integrated `blockTemplateInterval` configuration
 - Hashrate corrections and updated statistics endpoints
+- Extended `/api/info/chart` endpoint with a `range` query supporting `1d`, `1m`, `6m` and `12m`
+- Statistics are retained for up to one year to enable long-range charts
 - Telegram bot subscriptions managed via a custom ORM
 
 #### Blitzpool-UI

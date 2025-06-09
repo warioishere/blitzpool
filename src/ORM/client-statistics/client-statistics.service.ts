@@ -38,19 +38,36 @@ export class ClientStatisticsService {
     }
 
     public async deleteOldStatistics() {
-        const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        const oneYearAgo = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
 
         return await this.clientStatisticsRepository
             .createQueryBuilder()
             .delete()
             .from(ClientStatisticsEntity)
-            .where('time < :time', { time: oneDayAgo.getTime() })
+            .where('time < :time', { time: oneYearAgo.getTime() })
             .execute();
     }
 
-    public async getChartDataForSite() {
+    public async getChartDataForSite(range: '1d' | '1m' | '6m' | '12m' = '1d') {
 
-        var yesterday = new Date(new Date().getTime() - (24 * 60 * 60 * 1000));
+        let diffDays = 1;
+
+        switch (range) {
+            case '1m':
+                diffDays = 30;
+                break;
+            case '6m':
+                diffDays = 180;
+                break;
+            case '12m':
+                diffDays = 365;
+                break;
+            default:
+                diffDays = 1;
+        }
+
+        const since = new Date(Date.now() - diffDays * 24 * 60 * 60 * 1000);
+        const limit = diffDays * 144;
 
         const query = `
             SELECT
@@ -59,12 +76,12 @@ export class ClientStatisticsService {
             FROM
                 client_statistics_entity AS entry
             WHERE
-                entry.time > ${yesterday.getTime()}
+                entry.time > ${since.getTime()}
             GROUP BY
                 time
             ORDER BY
                 time
-            LIMIT 144;
+            LIMIT ${limit};
 
     `;
 
