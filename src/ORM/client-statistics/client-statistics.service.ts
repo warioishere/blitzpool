@@ -39,10 +39,11 @@ export class ClientStatisticsService {
 
     public async deleteOldStatistics() {
         const now = Date.now();
-        const detailCutoff = new Date(now - 14 * 24 * 60 * 60 * 1000);
+        const detailCutoff = new Date(now - 1 * 24 * 60 * 60 * 1000);
+        const halfYearCutoff = new Date(now - 180 * 24 * 60 * 60 * 1000);
         const yearCutoff = new Date(now - 365 * 24 * 60 * 60 * 1000);
 
-        // Aggregate old statistics so that only pool hashrate is retained
+        // Aggregate old statistics so that only pool hashrate and worker totals are retained
         await this.clientStatisticsRepository.query(`
             INSERT INTO client_statistics_entity (
                 address,
@@ -64,20 +65,51 @@ export class ClientStatisticsService {
                 datetime('now'),
                 datetime('now')
             FROM client_statistics_entity
-            WHERE time < ${detailCutoff.getTime()} AND time >= ${yearCutoff.getTime()} AND NOT (address = 'POOL' AND clientName = 'POOL' AND sessionId = 'POOL')
+            WHERE time < ${detailCutoff.getTime()} AND NOT (address = 'POOL' AND clientName = 'POOL' AND sessionId = 'POOL') AND sessionId != 'AGG'
             GROUP BY time;
         `);
 
-        // Delete detailed records older than two weeks
         await this.clientStatisticsRepository.query(`
-            DELETE FROM client_statistics_entity
-            WHERE time < ${detailCutoff.getTime()} AND NOT (address = 'POOL' AND clientName = 'POOL' AND sessionId = 'POOL');
+            INSERT INTO client_statistics_entity (
+                address,
+                clientName,
+                sessionId,
+                time,
+                shares,
+                acceptedCount,
+                "createdAt",
+                "updatedAt"
+            )
+            SELECT
+                address,
+                clientName,
+                'AGG',
+                ${detailCutoff.getTime()},
+                SUM(shares),
+                SUM(acceptedCount),
+                datetime('now'),
+                datetime('now')
+            FROM client_statistics_entity
+            WHERE time < ${detailCutoff.getTime()} AND NOT (sessionId = 'AGG' OR (address = 'POOL' AND clientName = 'POOL' AND sessionId = 'POOL'))
+            GROUP BY address, clientName;
         `);
 
-        // Remove aggregated data older than one year
+        // Delete detailed records older than one day
         await this.clientStatisticsRepository.query(`
             DELETE FROM client_statistics_entity
-            WHERE time < ${yearCutoff.getTime()};
+            WHERE time < ${detailCutoff.getTime()} AND NOT (sessionId = 'AGG' OR (address = 'POOL' AND clientName = 'POOL' AND sessionId = 'POOL'));
+        `);
+
+        // Remove worker aggregates older than six months
+        await this.clientStatisticsRepository.query(`
+            DELETE FROM client_statistics_entity
+            WHERE time < ${halfYearCutoff.getTime()} AND sessionId = 'AGG';
+        `);
+
+        // Remove pool aggregates older than one year
+        await this.clientStatisticsRepository.query(`
+            DELETE FROM client_statistics_entity
+            WHERE time < ${yearCutoff.getTime()} AND address = 'POOL' AND clientName = 'POOL' AND sessionId = 'POOL';
         `);
     }
 
@@ -109,7 +141,7 @@ export class ClientStatisticsService {
             FROM
                 client_statistics_entity AS entry
             WHERE
-                entry.time > ${since.getTime()}
+                entry.time > ${since.getTime()} AND entry.sessionId != 'AGG'
             GROUP BY
                 time
             ORDER BY
