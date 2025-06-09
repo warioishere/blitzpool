@@ -55,8 +55,8 @@ export class AppService implements OnModuleInit {
     private async deleteOldStatistics() {
         console.log('Deleting statistics');
 
-        const deletedStatistics = await this.clientStatisticsService.deleteOldStatistics();
-        console.log(`Deleted ${deletedStatistics.affected} old statistics`);
+        await this.clientStatisticsService.deleteOldStatistics();
+        console.log('Deleted old statistics');
         const deletedClients = await this.clientService.deleteOldClients();
         console.log(`Deleted ${deletedClients.affected} old clients`);
 
