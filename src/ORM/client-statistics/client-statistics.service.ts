@@ -38,14 +38,47 @@ export class ClientStatisticsService {
     }
 
     public async deleteOldStatistics() {
-        const oneYearAgo = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
+        const now = Date.now();
+        const detailCutoff = new Date(now - 14 * 24 * 60 * 60 * 1000);
+        const yearCutoff = new Date(now - 365 * 24 * 60 * 60 * 1000);
 
-        return await this.clientStatisticsRepository
-            .createQueryBuilder()
-            .delete()
-            .from(ClientStatisticsEntity)
-            .where('time < :time', { time: oneYearAgo.getTime() })
-            .execute();
+        // Aggregate old statistics so that only pool hashrate is retained
+        await this.clientStatisticsRepository.query(`
+            INSERT INTO client_statistics_entity (
+                address,
+                clientName,
+                sessionId,
+                time,
+                shares,
+                acceptedCount,
+                "createdAt",
+                "updatedAt"
+            )
+            SELECT
+                'POOL',
+                'POOL',
+                'POOL',
+                time,
+                SUM(shares),
+                SUM(acceptedCount),
+                datetime('now'),
+                datetime('now')
+            FROM client_statistics_entity
+            WHERE time < ${detailCutoff.getTime()} AND time >= ${yearCutoff.getTime()} AND NOT (address = 'POOL' AND clientName = 'POOL' AND sessionId = 'POOL')
+            GROUP BY time;
+        `);
+
+        // Delete detailed records older than two weeks
+        await this.clientStatisticsRepository.query(`
+            DELETE FROM client_statistics_entity
+            WHERE time < ${detailCutoff.getTime()} AND NOT (address = 'POOL' AND clientName = 'POOL' AND sessionId = 'POOL');
+        `);
+
+        // Remove aggregated data older than one year
+        await this.clientStatisticsRepository.query(`
+            DELETE FROM client_statistics_entity
+            WHERE time < ${yearCutoff.getTime()};
+        `);
     }
 
     public async getChartDataForSite(range: '1d' | '1m' | '6m' | '12m' = '1d') {
