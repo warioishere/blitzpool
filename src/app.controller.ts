@@ -112,30 +112,16 @@ export class AppController {
   }
 
   @Get('info/share-rate')
-  public async shareRate(@Query('minutes') minutes = '10') {
-    const interval = parseInt(minutes, 10);
-    if (interval > 1440) {
-      const CACHE_KEY = `SITE_SHARE_RATE_SERIES_${interval}`;
-      const cachedResult = await this.cacheManager.get(CACHE_KEY);
-      if (cachedResult != null) {
-        return cachedResult;
-      }
-      const series = await this.clientStatisticsService.getShareRateSeriesForSite(interval);
-      await this.cacheManager.set(CACHE_KEY, series, 10 * 60 * 1000);
-      return series;
-    }
-
-    const CACHE_KEY = `SITE_SHARE_RATE_${interval}`;
+  public async shareRate() {
+    const interval = 7 * 24 * 60;
+    const CACHE_KEY = `SITE_SHARE_RATE_SERIES_${interval}`;
     const cachedResult = await this.cacheManager.get(CACHE_KEY);
     if (cachedResult != null) {
       return cachedResult;
     }
-
-    const rate = await this.clientStatisticsService.getShareRateForSite(interval || 10);
-    const data = { sharesPerSecond: Math.floor(rate) };
-    // 1 min
-    await this.cacheManager.set(CACHE_KEY, data, 1 * 60 * 1000);
-    return data;
+    const series = await this.clientStatisticsService.getShareRateSeriesForSite(interval);
+    await this.cacheManager.set(CACHE_KEY, series, 10 * 60 * 1000);
+    return series;
   }
 
 }

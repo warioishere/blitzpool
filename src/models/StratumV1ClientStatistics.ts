@@ -33,8 +33,8 @@ export class StratumV1ClientStatistics {
     // awhile with saveShares()
     public async addShares(client: ClientEntity, targetDifficulty: number) {
 
-        // 10 min
-        var coeff = 1000 * 60 * 10;
+        // 5 min
+        var coeff = 1000 * 60 * 5;
         var date = new Date();
         var timeSlot = new Date(Math.floor(date.getTime() / coeff) * coeff).getTime();
 

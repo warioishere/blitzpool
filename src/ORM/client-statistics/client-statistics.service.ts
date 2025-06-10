@@ -132,7 +132,7 @@ export class ClientStatisticsService {
         }
 
         const since = new Date(Date.now() - diffDays * 24 * 60 * 60 * 1000);
-        const limit = diffDays * 144;
+        const limit = diffDays * 288;
 
         const query = `
             SELECT
@@ -198,7 +198,7 @@ export class ClientStatisticsService {
                     time
                 ORDER BY
                     time
-                LIMIT 144;
+                LIMIT 288;
 
         `;
 
@@ -250,7 +250,7 @@ export class ClientStatisticsService {
                 time
             ORDER BY
                 time
-            LIMIT 144;
+            LIMIT 288;
         `;
 
         const result = await this.clientStatisticsRepository.query(query, [address, clientName]);
@@ -321,7 +321,7 @@ export class ClientStatisticsService {
                 time
             ORDER BY
                 time
-            LIMIT 144;
+            LIMIT 288;
         `;
 
         const result = await this.clientStatisticsRepository.query(query, [address, clientName, sessionId]);
@@ -371,7 +371,7 @@ export class ClientStatisticsService {
 
     public async getShareRateSeriesForSite(minutes: number): Promise<{ label: string, data: number }[]> {
         const since = new Date(Date.now() - minutes * 60 * 1000);
-        const limit = Math.floor(minutes / 10);
+        const limit = Math.floor(minutes / 5);
 
         const query = `
             SELECT
