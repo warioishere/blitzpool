@@ -112,8 +112,8 @@ export class AppController {
   }
 
   @Get('info/share-rate')
-  public async shareRate() {
-    const interval = 7 * 24 * 60;
+  public async shareRate(@Query('minutes') minutes = '10080') {
+    const interval = parseInt(minutes, 10) || (7 * 24 * 60);
     const CACHE_KEY = `SITE_SHARE_RATE_SERIES_${interval}`;
     const cachedResult = await this.cacheManager.get(CACHE_KEY);
     if (cachedResult != null) {

@@ -392,7 +392,7 @@ export class ClientStatisticsService {
 
         return result.map(res => ({
             label: new Date(res.label).toISOString(),
-            data: Math.floor((parseFloat(res.shares) * 4294967296) / 600)
+            data: Math.floor(parseFloat(res.shares) / 300)
         })).slice(0, result.length - 1);
     }
 }
