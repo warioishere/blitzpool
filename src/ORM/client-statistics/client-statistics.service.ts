@@ -368,4 +368,31 @@ export class ClientStatisticsService {
         const totalShares = result?.total ? parseFloat(result.total) : 0;
         return totalShares / (minutes * 60);
     }
+
+    public async getShareRateSeriesForSite(minutes: number): Promise<{ label: string, data: number }[]> {
+        const since = new Date(Date.now() - minutes * 60 * 1000);
+        const limit = Math.floor(minutes / 10);
+
+        const query = `
+            SELECT
+                time AS label,
+                SUM(shares) AS shares
+            FROM
+                client_statistics_entity AS entry
+            WHERE
+                entry.time > ${since.getTime()} AND entry.sessionId != 'AGG'
+            GROUP BY
+                time
+            ORDER BY
+                time
+            LIMIT ${limit};
+        `;
+
+        const result: any[] = await this.clientStatisticsRepository.query(query);
+
+        return result.map(res => ({
+            label: new Date(res.label).toISOString(),
+            data: Math.floor((parseFloat(res.shares) * 4294967296) / 600)
+        })).slice(0, result.length - 1);
+    }
 }

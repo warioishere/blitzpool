@@ -45,11 +45,12 @@ https://github.com/warioishere/blitzpool-message-encryptor-for-TG
 #### 🛠️ Extra Services
 - Integrated `blockTemplateInterval` configuration
 - Hashrate corrections and updated statistics endpoints
-- Extended `/api/info/chart` endpoint with a `range` query supporting `1d`, `1m`, `6m` and `12m`
+- Extended `/api/info/chart` endpoint with a `range` query supporting `1d`, `7d`, `1m`, `6m` and `12m`
 - Statistics are retained for up to one year by aggregating old pool hashrate
 - Worker totals are kept for six months while session details are pruned after one day
 - Example: `GET /api/info/chart?range=6m` returns six months of pool hashrate data (defaults to `1d`)
 - Telegram bot subscriptions managed via a custom ORM
+- `GET /api/info/share-rate?minutes=10080` yields a 7-day series of pool share rate values
 
 #### Blitzpool-UI
 
