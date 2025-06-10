@@ -356,4 +356,16 @@ export class ClientStatisticsService {
     public async deleteAll() {
         return await this.clientStatisticsRepository.delete({})
     }
+
+    public async getShareRateForSite(minutes: number = 10): Promise<number> {
+        const since = new Date(Date.now() - minutes * 60 * 1000);
+        const result = await this.clientStatisticsRepository
+            .createQueryBuilder('entry')
+            .select('SUM(entry.shares)', 'total')
+            .where('entry.time > :since AND entry.sessionId != :agg', { since: since.getTime(), agg: 'AGG' })
+            .getRawOne();
+
+        const totalShares = result?.total ? parseFloat(result.total) : 0;
+        return totalShares / (minutes * 60);
+    }
 }
