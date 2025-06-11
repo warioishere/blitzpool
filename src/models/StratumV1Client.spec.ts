@@ -78,6 +78,8 @@ describe('StratumV1Client', () => {
                             switch (key) {
                                 case 'DEV_FEE_ADDRESS':
                                     return 'tb1qumezefzdeqqwn5zfvgdrhxjzc5ylr39uhuxcz4';
+                                case 'DEV_FEE_PERCENT':
+                                    return '1.5';
                                 case 'NETWORK':
                                     return 'testnet';
                             }
