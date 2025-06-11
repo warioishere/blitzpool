@@ -1,5 +1,4 @@
-import { Controller, Get, Patch, Body, UnauthorizedException, NotFoundException, Param } from '@nestjs/common';
-import * as bitcoinMessage from 'bitcoinjs-message';
+import { Controller, Get, Patch, Headers, UnauthorizedException, NotFoundException, Param } from '@nestjs/common';
 
 import { AddressSettingsService } from '../../ORM/address-settings/address-settings.service';
 import { ClientStatisticsService } from '../../ORM/client-statistics/client-statistics.service';
@@ -62,11 +61,11 @@ export class ClientController {
     @Patch(':address/reset-shares')
     async resetShares(
         @Param('address') address: string,
-        @Body('message') message: string,
-        @Body('signature') signature: string,
+        @Headers('x-api-key') apiKey: string,
     ) {
-        if (!bitcoinMessage.verify(message, address, signature)) {
-            throw new UnauthorizedException('Invalid signature');
+        const valid = await this.addressSettingsService.verifyApiToken(address, apiKey);
+        if (!valid) {
+            throw new UnauthorizedException('Invalid API key');
         }
         await this.clientStatisticsService.resetSharesForAddress(address);
         return { success: true };

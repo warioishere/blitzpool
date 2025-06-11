@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { randomBytes } from 'crypto';
 
 import { AddressSettingsEntity } from './address-settings.entity';
 
@@ -15,15 +16,22 @@ export class AddressSettingsService {
     }
 
     public async getSettings(address: string, createIfNotFound: boolean) {
-        const settings = await this.addressSettingsRepository.findOne({ where: { address } });
-        if (createIfNotFound == true && settings == null) {
+        let settings = await this.addressSettingsRepository.findOne({ where: { address } });
+
+        if (createIfNotFound && settings == null) {
             // It's possible to have a race condition here so if we get a PK violation, fetch it
             try {
-                return await this.createNew(address);
+                settings = await this.createNew(address);
             } catch (e) {
-                return await this.addressSettingsRepository.findOne({ where: { address } });
+                settings = await this.addressSettingsRepository.findOne({ where: { address } });
             }
         }
+
+        if (settings && !settings.apiToken) {
+            settings.apiToken = randomBytes(16).toString('hex');
+            await this.addressSettingsRepository.update({ address }, { apiToken: settings.apiToken });
+        }
+
         return settings;
     }
 
@@ -40,7 +48,8 @@ export class AddressSettingsService {
     }
 
     public async createNew(address: string) {
-        return await this.addressSettingsRepository.save({ address });
+        const apiToken = randomBytes(16).toString('hex');
+        return await this.addressSettingsRepository.save({ address, apiToken });
     }
 
     public async addShares(address: string, shares: number) {
@@ -58,5 +67,10 @@ export class AddressSettingsService {
             shares: 0,
             bestDifficulty: 0
         });
+    }
+
+    public async verifyApiToken(address: string, token: string): Promise<boolean> {
+        const settings = await this.addressSettingsRepository.findOne({ where: { address } });
+        return settings != null && settings.apiToken === token;
     }
 }
