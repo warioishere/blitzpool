@@ -336,7 +336,7 @@ export class ClientStatisticsService {
     public async getTotalSharesForAddress(address: string): Promise<number> {
         const result = await this.clientStatisticsRepository
             .createQueryBuilder('entry')
-            .select('SUM(entry.shares)', 'total')
+            .select('SUM(entry.acceptedCount)', 'total')
             .where('entry.address = :address', { address })
             .getRawOne();
         return result?.total ? parseFloat(result.total) : 0;
@@ -346,7 +346,7 @@ export class ClientStatisticsService {
         const results = await this.clientStatisticsRepository
             .createQueryBuilder('entry')
             .select('entry.clientName', 'clientName')
-            .addSelect('SUM(entry.shares)', 'total')
+            .addSelect('SUM(entry.acceptedCount)', 'total')
             .where('entry.address = :address', { address })
             .groupBy('entry.clientName')
             .getRawMany();
