@@ -1,7 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { randomBytes } from 'crypto';
 
 import { AddressSettingsEntity } from './address-settings.entity';
 
@@ -27,11 +26,6 @@ export class AddressSettingsService {
             }
         }
 
-        if (settings && !settings.apiToken) {
-            settings.apiToken = randomBytes(16).toString('hex');
-            await this.addressSettingsRepository.update({ address }, { apiToken: settings.apiToken });
-        }
-
         return settings;
     }
 
@@ -48,8 +42,7 @@ export class AddressSettingsService {
     }
 
     public async createNew(address: string) {
-        const apiToken = randomBytes(16).toString('hex');
-        return await this.addressSettingsRepository.save({ address, apiToken });
+        return await this.addressSettingsRepository.save({ address });
     }
 
     public async addShares(address: string, shares: number) {
@@ -69,8 +62,4 @@ export class AddressSettingsService {
         });
     }
 
-    public async verifyApiToken(address: string, token: string): Promise<boolean> {
-        const settings = await this.addressSettingsRepository.findOne({ where: { address } });
-        return settings != null && settings.apiToken === token;
-    }
 }

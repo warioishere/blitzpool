@@ -61,11 +61,10 @@ export class ClientController {
     @Patch(':address/reset-shares')
     async resetShares(
         @Param('address') address: string,
-        @Headers('x-api-key') apiKey: string,
+        @Headers('x-address') authAddress: string,
     ) {
-        const valid = await this.addressSettingsService.verifyApiToken(address, apiKey);
-        if (!valid) {
-            throw new UnauthorizedException('Invalid API key');
+        if (authAddress !== address) {
+            throw new UnauthorizedException('Address mismatch');
         }
         await this.clientStatisticsService.resetSharesForAddress(address);
         return { success: true };

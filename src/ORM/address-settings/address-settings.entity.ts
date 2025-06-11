@@ -20,8 +20,6 @@ export class AddressSettingsEntity extends TrackedEntity {
     @Column({ nullable: true })
     bestDifficultyUserAgent: string;
 
-    @Column({ nullable: true })
-    apiToken: string;
 
 }
 
