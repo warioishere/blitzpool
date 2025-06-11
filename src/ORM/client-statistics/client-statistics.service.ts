@@ -353,6 +353,14 @@ export class ClientStatisticsService {
         return results.map(r => ({ clientName: r.clientName, total: parseFloat(r.total) }));
     }
 
+    public async resetSharesForAddress(address: string): Promise<void> {
+        await this.clientStatisticsRepository.createQueryBuilder()
+            .update(ClientStatisticsEntity)
+            .set({ shares: 0, acceptedCount: 0, updatedAt: () => "DATETIME('now')" })
+            .where('address = :address', { address })
+            .execute();
+    }
+
     public async deleteAll() {
         return await this.clientStatisticsRepository.delete({})
     }

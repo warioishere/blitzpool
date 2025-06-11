@@ -1,4 +1,5 @@
-import { Controller, Get, NotFoundException, Param } from '@nestjs/common';
+import { Controller, Get, Patch, Body, UnauthorizedException, NotFoundException, Param } from '@nestjs/common';
+import * as bitcoinMessage from 'bitcoinjs-message';
 
 import { AddressSettingsService } from '../../ORM/address-settings/address-settings.service';
 import { ClientStatisticsService } from '../../ORM/client-statistics/client-statistics.service';
@@ -56,6 +57,19 @@ export class ClientController {
     async getWorkerShares(@Param('address') address: string) {
         const workerShares = await this.clientStatisticsService.getTotalSharesForWorkers(address);
         return workerShares.map(ws => ({ workerName: ws.clientName, totalShares: ws.total }));
+    }
+
+    @Patch(':address/reset-shares')
+    async resetShares(
+        @Param('address') address: string,
+        @Body('message') message: string,
+        @Body('signature') signature: string,
+    ) {
+        if (!bitcoinMessage.verify(message, address, signature)) {
+            throw new UnauthorizedException('Invalid signature');
+        }
+        await this.clientStatisticsService.resetSharesForAddress(address);
+        return { success: true };
     }
 
     @Get(':address/:workerName')
