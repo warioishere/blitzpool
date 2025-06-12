@@ -91,7 +91,7 @@ export class AppController {
   }
 
   @Get('info/chart')
-  public async infoChart(@Query('range') range: '1d' | '1m' | '6m' | '12m' = '1d') {
+  public async infoChart(@Query('range') range: '1d' | '1m' = '1d') {
 
 
     const CACHE_KEY = `SITE_HASHRATE_GRAPH_${range}`;
