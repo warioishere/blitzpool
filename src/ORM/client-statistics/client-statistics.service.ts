@@ -41,7 +41,7 @@ export class ClientStatisticsService {
         const now = Date.now();
         const detailCutoff = new Date(now - 1 * 24 * 60 * 60 * 1000);
         const halfYearCutoff = new Date(now - 180 * 24 * 60 * 60 * 1000);
-        const yearCutoff = new Date(now - 365 * 24 * 60 * 60 * 1000);
+        const monthCutoff = new Date(now - 30 * 24 * 60 * 60 * 1000);
 
         // Aggregate old statistics so that only pool hashrate and worker totals are retained
         await this.clientStatisticsRepository.query(`
@@ -106,26 +106,20 @@ export class ClientStatisticsService {
             WHERE time < ${halfYearCutoff.getTime()} AND sessionId = 'AGG';
         `);
 
-        // Remove pool aggregates older than one year
+        // Remove pool aggregates older than one month
         await this.clientStatisticsRepository.query(`
             DELETE FROM client_statistics_entity
-            WHERE time < ${yearCutoff.getTime()} AND address = 'POOL' AND clientName = 'POOL' AND sessionId = 'POOL';
+            WHERE time < ${monthCutoff.getTime()} AND address = 'POOL' AND clientName = 'POOL' AND sessionId = 'POOL';
         `);
     }
 
-    public async getChartDataForSite(range: '1d' | '1m' | '6m' | '12m' = '1d') {
+    public async getChartDataForSite(range: '1d' | '1m' = '1d') {
 
         let diffDays = 1;
 
         switch (range) {
             case '1m':
                 diffDays = 30;
-                break;
-            case '6m':
-                diffDays = 180;
-                break;
-            case '12m':
-                diffDays = 365;
                 break;
             default:
                 diffDays = 1;
