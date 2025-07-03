@@ -98,7 +98,6 @@ describe.skip('StratumV1Client', () => {
 
     beforeEach(async () => {
 
-        console.log('NEW TEST')
 
         clientService = moduleRef.get<ClientService>(ClientService);
 
@@ -215,7 +214,6 @@ describe.skip('StratumV1Client', () => {
     it('should set difficulty', async () => {
         jest.spyOn(client as any, 'write').mockImplementation((data) => Promise.resolve(true));
 
-        console.log('should set difficulty')
         socketEmitter(Buffer.from(MockRecording1.MINING_SUBSCRIBE));
         socketEmitter(Buffer.from(MockRecording1.MINING_AUTHORIZE));
         await new Promise((r) => setTimeout(r, 100));
