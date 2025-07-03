@@ -115,6 +115,15 @@ export class ClientService {
         })
     }
 
+    public async getFirstSeen(address: string, clientName: string): Promise<Date | null> {
+        const result = await this.clientRepository.createQueryBuilder('client')
+            .withDeleted()
+            .where('client.address = :address AND client.clientName = :clientName', { address, clientName })
+            .orderBy('client.firstSeen', 'ASC')
+            .getOne();
+        return result?.firstSeen || result?.startTime || null;
+    }
+
     public async getBySessionId(address: string, clientName: string, sessionId: string): Promise<ClientEntity> {
         return await this.clientRepository.findOne({
             where: {

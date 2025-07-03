@@ -31,6 +31,9 @@ export class ClientEntity extends TrackedEntity {
     @Column({ type: 'datetime', transformer: new DateTimeTransformer() })
     startTime: Date;
 
+    @Column({ type: 'datetime', transformer: new DateTimeTransformer(), nullable: true })
+    firstSeen: Date;
+
     @Column({ type: 'real', default: 0 })
     bestDifficulty: number
 

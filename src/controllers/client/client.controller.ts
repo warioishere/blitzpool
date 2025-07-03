@@ -32,7 +32,7 @@ export class ClientController {
                         name: worker.clientName,
                         bestDifficulty: worker.bestDifficulty.toFixed(2),
                         hashRate: worker.hashRate,
-                        startTime: worker.startTime,
+                        startTime: worker.firstSeen ?? worker.startTime,
                         lastSeen: worker.updatedAt
                     };
                 })
@@ -94,7 +94,7 @@ export class ClientController {
             name: worker.clientName,
             bestDifficulty: Math.floor(worker.bestDifficulty),
             chartData: chartData,
-            startTime: worker.startTime
+            startTime: worker.firstSeen ?? worker.startTime
         }
     }
 }
