@@ -3,7 +3,7 @@ import { ValueTransformer } from 'typeorm';
 export class DateTimeTransformer implements ValueTransformer {
     to(value: Date): any {
         // Convert the local time to UTC before saving to the database
-        const utcTime = value?.toISOString();
+        const utcTime = value?.toLocaleString();
         return utcTime;
     }
 
