@@ -457,7 +457,7 @@ export class StratumV1Client {
             if (this.creatingEntity == null) {
                 this.creatingEntity = new Promise(async (resolve, reject) => {
                     try {
-                        const firstSeen = await this.clientService.getFirstSeen(
+                        const firstSeen = await this.clientService.getFirstSeenIfRecent(
                             this.clientAuthorization.address,
                             this.clientAuthorization.worker
                         );

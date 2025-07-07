@@ -13,7 +13,7 @@ describe('ClientService', () => {
       imports: [
         TypeOrmModule.forRoot({
           type: 'sqlite',
-          database: './DB/public-pool.test.sqlite',
+          database: ':memory:',
           synchronize: true,
           autoLoadEntities: true,
           cache: true,
@@ -26,8 +26,9 @@ describe('ClientService', () => {
     await service.deleteAll();
   });
 
-  it('should keep firstSeen across sessions', async () => {
-    const firstSeen = new Date('2023-01-01T00:00:00Z');
+  it('should keep firstSeen for reconnects within 30 minutes and reset afterwards', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2023-01-01T00:00:00Z'));
+    const firstSeen = new Date();
     await service.insert({
       sessionId: 's1',
       address: 'addr',
@@ -38,21 +39,39 @@ describe('ClientService', () => {
       bestDifficulty: 0
     });
     await service.insertClients();
-    await service.delete('s1');
+    const repo: any = (service as any).clientRepository;
+    await repo.update({ sessionId: 's1' }, { deletedAt: new Date('2023-01-01T00:10:00Z').toLocaleString(), updatedAt: new Date('2023-01-01T00:10:00Z').toLocaleString() });
 
-    const prev = await service.getFirstSeen('addr', 'worker');
+    jest.setSystemTime(new Date('2023-01-01T00:10:00Z'));
+    const prev = await service.getFirstSeenIfRecent('addr', 'worker');
     await service.insert({
       sessionId: 's2',
       address: 'addr',
       clientName: 'worker',
       userAgent: 'ua',
-      startTime: new Date('2023-01-02T00:00:00Z'),
-      firstSeen: prev || new Date('2023-01-02T00:00:00Z'),
+      startTime: new Date(),
+      firstSeen: prev || new Date(),
       bestDifficulty: 0
     });
     await service.insertClients();
-
     const latest = await service.getBySessionId('addr', 'worker', 's2');
     expect(latest.firstSeen.toISOString()).toBe(firstSeen.toISOString());
+
+    await repo.update({ sessionId: 's2' }, { deletedAt: new Date('2023-01-01T00:00:00Z').toLocaleString(), updatedAt: new Date('2023-01-01T00:00:00Z').toLocaleString() });
+    jest.setSystemTime(new Date('2023-01-01T01:00:00Z'));
+    const none = await service.getFirstSeenIfRecent('addr', 'worker');
+    await service.insert({
+      sessionId: 's3',
+      address: 'addr',
+      clientName: 'worker',
+      userAgent: 'ua',
+      startTime: new Date(),
+      firstSeen: none || new Date(),
+      bestDifficulty: 0
+    });
+    await service.insertClients();
+    const latestReset = await service.getBySessionId('addr', 'worker', 's3');
+    expect(latestReset.firstSeen.toISOString()).toBe(new Date('2023-01-01T01:00:00Z').toISOString());
+    jest.useRealTimers();
   });
 });

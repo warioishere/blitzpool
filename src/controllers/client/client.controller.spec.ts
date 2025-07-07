@@ -17,7 +17,7 @@ describe('ClientController', () => {
       imports: [
         TypeOrmModule.forRoot({
           type: 'sqlite',
-          database: './DB/public-pool.test.sqlite',
+          database: ':memory:',
           synchronize: true,
           autoLoadEntities: true,
           cache: true,
@@ -33,31 +33,38 @@ describe('ClientController', () => {
 
     controller = module.get<ClientController>(ClientController);
     clientService = module.get<ClientService>(ClientService);
+    await clientService.deleteAll();
   });
 
   it('should be defined', () => {
     expect(controller).toBeDefined();
   });
 
-  it('should return persistent startTime', async () => {
-    const firstSeen = new Date('2023-01-01T00:00:00Z');
+  it('should return persistent startTime within 30 minutes', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2023-01-01T00:00:00Z'));
+    const firstSeen = new Date();
     await clientService.insert({
       sessionId: 'sess1',
       address: 'tb1qumezefzdeqqwn5zfvgdrhxjzc5ylr39uhuxcz4',
       clientName: 'worker1',
       userAgent: 'ua',
       startTime: firstSeen,
-      firstSeen: firstSeen,
+      firstSeen,
       bestDifficulty: 0
     });
     await clientService.insertClients();
+    const repo: any = (clientService as any).clientRepository;
+    await repo.update({ sessionId: 'sess1' }, { deletedAt: new Date('2023-01-01T00:20:00Z').toLocaleString(), updatedAt: new Date('2023-01-01T00:20:00Z').toLocaleString() });
+
+    jest.setSystemTime(new Date('2023-01-01T00:20:00Z'));
+    const prev = await clientService.getFirstSeenIfRecent('tb1qumezefzdeqqwn5zfvgdrhxjzc5ylr39uhuxcz4', 'worker1');
     await clientService.insert({
       sessionId: 'sess2',
       address: 'tb1qumezefzdeqqwn5zfvgdrhxjzc5ylr39uhuxcz4',
       clientName: 'worker1',
       userAgent: 'ua',
-      startTime: new Date('2023-01-02T00:00:00Z'),
-      firstSeen: firstSeen,
+      startTime: new Date(),
+      firstSeen: prev || new Date(),
       bestDifficulty: 0
     });
     await clientService.insertClients();
@@ -67,5 +74,43 @@ describe('ClientController', () => {
       throw new Error('worker not found');
     }
     expect(new Date(worker.startTime).toISOString()).toBe(firstSeen.toISOString());
+    jest.useRealTimers();
+  });
+
+  it('should reset startTime after 30 minutes', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2023-01-01T00:00:00Z'));
+    const firstSeen = new Date();
+    await clientService.insert({
+      sessionId: 'sess1',
+      address: 'tb1qumezefzdeqqwn5zfvgdrhxjzc5ylr39uhuxcz4',
+      clientName: 'worker1',
+      userAgent: 'ua',
+      startTime: firstSeen,
+      firstSeen,
+      bestDifficulty: 0
+    });
+    await clientService.insertClients();
+    const repo: any = (clientService as any).clientRepository;
+    await repo.update({ sessionId: 'sess1' }, { deletedAt: new Date('2023-01-01T00:00:00Z').toLocaleString(), updatedAt: new Date('2023-01-01T00:00:00Z').toLocaleString() });
+
+    jest.setSystemTime(new Date('2023-01-01T00:40:00Z'));
+    const prev = await clientService.getFirstSeenIfRecent('tb1qumezefzdeqqwn5zfvgdrhxjzc5ylr39uhuxcz4', 'worker1');
+    await clientService.insert({
+      sessionId: 'sess2',
+      address: 'tb1qumezefzdeqqwn5zfvgdrhxjzc5ylr39uhuxcz4',
+      clientName: 'worker1',
+      userAgent: 'ua',
+      startTime: new Date(),
+      firstSeen: prev || new Date(),
+      bestDifficulty: 0
+    });
+    await clientService.insertClients();
+
+    const worker = await controller.getWorkerInfo('tb1qumezefzdeqqwn5zfvgdrhxjzc5ylr39uhuxcz4', 'worker1', 'sess2');
+    if (worker instanceof NotFoundException) {
+      throw new Error('worker not found');
+    }
+    expect(new Date(worker.startTime).toISOString()).toBe(new Date('2023-01-01T00:40:00Z').toISOString());
+    jest.useRealTimers();
   });
 });

@@ -124,6 +124,26 @@ export class ClientService {
         return result?.firstSeen || result?.startTime || null;
     }
 
+    public async getFirstSeenIfRecent(address: string, clientName: string, minutes = 30): Promise<Date | null> {
+        const cutoff = new Date(Date.now() - minutes * 60 * 1000);
+        const result = await this.clientRepository.createQueryBuilder('client')
+            .withDeleted()
+            .where('client.address = :address AND client.clientName = :clientName', { address, clientName })
+            .orderBy('client.updatedAt', 'DESC')
+            .getOne();
+
+        if (result == null) {
+            return null;
+        }
+
+        const lastActiveStr: any = result.deletedAt ?? result.updatedAt;
+        const lastActive = lastActiveStr instanceof Date ? lastActiveStr : new Date(lastActiveStr);
+        if (lastActive >= cutoff) {
+            return result.firstSeen || result.startTime;
+        }
+        return null;
+    }
+
     public async getBySessionId(address: string, clientName: string, sessionId: string): Promise<ClientEntity> {
         return await this.clientRepository.findOne({
             where: {
