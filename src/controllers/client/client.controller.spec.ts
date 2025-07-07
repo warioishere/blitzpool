@@ -40,7 +40,7 @@ describe('ClientController', () => {
     expect(controller).toBeDefined();
   });
 
-  it('should return persistent startTime within 30 minutes', async () => {
+  it('should keep startTime per session within 30 minutes', async () => {
     jest.useFakeTimers().setSystemTime(new Date('2023-01-01T00:00:00Z'));
     const firstSeen = new Date();
     await clientService.insert({
@@ -73,7 +73,7 @@ describe('ClientController', () => {
     if (worker instanceof NotFoundException) {
       throw new Error('worker not found');
     }
-    expect(new Date(worker.startTime).toISOString()).toBe(firstSeen.toISOString());
+    expect(new Date(worker.startTime).toISOString()).toBe(new Date('2023-01-01T00:20:00Z').toISOString());
     jest.useRealTimers();
   });
 
