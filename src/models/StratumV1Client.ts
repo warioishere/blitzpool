@@ -457,12 +457,17 @@ export class StratumV1Client {
             if (this.creatingEntity == null) {
                 this.creatingEntity = new Promise(async (resolve, reject) => {
                     try {
+                        const firstSeen = await this.clientService.getFirstSeenIfRecent(
+                            this.clientAuthorization.address,
+                            this.clientAuthorization.worker
+                        );
                         this.entity = await this.clientService.insert({
                             sessionId: this.extraNonceAndSessionId,
                             address: this.clientAuthorization.address,
                             clientName: this.clientAuthorization.worker,
                             userAgent: this.clientSubscription.userAgent,
                             startTime: new Date(),
+                            firstSeen: firstSeen || new Date(),
                             bestDifficulty: 0
                         });
                     } catch (e) {
