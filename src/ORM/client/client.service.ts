@@ -93,6 +93,18 @@ export class ClientService {
     public async updateBestDifficulty(sessionId: string, bestDifficulty: number) {
         return await this.clientRepository.update({ sessionId }, { bestDifficulty });
     }
+
+    public async updateSessionId(address: string, clientName: string, oldSessionId: string, newSessionId: string) {
+        return await this.clientRepository.createQueryBuilder()
+            .update(ClientEntity)
+            .set({ sessionId: newSessionId })
+            .where('address = :address AND clientName = :clientName AND sessionId = :oldSessionId', {
+                address,
+                clientName,
+                oldSessionId
+            })
+            .execute();
+    }
     public async connectedClientCount(): Promise<number> {
         return await this.clientRepository.count();
     }

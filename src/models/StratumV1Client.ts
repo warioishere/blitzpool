@@ -93,8 +93,9 @@ export class StratumV1Client {
 
     public async destroy() {
 
-        if (this.extraNonceAndSessionId) {
-            await this.clientService.delete(this.extraNonceAndSessionId);
+        const sid = this.entity?.sessionId || this.extraNonceAndSessionId;
+        if (sid) {
+            await this.clientService.delete(sid);
         }
 
         if (this.stratumSubscription != null) {
@@ -430,8 +431,20 @@ export class StratumV1Client {
     private async sendNewMiningJob(jobTemplate: IJobTemplate) {
 
         if (jobTemplate.blockData.clearJobs && this.extraNonceSubscribed) {
+            const oldSessionId = this.extraNonceAndSessionId;
             this.extraNonceAndSessionId = this.getRandomHexString();
             await this.sendSetExtraNonce();
+
+            if (this.entity) {
+                const previous = this.entity.sessionId;
+                this.entity.sessionId = this.extraNonceAndSessionId;
+                await this.clientService.updateSessionId(
+                    this.entity.address,
+                    this.entity.clientName,
+                    previous,
+                    this.entity.sessionId,
+                );
+            }
         }
 
         let payoutInformation;
@@ -582,7 +595,7 @@ export class StratumV1Client {
                     height: jobTemplate.blockData.height,
                     minerAddress: this.clientAuthorization.address,
                     worker: this.clientAuthorization.worker,
-                    sessionId: this.extraNonceAndSessionId,
+                    sessionId: this.entity.sessionId,
                     blockData: blockHex
                 });
 
@@ -609,7 +622,7 @@ export class StratumV1Client {
 
                 await this.notificationService.notifySubscribersBestDiff(this.clientAuthorization.address, submissionDifficulty);
 
-                await this.clientService.updateBestDifficulty(this.extraNonceAndSessionId, submissionDifficulty);
+                await this.clientService.updateBestDifficulty(this.entity.sessionId, submissionDifficulty);
                 this.entity.bestDifficulty = submissionDifficulty;
                 if (submissionDifficulty > (await this.addressSettingsService.getSettings(this.clientAuthorization.address, true)).bestDifficulty) {
                     await this.addressSettingsService.updateBestDifficulty(this.clientAuthorization.address, submissionDifficulty, this.entity.userAgent);
