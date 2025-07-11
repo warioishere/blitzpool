@@ -155,6 +155,29 @@ describe('StratumV1Client XNSub', () => {
     expect(msgs[3].method).toBe(eResponseMethod.MINING_NOTIFY);
   });
 
+  it('handles clients waiting for subscribe reply before authorize', async () => {
+    const template = { blockData: { clearJobs: true } } as any;
+    (client as any).stratumV1JobsService.newMiningJob$.next(template);
+
+    await send({ id: 1, method: eRequestMethod.SUBSCRIBE, params: ['test'] });
+    await new Promise(r => setImmediate(r));
+
+    const firstCall = (socket.write as jest.Mock).mock.calls[0][0];
+    const firstMsg = JSON.parse((firstCall as string).trim());
+    expect(firstMsg.id).toBe(1);
+
+    await send({ id: 2, method: eRequestMethod.AUTHORIZE, params: ['user', 'x'] });
+    await new Promise(r => setTimeout(r, 60));
+
+    const unique = Array.from(new Set((socket.write as jest.Mock).mock.calls.map(c => c[0]))).slice(0,4);
+    const msgs = unique.map(m => JSON.parse((m as string).trim()));
+    expect(msgs.length).toBe(4);
+    expect(msgs[0].id).toBe(1);
+    expect(msgs[1].id).toBe(2);
+    expect(msgs[2].method).toBe(eResponseMethod.SET_DIFFICULTY);
+    expect(msgs[3].method).toBe(eResponseMethod.MINING_NOTIFY);
+  });
+
   it('sends new extranonce before notify on clearJobs', async () => {
     await send({ id: 1, method: eRequestMethod.SUBSCRIBE, params: ['test'] });
     await send({ id: 2, method: eRequestMethod.EXTRANONCE_SUBSCRIBE });
