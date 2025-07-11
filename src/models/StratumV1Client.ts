@@ -482,7 +482,6 @@ export class StratumV1Client {
     private async sendNewMiningJob(jobTemplate: IJobTemplate) {
 
         if (jobTemplate.blockData.clearJobs && this.extraNonceSubscribed) {
-            const oldSessionId = this.extraNonceAndSessionId;
             this.extraNonceAndSessionId = this.getRandomHexString();
             await this.sendSetExtraNonce();
 
