@@ -165,6 +165,7 @@ export class StratumV1Client {
 
                     this.clientSubscription = subscriptionMessage;
                     this.subscribeResponse = JSON.stringify(this.clientSubscription.response(this.extraNonceAndSessionId)) + '\n';
+                    await this.write(this.subscribeResponse);
                 } else {
                     console.error('Subscription validation error');
                     const err = new StratumErrorMessage(
@@ -421,10 +422,6 @@ export class StratumV1Client {
         if (this.initTimer) {
             clearTimeout(this.initTimer);
             this.initTimer = undefined;
-        }
-
-        if (this.subscribeResponse) {
-            await this.write(this.subscribeResponse);
         }
 
         if (this.authorizeResponse) {
