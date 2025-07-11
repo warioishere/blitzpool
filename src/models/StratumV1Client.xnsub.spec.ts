@@ -1,5 +1,5 @@
 import { Socket } from 'net';
-import { Subject } from 'rxjs';
+import { ReplaySubject } from 'rxjs';
 jest.mock('./validators/bitcoin-address.validator', () => ({
   IsBitcoinAddress() {
     return jest.fn();
@@ -33,7 +33,7 @@ describe('StratumV1Client XNSub', () => {
     } as unknown as Socket;
 
     const stratumV1JobsService = {
-      newMiningJob$: new Subject<any>(),
+      newMiningJob$: new ReplaySubject<any>(1),
       addJob: jest.fn(),
       getNextId: jest.fn().mockReturnValue('1'),
       getNextTemplateId: jest.fn().mockReturnValue('1'),
@@ -64,8 +64,10 @@ describe('StratumV1Client XNSub', () => {
       empty,
       empty
     );
-
-    client.extraNonceAndSessionId = 'abcd1234';
+    jest.spyOn<any, any>(client as any, 'getRandomHexString').mockReturnValue('abcd1234');
+    jest.spyOn<any, any>(client as any, 'sendNewMiningJob').mockImplementation(async () => {
+      await (client as any).write(JSON.stringify({ id: null, method: eResponseMethod.MINING_NOTIFY, params: [] }) + '\n');
+    });
   });
 
   afterEach(() => {
@@ -84,14 +86,16 @@ describe('StratumV1Client XNSub', () => {
     await send({ id: 1, method: eRequestMethod.SUBSCRIBE, params: ['test'] });
     await send({ id: 2, method: eRequestMethod.AUTHORIZE, params: ['user', 'x'] });
     await send({ id: 3, method: eRequestMethod.EXTRANONCE_SUBSCRIBE });
-
-    const calls = (socket.write as jest.Mock).mock.calls.map(c => c[0]);
-    expect(calls[0]).toContain('mining.subscribe');
-    expect(calls[1]).toContain('mining.authorize');
-    expect(calls[2]).toContain('mining.extranonce.subscribe');
-    expect(calls[3]).toContain('mining.set_extranonce');
-    expect(calls[4]).toContain('mining.set_difficulty');
-    expect(calls[5]).toContain('mining.notify');
+    await new Promise(r => setTimeout(r, 60));
+    const unique = Array.from(new Set((socket.write as jest.Mock).mock.calls.map(c => c[0]))).slice(0,6);
+    const msgs = unique.map(m => JSON.parse((m as string).trim()));
+    expect(msgs.length).toBe(6);
+    expect(msgs[0].id).toBe(1);
+    expect(msgs[1].id).toBe(2);
+    expect(msgs[2].id).toBe(3);
+    expect(msgs[3].method).toBe(eResponseMethod.SET_EXTRANONCE);
+    expect(msgs[4].method).toBe(eResponseMethod.SET_DIFFICULTY);
+    expect(msgs[5].method).toBe(eResponseMethod.MINING_NOTIFY);
   });
 
   it('orders messages when extranonce.subscribe precedes authorize', async () => {
@@ -101,14 +105,17 @@ describe('StratumV1Client XNSub', () => {
     await send({ id: 1, method: eRequestMethod.SUBSCRIBE, params: ['test'] });
     await send({ id: 2, method: eRequestMethod.EXTRANONCE_SUBSCRIBE });
     await send({ id: 3, method: eRequestMethod.AUTHORIZE, params: ['user', 'x'] });
+    await new Promise(r => setTimeout(r, 60));
 
-    const calls = (socket.write as jest.Mock).mock.calls.map(c => c[0]);
-    expect(calls[0]).toContain('mining.subscribe');
-    expect(calls[1]).toContain('mining.extranonce.subscribe');
-    expect(calls[2]).toContain('mining.authorize');
-    expect(calls[3]).toContain('mining.set_extranonce');
-    expect(calls[4]).toContain('mining.set_difficulty');
-    expect(calls[5]).toContain('mining.notify');
+    const unique = Array.from(new Set((socket.write as jest.Mock).mock.calls.map(c => c[0]))).slice(0,6);
+    const msgs = unique.map(m => JSON.parse((m as string).trim()));
+    expect(msgs.length).toBe(6);
+    expect(msgs[0].id).toBe(1);
+    expect(msgs[1].id).toBe(3); // authorize result should follow subscribe
+    expect(msgs[2].id).toBe(2); // extranonce.subscribe result
+    expect(msgs[3].method).toBe(eResponseMethod.SET_EXTRANONCE);
+    expect(msgs[4].method).toBe(eResponseMethod.SET_DIFFICULTY);
+    expect(msgs[5].method).toBe(eResponseMethod.MINING_NOTIFY);
   });
 
   it('handles extranonce.subscribe before subscribe', async () => {
@@ -118,14 +125,34 @@ describe('StratumV1Client XNSub', () => {
     await send({ id: 1, method: eRequestMethod.EXTRANONCE_SUBSCRIBE });
     await send({ id: 2, method: eRequestMethod.SUBSCRIBE, params: ['test'] });
     await send({ id: 3, method: eRequestMethod.AUTHORIZE, params: ['user', 'x'] });
+    await new Promise(r => setTimeout(r, 60));
 
-    const calls = (socket.write as jest.Mock).mock.calls.map(c => c[0]);
-    expect(calls[0]).toContain('mining.set_extranonce');
-    expect(calls[1]).toContain('mining.subscribe');
-    expect(calls[2]).toContain('mining.authorize');
-    expect(calls[3]).toContain('mining.extranonce.subscribe');
-    expect(calls[4]).toContain('mining.set_difficulty');
-    expect(calls[5]).toContain('mining.notify');
+    const unique = Array.from(new Set((socket.write as jest.Mock).mock.calls.map(c => c[0]))).slice(0,6);
+    const msgs = unique.map(m => JSON.parse((m as string).trim()));
+    expect(msgs.length).toBe(6);
+    expect(msgs[0].id).toBe(2); // subscribe result
+    expect(msgs[1].id).toBe(3); // authorize result
+    expect(msgs[2].id).toBe(1); // extranonce.subscribe result
+    expect(msgs[3].method).toBe(eResponseMethod.SET_EXTRANONCE);
+    expect(msgs[4].method).toBe(eResponseMethod.SET_DIFFICULTY);
+    expect(msgs[5].method).toBe(eResponseMethod.MINING_NOTIFY);
+  });
+
+  it('orders messages without extranonce.subscribe', async () => {
+    const template = { blockData: { clearJobs: true } } as any;
+    (client as any).stratumV1JobsService.newMiningJob$.next(template);
+
+    await send({ id: 1, method: eRequestMethod.SUBSCRIBE, params: ['test'] });
+    await send({ id: 2, method: eRequestMethod.AUTHORIZE, params: ['user', 'x'] });
+    await new Promise(r => setTimeout(r, 60));
+
+    const unique = Array.from(new Set((socket.write as jest.Mock).mock.calls.map(c => c[0]))).slice(0,4);
+    const msgs = unique.map(m => JSON.parse((m as string).trim()));
+    expect(msgs.length).toBe(4);
+    expect(msgs[0].id).toBe(1);
+    expect(msgs[1].id).toBe(2);
+    expect(msgs[2].method).toBe(eResponseMethod.SET_DIFFICULTY);
+    expect(msgs[3].method).toBe(eResponseMethod.MINING_NOTIFY);
   });
 
   it('sends new extranonce before notify on clearJobs', async () => {

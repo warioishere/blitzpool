@@ -165,10 +165,6 @@ export class StratumV1Client {
 
                     this.clientSubscription = subscriptionMessage;
                     this.subscribeResponse = JSON.stringify(this.clientSubscription.response(this.extraNonceAndSessionId)) + '\n';
-
-                    if (this.extraNonceSubscribed) {
-                        await this.sendSetExtraNonce();
-                    }
                 } else {
                     console.error('Subscription validation error');
                     const err = new StratumErrorMessage(
