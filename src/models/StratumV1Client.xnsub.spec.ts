@@ -111,6 +111,23 @@ describe('StratumV1Client XNSub', () => {
     expect(calls[5]).toContain('mining.notify');
   });
 
+  it('handles extranonce.subscribe before subscribe', async () => {
+    const template = { blockData: { clearJobs: true } } as any;
+    (client as any).stratumV1JobsService.newMiningJob$.next(template);
+
+    await send({ id: 1, method: eRequestMethod.EXTRANONCE_SUBSCRIBE });
+    await send({ id: 2, method: eRequestMethod.SUBSCRIBE, params: ['test'] });
+    await send({ id: 3, method: eRequestMethod.AUTHORIZE, params: ['user', 'x'] });
+
+    const calls = (socket.write as jest.Mock).mock.calls.map(c => c[0]);
+    expect(calls[0]).toContain('mining.set_extranonce');
+    expect(calls[1]).toContain('mining.subscribe');
+    expect(calls[2]).toContain('mining.authorize');
+    expect(calls[3]).toContain('mining.extranonce.subscribe');
+    expect(calls[4]).toContain('mining.set_difficulty');
+    expect(calls[5]).toContain('mining.notify');
+  });
+
   it('sends new extranonce before notify on clearJobs', async () => {
     await send({ id: 1, method: eRequestMethod.SUBSCRIBE, params: ['test'] });
     await send({ id: 2, method: eRequestMethod.EXTRANONCE_SUBSCRIBE });

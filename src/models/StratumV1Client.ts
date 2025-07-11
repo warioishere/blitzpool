@@ -57,6 +57,7 @@ export class StratumV1Client {
 
     private miningSubmissionHashes = new Set<string>()
     private extraNonceSubscribed: boolean = false;
+    private sentExtraNonce: boolean = false;
 
     private subscribeResponse?: string;
     private authorizeResponse?: string;
@@ -164,6 +165,10 @@ export class StratumV1Client {
 
                     this.clientSubscription = subscriptionMessage;
                     this.subscribeResponse = JSON.stringify(this.clientSubscription.response(this.extraNonceAndSessionId)) + '\n';
+
+                    if (this.extraNonceSubscribed) {
+                        await this.sendSetExtraNonce();
+                    }
                 } else {
                     console.error('Subscription validation error');
                     const err = new StratumErrorMessage(
@@ -432,7 +437,9 @@ export class StratumV1Client {
 
         if (withXNSub && this.extranonceResponse) {
             await this.write(this.extranonceResponse);
-            await this.sendSetExtraNonce();
+            if (!this.sentExtraNonce) {
+                await this.sendSetExtraNonce();
+            }
         }
 
         await this.initStratum();
@@ -744,6 +751,7 @@ export class StratumV1Client {
             params: [this.extraNonceAndSessionId, 4]
         }) + '\n';
         await this.write(data);
+        this.sentExtraNonce = true;
     }
 
     private async write(message: string): Promise<boolean> {
