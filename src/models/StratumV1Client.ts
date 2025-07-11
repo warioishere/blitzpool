@@ -25,6 +25,7 @@ import { MiningSubmitMessage } from './stratum-messages/MiningSubmitMessage';
 import { StratumErrorMessage } from './stratum-messages/StratumErrorMessage';
 import { SubscriptionMessage } from './stratum-messages/SubscriptionMessage';
 import { SuggestDifficulty } from './stratum-messages/SuggestDifficultyMessage';
+import { ExtraNonceSubscribeMessage } from './stratum-messages/ExtraNonceSubscribeMessage';
 import { StratumV1ClientStatistics } from './StratumV1ClientStatistics';
 import { ExternalSharesService } from '../services/external-shares.service';
 import { DifficultyUtils } from '../utils/difficulty.utils';
@@ -55,6 +56,7 @@ export class StratumV1Client {
     private buffer: string = '';
 
     private miningSubmissionHashes = new Set<string>()
+    private extraNonceSubscribed: boolean = false;
 
     constructor(
         public readonly socket: Socket,
@@ -245,6 +247,43 @@ export class StratumV1Client {
 
                 break;
             }
+            case eRequestMethod.EXTRANONCE_SUBSCRIBE: {
+                const extraNonceMessage = plainToInstance(
+                    ExtraNonceSubscribeMessage,
+                    parsedMessage,
+                );
+
+                const validatorOptions: ValidatorOptions = {
+                    whitelist: true,
+                };
+
+                const errors = await validate(extraNonceMessage, validatorOptions);
+
+                if (errors.length === 0) {
+                    this.extraNonceSubscribed = true;
+                    const success = await this.write(JSON.stringify(extraNonceMessage.response()) + '\n');
+                    if (!success) {
+                        return;
+                    }
+                    if (this.extraNonceAndSessionId) {
+                        await this.sendSetExtraNonce();
+                    }
+                } else {
+                    console.error('Extranonce subscribe validation error');
+                    const err = new StratumErrorMessage(
+                        extraNonceMessage.id,
+                        eStratumErrorCode.OtherUnknown,
+                        'Extranonce subscribe validation error',
+                        errors).response();
+                    console.error(err);
+                    const success = await this.write(err);
+                    if (!success) {
+                        return;
+                    }
+                }
+
+                break;
+            }
             case eRequestMethod.SUGGEST_DIFFICULTY: {
                 if (this.usedSuggestedDifficulty == true) {
                     return;
@@ -389,6 +428,13 @@ export class StratumV1Client {
     }
 
     private async sendNewMiningJob(jobTemplate: IJobTemplate) {
+
+        if (jobTemplate.blockData.clearJobs) {
+            this.extraNonceAndSessionId = this.getRandomHexString();
+            if (this.extraNonceSubscribed) {
+                await this.sendSetExtraNonce();
+            }
+        }
 
         let payoutInformation;
         const devFeeAddress = this.configService.get('DEV_FEE_ADDRESS');
@@ -630,6 +676,15 @@ export class StratumV1Client {
             await this.sendNewMiningJob(jobTemplate);
 
         }
+    }
+
+    private async sendSetExtraNonce() {
+        const data = JSON.stringify({
+            id: null,
+            method: eResponseMethod.SET_EXTRANONCE,
+            params: [this.extraNonceAndSessionId, 4]
+        }) + '\n';
+        await this.write(data);
     }
 
     private async write(message: string): Promise<boolean> {
