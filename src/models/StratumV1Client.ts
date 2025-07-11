@@ -58,6 +58,11 @@ export class StratumV1Client {
     private miningSubmissionHashes = new Set<string>()
     private extraNonceSubscribed: boolean = false;
 
+    private subscribeResponse?: string;
+    private authorizeResponse?: string;
+    private extranonceResponse?: string;
+    private initTimer?: NodeJS.Timeout;
+
     constructor(
         public readonly socket: Socket,
         private readonly stratumV1JobsService: StratumV1JobsService,
@@ -105,6 +110,10 @@ export class StratumV1Client {
         this.backgroundWork.forEach(work => {
             clearInterval(work);
         });
+
+        if (this.initTimer) {
+            clearTimeout(this.initTimer);
+        }
     }
 
     private getRandomHexString() {
@@ -154,10 +163,7 @@ export class StratumV1Client {
                     }
 
                     this.clientSubscription = subscriptionMessage;
-                    const success = await this.write(JSON.stringify(this.clientSubscription.response(this.extraNonceAndSessionId)) + '\n');
-                    if (!success) {
-                        return;
-                    }
+                    this.subscribeResponse = JSON.stringify(this.clientSubscription.response(this.extraNonceAndSessionId)) + '\n';
                 } else {
                     console.error('Subscription validation error');
                     const err = new StratumErrorMessage(
@@ -228,10 +234,7 @@ export class StratumV1Client {
 
                 if (errors.length === 0) {
                     this.clientAuthorization = authorizationMessage;
-                    const success = await this.write(JSON.stringify(this.clientAuthorization.response()) + '\n');
-                    if (!success) {
-                        return;
-                    }
+                    this.authorizeResponse = JSON.stringify(this.clientAuthorization.response()) + '\n';
                 } else {
                     console.error('Authorization validation error');
                     const err = new StratumErrorMessage(
@@ -262,12 +265,17 @@ export class StratumV1Client {
 
                 if (errors.length === 0) {
                     this.extraNonceSubscribed = true;
-                    const success = await this.write(JSON.stringify(extraNonceMessage.response()) + '\n');
-                    if (!success) {
-                        return;
-                    }
-                    if (this.extraNonceAndSessionId) {
+                    this.extranonceResponse = JSON.stringify(extraNonceMessage.response()) + '\n';
+
+                    if (this.stratumInitialized) {
+                        await this.write(this.extranonceResponse);
                         await this.sendSetExtraNonce();
+                    } else if (this.clientSubscription && this.clientAuthorization) {
+                        if (this.initTimer) {
+                            clearTimeout(this.initTimer);
+                            this.initTimer = undefined;
+                        }
+                        this.flushInit(true);
                     }
                 } else {
                     console.error('Extranonce subscribe validation error');
@@ -381,13 +389,53 @@ export class StratumV1Client {
         }
 
 
-        if (this.clientSubscription != null
-            && this.clientAuthorization != null
-            && this.stratumInitialized == false) {
+        this.checkInit();
+    }
 
-            await this.initStratum();
-
+    private checkInit() {
+        if (this.stratumInitialized) {
+            return;
         }
+
+        if (this.clientSubscription && this.clientAuthorization) {
+            if (this.extraNonceSubscribed && this.extranonceResponse) {
+                if (this.initTimer) {
+                    clearTimeout(this.initTimer);
+                    this.initTimer = undefined;
+                }
+                this.flushInit(true);
+            } else if (!this.initTimer) {
+                this.initTimer = setTimeout(() => {
+                    this.flushInit(false);
+                }, 50);
+            }
+        }
+    }
+
+    private async flushInit(withXNSub: boolean) {
+        if (this.stratumInitialized) {
+            return;
+        }
+
+        if (this.initTimer) {
+            clearTimeout(this.initTimer);
+            this.initTimer = undefined;
+        }
+
+        if (this.subscribeResponse) {
+            await this.write(this.subscribeResponse);
+        }
+
+        if (this.authorizeResponse) {
+            await this.write(this.authorizeResponse);
+        }
+
+        if (withXNSub && this.extranonceResponse) {
+            await this.write(this.extranonceResponse);
+            await this.sendSetExtraNonce();
+        }
+
+        await this.initStratum();
     }
 
     private async initStratum() {

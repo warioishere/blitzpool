@@ -77,15 +77,38 @@ describe('StratumV1Client XNSub', () => {
     await new Promise((r) => setImmediate(r));
   }
 
-  it('responds with set_extranonce when extranonce.subscribe is received', async () => {
-    await send({ id: 1, method: eRequestMethod.SUBSCRIBE, params: ['test'] });
-    const sid = client.extraNonceAndSessionId;
-    await send({ id: 2, method: eRequestMethod.EXTRANONCE_SUBSCRIBE });
+  it('orders messages when extranonce.subscribe follows authorize', async () => {
+    const template = { blockData: { clearJobs: true } } as any;
+    (client as any).stratumV1JobsService.newMiningJob$.next(template);
 
-    expect(socket.write).toHaveBeenNthCalledWith(2,
-      JSON.stringify({ id: 2, error: null, result: true }) + '\n', expect.any(Function));
-    expect(socket.write).toHaveBeenNthCalledWith(3,
-      JSON.stringify({ id: null, method: eResponseMethod.SET_EXTRANONCE, params: [sid, 4] }) + '\n', expect.any(Function));
+    await send({ id: 1, method: eRequestMethod.SUBSCRIBE, params: ['test'] });
+    await send({ id: 2, method: eRequestMethod.AUTHORIZE, params: ['user', 'x'] });
+    await send({ id: 3, method: eRequestMethod.EXTRANONCE_SUBSCRIBE });
+
+    const calls = (socket.write as jest.Mock).mock.calls.map(c => c[0]);
+    expect(calls[0]).toContain('mining.subscribe');
+    expect(calls[1]).toContain('mining.authorize');
+    expect(calls[2]).toContain('mining.extranonce.subscribe');
+    expect(calls[3]).toContain('mining.set_extranonce');
+    expect(calls[4]).toContain('mining.set_difficulty');
+    expect(calls[5]).toContain('mining.notify');
+  });
+
+  it('orders messages when extranonce.subscribe precedes authorize', async () => {
+    const template = { blockData: { clearJobs: true } } as any;
+    (client as any).stratumV1JobsService.newMiningJob$.next(template);
+
+    await send({ id: 1, method: eRequestMethod.SUBSCRIBE, params: ['test'] });
+    await send({ id: 2, method: eRequestMethod.EXTRANONCE_SUBSCRIBE });
+    await send({ id: 3, method: eRequestMethod.AUTHORIZE, params: ['user', 'x'] });
+
+    const calls = (socket.write as jest.Mock).mock.calls.map(c => c[0]);
+    expect(calls[0]).toContain('mining.subscribe');
+    expect(calls[1]).toContain('mining.extranonce.subscribe');
+    expect(calls[2]).toContain('mining.authorize');
+    expect(calls[3]).toContain('mining.set_extranonce');
+    expect(calls[4]).toContain('mining.set_difficulty');
+    expect(calls[5]).toContain('mining.notify');
   });
 
   it('sends new extranonce before notify on clearJobs', async () => {
