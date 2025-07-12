@@ -44,6 +44,9 @@ export class StratumV1Service implements OnModuleInit {
   private startSocketServer() {
     const server = new Server(async (socket: Socket) => {
 
+      // Disable Nagle's algorithm to improve latency
+      socket.setNoDelay(true);
+
       //5 min
       socket.setTimeout(1000 * 60 * 5);
 
