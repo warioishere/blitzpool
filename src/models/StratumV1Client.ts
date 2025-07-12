@@ -77,8 +77,8 @@ export class StratumV1Client {
         private readonly externalSharesService: ExternalSharesService
     ) {
 
-        this.socket.on('data', (data: Buffer) => {
-            this.buffer += data.toString();
+        this.socket.on('data', (data: string) => {
+            this.buffer += data;
             let lines = this.buffer.split('\n');
             this.buffer = lines.pop() || ''; // Save the last part of the data (incomplete line) to the buffer
 

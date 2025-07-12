@@ -44,8 +44,9 @@ export class StratumV1Service implements OnModuleInit {
   private startSocketServer() {
     const server = new Server(async (socket: Socket) => {
 
-      // Disable Nagle's algorithm to improve latency
+      // Disable Nagle's algorithm and use UTF-8 encoding for better latency
       socket.setNoDelay(true);
+      socket.setEncoding('utf8');
 
       //5 min
       socket.setTimeout(1000 * 60 * 5);
