@@ -59,6 +59,8 @@ export class StratumV1Client {
     private extraNonceSubscribed: boolean = false;
     private sentExtraNonce: boolean = false;
 
+    private network: bitcoinjs.networks.Network;
+
     private subscribeResponse?: string;
     private authorizeResponse?: string;
     private extranonceResponse?: string;
@@ -76,6 +78,17 @@ export class StratumV1Client {
         private readonly addressSettingsService: AddressSettingsService,
         private readonly externalSharesService: ExternalSharesService
     ) {
+
+        const networkConfig = this.configService.get('NETWORK');
+        if (networkConfig === 'mainnet') {
+            this.network = bitcoinjs.networks.bitcoin;
+        } else if (networkConfig === 'testnet') {
+            this.network = bitcoinjs.networks.testnet;
+        } else if (networkConfig === 'regtest') {
+            this.network = bitcoinjs.networks.regtest;
+        } else {
+            throw new Error('Invalid network configuration');
+        }
 
         this.socket.on('data', (data: string) => {
             this.buffer += data;
@@ -520,18 +533,7 @@ export class StratumV1Client {
             ];
         }
 
-        const networkConfig = this.configService.get('NETWORK');
-        let network;
-
-        if (networkConfig === 'mainnet') {
-            network = bitcoinjs.networks.bitcoin;
-        } else if (networkConfig === 'testnet') {
-            network = bitcoinjs.networks.testnet;
-        } else if (networkConfig === 'regtest') {
-            network = bitcoinjs.networks.regtest;
-        } else {
-            throw new Error('Invalid network configuration');
-        }
+        const network = this.network;
 
         const job = new MiningJob(
             this.configService,
