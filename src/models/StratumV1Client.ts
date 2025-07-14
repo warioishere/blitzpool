@@ -112,6 +112,10 @@ export class StratumV1Client {
 
     public async destroy() {
 
+        if (this.entity) {
+            await this.statistics.flush(this.entity);
+        }
+
         const sid = this.entity?.sessionId || this.extraNonceAndSessionId;
         if (sid) {
             await this.clientService.delete(sid);
@@ -392,6 +396,12 @@ export class StratumV1Client {
                     if (!success) {
                         return;
                     }
+                    if (this.stratumInitialized) {
+                        await this.ensureEntity();
+                        if (this.entity) {
+                            await this.statistics.addRejectedShare(this.entity, this.sessionDifficulty);
+                        }
+                    }
                 }
                 break;
             }
@@ -557,8 +567,7 @@ export class StratumV1Client {
     }
 
 
-    private async handleMiningSubmission(submission: MiningSubmitMessage) {
-
+    private async ensureEntity() {
         if (this.entity == null) {
             if (this.creatingEntity == null) {
                 this.creatingEntity = new Promise(async (resolve, reject) => {
@@ -582,11 +591,15 @@ export class StratumV1Client {
                     resolve();
                 });
                 await this.creatingEntity;
-
             } else {
                 await this.creatingEntity;
             }
         }
+    }
+
+    private async handleMiningSubmission(submission: MiningSubmitMessage) {
+
+        await this.ensureEntity();
 
         const submissionHash = submission.hash();
         if(this.miningSubmissionHashes.has(submissionHash)){
@@ -597,6 +610,9 @@ export class StratumV1Client {
             const success = await this.write(err);
             if (!success) {
                 return false;
+            }
+            if (this.entity) {
+                await this.statistics.addRejectedShare(this.entity, this.sessionDifficulty);
             }
             return false;
         }else{
@@ -615,6 +631,9 @@ export class StratumV1Client {
             const success = await this.write(err);
             if (!success) {
                 return false;
+            }
+            if (this.entity) {
+                await this.statistics.addRejectedShare(this.entity, this.sessionDifficulty);
             }
             return false;
         }
@@ -701,6 +720,9 @@ export class StratumV1Client {
             const success = await this.write(err);
             if (!success) {
                 return false;
+            }
+            if (this.entity) {
+                await this.statistics.addRejectedShare(this.entity, this.sessionDifficulty);
             }
 
             return false;

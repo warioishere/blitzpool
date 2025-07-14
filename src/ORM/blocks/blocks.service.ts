@@ -46,4 +46,12 @@ export class BlocksService {
             }
         });
     }
+
+    public async getLatestBlockTime(): Promise<Date | null> {
+        const latest = await this.blocksRepository
+            .createQueryBuilder('block')
+            .orderBy('block.createdAt', 'DESC')
+            .getOne();
+        return latest?.createdAt || null;
+    }
 }

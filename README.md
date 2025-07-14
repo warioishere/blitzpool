@@ -49,10 +49,13 @@ https://github.com/warioishere/blitzpool-message-encryptor-for-TG
 - Integrated `blockTemplateInterval` configuration
 - Hashrate corrections and updated statistics endpoints
 - Extended `/api/info/chart` endpoint with a `range` query supporting `1d` and `1m`
+- `/api/client/:address/chart` now accepts a `range` query (`1d`, `3d`, `7d`) for up to one week of address hashrate data
 - Pool hashrate statistics are kept for one month
 - Worker shares and total shares per address are kept for six months while session details are pruned after one day
 - Example: `GET /api/info/chart?range=1m` returns one month of pool hashrate data (defaults to `1d`)
 - Telegram bot subscriptions managed via a custom ORM
+- New `/api/info/shares` endpoint returns pool-wide accepted and rejected share totals for 1d, 14d, 1m and since the last block. Counts represent the sum of difficulty‑1 shares.
+- Optional `SHARE_STATS_RESET_AFTER` environment variable allows ignoring statistics before a given UNIX timestamp **in milliseconds** without deleting data (values below `1e12` are treated as seconds)
 
 #### Blitzpool-UI
 
@@ -64,6 +67,16 @@ Blitzpool UI has additional Features to show
 
 - total Shares per address
 - total shares per Worker
+
+### Database Migrations
+
+Run pending TypeORM migrations whenever the database schema changes. After pulling updates, execute:
+
+```bash
+npm run migration:run
+```
+
+The server will also attempt to apply migrations automatically when it starts.
 
 ---
 💬 Contact

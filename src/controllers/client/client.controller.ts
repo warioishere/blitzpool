@@ -1,4 +1,4 @@
-import { Controller, Get, NotFoundException, Param } from '@nestjs/common';
+import { Controller, Get, NotFoundException, Param, Query } from '@nestjs/common';
 
 import { AddressSettingsService } from '../../ORM/address-settings/address-settings.service';
 import { ClientStatisticsService } from '../../ORM/client-statistics/client-statistics.service';
@@ -41,8 +41,11 @@ export class ClientController {
     }
 
     @Get(':address/chart')
-    async getClientInfoChart(@Param('address') address: string) {
-        const chartData = await this.clientStatisticsService.getChartDataForAddress(address);
+    async getClientInfoChart(
+        @Param('address') address: string,
+        @Query('range') range: '1d' | '3d' | '7d' = '1d'
+    ) {
+        const chartData = await this.clientStatisticsService.getChartDataForAddress(address, range);
         return chartData;
     }
 
