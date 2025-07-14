@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { ConfigService } from '@nestjs/config';
 import { Repository } from 'typeorm';
 
 import { ClientStatisticsEntity } from './client-statistics.entity';
@@ -7,14 +8,19 @@ import { ClientStatisticsEntity } from './client-statistics.entity';
 
 @Injectable()
 export class ClientStatisticsService {
+    private readonly resetAfter: number;
 
     constructor(
-
-
         @InjectRepository(ClientStatisticsEntity)
         private clientStatisticsRepository: Repository<ClientStatisticsEntity>,
+        configService: ConfigService,
     ) {
-
+        const value = configService.get<string>('SHARE_STATS_RESET_AFTER');
+        let parsed = value ? parseInt(value, 10) : 0;
+        if (parsed && parsed < 1e12) {
+            parsed *= 1000; // allow specifying timestamp in seconds
+        }
+        this.resetAfter = parsed;
     }
 
     public async update(clientStatistic: Partial<ClientStatisticsEntity>) {
@@ -28,6 +34,7 @@ export class ClientStatisticsService {
             {
                 shares: clientStatistic.shares,
                 acceptedCount: clientStatistic.acceptedCount,
+                rejectedCount: clientStatistic.rejectedCount,
                 updatedAt: new Date()
             });
 
@@ -52,6 +59,7 @@ export class ClientStatisticsService {
                 time,
                 shares,
                 acceptedCount,
+                rejectedCount,
                 "createdAt",
                 "updatedAt"
             )
@@ -62,6 +70,7 @@ export class ClientStatisticsService {
                 time,
                 SUM(shares),
                 SUM(acceptedCount),
+                SUM(rejectedCount),
                 datetime('now'),
                 datetime('now')
             FROM client_statistics_entity
@@ -77,6 +86,7 @@ export class ClientStatisticsService {
                 time,
                 shares,
                 acceptedCount,
+                rejectedCount,
                 "createdAt",
                 "updatedAt"
             )
@@ -87,6 +97,7 @@ export class ClientStatisticsService {
                 ${detailCutoff.getTime()},
                 SUM(shares),
                 SUM(acceptedCount),
+                SUM(rejectedCount),
                 datetime('now'),
                 datetime('now')
             FROM client_statistics_entity
@@ -176,9 +187,25 @@ export class ClientStatisticsService {
 
     // }
 
-    public async getChartDataForAddress(address: string) {
+    public async getChartDataForAddress(
+        address: string,
+        range: '1d' | '3d' | '7d' = '1d',
+    ) {
 
-        var yesterday = new Date(new Date().getTime() - (24 * 60 * 60 * 1000));
+        let diffDays = 1;
+        switch (range) {
+            case '3d':
+                diffDays = 3;
+                break;
+            case '7d':
+                diffDays = 7;
+                break;
+            default:
+                diffDays = 1;
+        }
+
+        const since = new Date(Date.now() - diffDays * 24 * 60 * 60 * 1000);
+        const limit = diffDays * 144;
 
         const query = `
                 SELECT
@@ -187,21 +214,23 @@ export class ClientStatisticsService {
                 FROM
                     client_statistics_entity AS entry
                 WHERE
-                    entry.address = ? AND entry.time > ${yesterday.getTime()}
+                    entry.address = ? AND entry.time > ${since.getTime()}
                 GROUP BY
                     time
                 ORDER BY
                     time
-                LIMIT 144;
+                LIMIT ${limit};
 
         `;
 
         const result = await this.clientStatisticsRepository.query(query, [address]);
 
-        return result.map(res => {
-            res.label = new Date(res.label).toISOString();
-            return res;
-        }).slice(0, result.length - 1);
+        return result
+            .map(res => {
+                res.label = new Date(res.label).toISOString();
+                return res;
+            })
+            .slice(0, result.length - 1);
 
 
     }
@@ -349,5 +378,63 @@ export class ClientStatisticsService {
 
     public async deleteAll() {
         return await this.clientStatisticsRepository.delete({})
+    }
+
+    private effectiveSince(date: Date): number {
+        const t = date.getTime();
+        return this.resetAfter && this.resetAfter > t ? this.resetAfter : t;
+    }
+
+    private async getTotalsSince(date: Date): Promise<Array<{ address: string, accepted: number, rejected: number }>> {
+        const since = this.effectiveSince(date);
+        const results = await this.clientStatisticsRepository
+            .createQueryBuilder('entry')
+            .select('entry.address', 'address')
+            .addSelect('SUM(entry.acceptedCount)', 'accepted')
+            .addSelect('SUM(entry.rejectedCount)', 'rejected')
+            .where('entry.time >= :since', { since })
+            .andWhere("NOT (entry.address = 'POOL' AND entry.clientName = 'POOL' AND entry.sessionId = 'POOL')")
+            .groupBy('entry.address')
+            .getRawMany();
+        return results.map(r => ({
+            address: r.address,
+            accepted: parseFloat(r.accepted || 0),
+            rejected: parseFloat(r.rejected || 0)
+        }));
+    }
+
+    public async getTotalsLastDays(days: number): Promise<Array<{ address: string, accepted: number, rejected: number }>> {
+        const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+        return this.getTotalsSince(since);
+    }
+
+    public async getTotalsSinceLastBlock(lastBlockTime: Date | null): Promise<Array<{ address: string, accepted: number, rejected: number }>> {
+        const since = lastBlockTime || new Date(0);
+        return this.getTotalsSince(since);
+    }
+
+    private async getPoolTotalsSince(date: Date): Promise<{ accepted: number; rejected: number }> {
+        const since = this.effectiveSince(date);
+        const result = await this.clientStatisticsRepository
+            .createQueryBuilder('entry')
+            .select('SUM(entry.acceptedCount)', 'accepted')
+            .addSelect('SUM(entry.rejectedCount)', 'rejected')
+            .where('entry.time >= :since', { since })
+            .andWhere("NOT (entry.address = 'POOL' AND entry.clientName = 'POOL' AND entry.sessionId = 'POOL')")
+            .getRawOne();
+        return {
+            accepted: parseFloat(result?.accepted || 0),
+            rejected: parseFloat(result?.rejected || 0)
+        };
+    }
+
+    public async getPoolTotalsLastDays(days: number): Promise<{ accepted: number; rejected: number }> {
+        const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+        return this.getPoolTotalsSince(since);
+    }
+
+    public async getPoolTotalsSinceLastBlock(lastBlockTime: Date | null): Promise<{ accepted: number; rejected: number }> {
+        const since = lastBlockTime || new Date(0);
+        return this.getPoolTotalsSince(since);
     }
 }

@@ -108,7 +108,40 @@ export class AppController {
 
     return chartData;
 
+  }
+
+  @Get('info/shares')
+  public async infoShares() {
+    const CACHE_KEY = 'SHARE_INFO';
+    const cached = await this.cacheManager.get(CACHE_KEY);
+    if (cached != null) {
+      return cached;
+    }
+
+    const lastBlockTime = await this.blocksService.getLatestBlockTime();
+
+    const [totals1d, totals14d, totals30d, totalsSinceBlock] = await Promise.all([
+      this.clientStatisticsService.getPoolTotalsLastDays(1),
+      this.clientStatisticsService.getPoolTotalsLastDays(14),
+      this.clientStatisticsService.getPoolTotalsLastDays(30),
+      this.clientStatisticsService.getPoolTotalsSinceLastBlock(lastBlockTime)
+    ]);
+
+    const result = {
+      accepted1d: totals1d.accepted,
+      rejected1d: totals1d.rejected,
+      accepted14d: totals14d.accepted,
+      rejected14d: totals14d.rejected,
+      accepted30d: totals30d.accepted,
+      rejected30d: totals30d.rejected,
+      acceptedSinceBlock: totalsSinceBlock.accepted,
+      rejectedSinceBlock: totalsSinceBlock.rejected
+    };
+
+    await this.cacheManager.set(CACHE_KEY, result, 60 * 1000);
+    return result;
 
   }
 
 }
+

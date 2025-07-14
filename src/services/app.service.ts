@@ -18,6 +18,7 @@ export class AppService implements OnModuleInit {
     }
 
     async onModuleInit() {
+        await this.dataSource.runMigrations();
         // if (process.env.NODE_APP_INSTANCE == '0') {
         //     await this.dataSource.query(`VACUUM;`);
         // }

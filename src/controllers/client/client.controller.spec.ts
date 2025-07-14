@@ -1,5 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { ConfigModule } from '@nestjs/config';
 
 import { AddressSettingsModule } from '../../ORM/address-settings/address-settings.module';
 import { ClientStatisticsModule } from '../../ORM/client-statistics/client-statistics.module';
@@ -15,6 +16,7 @@ describe('ClientController', () => {
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
       imports: [
+        ConfigModule.forRoot(),
         TypeOrmModule.forRoot({
           type: 'sqlite',
           database: ':memory:',

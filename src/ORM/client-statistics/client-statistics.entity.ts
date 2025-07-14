@@ -28,8 +28,11 @@ export class ClientStatisticsEntity extends TrackedEntity {
     @Column({ type: 'real' })
     shares: number;
 
-    @Column({ default: 0, type: 'integer' })
+    @Column({ default: 0, type: 'real' })
     acceptedCount: number;
+
+    @Column({ default: 0, type: 'real' })
+    rejectedCount: number;
 
 
 }
