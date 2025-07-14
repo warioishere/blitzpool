@@ -14,6 +14,8 @@ BlitzPool extends the original `public-pool` implementation in multiple ways to 
 - Lightweight, performant Node.js mining pool
 - Full support for Bitcoin mainnet
 - Stratum V1 protocol support
+- Optimized for low-latency share submission with Nagle’s algorithm disabled by default.
+- Includes further performance improvements like UTF-8 socket encoding, cached network selection, and efficient big number handling.
 - Supports Extranonce Subscribe (XNSub) for dynamic extranonce updates
 - loads of Telegram Bot Commands to get basic mining infos
 
