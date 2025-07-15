@@ -103,8 +103,8 @@ export class AppController {
 
     const chartData = await this.clientStatisticsService.getChartDataForSite(range);
 
-    //10 min
-    await this.cacheManager.set(CACHE_KEY, chartData, 10 * 60 * 1000);
+    //cache for one minute so recent shares show up quickly
+    await this.cacheManager.set(CACHE_KEY, chartData, 1 * 60 * 1000);
 
     return chartData;
 

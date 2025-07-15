@@ -68,3 +68,57 @@ describe('AppController infoShares', () => {
     jest.useRealTimers();
   });
 });
+
+describe('AppController infoChart', () => {
+  let controller: AppController;
+  let stats: ClientStatisticsService;
+
+  beforeEach(async () => {
+    const module: TestingModule = await Test.createTestingModule({
+      imports: [
+        CacheModule.register(),
+        ConfigModule.forRoot(),
+        TypeOrmModule.forRoot({
+          type: 'sqlite',
+          database: ':memory:',
+          synchronize: true,
+          autoLoadEntities: true,
+          logging: false,
+        }),
+        ClientStatisticsModule,
+      ],
+      controllers: [AppController],
+      providers: [
+        { provide: ClientService, useValue: {} },
+        { provide: BlocksService, useValue: { getLatestBlockTime: jest.fn() } },
+        { provide: BitcoinRpcService, useValue: { newBlock$: { subscribe: () => ({}) } } },
+        { provide: AddressSettingsService, useValue: {} },
+      ],
+    }).compile();
+
+    controller = module.get<AppController>(AppController);
+    stats = module.get<ClientStatisticsService>(ClientStatisticsService);
+  });
+
+  it('includes shares from the latest slot', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2023-01-01T00:00:30Z'));
+
+    const time = Math.floor(Date.now() / 600000) * 600000;
+    await stats.insert({
+      time,
+      shares: 1,
+      acceptedCount: 0,
+      rejectedCount: 0,
+      address: 'addr',
+      clientName: 'w1',
+      sessionId: 's1',
+    });
+
+    const result: any = await controller.infoChart('1d');
+
+    const expectedData = Math.round((1 * 4294967296) / 600);
+    expect(result).toEqual([{ label: new Date(time).toISOString(), data: expectedData }]);
+
+    jest.useRealTimers();
+  });
+});
