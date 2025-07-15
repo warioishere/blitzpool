@@ -195,7 +195,7 @@ describe('Client statistics persistence', () => {
   expect(rows[0].rejectedCount).toBe(2);
   });
 
-  it('persists each rejected share immediately', async () => {
+  it('updates rejected shares after one minute', async () => {
     jest.useFakeTimers();
 
     const now = new Date('2023-11-14T00:00:00Z');
@@ -215,12 +215,13 @@ describe('Client statistics persistence', () => {
     const stats = new (require('./StratumV1ClientStatistics').StratumV1ClientStatistics)(statsService);
 
     await stats.addRejectedShare(client, 1);
-    let repo = dataSource.getRepository(ClientStatisticsEntity);
+    const repo = dataSource.getRepository(ClientStatisticsEntity);
     expect((await repo.find())[0].rejectedCount).toBe(1);
 
     jest.setSystemTime(new Date(now.getTime() + 30_000));
     await stats.addRejectedShare(client, 1);
-    expect((await repo.find())[0].rejectedCount).toBe(2);
+    // not saved yet
+    expect((await repo.find())[0].rejectedCount).toBe(1);
 
     jest.setSystemTime(new Date(now.getTime() + 61_000));
     await stats.addRejectedShare(client, 1);

@@ -24,20 +24,22 @@ export class ClientStatisticsService {
     }
 
     public async update(clientStatistic: Partial<ClientStatisticsEntity>) {
-
-        await this.clientStatisticsRepository.update({
-            address: clientStatistic.address,
-            clientName: clientStatistic.clientName,
-            sessionId: clientStatistic.sessionId,
-            time: clientStatistic.time
-        },
-            {
-                shares: clientStatistic.shares,
-                acceptedCount: clientStatistic.acceptedCount,
-                rejectedCount: clientStatistic.rejectedCount,
-                updatedAt: new Date()
-            });
-
+        await this.clientStatisticsRepository
+            .createQueryBuilder()
+            .update(ClientStatisticsEntity)
+            .set({
+                shares: () => `shares + ${clientStatistic.shares ?? 0}`,
+                acceptedCount: () => `acceptedCount + ${clientStatistic.acceptedCount ?? 0}`,
+                rejectedCount: () => `rejectedCount + ${clientStatistic.rejectedCount ?? 0}`,
+                updatedAt: () => 'CURRENT_TIMESTAMP'
+            })
+            .where({
+                address: clientStatistic.address,
+                clientName: clientStatistic.clientName,
+                sessionId: clientStatistic.sessionId,
+                time: clientStatistic.time
+            })
+            .execute();
     }
     public async insert(clientStatistic: Partial<ClientStatisticsEntity>) {
         // If no rows were updated, insert a new record

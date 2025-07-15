@@ -6,9 +6,9 @@ const TARGET_SUBMISSION_PER_SECOND = 10;
 const MIN_DIFF = 0.00001;
 export class StratumV1ClientStatistics {
 
-    private shares: number = 0;
-    private acceptedCount: number = 0;
-    private rejectedCount: number = 0;
+    private shares = 0;
+    private acceptedCount = 0;
+    private rejectedCount = 0;
 
     private submissionCacheStart: Date;
     private submissionCache: { time: Date, difficulty: number }[] = [];
@@ -49,8 +49,8 @@ export class StratumV1ClientStatistics {
 
 
         if (this.currentTimeSlot == null) {
-            // First record, insert it
-			this.previousTimeSlotTime = new Date();
+            // First record, insert it and reset counters
+            this.previousTimeSlotTime = new Date();
             this.currentTimeSlotTime = new Date();
             this.currentTimeSlot = timeSlot;
             this.shares += targetDifficulty;
@@ -64,7 +64,10 @@ export class StratumV1ClientStatistics {
                 clientName: client.clientName,
                 sessionId: client.sessionId
             });
-            this.lastSave = new Date().getTime();
+            this.shares = 0;
+            this.acceptedCount = 0;
+            this.rejectedCount = 0;
+            this.lastSave = Date.now();
         } else if (this.currentTimeSlot != timeSlot) {
             // Transitioning to a new time slot,
             // First update the old time slot with the latest data
@@ -77,14 +80,16 @@ export class StratumV1ClientStatistics {
                 clientName: client.clientName,
                 sessionId: client.sessionId
             });
-			 this.previousShares = this.shares;
+            this.shares = 0;
+            this.acceptedCount = 0;
+            this.rejectedCount = 0;
+            this.previousShares = 0;
             this.previousTimeSlotTime = this.currentTimeSlotTime;
             this.currentTimeSlotTime = new Date();
             // Set the new time slot and add incoming shares then insert it
             this.currentTimeSlot = timeSlot;
-            this.shares = targetDifficulty;
-            this.acceptedCount = targetDifficulty;
-            this.rejectedCount = 0;
+            this.shares += targetDifficulty;
+            this.acceptedCount += targetDifficulty;
             await this.clientStatisticsService.insert({
                 time: this.currentTimeSlot,
                 shares: this.shares,
@@ -94,7 +99,10 @@ export class StratumV1ClientStatistics {
                 clientName: client.clientName,
                 sessionId: client.sessionId
             });
-            this.lastSave = new Date().getTime();
+            this.shares = 0;
+            this.acceptedCount = 0;
+            this.rejectedCount = 0;
+            this.lastSave = Date.now();
         } else if ((date.getTime() - 60 * 1000) > this.lastSave) {
             // If we haven't saved for a minute, update the table
             this.shares += targetDifficulty;
@@ -108,13 +116,16 @@ export class StratumV1ClientStatistics {
                 clientName: client.clientName,
                 sessionId: client.sessionId
             });
-            this.lastSave = new Date().getTime();
+            this.shares = 0;
+            this.acceptedCount = 0;
+            this.rejectedCount = 0;
+            this.lastSave = Date.now();
         } else {
             // Accept the shares if none of the prior conditions are met,
             // saving to memory for storing later
             this.shares += targetDifficulty;
             this.acceptedCount += targetDifficulty;
-			if(this.shares > 0) {
+            if(this.shares > 0) {
             const time = new Date().getTime() - this.previousTimeSlotTime.getTime();
             this.hashRate = ((this.previousShares + this.shares) * 4294967296) / (time / 1000);
         }
@@ -143,6 +154,9 @@ export class StratumV1ClientStatistics {
                 clientName: client.clientName,
                 sessionId: client.sessionId
             });
+            this.rejectedCount = 0;
+            this.shares = 0;
+            this.acceptedCount = 0;
             this.lastSave = Date.now();
         } else if (this.currentTimeSlot != timeSlot) {
             // time slot changed - persist the previous slot and start a new one
@@ -155,13 +169,14 @@ export class StratumV1ClientStatistics {
                 clientName: client.clientName,
                 sessionId: client.sessionId
             });
-            this.previousShares = this.shares;
+            this.shares = 0;
+            this.acceptedCount = 0;
+            this.rejectedCount = 0;
+            this.previousShares = 0;
             this.previousTimeSlotTime = this.currentTimeSlotTime;
             this.currentTimeSlotTime = new Date();
             this.currentTimeSlot = timeSlot;
-            this.shares = 0;
-            this.acceptedCount = 0;
-            this.rejectedCount = targetDifficulty;
+            this.rejectedCount += targetDifficulty;
             await this.clientStatisticsService.insert({
                 time: this.currentTimeSlot,
                 shares: this.shares,
@@ -171,9 +186,11 @@ export class StratumV1ClientStatistics {
                 clientName: client.clientName,
                 sessionId: client.sessionId
             });
+            this.rejectedCount = 0;
+            this.shares = 0;
+            this.acceptedCount = 0;
             this.lastSave = Date.now();
-        } else {
-            // same time slot - increment and persist immediately
+        } else if ((date.getTime() - 60 * 1000) > this.lastSave) {
             this.rejectedCount += targetDifficulty;
             await this.clientStatisticsService.update({
                 time: this.currentTimeSlot,
@@ -184,7 +201,12 @@ export class StratumV1ClientStatistics {
                 clientName: client.clientName,
                 sessionId: client.sessionId
             });
+            this.rejectedCount = 0;
+            this.shares = 0;
+            this.acceptedCount = 0;
             this.lastSave = Date.now();
+        } else {
+            this.rejectedCount += targetDifficulty;
         }
 
     }
@@ -200,6 +222,9 @@ export class StratumV1ClientStatistics {
                 clientName: client.clientName,
                 sessionId: client.sessionId
             });
+            this.shares = 0;
+            this.acceptedCount = 0;
+            this.rejectedCount = 0;
         }
     }
 
