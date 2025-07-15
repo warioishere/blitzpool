@@ -138,41 +138,21 @@ export class ClientStatisticsService {
                 diffDays = 1;
         }
 
-        const interval = 10 * 60 * 1000;
-        const now = Math.floor(Date.now() / interval) * interval;
-        const start = Math.floor((Date.now() - diffDays * 24 * 60 * 60 * 1000) / interval) * interval;
+        const since = new Date(Date.now() - diffDays * 24 * 60 * 60 * 1000);
+        const limit = diffDays * 144;
 
-        const rows: Array<{ time: number; shares: number }> = await this.clientStatisticsRepository
+        const rows: Array<{ label: number; data: string }> = await this.clientStatisticsRepository
             .createQueryBuilder('entry')
-            .select('entry.time', 'time')
-            .addSelect('SUM(entry.shares)', 'shares')
-            .where('entry.time >= :start', { start: start - interval })
+            .select('entry.time', 'label')
+            .addSelect('ROUND(((SUM(entry.shares) * 4294967296) / 600))', 'data')
+            .where('entry.time > :since', { since: since.getTime() })
             .andWhere('entry.sessionId != :agg', { agg: 'AGG' })
-            .groupBy('entry.time')
-            .orderBy('entry.time')
+            .groupBy('time')
+            .orderBy('time')
+            .limit(limit)
             .getRawMany();
 
-        const data: { label: string; data: number }[] = [];
-        let idx = 0;
-        const window: Array<{ time: number; shares: number }> = [];
-        let windowSum = 0;
-
-        for (let t = start; t <= now; t += interval) {
-            while (idx < rows.length && Number(rows[idx].time) <= t) {
-                const item = { time: Number(rows[idx].time), shares: Number(rows[idx].shares) };
-                window.push(item);
-                windowSum += item.shares;
-                idx++;
-            }
-            while (window.length && window[0].time < t - interval) {
-                const item = window.shift();
-                windowSum -= item.shares;
-            }
-            const rate = Math.round((windowSum * 4294967296) / 600);
-            data.push({ label: new Date(t).toISOString(), data: rate });
-        }
-
-        return data;
+        return rows.map(r => ({ label: new Date(Number(r.label)).toISOString(), data: Number(r.data) }));
 
     }
 
@@ -215,41 +195,21 @@ export class ClientStatisticsService {
                 diffDays = 1;
         }
 
-        const interval = 10 * 60 * 1000;
-        const now = Math.floor(Date.now() / interval) * interval;
-        const start = Math.floor((Date.now() - diffDays * 24 * 60 * 60 * 1000) / interval) * interval;
+        const since = new Date(Date.now() - diffDays * 24 * 60 * 60 * 1000);
+        const limit = diffDays * 144;
 
-        const rows: Array<{ time: number; shares: number }> = await this.clientStatisticsRepository
+        const rows: Array<{ label: number; data: string }> = await this.clientStatisticsRepository
             .createQueryBuilder('entry')
-            .select('entry.time', 'time')
-            .addSelect('SUM(entry.shares)', 'shares')
+            .select('entry.time', 'label')
+            .addSelect('ROUND(((SUM(entry.shares) * 4294967296) / 600))', 'data')
             .where('entry.address = :address', { address })
-            .andWhere('entry.time >= :start', { start: start - interval })
-            .groupBy('entry.time')
-            .orderBy('entry.time')
+            .andWhere('entry.time > :since', { since: since.getTime() })
+            .groupBy('time')
+            .orderBy('time')
+            .limit(limit)
             .getRawMany();
 
-        const data: { label: string; data: number }[] = [];
-        let idx = 0;
-        const window: Array<{ time: number; shares: number }> = [];
-        let windowSum = 0;
-
-        for (let t = start; t <= now; t += interval) {
-            while (idx < rows.length && Number(rows[idx].time) <= t) {
-                const item = { time: Number(rows[idx].time), shares: Number(rows[idx].shares) };
-                window.push(item);
-                windowSum += item.shares;
-                idx++;
-            }
-            while (window.length && window[0].time < t - interval) {
-                const item = window.shift();
-                windowSum -= item.shares;
-            }
-            const rate = Math.round((windowSum * 4294967296) / 600);
-            data.push({ label: new Date(t).toISOString(), data: rate });
-        }
-
-        return data;
+        return rows.map(r => ({ label: new Date(Number(r.label)).toISOString(), data: Number(r.data) }));
 
 
     }
