@@ -164,7 +164,7 @@ export class ClientStatisticsService {
                 windowSum += item.shares;
                 idx++;
             }
-            while (window.length && window[0].time <= t - interval) {
+            while (window.length && window[0].time < t - interval) {
                 const item = window.shift();
                 windowSum -= item.shares;
             }
@@ -241,7 +241,7 @@ export class ClientStatisticsService {
                 windowSum += item.shares;
                 idx++;
             }
-            while (window.length && window[0].time <= t - interval) {
+            while (window.length && window[0].time < t - interval) {
                 const item = window.shift();
                 windowSum -= item.shares;
             }
