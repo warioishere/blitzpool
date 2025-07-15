@@ -39,7 +39,8 @@ export class ClientStatisticsService {
 
     public async deleteOldStatistics() {
         const now = Date.now();
-        const detailCutoff = new Date(now - 1 * 24 * 60 * 60 * 1000);
+        // Keep detailed records for one week before aggregation
+        const detailCutoff = new Date(now - 7 * 24 * 60 * 60 * 1000);
         const halfYearCutoff = new Date(now - 180 * 24 * 60 * 60 * 1000);
         const monthCutoff = new Date(now - 30 * 24 * 60 * 60 * 1000);
 
