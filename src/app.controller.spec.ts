@@ -117,7 +117,9 @@ describe('AppController infoChart', () => {
     const result: any = await controller.infoChart('1d');
 
     const expectedData = Math.round((1 * 4294967296) / 600);
-    expect(result).toEqual([{ label: new Date(time).toISOString(), data: expectedData }]);
+    const entry = result.find(d => d.label === new Date(time).toISOString());
+    expect(result.length).toBe(145);
+    expect(entry).toEqual({ label: new Date(time).toISOString(), data: expectedData });
 
     jest.useRealTimers();
   });

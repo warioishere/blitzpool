@@ -48,8 +48,9 @@ https://github.com/warioishere/blitzpool-message-encryptor-for-TG
 #### 🛠️ Extra Services
 - Integrated `blockTemplateInterval` configuration
 - Hashrate corrections and updated statistics endpoints
-- Extended `/api/info/chart` endpoint with a `range` query supporting `1d` and `1m`
-- `/api/client/:address/chart` now accepts a `range` query (`1d`, `3d`, `7d`) for up to one week of address hashrate data
+- Extended `/api/info/chart` endpoint with a `range` query supporting `1d` and `1m`.
+- `/api/client/:address/chart` accepts a `range` query (`1d`, `3d`, `7d`) for up to one week of address hashrate data.
+- Chart responses return a data point every ten minutes showing the average hash rate of the preceding ten minutes.
 - Pool hashrate statistics are kept for one month
 - Worker shares and total shares per address are kept for six months while session details are pruned after one day
 - Example: `GET /api/info/chart?range=1m` returns one month of pool hashrate data (defaults to `1d`)
