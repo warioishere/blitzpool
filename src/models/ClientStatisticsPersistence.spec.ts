@@ -266,7 +266,7 @@ describe('Client statistics persistence', () => {
     jest.useRealTimers();
   });
 
-  it('computes hash rate across updates', async () => {
+  it('computes sliding window hash rate', async () => {
     jest.useFakeTimers();
 
     const start = new Date('2023-11-14T00:00:00Z');
@@ -288,15 +288,18 @@ describe('Client statistics persistence', () => {
     await stats.addShares(client, 1);
     jest.setSystemTime(new Date(start.getTime() + 30_000));
     await stats.addShares(client, 1);
-    const rate1 = stats.hashRate;
+    const rate1 = await stats.getCurrentHashrate();
 
-    jest.setSystemTime(new Date(start.getTime() + 61_000));
-    await stats.addShares(client, 1);
-    jest.setSystemTime(new Date(start.getTime() + 90_000));
-    await stats.addShares(client, 1);
-    const rate2 = stats.hashRate;
+    // First share falls out of window
+    jest.setSystemTime(new Date(start.getTime() + 600_000 + 1_000));
+    const rate2 = await stats.getCurrentHashrate();
+    expect(rate2).toBeLessThan(rate1);
+    expect(rate2).toBeGreaterThan(0);
 
-    expect(rate1).toBeGreaterThan(rate2);
+    // All shares fall out of window
+    jest.setSystemTime(new Date(start.getTime() + 600_000 + 31_000));
+    const rate3 = await stats.getCurrentHashrate();
+    expect(rate3).toBe(0);
 
     jest.useRealTimers();
   });

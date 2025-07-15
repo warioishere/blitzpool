@@ -15,14 +15,10 @@ export class StratumV1ClientStatistics {
 
     private currentTimeSlot: number = null;
     private lastSave: number = null;
-	
-	public hashRate = 0;
 
-    private previousTimeSlotTime: Date;
-    private currentTimeSlotTime: Date;
+    public hashRate = 0;
 
-    private previousShares: number = 0;
-    private slotShares = 0;
+    private shareHistory: { time: number; difficulty: number }[] = [];
 
     constructor(
         private readonly clientStatisticsService: ClientStatisticsService
@@ -42,7 +38,12 @@ export class StratumV1ClientStatistics {
             difficulty: targetDifficulty,
         });
 
+        this.shareHistory.push({ time: Date.now(), difficulty: targetDifficulty });
+        await this.cleanupHistory();
+
         await this.processShare(client, targetDifficulty, false);
+
+        this.hashRate = await this.getCurrentHashrate();
     }
 
     public async addRejectedShare(client: ClientEntity, targetDifficulty: number) {
@@ -55,15 +56,12 @@ export class StratumV1ClientStatistics {
         const timeSlot = new Date(Math.floor(date.getTime() / coeff) * coeff).getTime();
 
         if (this.currentTimeSlot == null) {
-            this.previousTimeSlotTime = new Date();
-            this.currentTimeSlotTime = new Date();
             this.currentTimeSlot = timeSlot;
             if (isRejected) {
                 this.rejectedCount += difficulty;
             } else {
                 this.shares += difficulty;
                 this.acceptedCount += difficulty;
-                this.slotShares += difficulty;
             }
             await this.clientStatisticsService.insert({
                 time: this.currentTimeSlot,
@@ -91,17 +89,12 @@ export class StratumV1ClientStatistics {
             this.shares = 0;
             this.acceptedCount = 0;
             this.rejectedCount = 0;
-            this.previousShares = this.slotShares;
-            this.slotShares = 0;
-            this.previousTimeSlotTime = this.currentTimeSlotTime;
-            this.currentTimeSlotTime = new Date();
             this.currentTimeSlot = timeSlot;
             if (isRejected) {
                 this.rejectedCount += difficulty;
             } else {
                 this.shares += difficulty;
                 this.acceptedCount += difficulty;
-                this.slotShares += difficulty;
             }
             await this.clientStatisticsService.insert({
                 time: this.currentTimeSlot,
@@ -122,7 +115,6 @@ export class StratumV1ClientStatistics {
             } else {
                 this.shares += difficulty;
                 this.acceptedCount += difficulty;
-                this.slotShares += difficulty;
             }
             await this.clientStatisticsService.update({
                 time: this.currentTimeSlot,
@@ -143,11 +135,6 @@ export class StratumV1ClientStatistics {
             } else {
                 this.shares += difficulty;
                 this.acceptedCount += difficulty;
-                this.slotShares += difficulty;
-                if (this.slotShares > 0) {
-                    const time = new Date().getTime() - this.previousTimeSlotTime.getTime();
-                    this.hashRate = ((this.previousShares + this.slotShares) * 4294967296) / (time / 1000);
-                }
             }
         }
     }
@@ -167,6 +154,19 @@ export class StratumV1ClientStatistics {
             this.acceptedCount = 0;
             this.rejectedCount = 0;
         }
+    }
+
+    private async cleanupHistory() {
+        const cutoff = Date.now() - 10 * 60 * 1000;
+        while (this.shareHistory.length && this.shareHistory[0].time < cutoff) {
+            this.shareHistory.shift();
+        }
+    }
+
+    public async getCurrentHashrate(): Promise<number> {
+        await this.cleanupHistory();
+        const sum = this.shareHistory.reduce((s, h) => s + h.difficulty, 0);
+        return (sum * 4294967296) / 600;
     }
 
     public getSuggestedDifficulty(clientDifficulty: number) {

@@ -524,7 +524,7 @@ export class StratumV1Client {
         );
 
         if (this.entity) {
-            this.hashRate = this.statistics.hashRate;
+            this.hashRate = await this.statistics.getCurrentHashrate();
         }
 
         this.noFee = devFeeAddress == null || devFeeAddress.length < 1;
@@ -675,7 +675,7 @@ export class StratumV1Client {
             }
             try {
                 await this.statistics.addShares(this.entity, this.sessionDifficulty);
-                this.hashRate = this.statistics.hashRate;
+                this.hashRate = await this.statistics.getCurrentHashrate();
                 const now = new Date();
                 // only update every minute
                 if (this.entity.updatedAt == null || now.getTime() - this.entity.updatedAt.getTime() > 1000 * 60) {
