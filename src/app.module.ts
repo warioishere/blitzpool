@@ -27,6 +27,7 @@ import { TelegramService } from './services/telegram.service';
 import { ExternalSharesService } from './services/external-shares.service';
 import { ExternalShareController } from './controllers/external-share/external-share.controller';
 import { ExternalSharesModule } from './ORM/external-shares/external-shares.module';
+import { PoolShareStatisticsModule } from './ORM/pool-share-statistics/pool-share-statistics.module';
 
 const ORMModules = [
     ClientStatisticsModule,
@@ -35,7 +36,8 @@ const ORMModules = [
     TelegramSubscriptionsModule,
     BlocksModule,
     RpcBlocksModule,
-    ExternalSharesModule
+    ExternalSharesModule,
+    PoolShareStatisticsModule
 ]
 
 @Module({
