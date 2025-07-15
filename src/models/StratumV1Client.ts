@@ -29,6 +29,7 @@ import { ExtraNonceSubscribeMessage } from './stratum-messages/ExtraNonceSubscri
 import { StratumV1ClientStatistics } from './StratumV1ClientStatistics';
 import { ExternalSharesService } from '../services/external-shares.service';
 import { DifficultyUtils } from '../utils/difficulty.utils';
+import { PoolShareStatisticsService } from '../ORM/pool-share-statistics/pool-share-statistics.service';
 
 
 export class StratumV1Client {
@@ -76,6 +77,7 @@ export class StratumV1Client {
         private readonly blocksService: BlocksService,
         private readonly configService: ConfigService,
         private readonly addressSettingsService: AddressSettingsService,
+        private readonly poolShareStatisticsService: PoolShareStatisticsService,
         private readonly externalSharesService: ExternalSharesService
     ) {
 
@@ -590,6 +592,7 @@ export class StratumV1Client {
 
         const submissionHash = submission.hash();
         if(this.miningSubmissionHashes.has(submissionHash)){
+            await this.poolShareStatisticsService.addRejectedShare(this.sessionDifficulty);
             const err = new StratumErrorMessage(
                 submission.id,
                 eStratumErrorCode.DuplicateShare,
@@ -607,6 +610,7 @@ export class StratumV1Client {
 
         // a miner may submit a job that doesn't exist anymore if it was removed by a new block notification (or expired, 5 min)
         if (job == null) {
+            await this.poolShareStatisticsService.addRejectedShare(this.sessionDifficulty);
             const err = new StratumErrorMessage(
                 submission.id,
                 eStratumErrorCode.JobNotFound,
@@ -635,6 +639,7 @@ export class StratumV1Client {
 
 
         if (submissionDifficulty >= this.sessionDifficulty) {
+            await this.poolShareStatisticsService.addAcceptedShare(this.sessionDifficulty);
 
             if (submissionDifficulty >= jobTemplate.blockData.networkDifficulty) {
                 console.log('!!! BLOCK FOUND !!!');
@@ -693,6 +698,7 @@ export class StratumV1Client {
             }
 
         } else {
+            await this.poolShareStatisticsService.addRejectedShare(this.sessionDifficulty);
             const err = new StratumErrorMessage(
                 submission.id,
                 eStratumErrorCode.LowDifficultyShare,

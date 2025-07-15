@@ -48,6 +48,7 @@ describe.skip('StratumV1Client', () => {
     let blocksService: BlocksService;
     let configService: ConfigService;
     let externalSharesService: ExternalSharesService;
+    let poolShareStatisticsService: any;
 
     let client: StratumV1Client;
 
@@ -134,6 +135,10 @@ describe.skip('StratumV1Client', () => {
         const addressSettings = moduleRef.get<AddressSettingsService>(AddressSettingsService);
 
         externalSharesService = { submitShare: jest.fn() } as unknown as ExternalSharesService;
+        poolShareStatisticsService = {
+            addAcceptedShare: jest.fn(),
+            addRejectedShare: jest.fn(),
+        };
 
         client = new StratumV1Client(
             socket,
@@ -145,6 +150,7 @@ describe.skip('StratumV1Client', () => {
             blocksService,
             configService,
             addressSettings,
+            poolShareStatisticsService as any,
             externalSharesService
         );
 

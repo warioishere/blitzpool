@@ -62,6 +62,7 @@ describe('StratumV1Client XNSub', () => {
       empty,
       configService,
       empty,
+      empty,
       empty
     );
     jest.spyOn<any, any>(client as any, 'getRandomHexString').mockReturnValue('abcd1234');
