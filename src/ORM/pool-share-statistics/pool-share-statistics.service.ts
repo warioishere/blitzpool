@@ -26,26 +26,43 @@ export class PoolShareStatisticsService {
       const timeSlot = Math.floor(now / coeff) * coeff;
 
       if (this.currentTimeSlot == null) {
-        this.currentTimeSlot = timeSlot;
-        this.accepted = accepted;
-        this.rejected = rejected;
-        await this.insert({ time: this.currentTimeSlot, accepted: this.accepted, rejected: this.rejected });
-        this.lastSave = now;
-      } else if (this.currentTimeSlot !== timeSlot) {
+        const existing = await this.poolShareStatisticsRepository.findOneBy({ time: timeSlot });
+        if (existing) {
+          this.currentTimeSlot = existing.time;
+          this.accepted = existing.accepted;
+          this.rejected = existing.rejected;
+          this.lastSave = now;
+        } else {
+          this.currentTimeSlot = timeSlot;
+          this.accepted = 0;
+          this.rejected = 0;
+          await this.insert({ time: this.currentTimeSlot, accepted: 0, rejected: 0 });
+          this.lastSave = now;
+        }
+      }
+
+      if (this.currentTimeSlot !== timeSlot) {
         await this.update({ time: this.currentTimeSlot, accepted: this.accepted, rejected: this.rejected });
-        this.currentTimeSlot = timeSlot;
-        this.accepted = accepted;
-        this.rejected = rejected;
-        await this.insert({ time: this.currentTimeSlot, accepted: this.accepted, rejected: this.rejected });
+        const existing = await this.poolShareStatisticsRepository.findOneBy({ time: timeSlot });
+        if (existing) {
+          this.currentTimeSlot = existing.time;
+          this.accepted = existing.accepted;
+          this.rejected = existing.rejected;
+        } else {
+          this.currentTimeSlot = timeSlot;
+          this.accepted = 0;
+          this.rejected = 0;
+          await this.insert({ time: this.currentTimeSlot, accepted: 0, rejected: 0 });
+        }
         this.lastSave = now;
-      } else if (now - this.lastSave > 60 * 1000) {
-        this.accepted += accepted;
-        this.rejected += rejected;
+      }
+
+      this.accepted += accepted;
+      this.rejected += rejected;
+
+      if (now - this.lastSave > 60 * 1000) {
         await this.update({ time: this.currentTimeSlot, accepted: this.accepted, rejected: this.rejected });
         this.lastSave = now;
-      } else {
-        this.accepted += accepted;
-        this.rejected += rejected;
       }
     });
   }

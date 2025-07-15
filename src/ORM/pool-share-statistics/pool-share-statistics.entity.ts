@@ -1,8 +1,9 @@
-import { Column, Entity, PrimaryGeneratedColumn } from 'typeorm';
+import { Column, Entity, PrimaryGeneratedColumn, Unique } from 'typeorm';
 
 import { TrackedEntity } from '../utils/TrackedEntity.entity';
 
 @Entity()
+@Unique(['time'])
 export class PoolShareStatisticsEntity extends TrackedEntity {
   @PrimaryGeneratedColumn()
   id: number;
