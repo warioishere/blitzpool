@@ -172,8 +172,8 @@ export class StratumV1ClientStatistics {
                 sessionId: client.sessionId
             });
             this.lastSave = Date.now();
-        } else if ((date.getTime() - 60 * 1000) > this.lastSave) {
-            // persist current slot periodically
+        } else {
+            // same time slot - increment and persist immediately
             this.rejectedCount += targetDifficulty;
             await this.clientStatisticsService.update({
                 time: this.currentTimeSlot,
@@ -185,9 +185,6 @@ export class StratumV1ClientStatistics {
                 sessionId: client.sessionId
             });
             this.lastSave = Date.now();
-        } else {
-            // keep in memory until a save is required
-            this.rejectedCount += targetDifficulty;
         }
 
     }

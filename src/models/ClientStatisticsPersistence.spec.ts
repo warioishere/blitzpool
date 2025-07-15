@@ -195,7 +195,7 @@ describe('Client statistics persistence', () => {
   expect(rows[0].rejectedCount).toBe(2);
   });
 
-  it('persists rejected shares after sixty seconds', async () => {
+  it('persists each rejected share immediately', async () => {
     jest.useFakeTimers();
 
     const now = new Date('2023-11-14T00:00:00Z');
@@ -220,7 +220,7 @@ describe('Client statistics persistence', () => {
 
     jest.setSystemTime(new Date(now.getTime() + 30_000));
     await stats.addRejectedShare(client, 1);
-    expect((await repo.find())[0].rejectedCount).toBe(1);
+    expect((await repo.find())[0].rejectedCount).toBe(2);
 
     jest.setSystemTime(new Date(now.getTime() + 61_000));
     await stats.addRejectedShare(client, 1);
