@@ -92,19 +92,21 @@ export class StratumV1Client {
 
         this.socket.on('data', (data: string) => {
             this.buffer += data;
-            let lines = this.buffer.split('\n');
-            this.buffer = lines.pop() || ''; // Save the last part of the data (incomplete line) to the buffer
+            const lines = this.buffer.split('\n');
+            this.buffer = lines.pop() || '';
 
-            lines
-                .filter(m => m.length > 0)
-                .forEach(async (m) => {
+            const validLines = lines.filter(l => l.length > 0);
+            (async () => {
+                for (const m of validLines) {
                     try {
                         await this.handleMessage(m);
                     } catch (e) {
                         await this.socket.end();
                         console.error(e);
+                        break;
                     }
-                });
+                }
+            })();
         });
 
 
