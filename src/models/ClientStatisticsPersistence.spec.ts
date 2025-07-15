@@ -265,4 +265,40 @@ describe('Client statistics persistence', () => {
 
     jest.useRealTimers();
   });
+
+  it('computes hash rate across updates', async () => {
+    jest.useFakeTimers();
+
+    const start = new Date('2023-11-14T00:00:00Z');
+    jest.setSystemTime(start);
+
+    const client = await clientService.insert({
+      sessionId: 's5',
+      address: 'addr',
+      clientName: 'worker',
+      userAgent: 'ua',
+      startTime: start,
+      firstSeen: start,
+      bestDifficulty: 0
+    });
+    await clientService.insertClients();
+
+    const stats = new (require('./StratumV1ClientStatistics').StratumV1ClientStatistics)(statsService);
+
+    await stats.addShares(client, 1);
+    jest.setSystemTime(new Date(start.getTime() + 30_000));
+    await stats.addShares(client, 1);
+    const rate1 = stats.hashRate;
+
+    jest.setSystemTime(new Date(start.getTime() + 61_000));
+    await stats.addShares(client, 1);
+    jest.setSystemTime(new Date(start.getTime() + 90_000));
+    await stats.addShares(client, 1);
+    const rate2 = stats.hashRate;
+
+    expect(rate1).toBeGreaterThan(rate2);
+
+    jest.useRealTimers();
+  });
 });
+

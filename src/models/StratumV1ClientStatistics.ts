@@ -22,6 +22,7 @@ export class StratumV1ClientStatistics {
     private currentTimeSlotTime: Date;
 
     private previousShares: number = 0;
+    private slotShares = 0;
 
     constructor(
         private readonly clientStatisticsService: ClientStatisticsService
@@ -55,6 +56,7 @@ export class StratumV1ClientStatistics {
             this.currentTimeSlot = timeSlot;
             this.shares += targetDifficulty;
             this.acceptedCount += targetDifficulty;
+            this.slotShares += targetDifficulty;
             await this.clientStatisticsService.insert({
                 time: this.currentTimeSlot,
                 shares: this.shares,
@@ -83,13 +85,15 @@ export class StratumV1ClientStatistics {
             this.shares = 0;
             this.acceptedCount = 0;
             this.rejectedCount = 0;
-            this.previousShares = 0;
+            this.previousShares = this.slotShares;
+            this.slotShares = 0;
             this.previousTimeSlotTime = this.currentTimeSlotTime;
             this.currentTimeSlotTime = new Date();
             // Set the new time slot and add incoming shares then insert it
             this.currentTimeSlot = timeSlot;
             this.shares += targetDifficulty;
             this.acceptedCount += targetDifficulty;
+            this.slotShares += targetDifficulty;
             await this.clientStatisticsService.insert({
                 time: this.currentTimeSlot,
                 shares: this.shares,
@@ -107,6 +111,7 @@ export class StratumV1ClientStatistics {
             // If we haven't saved for a minute, update the table
             this.shares += targetDifficulty;
             this.acceptedCount += targetDifficulty;
+            this.slotShares += targetDifficulty;
             await this.clientStatisticsService.update({
                 time: this.currentTimeSlot,
                 shares: this.shares,
@@ -125,9 +130,10 @@ export class StratumV1ClientStatistics {
             // saving to memory for storing later
             this.shares += targetDifficulty;
             this.acceptedCount += targetDifficulty;
-            if(this.shares > 0) {
+            this.slotShares += targetDifficulty;
+            if(this.slotShares > 0) {
             const time = new Date().getTime() - this.previousTimeSlotTime.getTime();
-            this.hashRate = ((this.previousShares + this.shares) * 4294967296) / (time / 1000);
+            this.hashRate = ((this.previousShares + this.slotShares) * 4294967296) / (time / 1000);
         }
         }
 
@@ -172,7 +178,8 @@ export class StratumV1ClientStatistics {
             this.shares = 0;
             this.acceptedCount = 0;
             this.rejectedCount = 0;
-            this.previousShares = 0;
+            this.previousShares = this.slotShares;
+            this.slotShares = 0;
             this.previousTimeSlotTime = this.currentTimeSlotTime;
             this.currentTimeSlotTime = new Date();
             this.currentTimeSlot = timeSlot;
@@ -280,3 +287,4 @@ export class StratumV1ClientStatistics {
     }
 
 }
+

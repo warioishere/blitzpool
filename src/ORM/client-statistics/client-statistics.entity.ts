@@ -36,3 +36,4 @@ export class ClientStatisticsEntity extends TrackedEntity {
 
 
 }
+
