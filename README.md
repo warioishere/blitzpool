@@ -53,6 +53,7 @@ https://github.com/warioishere/blitzpool-message-encryptor-for-TG
 - Worker shares and total shares per address are kept for six months while session details are pruned after one day
 - Example: `GET /api/info/chart?range=1m` returns one month of pool hashrate data (defaults to `1d`)
 - Telegram bot subscriptions managed via a custom ORM
+- New `/api/info/shares` endpoint provides pool-wide accepted and rejected share totals
 
 #### Blitzpool-UI
 

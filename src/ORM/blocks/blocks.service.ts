@@ -46,4 +46,11 @@ export class BlocksService {
             }
         });
     }
+
+    public async getLatestBlock(): Promise<BlocksEntity | null> {
+        return await this.blocksRepository
+            .createQueryBuilder('block')
+            .orderBy('block.height', 'DESC')
+            .getOne();
+    }
 }
