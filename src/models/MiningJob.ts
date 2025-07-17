@@ -76,8 +76,9 @@ export class MiningJob {
         }
 
         // get the non-witness coinbase tx
-        //@ts-ignore
-        const serializedCoinbaseTx = this.coinbaseTransaction.__toBuffer().toString('hex');
+        const serializedCoinbaseTx =
+            // @ts-ignore
+            this.coinbaseTransaction.__toBuffer().toString('hex');
 
         const inputScript = this.coinbaseTransaction.ins[0].script.toString('hex');
 
