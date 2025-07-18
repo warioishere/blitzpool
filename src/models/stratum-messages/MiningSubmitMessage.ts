@@ -65,9 +65,15 @@ export class MiningSubmitMessage extends StratumBaseMessage {
         };
     }
 
-    public hash(): string{
-        const buffer = Buffer.from(this.versionMask + this.nonce + this.extraNonce2 + this.ntime + this.jobId);
-        return bitcoinjs.crypto.hash256(buffer).toString('base64');
+    public hash(): string {
+        const canonical = JSON.stringify({
+            versionMask: this.versionMask ?? '',
+            nonce: this.nonce,
+            extraNonce2: this.extraNonce2,
+            ntime: this.ntime,
+            jobId: this.jobId,
+        });
+        return bitcoinjs.crypto.hash256(Buffer.from(canonical)).toString('base64');
     }
 
 

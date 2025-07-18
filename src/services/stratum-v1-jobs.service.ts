@@ -41,6 +41,9 @@ export class StratumV1JobsService {
     private block_template_interval: number =
       parseInt(process.env.BLOCK_TEMPLATE_INTERVAL) || 60000;
 
+    private job_retention_ms: number =
+      parseInt(process.env.JOB_RETENTION_MS) || 90000;
+
     constructor(
         private readonly bitcoinRpcService: BitcoinRpcService
     ) {
@@ -127,24 +130,7 @@ export class StratumV1JobsService {
                 }
             }),
             tap((data) => {
-                if (data.blockData.clearJobs) {
-                    this.blocks = {};
-                    this.jobs = {};
-                }else{
-                    const now = new Date().getTime();
-                    // Delete old templates (5 minutes)
-                    for(const templateId in this.blocks){
-                        if(now - this.blocks[templateId].blockData.creation  > (1000 * 60 * 5)){
-                            delete this.blocks[templateId];
-                        }
-                    }
-                    // Delete old jobs (5 minutes)
-                    for (const jobId in this.jobs) {
-                        if(now - this.jobs[jobId].creation > (1000 * 60 * 5)){
-                            delete this.jobs[jobId];
-                        }
-                    }
-                }
+                this.cleanup(data.blockData.clearJobs);
                 this.blocks[data.blockData.id] = data;
             }),
             shareReplay({ refCount: true, bufferSize: 1 })
@@ -167,6 +153,26 @@ export class StratumV1JobsService {
         const bytes = Buffer.from(hash, 'hex');
         Array.prototype.reverse.call(bytes);
         return bytes;
+    }
+
+    public cleanup(clearJobs: boolean, now: number = Date.now()) {
+        if (clearJobs) {
+            this.blocks = {};
+            this.jobs = {};
+            return;
+        }
+
+        for (const templateId in this.blocks) {
+            if (now - this.blocks[templateId].blockData.creation > this.job_retention_ms) {
+                delete this.blocks[templateId];
+            }
+        }
+
+        for (const jobId in this.jobs) {
+            if (now - this.jobs[jobId].creation > this.job_retention_ms) {
+                delete this.jobs[jobId];
+            }
+        }
     }
 
     public getJobTemplateById(jobTemplateId: string): IJobTemplate | null {

@@ -31,5 +31,21 @@ describe('MiningSubmitMessage', () => {
         });
     });
 
+    describe('hash uniqueness', () => {
+        it('should not collide for different parameters', () => {
+            const m1 = plainToInstance(MiningSubmitMessage, {
+                id: 1,
+                method: 'mining.submit',
+                params: ['user', '89', '45', '67', '23', '1'],
+            });
+            const m2 = plainToInstance(MiningSubmitMessage, {
+                id: 2,
+                method: 'mining.submit',
+                params: ['user', '89', '45', '67', '3', '12'],
+            });
+            expect(m1.hash()).not.toEqual(m2.hash());
+        });
+    });
+
 
 });
