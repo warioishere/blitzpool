@@ -54,8 +54,8 @@ https://github.com/warioishere/blitzpool-message-encryptor-for-TG
 - Example: `GET /api/info/chart?range=1m` returns one month of pool hashrate data (defaults to `1d`)
 - Telegram bot subscriptions managed via a custom ORM
 - New `/api/info/shares` endpoint provides pool-wide accepted and rejected share totals
-- New `/api/info/rejected` endpoint lists rejected share reasons pool-wide
-- New `/api/client/<btc_address>/rejected` shows rejected reasons for a specific address
+- New `/api/info/rejected` endpoint lists rejected share reasons pool-wide (supports `range=1d|3d|7d`)
+- New `/api/client/<btc_address>/rejected` shows rejected reasons for a specific address (supports `range=1d|3d|7d`)
 - Old jobs are cleaned after 90 seconds by default (`JOB_RETENTION_MS` can adjust this)
 
 #### Blitzpool-UI

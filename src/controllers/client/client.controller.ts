@@ -64,29 +64,41 @@ export class ClientController {
     }
 
     @Get(':address/rejected')
-    async getAddressRejected(@Param('address') address: string) {
+    async getAddressRejected(
+        @Param('address') address: string,
+        @Query('range') range: '1d' | '3d' | '7d' = '1d'
+    ) {
         const now = Date.now();
         const oneDay = 24 * 60 * 60 * 1000;
+        const days = range === '7d' ? 7 : range === '3d' ? 3 : 1;
+        const sinceTime = now - days * oneDay;
 
-        const entries = await this.clientRejectedStatisticsService.getEntriesSince(address, now - oneDay);
+        const entries = await this.clientRejectedStatisticsService.getEntriesSince(address, sinceTime);
         const slotMap = new Map<number, Record<string, number>>();
+        const reasons = new Set<string>();
         for (const entry of entries) {
+            reasons.add(entry.reason);
             if (!slotMap.has(entry.time)) {
                 slotMap.set(entry.time, {});
             }
             const r = slotMap.get(entry.time);
             r[entry.reason] = entry.count;
         }
-        const slotData = Array.from(slotMap.entries()).map(([time, reasons]) => ({
-            time: new Date(time).toISOString(),
-            counts: reasons,
-        }));
 
-        const totals1d = await this.clientRejectedStatisticsService.getTotalsSince(address, now - oneDay);
-        const totals3d = await this.clientRejectedStatisticsService.getTotalsSince(address, now - oneDay * 3);
-        const totals7d = await this.clientRejectedStatisticsService.getTotalsSince(address, now - oneDay * 7);
+        const coeff = 1000 * 60 * 10;
+        const startSlot = Math.floor(sinceTime / coeff) * coeff;
+        const endSlot = Math.floor(now / coeff) * coeff;
+        const allReasons = Array.from(reasons);
+        const slotData: { time: string; counts: Record<string, number> }[] = [];
+        for (let t = startSlot; t <= endSlot; t += coeff) {
+            const counts: Record<string, number> = {};
+            for (const reason of allReasons) {
+                counts[reason] = slotMap.get(t)?.[reason] || 0;
+            }
+            slotData.push({ time: new Date(t).toISOString(), counts });
+        }
 
-        return { slotData, totals1d, totals3d, totals7d };
+        return { slotData };
     }
 
     @Get(':address/:workerName')
