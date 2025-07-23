@@ -21,6 +21,8 @@ import { StratumV1JobsService } from '../services/stratum-v1-jobs.service';
 import { ExternalSharesService } from '../services/external-shares.service';
 import { IMiningInfo } from './bitcoin-rpc/IMiningInfo';
 import { StratumV1Client } from './StratumV1Client';
+import { PoolRejectedStatisticsService } from '../ORM/pool-rejected-statistics/pool-rejected-statistics.service';
+import { ClientRejectedStatisticsService } from '../ORM/client-rejected-statistics/client-rejected-statistics.service';
 
 
 
@@ -49,6 +51,8 @@ describe.skip('StratumV1Client', () => {
     let configService: ConfigService;
     let externalSharesService: ExternalSharesService;
     let poolShareStatisticsService: any;
+    let poolRejectedStatisticsService: any;
+    let clientRejectedStatisticsService: any;
 
     let client: StratumV1Client;
 
@@ -139,6 +143,12 @@ describe.skip('StratumV1Client', () => {
             addAcceptedShare: jest.fn(),
             addRejectedShare: jest.fn(),
         };
+        poolRejectedStatisticsService = {
+            addRejectedShare: jest.fn(),
+        };
+        clientRejectedStatisticsService = {
+            addRejectedShare: jest.fn(),
+        };
 
         client = new StratumV1Client(
             socket,
@@ -151,6 +161,8 @@ describe.skip('StratumV1Client', () => {
             configService,
             addressSettings,
             poolShareStatisticsService as any,
+            poolRejectedStatisticsService as any,
+            clientRejectedStatisticsService as any,
             externalSharesService
         );
 

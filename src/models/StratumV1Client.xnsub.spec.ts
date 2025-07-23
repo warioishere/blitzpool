@@ -9,6 +9,8 @@ jest.mock('./validators/bitcoin-address.validator', () => ({
 import { StratumV1Client } from './StratumV1Client';
 import { eResponseMethod } from './enums/eResponseMethod';
 import { eRequestMethod } from './enums/eRequestMethod';
+import { PoolRejectedStatisticsService } from '../ORM/pool-rejected-statistics/pool-rejected-statistics.service';
+import { ClientRejectedStatisticsService } from '../ORM/client-rejected-statistics/client-rejected-statistics.service';
 
 describe('StratumV1Client XNSub', () => {
   let socket: any;
@@ -61,6 +63,8 @@ describe('StratumV1Client XNSub', () => {
       empty,
       empty,
       configService,
+      empty,
+      empty,
       empty,
       empty,
       empty

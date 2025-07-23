@@ -12,6 +12,8 @@ import { NotificationService } from './notification.service';
 import { StratumV1JobsService } from './stratum-v1-jobs.service';
 import { ExternalSharesService } from './external-shares.service';
 import { PoolShareStatisticsService } from '../ORM/pool-share-statistics/pool-share-statistics.service';
+import { PoolRejectedStatisticsService } from '../ORM/pool-rejected-statistics/pool-rejected-statistics.service';
+import { ClientRejectedStatisticsService } from '../ORM/client-rejected-statistics/client-rejected-statistics.service';
 
 
 @Injectable()
@@ -27,6 +29,8 @@ export class StratumV1Service implements OnModuleInit {
     private readonly stratumV1JobsService: StratumV1JobsService,
     private readonly addressSettingsService: AddressSettingsService,
     private readonly poolShareStatisticsService: PoolShareStatisticsService,
+    private readonly poolRejectedStatisticsService: PoolRejectedStatisticsService,
+    private readonly clientRejectedStatisticsService: ClientRejectedStatisticsService,
     private readonly externalSharesService: ExternalSharesService
   ) {
 
@@ -64,6 +68,8 @@ export class StratumV1Service implements OnModuleInit {
         this.configService,
         this.addressSettingsService,
         this.poolShareStatisticsService,
+        this.poolRejectedStatisticsService,
+        this.clientRejectedStatisticsService,
         this.externalSharesService
       );
 
