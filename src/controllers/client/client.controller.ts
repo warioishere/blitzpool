@@ -3,6 +3,7 @@ import { Controller, Get, NotFoundException, Param, Query } from '@nestjs/common
 import { AddressSettingsService } from '../../ORM/address-settings/address-settings.service';
 import { ClientStatisticsService } from '../../ORM/client-statistics/client-statistics.service';
 import { ClientService } from '../../ORM/client/client.service';
+import { ClientRejectedStatisticsService } from '../../ORM/client-rejected-statistics/client-rejected-statistics.service';
 
 
 @Controller('client')
@@ -11,7 +12,8 @@ export class ClientController {
     constructor(
         private readonly clientService: ClientService,
         private readonly clientStatisticsService: ClientStatisticsService,
-        private readonly addressSettingsService: AddressSettingsService
+        private readonly addressSettingsService: AddressSettingsService,
+        private readonly clientRejectedStatisticsService: ClientRejectedStatisticsService
     ) { }
 
 
@@ -59,6 +61,32 @@ export class ClientController {
     async getWorkerShares(@Param('address') address: string) {
         const workerShares = await this.clientStatisticsService.getTotalSharesForWorkers(address);
         return workerShares.map(ws => ({ workerName: ws.clientName, totalShares: ws.total }));
+    }
+
+    @Get(':address/rejected')
+    async getAddressRejected(@Param('address') address: string) {
+        const now = Date.now();
+        const oneDay = 24 * 60 * 60 * 1000;
+
+        const entries = await this.clientRejectedStatisticsService.getEntriesSince(address, now - oneDay);
+        const slotMap = new Map<number, Record<string, number>>();
+        for (const entry of entries) {
+            if (!slotMap.has(entry.time)) {
+                slotMap.set(entry.time, {});
+            }
+            const r = slotMap.get(entry.time);
+            r[entry.reason] = entry.count;
+        }
+        const slotData = Array.from(slotMap.entries()).map(([time, reasons]) => ({
+            time: new Date(time).toISOString(),
+            counts: reasons,
+        }));
+
+        const totals1d = await this.clientRejectedStatisticsService.getTotalsSince(address, now - oneDay);
+        const totals3d = await this.clientRejectedStatisticsService.getTotalsSince(address, now - oneDay * 3);
+        const totals7d = await this.clientRejectedStatisticsService.getTotalsSince(address, now - oneDay * 7);
+
+        return { slotData, totals1d, totals3d, totals7d };
     }
 
     @Get(':address/:workerName')

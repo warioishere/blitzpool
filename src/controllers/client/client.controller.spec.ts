@@ -6,6 +6,7 @@ import { ClientStatisticsModule } from '../../ORM/client-statistics/client-stati
 import { ClientModule } from '../../ORM/client/client.module';
 import { ClientController } from './client.controller';
 import { ClientService } from '../../ORM/client/client.service';
+import { ClientRejectedStatisticsModule } from '../../ORM/client-rejected-statistics/client-rejected-statistics.module';
 import { NotFoundException } from '@nestjs/common';
 
 describe('ClientController', () => {
@@ -25,7 +26,8 @@ describe('ClientController', () => {
         }),
         AddressSettingsModule,
         ClientModule,
-        ClientStatisticsModule
+        ClientStatisticsModule,
+        ClientRejectedStatisticsModule
       ],
       controllers: [ClientController],
 

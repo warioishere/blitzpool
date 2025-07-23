@@ -6,6 +6,7 @@ import { firstValueFrom } from 'rxjs';
 import { AddressSettingsService } from './ORM/address-settings/address-settings.service';
 import { BlocksService } from './ORM/blocks/blocks.service';
 import { PoolShareStatisticsService } from './ORM/pool-share-statistics/pool-share-statistics.service';
+import { PoolRejectedStatisticsService } from './ORM/pool-rejected-statistics/pool-rejected-statistics.service';
 import { ClientStatisticsService } from './ORM/client-statistics/client-statistics.service';
 import { ClientService } from './ORM/client/client.service';
 import { BitcoinRpcService } from './services/bitcoin-rpc.service';
@@ -21,6 +22,7 @@ export class AppController {
     private readonly clientStatisticsService: ClientStatisticsService,
     private readonly blocksService: BlocksService,
     private readonly poolShareStatisticsService: PoolShareStatisticsService,
+    private readonly poolRejectedStatisticsService: PoolRejectedStatisticsService,
     private readonly bitcoinRpcService: BitcoinRpcService,
     private readonly addressSettingsService: AddressSettingsService,
   ) { }
@@ -148,5 +150,43 @@ export class AppController {
 
     return data;
 
+  }
+
+  @Get('info/rejected')
+  public async infoRejected() {
+
+    const CACHE_KEY = 'POOL_REJECTED_STATS';
+    const cachedResult = await this.cacheManager.get(CACHE_KEY);
+
+    if (cachedResult != null) {
+      return cachedResult;
+    }
+
+    const now = Date.now();
+    const oneDay = 24 * 60 * 60 * 1000;
+
+    const entries = await this.poolRejectedStatisticsService.getEntriesSince(now - oneDay);
+    const slotMap = new Map<number, Record<string, number>>();
+    for (const entry of entries) {
+      if (!slotMap.has(entry.time)) {
+        slotMap.set(entry.time, {});
+      }
+      const r = slotMap.get(entry.time);
+      r[entry.reason] = entry.count;
+    }
+    const slotData = Array.from(slotMap.entries()).map(([time, reasons]) => ({
+      time: new Date(time).toISOString(),
+      counts: reasons,
+    }));
+
+    const totals1d = await this.poolRejectedStatisticsService.getTotalsSince(now - oneDay);
+    const totals3d = await this.poolRejectedStatisticsService.getTotalsSince(now - oneDay * 3);
+    const totals7d = await this.poolRejectedStatisticsService.getTotalsSince(now - oneDay * 7);
+
+    const data = { slotData, totals1d, totals3d, totals7d };
+
+    await this.cacheManager.set(CACHE_KEY, data, 10 * 60 * 1000);
+
+    return data;
   }
 }

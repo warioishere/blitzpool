@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, MoreThan } from 'typeorm';
 import { Mutex } from 'async-mutex';
 
 import { PoolRejectedStatisticsEntity } from './pool-rejected-statistics.entity';
@@ -82,5 +82,12 @@ export class PoolRejectedStatisticsService {
       totals[r.reason] = r.count ? parseFloat(r.count) : 0;
     });
     return totals;
+  }
+
+  public async getEntriesSince(time: number): Promise<PoolRejectedStatisticsEntity[]> {
+    return this.poolRejectedStatisticsRepository.find({
+      where: { time: MoreThan(time) },
+      order: { time: 'ASC' },
+    });
   }
 }
