@@ -28,6 +28,8 @@ import { ExternalSharesService } from './services/external-shares.service';
 import { ExternalShareController } from './controllers/external-share/external-share.controller';
 import { ExternalSharesModule } from './ORM/external-shares/external-shares.module';
 import { PoolShareStatisticsModule } from './ORM/pool-share-statistics/pool-share-statistics.module';
+import { PoolRejectedStatisticsModule } from './ORM/pool-rejected-statistics/pool-rejected-statistics.module';
+import { ClientRejectedStatisticsModule } from './ORM/client-rejected-statistics/client-rejected-statistics.module';
 
 const ORMModules = [
     ClientStatisticsModule,
@@ -37,7 +39,9 @@ const ORMModules = [
     BlocksModule,
     RpcBlocksModule,
     ExternalSharesModule,
-    PoolShareStatisticsModule
+    PoolShareStatisticsModule,
+    PoolRejectedStatisticsModule,
+    ClientRejectedStatisticsModule
 ]
 
 @Module({
