@@ -4,6 +4,7 @@ import { AddressSettingsService } from '../../ORM/address-settings/address-setti
 import { ClientStatisticsService } from '../../ORM/client-statistics/client-statistics.service';
 import { ClientService } from '../../ORM/client/client.service';
 import { ClientRejectedStatisticsService } from '../../ORM/client-rejected-statistics/client-rejected-statistics.service';
+import { eStratumErrorCode } from '../../models/enums/eStratumErrorCode';
 
 
 @Controller('client')
@@ -75,9 +76,7 @@ export class ClientController {
 
         const entries = await this.clientRejectedStatisticsService.getEntriesSince(address, sinceTime);
         const slotMap = new Map<number, Record<string, number>>();
-        const reasons = new Set<string>();
         for (const entry of entries) {
-            reasons.add(entry.reason);
             if (!slotMap.has(entry.time)) {
                 slotMap.set(entry.time, {});
             }
@@ -88,7 +87,7 @@ export class ClientController {
         const coeff = 1000 * 60 * 10;
         const startSlot = Math.floor(sinceTime / coeff) * coeff;
         const endSlot = Math.floor(now / coeff) * coeff;
-        const allReasons = Array.from(reasons);
+        const allReasons = Object.keys(eStratumErrorCode).filter(k => isNaN(Number(k)));
         const slotData: { time: string; counts: Record<string, number> }[] = [];
         for (let t = startSlot; t <= endSlot; t += coeff) {
             const counts: Record<string, number> = {};
