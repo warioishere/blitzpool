@@ -17,7 +17,7 @@ export class ClientRejectedStatisticsService {
   private lastSave: number = null;
   private counts: Map<string, Map<string, number>> = new Map();
 
-  public async addRejectedShare(address: string, reason: string, diff: number) {
+  public async addRejectedShare(address: string, reason: string, _diff: number) {
     await this.mutex.runExclusive(async () => {
       const coeff = 1000 * 60 * 10;
       const now = Date.now();
@@ -55,7 +55,7 @@ export class ClientRejectedStatisticsService {
       }
       const addrMap = this.counts.get(address);
       const current = addrMap.get(reason) || 0;
-      addrMap.set(reason, current + diff);
+      addrMap.set(reason, current + 1);
 
       if (now - this.lastSave > 60 * 1000) {
         await this.saveCurrent();

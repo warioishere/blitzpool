@@ -62,8 +62,8 @@ https://github.com/warioishere/blitzpool-message-encryptor-for-TG
 
 - `GET /api/info/chart?range=1d|1m` – Returns pool hashrate statistics.
 - `GET /api/info/shares` – Provides pool-wide accepted and rejected share totals.
-- `GET /api/info/rejected?range=1d|3d|7d` – Lists rejected share reasons pool-wide.
-- `GET /api/client/<btc_address>/rejected?range=1d|3d|7d` – Shows rejected reasons for a specific address.
+- `GET /api/info/rejected?range=1d|3d|7d` – Lists rejected share reasons pool-wide (difficulty weighted).
+- `GET /api/client/<btc_address>/rejected?range=1d|3d|7d` – Shows rejected reasons for a specific address (counts per share).
 
 #### Blitzpool-UI
 
