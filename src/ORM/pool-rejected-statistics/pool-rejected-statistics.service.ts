@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { Interval } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, MoreThan } from 'typeorm';
 import { Mutex } from 'async-mutex';
@@ -16,6 +17,16 @@ export class PoolRejectedStatisticsService {
   private currentTimeSlot: number = null;
   private lastSave: number = null;
   private counts: Map<string, number> = new Map();
+
+  @Interval(60 * 1000)
+  private async flushInterval() {
+    if (this.currentTimeSlot != null) {
+      await this.mutex.runExclusive(async () => {
+        await this.saveCurrent();
+        this.lastSave = Date.now();
+      });
+    }
+  }
 
   public async addRejectedShare(reason: string, diff: number) {
     await this.mutex.runExclusive(async () => {
