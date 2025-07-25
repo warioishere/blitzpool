@@ -136,22 +136,15 @@ export class AppController {
     const totals30d = await this.poolShareStatisticsService.getTotalsSince(now - oneDay * 30);
     const totalsSinceBlock = await this.poolShareStatisticsService.getTotalsSince(sinceBlock);
 
-    const rejected1dMap = await this.poolRejectedStatisticsService.getTotalsSince(now - oneDay);
-    const rejected14dMap = await this.poolRejectedStatisticsService.getTotalsSince(now - oneDay * 14);
-    const rejected30dMap = await this.poolRejectedStatisticsService.getTotalsSince(now - oneDay * 30);
-    const rejectedSinceBlockMap = await this.poolRejectedStatisticsService.getTotalsSince(sinceBlock);
-
-    const sum = (m: Record<string, number>) => Object.values(m).reduce((a, b) => a + b, 0);
-
     const data = {
       accepted1d: totals1d.accepted,
-      rejected1d: sum(rejected1dMap),
+      rejected1d: totals1d.rejected,
       accepted14d: totals14d.accepted,
-      rejected14d: sum(rejected14dMap),
+      rejected14d: totals14d.rejected,
       accepted30d: totals30d.accepted,
-      rejected30d: sum(rejected30dMap),
+      rejected30d: totals30d.rejected,
       acceptedSinceBlock: totalsSinceBlock.accepted,
-      rejectedSinceBlock: sum(rejectedSinceBlockMap),
+      rejectedSinceBlock: totalsSinceBlock.rejected,
     };
 
     await this.cacheManager.set(CACHE_KEY, data, 10 * 60 * 1000);

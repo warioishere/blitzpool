@@ -596,6 +596,7 @@ export class StratumV1Client {
 
         const submissionHash = submission.hash();
         if(this.miningSubmissionHashes.has(submissionHash)){
+            await this.poolShareStatisticsService.addRejectedShare(this.sessionDifficulty);
             await this.poolRejectedStatisticsService.addRejectedShare(eStratumErrorCode[eStratumErrorCode.DuplicateShare], this.sessionDifficulty);
             await this.clientRejectedStatisticsService.addRejectedShare(this.clientAuthorization.address, eStratumErrorCode[eStratumErrorCode.DuplicateShare], 1);
             const err = new StratumErrorMessage(
@@ -615,6 +616,7 @@ export class StratumV1Client {
 
         // a miner may submit a job that doesn't exist anymore if it was removed by a new block notification (or expired, 5 min)
         if (job == null) {
+            await this.poolShareStatisticsService.addRejectedShare(this.sessionDifficulty);
             await this.poolRejectedStatisticsService.addRejectedShare(eStratumErrorCode[eStratumErrorCode.JobNotFound], this.sessionDifficulty);
             await this.clientRejectedStatisticsService.addRejectedShare(this.clientAuthorization.address, eStratumErrorCode[eStratumErrorCode.JobNotFound], 1);
             const err = new StratumErrorMessage(
@@ -704,6 +706,7 @@ export class StratumV1Client {
             }
 
         } else {
+            await this.poolShareStatisticsService.addRejectedShare(this.sessionDifficulty);
             await this.poolRejectedStatisticsService.addRejectedShare(eStratumErrorCode[eStratumErrorCode.LowDifficultyShare], this.sessionDifficulty);
             await this.clientRejectedStatisticsService.addRejectedShare(this.clientAuthorization.address, eStratumErrorCode[eStratumErrorCode.LowDifficultyShare], 1);
             const err = new StratumErrorMessage(
