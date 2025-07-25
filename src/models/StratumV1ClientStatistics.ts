@@ -2,7 +2,7 @@ import { ClientStatisticsService } from '../ORM/client-statistics/client-statist
 import { ClientEntity } from '../ORM/client/client.entity';
 
 const CACHE_SIZE = 30;
-const TARGET_SHARES_PER_MINUTE = parseFloat(process.env.TARGET_SHARES_PER_MINUTE || '10');
+const TARGET_SHARES_PER_MINUTE = parseFloat(process.env.TARGET_SHARES_PER_MINUTE || '20');
 const MIN_DIFF = 0.00001;
 export class StratumV1ClientStatistics {
 
