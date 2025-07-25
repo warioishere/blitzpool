@@ -6,9 +6,11 @@ import { firstValueFrom } from 'rxjs';
 import { AddressSettingsService } from './ORM/address-settings/address-settings.service';
 import { BlocksService } from './ORM/blocks/blocks.service';
 import { PoolShareStatisticsService } from './ORM/pool-share-statistics/pool-share-statistics.service';
+import { PoolRejectedStatisticsService } from './ORM/pool-rejected-statistics/pool-rejected-statistics.service';
 import { ClientStatisticsService } from './ORM/client-statistics/client-statistics.service';
 import { ClientService } from './ORM/client/client.service';
 import { BitcoinRpcService } from './services/bitcoin-rpc.service';
+import { eStratumErrorCode } from './models/enums/eStratumErrorCode';
 
 @Controller()
 export class AppController {
@@ -21,6 +23,7 @@ export class AppController {
     private readonly clientStatisticsService: ClientStatisticsService,
     private readonly blocksService: BlocksService,
     private readonly poolShareStatisticsService: PoolShareStatisticsService,
+    private readonly poolRejectedStatisticsService: PoolRejectedStatisticsService,
     private readonly bitcoinRpcService: BitcoinRpcService,
     private readonly addressSettingsService: AddressSettingsService,
   ) { }
@@ -133,20 +136,72 @@ export class AppController {
     const totals30d = await this.poolShareStatisticsService.getTotalsSince(now - oneDay * 30);
     const totalsSinceBlock = await this.poolShareStatisticsService.getTotalsSince(sinceBlock);
 
+    const rejected1dMap = await this.poolRejectedStatisticsService.getTotalsSince(now - oneDay);
+    const rejected14dMap = await this.poolRejectedStatisticsService.getTotalsSince(now - oneDay * 14);
+    const rejected30dMap = await this.poolRejectedStatisticsService.getTotalsSince(now - oneDay * 30);
+    const rejectedSinceBlockMap = await this.poolRejectedStatisticsService.getTotalsSince(sinceBlock);
+
+    const sum = (m: Record<string, number>) => Object.values(m).reduce((a, b) => a + b, 0);
+
     const data = {
       accepted1d: totals1d.accepted,
-      rejected1d: totals1d.rejected,
+      rejected1d: sum(rejected1dMap),
       accepted14d: totals14d.accepted,
-      rejected14d: totals14d.rejected,
+      rejected14d: sum(rejected14dMap),
       accepted30d: totals30d.accepted,
-      rejected30d: totals30d.rejected,
+      rejected30d: sum(rejected30dMap),
       acceptedSinceBlock: totalsSinceBlock.accepted,
-      rejectedSinceBlock: totalsSinceBlock.rejected,
+      rejectedSinceBlock: sum(rejectedSinceBlockMap),
     };
 
     await this.cacheManager.set(CACHE_KEY, data, 10 * 60 * 1000);
 
     return data;
 
+  }
+
+  @Get('info/rejected')
+  public async infoRejected(
+    @Query('range') range: '1d' | '3d' | '7d' = '1d',
+  ) {
+
+    const CACHE_KEY = `POOL_REJECTED_STATS_${range}`;
+    const cachedResult = await this.cacheManager.get(CACHE_KEY);
+
+    if (cachedResult != null) {
+      return cachedResult;
+    }
+
+    const now = Date.now();
+    const oneDay = 24 * 60 * 60 * 1000;
+    const days = range === '7d' ? 7 : range === '3d' ? 3 : 1;
+    const sinceTime = now - days * oneDay;
+
+    const entries = await this.poolRejectedStatisticsService.getEntriesSince(sinceTime);
+    const slotMap = new Map<number, Record<string, number>>();
+    for (const entry of entries) {
+      if (!slotMap.has(entry.time)) {
+        slotMap.set(entry.time, {});
+      }
+      const r = slotMap.get(entry.time);
+      r[entry.reason] = entry.count;
+    }
+
+    const coeff = 1000 * 60 * 10;
+    const startSlot = Math.floor(sinceTime / coeff) * coeff;
+    const endSlot = Math.floor(now / coeff) * coeff;
+    const allReasons = Object.keys(eStratumErrorCode).filter(k => isNaN(Number(k)));
+    const slotData: { time: string; counts: Record<string, number> }[] = [];
+    for (let t = startSlot; t <= endSlot; t += coeff) {
+      const counts: Record<string, number> = {};
+      for (const reason of allReasons) {
+        counts[reason] = slotMap.get(t)?.[reason] || 0;
+      }
+      slotData.push({ time: new Date(t).toISOString(), counts });
+    }
+
+    await this.cacheManager.set(CACHE_KEY, { slotData }, 10 * 60 * 1000);
+
+    return { slotData };
   }
 }

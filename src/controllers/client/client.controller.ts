@@ -3,6 +3,8 @@ import { Controller, Get, NotFoundException, Param, Query } from '@nestjs/common
 import { AddressSettingsService } from '../../ORM/address-settings/address-settings.service';
 import { ClientStatisticsService } from '../../ORM/client-statistics/client-statistics.service';
 import { ClientService } from '../../ORM/client/client.service';
+import { ClientRejectedStatisticsService } from '../../ORM/client-rejected-statistics/client-rejected-statistics.service';
+import { eStratumErrorCode } from '../../models/enums/eStratumErrorCode';
 
 
 @Controller('client')
@@ -11,7 +13,8 @@ export class ClientController {
     constructor(
         private readonly clientService: ClientService,
         private readonly clientStatisticsService: ClientStatisticsService,
-        private readonly addressSettingsService: AddressSettingsService
+        private readonly addressSettingsService: AddressSettingsService,
+        private readonly clientRejectedStatisticsService: ClientRejectedStatisticsService
     ) { }
 
 
@@ -59,6 +62,42 @@ export class ClientController {
     async getWorkerShares(@Param('address') address: string) {
         const workerShares = await this.clientStatisticsService.getTotalSharesForWorkers(address);
         return workerShares.map(ws => ({ workerName: ws.clientName, totalShares: ws.total }));
+    }
+
+    @Get(':address/rejected')
+    async getAddressRejected(
+        @Param('address') address: string,
+        @Query('range') range: '1d' | '3d' | '7d' = '1d'
+    ) {
+        const now = Date.now();
+        const oneDay = 24 * 60 * 60 * 1000;
+        const days = range === '7d' ? 7 : range === '3d' ? 3 : 1;
+        const sinceTime = now - days * oneDay;
+
+        const entries = await this.clientRejectedStatisticsService.getEntriesSince(address, sinceTime);
+        const slotMap = new Map<number, Record<string, number>>();
+        for (const entry of entries) {
+            if (!slotMap.has(entry.time)) {
+                slotMap.set(entry.time, {});
+            }
+            const r = slotMap.get(entry.time);
+            r[entry.reason] = entry.count;
+        }
+
+        const coeff = 1000 * 60 * 10;
+        const startSlot = Math.floor(sinceTime / coeff) * coeff;
+        const endSlot = Math.floor(now / coeff) * coeff;
+        const allReasons = Object.keys(eStratumErrorCode).filter(k => isNaN(Number(k)));
+        const slotData: { time: string; counts: Record<string, number> }[] = [];
+        for (let t = startSlot; t <= endSlot; t += coeff) {
+            const counts: Record<string, number> = {};
+            for (const reason of allReasons) {
+                counts[reason] = slotMap.get(t)?.[reason] || 0;
+            }
+            slotData.push({ time: new Date(t).toISOString(), counts });
+        }
+
+        return { slotData };
     }
 
     @Get(':address/:workerName')
