@@ -68,6 +68,7 @@ export class StratumV1Client {
     private authorizeResponse?: string;
     private extranonceResponse?: string;
     private initTimer?: NodeJS.Timeout;
+    private difficultyCheckIntervalMs: number;
 
     constructor(
         public readonly socket: Socket,
@@ -95,6 +96,9 @@ export class StratumV1Client {
         } else {
             throw new Error('Invalid network configuration');
         }
+
+        const parsed = parseInt(this.configService.get('DIFFICULTY_CHECK_INTERVAL_MS') ?? '60000');
+        this.difficultyCheckIntervalMs = isNaN(parsed) ? 60000 : parsed;
 
         this.socket.on('data', (data: string) => {
             this.buffer += data;
@@ -490,7 +494,7 @@ export class StratumV1Client {
         this.backgroundWork.push(
             setInterval(async () => {
                 await this.checkDifficulty();
-            }, 60 * 1000)
+            }, this.difficultyCheckIntervalMs)
         );
 
     }
