@@ -2,8 +2,11 @@ import { ClientStatisticsService } from '../ORM/client-statistics/client-statist
 import { ClientEntity } from '../ORM/client/client.entity';
 
 const CACHE_SIZE = 30;
-const TARGET_SHARES_PER_MINUTE = parseFloat(process.env.TARGET_SHARES_PER_MINUTE || '20');
 const MIN_DIFF = 0.00001;
+
+function getTargetSharesPerMinute(): number {
+    return parseFloat(process.env.TARGET_SHARES_PER_MINUTE || '20');
+}
 export class StratumV1ClientStatistics {
 
     private shares: number = 0;
@@ -135,7 +138,7 @@ export class StratumV1ClientStatistics {
 
         const difficultyPerSecond = sum / diffSeconds;
 
-        const targetDifficulty = difficultyPerSecond * TARGET_SHARES_PER_MINUTE;
+        const targetDifficulty = difficultyPerSecond * getTargetSharesPerMinute();
 
         if ((clientDifficulty * 2) < targetDifficulty || (clientDifficulty / 2) > targetDifficulty) {
             return this.nearestPowerOfTwo(targetDifficulty)
