@@ -3,6 +3,7 @@ import { ClientEntity } from '../ORM/client/client.entity';
 import { ConfigService } from '@nestjs/config';
 
 const CACHE_SIZE = 30;
+const CACHE_WINDOW_SECONDS = 300;
 const MIN_DIFF = 0.00001;
 export class StratumV1ClientStatistics {
 
@@ -44,9 +45,17 @@ export class StratumV1ClientStatistics {
         var date = new Date();
         var timeSlot = new Date(Math.floor(date.getTime() / coeff) * coeff).getTime();
 
-        if (this.submissionCache.length > CACHE_SIZE) {
+        while (
+            this.submissionCache.length &&
+            date.getTime() - this.submissionCache[0].time.getTime() > CACHE_WINDOW_SECONDS * 1000
+        ) {
             this.submissionCache.shift();
         }
+
+        if (this.submissionCache.length >= CACHE_SIZE) {
+            this.submissionCache.shift();
+        }
+
         this.submissionCache.push({
             time: date,
             difficulty: targetDifficulty,
