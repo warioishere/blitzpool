@@ -1,9 +1,8 @@
 import { ClientStatisticsService } from '../ORM/client-statistics/client-statistics.service';
 import { ClientEntity } from '../ORM/client/client.entity';
+import { ConfigService } from '@nestjs/config';
 
 const CACHE_SIZE = 30;
-const targetSharesPerMinute = parseFloat(process.env.TARGET_SHARES_PER_MINUTE || '6');
-const TARGET_SUBMISSION_PER_SECOND = 60 / targetSharesPerMinute;
 const MIN_DIFF = 0.00001;
 export class StratumV1ClientStatistics {
 
@@ -22,11 +21,17 @@ export class StratumV1ClientStatistics {
     private currentTimeSlotTime: Date;
 
     private previousShares: number = 0;
+    private targetSharesPerMinute: number;
+    private targetSubmissionPerSecond: number;
 
     constructor(
-        private readonly clientStatisticsService: ClientStatisticsService
+        private readonly clientStatisticsService: ClientStatisticsService,
+        private readonly configService: ConfigService,
     ) {
         this.submissionCacheStart = new Date();
+        const tpm = parseFloat(this.configService.get('TARGET_SHARES_PER_MINUTE') ?? '6');
+        this.targetSharesPerMinute = isNaN(tpm) ? 6 : tpm;
+        this.targetSubmissionPerSecond = 60 / this.targetSharesPerMinute;
     }
 
 
@@ -122,7 +127,7 @@ export class StratumV1ClientStatistics {
         // miner hasn't submitted shares in one minute
         if (this.submissionCache.length < 5) {
             if ((new Date().getTime() - this.submissionCacheStart.getTime()) / 1000 > 60) {
-                return this.nearestPowerOfTwo(clientDifficulty / targetSharesPerMinute);
+                return this.nearestPowerOfTwo(clientDifficulty / this.targetSharesPerMinute);
             } else {
                 return null;
             }
@@ -136,7 +141,7 @@ export class StratumV1ClientStatistics {
 
         const difficultyPerSecond = sum / diffSeconds;
 
-        const targetDifficulty = difficultyPerSecond * TARGET_SUBMISSION_PER_SECOND;
+        const targetDifficulty = difficultyPerSecond * this.targetSubmissionPerSecond;
 
         if ((clientDifficulty * 2) < targetDifficulty || (clientDifficulty / 2) > targetDifficulty) {
             return this.nearestPowerOfTwo(targetDifficulty)
