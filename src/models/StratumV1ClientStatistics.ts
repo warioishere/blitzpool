@@ -127,7 +127,7 @@ export class StratumV1ClientStatistics {
         // miner hasn't submitted shares in one minute
         if (this.submissionCache.length < 5) {
             if ((new Date().getTime() - this.submissionCacheStart.getTime()) / 1000 > 60) {
-                return this.nearestPowerOfTwo(clientDifficulty / this.targetSharesPerMinute);
+                return this.nearestDifficultyStep(clientDifficulty / this.targetSharesPerMinute);
             } else {
                 return null;
             }
@@ -144,10 +144,33 @@ export class StratumV1ClientStatistics {
         const targetDifficulty = difficultyPerSecond * this.targetSubmissionPerSecond;
 
         if ((clientDifficulty * 2) < targetDifficulty || (clientDifficulty / 2) > targetDifficulty) {
-            return this.nearestPowerOfTwo(targetDifficulty)
+            return this.nearestDifficultyStep(targetDifficulty)
         }
 
         return null;
+    }
+
+    private nearestDifficultyStep(val: number): number {
+        if (val === 0) {
+            return null;
+        }
+        if (val < MIN_DIFF) {
+            return MIN_DIFF;
+        }
+
+        const exponent = Math.floor(Math.log2(val));
+        const lower = 2 ** exponent;
+        const middle = lower + lower / 2;
+        const upper = lower * 2;
+
+        const distances = [
+            { value: lower, diff: Math.abs(val - lower) },
+            { value: middle, diff: Math.abs(val - middle) },
+            { value: upper, diff: Math.abs(val - upper) },
+        ];
+
+        distances.sort((a, b) => a.diff - b.diff);
+        return distances[0].value;
     }
 
     private nearestPowerOfTwo(val): number {
