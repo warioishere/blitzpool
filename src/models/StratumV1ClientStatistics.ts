@@ -2,7 +2,8 @@ import { ClientStatisticsService } from '../ORM/client-statistics/client-statist
 import { ClientEntity } from '../ORM/client/client.entity';
 
 const CACHE_SIZE = 30;
-const TARGET_SUBMISSION_PER_SECOND = 10;
+const targetSharesPerMinute = parseFloat(process.env.TARGET_SHARES_PER_MINUTE || '6');
+const TARGET_SUBMISSION_PER_SECOND = 60 / targetSharesPerMinute;
 const MIN_DIFF = 0.00001;
 export class StratumV1ClientStatistics {
 
@@ -121,7 +122,7 @@ export class StratumV1ClientStatistics {
         // miner hasn't submitted shares in one minute
         if (this.submissionCache.length < 5) {
             if ((new Date().getTime() - this.submissionCacheStart.getTime()) / 1000 > 60) {
-                return this.nearestPowerOfTwo(clientDifficulty / 6);
+                return this.nearestPowerOfTwo(clientDifficulty / targetSharesPerMinute);
             } else {
                 return null;
             }

@@ -57,6 +57,7 @@ https://github.com/warioishere/blitzpool-message-encryptor-for-TG
 - New `/api/info/rejected` endpoint lists rejected share reasons pool-wide (supports `range=1d|3d|7d`)
 - New `/api/client/<btc_address>/rejected` shows rejected reasons for a specific address (supports `range=1d|3d|7d`)
 - Old jobs are cleaned after 90 seconds by default (`JOB_RETENTION_MS` can adjust this)
+- Desired share rate per worker can be tuned with `TARGET_SHARES_PER_MINUTE` (default `6`)
 
 ## API
 
