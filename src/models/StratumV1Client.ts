@@ -69,6 +69,7 @@ export class StratumV1Client {
     private extranonceResponse?: string;
     private initTimer?: NodeJS.Timeout;
     private difficultyCheckIntervalMs: number;
+    private lastDifficultyCheck = 0;
 
     constructor(
         public readonly socket: Socket,
@@ -680,6 +681,10 @@ export class StratumV1Client {
                     this.entity.updatedAt = now;
                 }
 
+                if (now.getTime() - this.lastDifficultyCheck >= this.difficultyCheckIntervalMs) {
+                    await this.checkDifficulty();
+                }
+
             } catch (e) {
                 console.log(e);
             }
@@ -732,6 +737,7 @@ export class StratumV1Client {
     }
 
     private async checkDifficulty() {
+        this.lastDifficultyCheck = Date.now();
         const targetDiff = this.statistics.getSuggestedDifficulty(this.sessionDifficulty);
         if (targetDiff == null) {
             return;
