@@ -367,6 +367,36 @@ export class ClientStatisticsService {
         return results.map(r => ({ clientName: r.clientName, total: parseFloat(r.total) }));
     }
 
+    public async getHashRateSince(address: string, since: number, clientName?: string): Promise<number> {
+        const qb = this.clientStatisticsRepository
+            .createQueryBuilder('entry')
+            .select('SUM(entry.shares)', 'sum')
+            .where('entry.address = :address', { address })
+            .andWhere('entry.time > :since', { since });
+        if (clientName) {
+            qb.andWhere('entry.clientName = :clientName', { clientName });
+        }
+        const result = await qb.getRawOne();
+        const diffSum = result?.sum ? parseFloat(result.sum) : 0;
+        const seconds = (Date.now() - since) / 1000;
+        if (seconds <= 0) {
+            return 0;
+        }
+        return (diffSum * 4294967296) / seconds;
+    }
+
+    public async getLastShareTime(address: string, clientName?: string): Promise<number | null> {
+        const qb = this.clientStatisticsRepository
+            .createQueryBuilder('entry')
+            .select('MAX(entry.time)', 'last')
+            .where('entry.address = :address', { address });
+        if (clientName) {
+            qb.andWhere('entry.clientName = :clientName', { clientName });
+        }
+        const result = await qb.getRawOne();
+        return result?.last ? parseInt(result.last, 10) : null;
+    }
+
     public async deleteAll() {
         return await this.clientStatisticsRepository.delete({})
     }

@@ -1,4 +1,5 @@
 import { Controller, Get, NotFoundException, Param, Query } from '@nestjs/common';
+import { NumberSuffix } from '../../utils/NumberSuffix';
 
 import { AddressSettingsService } from '../../ORM/address-settings/address-settings.service';
 import { ClientStatisticsService } from '../../ORM/client-statistics/client-statistics.service';
@@ -62,6 +63,61 @@ export class ClientController {
     async getWorkerShares(@Param('address') address: string) {
         const workerShares = await this.clientStatisticsService.getTotalSharesForWorkers(address);
         return workerShares.map(ws => ({ workerName: ws.clientName, totalShares: ws.total }));
+    }
+
+    @Get(':address/stats')
+    async getAddressStats(@Param('address') address: string) {
+        const suffix = new NumberSuffix();
+        const workers = await this.clientService.getByAddress(address);
+        const shares = await this.clientStatisticsService.getTotalSharesForAddress(address);
+        const rejectedTotals = await this.clientRejectedStatisticsService.getTotalsSince(address, 0);
+        const rejected = Object.values(rejectedTotals).reduce((a, b) => a + b, 0);
+        const addrSettings = await this.addressSettingsService.getSettings(address, false);
+        const now = Date.now();
+        const hashrate1m = await this.clientStatisticsService.getHashRateSince(address, now - 60 * 1000);
+        const hashrate5m = await this.clientStatisticsService.getHashRateSince(address, now - 5 * 60 * 1000);
+        const hashrate1hr = await this.clientStatisticsService.getHashRateSince(address, now - 60 * 60 * 1000);
+        const hashrate1d = await this.clientStatisticsService.getHashRateSince(address, now - 24 * 60 * 60 * 1000);
+        const hashrate7d = await this.clientStatisticsService.getHashRateSince(address, now - 7 * 24 * 60 * 60 * 1000);
+        const lastshare = await this.clientStatisticsService.getLastShareTime(address);
+
+        const workerShareTotals = await this.clientStatisticsService.getTotalSharesForWorkers(address);
+
+        const workerStats = await Promise.all(
+            workers.map(async (worker) => {
+                const wShares = workerShareTotals.find(w => w.clientName === worker.clientName)?.total || 0;
+                const wRejectedTotals = await this.clientRejectedStatisticsService.getTotalsSince(address, 0, worker.clientName);
+                const wRejected = Object.values(wRejectedTotals).reduce((a, b) => a + b, 0);
+                return {
+                    workername: worker.clientName,
+                    hashrate1m: suffix.to(await this.clientStatisticsService.getHashRateSince(address, now - 60 * 1000, worker.clientName)),
+                    hashrate5m: suffix.to(await this.clientStatisticsService.getHashRateSince(address, now - 5 * 60 * 1000, worker.clientName)),
+                    hashrate1hr: suffix.to(await this.clientStatisticsService.getHashRateSince(address, now - 60 * 60 * 1000, worker.clientName)),
+                    hashrate1d: suffix.to(await this.clientStatisticsService.getHashRateSince(address, now - 24 * 60 * 60 * 1000, worker.clientName)),
+                    hashrate7d: suffix.to(await this.clientStatisticsService.getHashRateSince(address, now - 7 * 24 * 60 * 60 * 1000, worker.clientName)),
+                    lastshare: await this.clientStatisticsService.getLastShareTime(address, worker.clientName),
+                    shares: wShares,
+                    rejected: wRejected,
+                    bestshare: worker.bestDifficulty,
+                    bestever: worker.bestDifficulty
+                };
+            })
+        );
+
+        return {
+            hashrate1m: suffix.to(hashrate1m),
+            hashrate5m: suffix.to(hashrate5m),
+            hashrate1hr: suffix.to(hashrate1hr),
+            hashrate1d: suffix.to(hashrate1d),
+            hashrate7d: suffix.to(hashrate7d),
+            lastshare: lastshare,
+            workers: workers.length,
+            shares,
+            rejected,
+            bestshare: addrSettings?.bestDifficulty || 0,
+            bestever: addrSettings?.bestDifficulty || 0,
+            worker: workerStats
+        };
     }
 
     @Get(':address/rejected')

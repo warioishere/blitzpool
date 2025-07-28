@@ -58,6 +58,7 @@ https://github.com/warioishere/blitzpool-message-encryptor-for-TG
 - New `/api/info/shares` endpoint provides pool-wide accepted and rejected share totals
 - New `/api/info/rejected` endpoint lists rejected share reasons pool-wide (supports `range=1d|3d|7d`)
 - New `/api/client/<btc_address>/rejected` shows rejected reasons for a specific address (supports `range=1d|3d|7d`)
+- New `/api/client/<btc_address>/stats` returns combined statistics for an address and its workers
 - Old jobs are cleaned after 90 seconds by default (`JOB_RETENTION_MS` can adjust this)
 - Desired share rate per worker can be tuned with `TARGET_SHARES_PER_MINUTE` (default `6`)
 - How often miners are checked for new difficulty can be set via `DIFFICULTY_CHECK_INTERVAL_MS` (default `60000` ms)
@@ -69,6 +70,7 @@ https://github.com/warioishere/blitzpool-message-encryptor-for-TG
 - `GET /api/info/rejected?range=1d|3d|7d` – Lists rejected share reasons pool-wide (difficulty weighted).
 - `GET /api/info/version` – Returns the BlitzPool version.
 - `GET /api/client/<btc_address>/rejected?range=1d|3d|7d` – Shows rejected reasons for a specific address (counts per share).
+- `GET /api/client/<btc_address>/stats` – Shows combined totals and per-worker statistics.
 
 #### Blitzpool-UI
 
