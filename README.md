@@ -2,6 +2,8 @@
 
 Welcome to **BlitzPool**, a lightweight and open-source Bitcoin mining pool based on the [public-pool](https://github.com/benjamin-wilson/public-pool) project – extended with powerful new features and real-world integrations.
 
+Current Version: **v1.2**
+
 🌐 **Live Pool:** [https://blitzpool.yourdevice.ch/#/](https://blitzpool.yourdevice.ch/#/)
 
 ---
@@ -65,6 +67,7 @@ https://github.com/warioishere/blitzpool-message-encryptor-for-TG
 - `GET /api/info/chart?range=1d|1m` – Returns pool hashrate statistics.
 - `GET /api/info/shares` – Provides pool-wide accepted and rejected share totals.
 - `GET /api/info/rejected?range=1d|3d|7d` – Lists rejected share reasons pool-wide (difficulty weighted).
+- `GET /api/info/version` – Returns the BlitzPool version.
 - `GET /api/client/<btc_address>/rejected?range=1d|3d|7d` – Shows rejected reasons for a specific address (counts per share).
 
 #### Blitzpool-UI
