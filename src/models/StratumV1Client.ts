@@ -68,6 +68,8 @@ export class StratumV1Client {
     private authorizeResponse?: string;
     private extranonceResponse?: string;
     private initTimer?: NodeJS.Timeout;
+    private difficultyCheckIntervalMs: number;
+    private lastDifficultyCheck = 0;
 
     constructor(
         public readonly socket: Socket,
@@ -95,6 +97,9 @@ export class StratumV1Client {
         } else {
             throw new Error('Invalid network configuration');
         }
+
+        const parsed = parseInt(this.configService.get('DIFFICULTY_CHECK_INTERVAL_MS') ?? '60000');
+        this.difficultyCheckIntervalMs = isNaN(parsed) ? 60000 : parsed;
 
         this.socket.on('data', (data: string) => {
             this.buffer += data;
@@ -177,7 +182,7 @@ export class StratumV1Client {
 
                     if (this.sessionStart == null) {
                         this.sessionStart = new Date();
-                        this.statistics = new StratumV1ClientStatistics(this.clientStatisticsService);
+                        this.statistics = new StratumV1ClientStatistics(this.clientStatisticsService, this.configService);
                         this.extraNonceAndSessionId = this.getRandomHexString();
                         console.log(`New client ID: : ${this.extraNonceAndSessionId}, ${this.socket.remoteAddress}:${this.socket.remotePort}`);
                     }
@@ -490,7 +495,7 @@ export class StratumV1Client {
         this.backgroundWork.push(
             setInterval(async () => {
                 await this.checkDifficulty();
-            }, 60 * 1000)
+            }, this.difficultyCheckIntervalMs)
         );
 
     }
@@ -676,6 +681,10 @@ export class StratumV1Client {
                     this.entity.updatedAt = now;
                 }
 
+                if (now.getTime() - this.lastDifficultyCheck >= this.difficultyCheckIntervalMs) {
+                    await this.checkDifficulty();
+                }
+
             } catch (e) {
                 console.log(e);
             }
@@ -728,6 +737,7 @@ export class StratumV1Client {
     }
 
     private async checkDifficulty() {
+        this.lastDifficultyCheck = Date.now();
         const targetDiff = this.statistics.getSuggestedDifficulty(this.sessionDifficulty);
         if (targetDiff == null) {
             return;
