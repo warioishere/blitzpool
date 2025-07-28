@@ -603,7 +603,12 @@ export class StratumV1Client {
         if(this.miningSubmissionHashes.has(submissionHash)){
             await this.poolShareStatisticsService.addRejectedShare(this.sessionDifficulty);
             await this.poolRejectedStatisticsService.addRejectedShare(eStratumErrorCode[eStratumErrorCode.DuplicateShare], this.sessionDifficulty);
-            await this.clientRejectedStatisticsService.addRejectedShare(this.clientAuthorization.address, eStratumErrorCode[eStratumErrorCode.DuplicateShare], 1);
+            await this.clientRejectedStatisticsService.addRejectedShare(
+                this.clientAuthorization.address,
+                this.clientAuthorization.worker,
+                eStratumErrorCode[eStratumErrorCode.DuplicateShare],
+                1,
+            );
             const err = new StratumErrorMessage(
                 submission.id,
                 eStratumErrorCode.DuplicateShare,
@@ -623,7 +628,12 @@ export class StratumV1Client {
         if (job == null) {
             await this.poolShareStatisticsService.addRejectedShare(this.sessionDifficulty);
             await this.poolRejectedStatisticsService.addRejectedShare(eStratumErrorCode[eStratumErrorCode.JobNotFound], this.sessionDifficulty);
-            await this.clientRejectedStatisticsService.addRejectedShare(this.clientAuthorization.address, eStratumErrorCode[eStratumErrorCode.JobNotFound], 1);
+            await this.clientRejectedStatisticsService.addRejectedShare(
+                this.clientAuthorization.address,
+                this.clientAuthorization.worker,
+                eStratumErrorCode[eStratumErrorCode.JobNotFound],
+                1,
+            );
             const err = new StratumErrorMessage(
                 submission.id,
                 eStratumErrorCode.JobNotFound,
@@ -717,7 +727,12 @@ export class StratumV1Client {
         } else {
             await this.poolShareStatisticsService.addRejectedShare(this.sessionDifficulty);
             await this.poolRejectedStatisticsService.addRejectedShare(eStratumErrorCode[eStratumErrorCode.LowDifficultyShare], this.sessionDifficulty);
-            await this.clientRejectedStatisticsService.addRejectedShare(this.clientAuthorization.address, eStratumErrorCode[eStratumErrorCode.LowDifficultyShare], 1);
+            await this.clientRejectedStatisticsService.addRejectedShare(
+                this.clientAuthorization.address,
+                this.clientAuthorization.worker,
+                eStratumErrorCode[eStratumErrorCode.LowDifficultyShare],
+                1,
+            );
             const err = new StratumErrorMessage(
                 submission.id,
                 eStratumErrorCode.LowDifficultyShare,

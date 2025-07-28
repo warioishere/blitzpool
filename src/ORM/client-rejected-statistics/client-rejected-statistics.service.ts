@@ -16,7 +16,7 @@ export class ClientRejectedStatisticsService {
   private mutex = new Mutex();
   private currentTimeSlot: number = null;
   private lastSave: number = null;
-  private counts: Map<string, Map<string, number>> = new Map();
+  private counts: Map<string, Map<string, Map<string, number>>> = new Map();
 
   @Interval(60 * 1000)
   private async flushInterval() {
@@ -28,7 +28,12 @@ export class ClientRejectedStatisticsService {
     }
   }
 
-  public async addRejectedShare(address: string, reason: string, _diff: number) {
+  public async addRejectedShare(
+    address: string,
+    clientName: string,
+    reason: string,
+    _diff: number,
+  ) {
     await this.mutex.runExclusive(async () => {
       const coeff = 1000 * 60 * 10;
       const now = Date.now();
@@ -42,7 +47,10 @@ export class ClientRejectedStatisticsService {
           if (!this.counts.has(rec.address)) {
             this.counts.set(rec.address, new Map());
           }
-          this.counts.get(rec.address).set(rec.reason, rec.count);
+          if (!this.counts.get(rec.address).has(rec.clientName)) {
+            this.counts.get(rec.address).set(rec.clientName, new Map());
+          }
+          this.counts.get(rec.address).get(rec.clientName).set(rec.reason, rec.count);
         }
         this.lastSave = now;
       }
@@ -56,7 +64,10 @@ export class ClientRejectedStatisticsService {
           if (!this.counts.has(rec.address)) {
             this.counts.set(rec.address, new Map());
           }
-          this.counts.get(rec.address).set(rec.reason, rec.count);
+          if (!this.counts.get(rec.address).has(rec.clientName)) {
+            this.counts.get(rec.address).set(rec.clientName, new Map());
+          }
+          this.counts.get(rec.address).get(rec.clientName).set(rec.reason, rec.count);
         }
         this.lastSave = now;
       }
@@ -64,7 +75,10 @@ export class ClientRejectedStatisticsService {
       if (!this.counts.has(address)) {
         this.counts.set(address, new Map());
       }
-      const addrMap = this.counts.get(address);
+      if (!this.counts.get(address).has(clientName)) {
+        this.counts.get(address).set(clientName, new Map());
+      }
+      const addrMap = this.counts.get(address).get(clientName);
       const current = addrMap.get(reason) || 0;
       addrMap.set(reason, current + 1);
 
@@ -76,29 +90,49 @@ export class ClientRejectedStatisticsService {
   }
 
   private async saveCurrent() {
-    for (const [address, reasons] of this.counts) {
-      for (const [reason, count] of reasons) {
-        const existing = await this.clientRejectedStatisticsRepository.findOneBy({ time: this.currentTimeSlot, address, reason });
-        if (existing) {
-          await this.clientRejectedStatisticsRepository.update(
-            { time: this.currentTimeSlot, address, reason },
-            { count, updatedAt: new Date() },
-          );
-        } else {
-          await this.clientRejectedStatisticsRepository.insert({ time: this.currentTimeSlot, address, reason, count });
+    for (const [address, workers] of this.counts) {
+      for (const [clientName, reasons] of workers) {
+        for (const [reason, count] of reasons) {
+          const existing = await this.clientRejectedStatisticsRepository.findOneBy({
+            time: this.currentTimeSlot,
+            address,
+            clientName,
+            reason,
+          });
+          if (existing) {
+            await this.clientRejectedStatisticsRepository.update(
+              { time: this.currentTimeSlot, address, clientName, reason },
+              { count, updatedAt: new Date() },
+            );
+          } else {
+            await this.clientRejectedStatisticsRepository.insert({
+              time: this.currentTimeSlot,
+              address,
+              clientName,
+              reason,
+              count,
+            });
+          }
         }
       }
     }
   }
 
-  public async getTotalsSince(address: string, time: number): Promise<Record<string, number>> {
+  public async getTotalsSince(
+    address: string,
+    time: number,
+    clientName?: string,
+  ): Promise<Record<string, number>> {
     const query = this.clientRejectedStatisticsRepository
       .createQueryBuilder('stat')
       .select('stat.reason', 'reason')
       .addSelect('SUM(stat.count)', 'count')
       .where('stat.time > :time', { time })
-      .andWhere('stat.address = :address', { address })
-      .groupBy('stat.reason');
+      .andWhere('stat.address = :address', { address });
+    if (clientName) {
+      query.andWhere('stat.clientName = :clientName', { clientName });
+    }
+    query.groupBy('stat.reason');
     const result = await query.getRawMany();
 
     const totals: Record<string, number> = {};
@@ -108,9 +142,17 @@ export class ClientRejectedStatisticsService {
     return totals;
   }
 
-  public async getEntriesSince(address: string, time: number): Promise<ClientRejectedStatisticsEntity[]> {
+  public async getEntriesSince(
+    address: string,
+    time: number,
+    clientName?: string,
+  ): Promise<ClientRejectedStatisticsEntity[]> {
+    const where: any = { address, time: MoreThan(time) };
+    if (clientName) {
+      where.clientName = clientName;
+    }
     return this.clientRejectedStatisticsRepository.find({
-      where: { address, time: MoreThan(time) },
+      where,
       order: { time: 'ASC' },
     });
   }
