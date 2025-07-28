@@ -72,6 +72,39 @@ https://github.com/warioishere/blitzpool-message-encryptor-for-TG
 - `GET /api/client/<btc_address>/rejected?range=1d|3d|7d` – Shows rejected reasons for a specific address (counts per share).
 - `GET /api/client/<btc_address>/stats` – Shows combined totals and per-worker statistics.
 
+Example response from `/api/client/<btc_address>/stats`:
+
+```json
+{
+  "hashrate1m": "596T",
+  "hashrate5m": "615T",
+  "hashrate1hr": "704T",
+  "hashrate1d": "658T",
+  "hashrate7d": "484T",
+  "lastshare": 1749632236,
+  "workers": 53,
+  "shares": 703029762124,
+  "rejected": 42,
+  "bestshare": 183996631107.3457,
+  "bestever": 183996631107,
+  "worker": [
+    {
+      "workername": "example.worker1",
+      "hashrate1m": "1.74T",
+      "hashrate5m": "1.49T",
+      "hashrate1hr": "1.37T",
+      "hashrate1d": "1.43T",
+      "hashrate7d": "1.36T",
+      "lastshare": 1749632235,
+      "shares": 1404625542,
+      "rejected": 1,
+      "bestshare": 794572222.3472384,
+      "bestever": 794572222
+    }
+  ]
+}
+```
+
 #### Blitzpool-UI
 
 Blitzpool UI can be found here:

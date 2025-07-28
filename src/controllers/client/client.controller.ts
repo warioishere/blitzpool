@@ -1,4 +1,6 @@
-import { Controller, Get, NotFoundException, Param, Query } from '@nestjs/common';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import { Controller, Get, Inject, NotFoundException, Param, Query } from '@nestjs/common';
+import { Cache } from 'cache-manager';
 import { NumberSuffix } from '../../utils/NumberSuffix';
 
 import { AddressSettingsService } from '../../ORM/address-settings/address-settings.service';
@@ -12,6 +14,7 @@ import { eStratumErrorCode } from '../../models/enums/eStratumErrorCode';
 export class ClientController {
 
     constructor(
+        @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
         private readonly clientService: ClientService,
         private readonly clientStatisticsService: ClientStatisticsService,
         private readonly addressSettingsService: AddressSettingsService,
@@ -67,6 +70,11 @@ export class ClientController {
 
     @Get(':address/stats')
     async getAddressStats(@Param('address') address: string) {
+        const CACHE_KEY = `CLIENT_STATS_${address}`;
+        const cached = await this.cacheManager.get(CACHE_KEY);
+        if (cached) {
+            return cached;
+        }
         const suffix = new NumberSuffix();
         const workers = await this.clientService.getByAddress(address);
         const shares = await this.clientStatisticsService.getTotalSharesForAddress(address);
@@ -104,7 +112,7 @@ export class ClientController {
             })
         );
 
-        return {
+        const data = {
             hashrate1m: suffix.to(hashrate1m),
             hashrate5m: suffix.to(hashrate5m),
             hashrate1hr: suffix.to(hashrate1hr),
@@ -118,6 +126,9 @@ export class ClientController {
             bestever: addrSettings?.bestDifficulty || 0,
             worker: workerStats
         };
+
+        await this.cacheManager.set(CACHE_KEY, data, 60);
+        return data;
     }
 
     @Get(':address/rejected')
