@@ -3,9 +3,7 @@ version: '3.8'
 services:
   bitcoin:
     container_name: bitcoin
-    build:
-      context: ./docker/bitcoin
-      dockerfile: Dockerfile
+    image: my-bitcoin-image:latest
     restart: unless-stopped
     stop_grace_period: 30s
     networks:
