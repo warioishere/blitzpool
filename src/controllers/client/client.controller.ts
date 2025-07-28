@@ -78,7 +78,7 @@ export class ClientController {
         const suffix = new NumberSuffix();
         const workers = await this.clientService.getByAddress(address);
         const shares = await this.clientStatisticsService.getTotalSharesForAddress(address);
-        const rejectedTotals = await this.clientRejectedStatisticsService.getTotalsSince(address, 0);
+        const rejectedTotals = await this.clientRejectedStatisticsService.getTotalsSince(address, 0, undefined, true);
         const rejected = Object.values(rejectedTotals).reduce((a, b) => a + b, 0);
         const addrSettings = await this.addressSettingsService.getSettings(address, false);
         const now = Date.now();
@@ -94,7 +94,7 @@ export class ClientController {
         const workerStats = await Promise.all(
             workers.map(async (worker) => {
                 const wShares = workerShareTotals.find(w => w.clientName === worker.clientName)?.total || 0;
-                const wRejectedTotals = await this.clientRejectedStatisticsService.getTotalsSince(address, 0, worker.clientName);
+                const wRejectedTotals = await this.clientRejectedStatisticsService.getTotalsSince(address, 0, worker.clientName, true);
                 const wRejected = Object.values(wRejectedTotals).reduce((a, b) => a + b, 0);
                 return {
                     workername: worker.clientName,

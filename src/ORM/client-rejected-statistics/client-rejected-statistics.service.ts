@@ -16,7 +16,7 @@ export class ClientRejectedStatisticsService {
   private mutex = new Mutex();
   private currentTimeSlot: number = null;
   private lastSave: number = null;
-  private counts: Map<string, Map<string, Map<string, number>>> = new Map();
+  private counts: Map<string, Map<string, Map<string, { count: number; diff: number }>>> = new Map();
 
   @Interval(60 * 1000)
   private async flushInterval() {
@@ -32,7 +32,7 @@ export class ClientRejectedStatisticsService {
     address: string,
     clientName: string,
     reason: string,
-    _diff: number,
+    diff: number,
   ) {
     await this.mutex.runExclusive(async () => {
       const coeff = 1000 * 60 * 10;
@@ -50,7 +50,10 @@ export class ClientRejectedStatisticsService {
           if (!this.counts.get(rec.address).has(rec.clientName)) {
             this.counts.get(rec.address).set(rec.clientName, new Map());
           }
-          this.counts.get(rec.address).get(rec.clientName).set(rec.reason, rec.count);
+          this.counts
+            .get(rec.address)
+            .get(rec.clientName)
+            .set(rec.reason, { count: rec.count, diff: rec.diff });
         }
         this.lastSave = now;
       }
@@ -67,7 +70,10 @@ export class ClientRejectedStatisticsService {
           if (!this.counts.get(rec.address).has(rec.clientName)) {
             this.counts.get(rec.address).set(rec.clientName, new Map());
           }
-          this.counts.get(rec.address).get(rec.clientName).set(rec.reason, rec.count);
+          this.counts
+            .get(rec.address)
+            .get(rec.clientName)
+            .set(rec.reason, { count: rec.count, diff: rec.diff });
         }
         this.lastSave = now;
       }
@@ -79,8 +85,8 @@ export class ClientRejectedStatisticsService {
         this.counts.get(address).set(clientName, new Map());
       }
       const addrMap = this.counts.get(address).get(clientName);
-      const current = addrMap.get(reason) || 0;
-      addrMap.set(reason, current + 1);
+      const current = addrMap.get(reason) || { count: 0, diff: 0 };
+      addrMap.set(reason, { count: current.count + 1, diff: current.diff + diff });
 
       if (now - this.lastSave > 60 * 1000) {
         await this.saveCurrent();
@@ -92,7 +98,7 @@ export class ClientRejectedStatisticsService {
   private async saveCurrent() {
     for (const [address, workers] of this.counts) {
       for (const [clientName, reasons] of workers) {
-        for (const [reason, count] of reasons) {
+        for (const [reason, data] of reasons) {
           const existing = await this.clientRejectedStatisticsRepository.findOneBy({
             time: this.currentTimeSlot,
             address,
@@ -102,7 +108,7 @@ export class ClientRejectedStatisticsService {
           if (existing) {
             await this.clientRejectedStatisticsRepository.update(
               { time: this.currentTimeSlot, address, clientName, reason },
-              { count, updatedAt: new Date() },
+              { count: data.count, diff: data.diff, updatedAt: new Date() },
             );
           } else {
             await this.clientRejectedStatisticsRepository.insert({
@@ -110,7 +116,8 @@ export class ClientRejectedStatisticsService {
               address,
               clientName,
               reason,
-              count,
+              count: data.count,
+              diff: data.diff,
             });
           }
         }
@@ -122,11 +129,12 @@ export class ClientRejectedStatisticsService {
     address: string,
     time: number,
     clientName?: string,
+    weighted: boolean = false,
   ): Promise<Record<string, number>> {
     const query = this.clientRejectedStatisticsRepository
       .createQueryBuilder('stat')
       .select('stat.reason', 'reason')
-      .addSelect('SUM(stat.count)', 'count')
+      .addSelect(`SUM(stat.${weighted ? 'diff' : 'count'})`, 'count')
       .where('stat.time > :time', { time })
       .andWhere('stat.address = :address', { address });
     if (clientName) {

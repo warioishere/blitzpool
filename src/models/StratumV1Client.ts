@@ -607,7 +607,7 @@ export class StratumV1Client {
                 this.clientAuthorization.address,
                 this.clientAuthorization.worker,
                 eStratumErrorCode[eStratumErrorCode.DuplicateShare],
-                1,
+                this.sessionDifficulty,
             );
             const err = new StratumErrorMessage(
                 submission.id,
@@ -632,7 +632,7 @@ export class StratumV1Client {
                 this.clientAuthorization.address,
                 this.clientAuthorization.worker,
                 eStratumErrorCode[eStratumErrorCode.JobNotFound],
-                1,
+                this.sessionDifficulty,
             );
             const err = new StratumErrorMessage(
                 submission.id,
@@ -731,7 +731,7 @@ export class StratumV1Client {
                 this.clientAuthorization.address,
                 this.clientAuthorization.worker,
                 eStratumErrorCode[eStratumErrorCode.LowDifficultyShare],
-                1,
+                submissionDifficulty,
             );
             const err = new StratumErrorMessage(
                 submission.id,

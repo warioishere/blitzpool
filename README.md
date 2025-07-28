@@ -70,7 +70,7 @@ https://github.com/warioishere/blitzpool-message-encryptor-for-TG
 - `GET /api/info/rejected?range=1d|3d|7d` – Lists rejected share reasons pool-wide (difficulty weighted).
 - `GET /api/info/version` – Returns the BlitzPool version.
 - `GET /api/client/<btc_address>/rejected?range=1d|3d|7d` – Shows rejected reasons for a specific address (counts per share).
-- `GET /api/client/<btc_address>/stats` – Shows combined totals and per-worker statistics.
+- `GET /api/client/<btc_address>/stats` – Shows combined totals and per-worker statistics. Rejected counts are difficulty weighted.
 
 Example response from `/api/client/<btc_address>/stats`:
 
