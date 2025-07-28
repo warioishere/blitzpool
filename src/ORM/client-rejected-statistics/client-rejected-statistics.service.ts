@@ -155,13 +155,35 @@ export class ClientRejectedStatisticsService {
     time: number,
     clientName?: string,
   ): Promise<ClientRejectedStatisticsEntity[]> {
-    const where: any = { address, time: MoreThan(time) };
     if (clientName) {
-      where.clientName = clientName;
+      return this.clientRejectedStatisticsRepository.find({
+        where: { address, clientName, time: MoreThan(time) },
+        order: { time: 'ASC' },
+      });
     }
-    return this.clientRejectedStatisticsRepository.find({
-      where,
-      order: { time: 'ASC' },
-    });
+
+    const raw = await this.clientRejectedStatisticsRepository
+      .createQueryBuilder('stat')
+      .select('stat.time', 'time')
+      .addSelect('stat.reason', 'reason')
+      .addSelect('SUM(stat.count)', 'count')
+      .where('stat.address = :address', { address })
+      .andWhere('stat.time > :time', { time })
+      .groupBy('stat.time')
+      .addGroupBy('stat.reason')
+      .orderBy('stat.time', 'ASC')
+      .getRawMany();
+
+    return raw.map(r => ({
+      id: 0,
+      address,
+      clientName: '',
+      time: parseInt(r.time, 10),
+      reason: r.reason,
+      count: parseFloat(r.count),
+      diff: 0,
+      createdAt: null,
+      updatedAt: null,
+    })) as ClientRejectedStatisticsEntity[];
   }
 }
