@@ -2,6 +2,8 @@ import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Controller, Get, Inject, Query } from '@nestjs/common';
 import { Cache } from 'cache-manager';
 import { firstValueFrom } from 'rxjs';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 
 import { AddressSettingsService } from './ORM/address-settings/address-settings.service';
 import { BlocksService } from './ORM/blocks/blocks.service';
@@ -16,6 +18,7 @@ import { eStratumErrorCode } from './models/enums/eStratumErrorCode';
 export class AppController {
 
   private uptime = new Date();
+  private readonly version: string;
 
   constructor(
     @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
@@ -26,7 +29,10 @@ export class AppController {
     private readonly poolRejectedStatisticsService: PoolRejectedStatisticsService,
     private readonly bitcoinRpcService: BitcoinRpcService,
     private readonly addressSettingsService: AddressSettingsService,
-  ) { }
+  ) {
+    const packagePath = join(__dirname, '..', 'package.json');
+    this.version = JSON.parse(readFileSync(packagePath, 'utf8')).version;
+  }
 
   @Get('info')
   public async info() {
@@ -93,6 +99,11 @@ export class AppController {
   public async network() {
     const miningInfo = await firstValueFrom(this.bitcoinRpcService.newBlock$);
     return miningInfo;
+  }
+
+  @Get('info/version')
+  public infoVersion() {
+    return { version: `v${this.version}` };
   }
 
   @Get('info/chart')
