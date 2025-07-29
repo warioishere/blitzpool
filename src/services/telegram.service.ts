@@ -53,7 +53,7 @@ export class TelegramService implements OnModuleInit {
         this.bot.onText(/\/subscribe (.+)/, async (msg, match) => {
             const raw = match?.[1]?.trim();
             if (!raw) {
-                this.bot.sendMessage(msg.chat.id, "Bitte gib eine Adresse an.");
+                this.bot.sendMessage(msg.chat.id, 'Befehl nicht erkannt, oder Wert fehlt');
                 return;
             }
 
@@ -83,7 +83,7 @@ export class TelegramService implements OnModuleInit {
             const value = match?.[1]?.toLowerCase();
 
             if (!value) {
-                this.bot.sendMessage(chatId, "Bitte gib 'on' oder 'off' an.");
+                this.bot.sendMessage(chatId, 'Befehl nicht erkannt, oder Wert fehlt');
                 return;
             }
 
@@ -173,12 +173,12 @@ Ich entschlüssle ihn und reagiere genau wie bei Klartext. 🔒`);
             }
         });
 
-	this.bot.onText(/\/stats (.+)/, async (msg, match) => {
+        this.bot.onText(/\/stats (.+)/, async (msg, match) => {
             const chatId = msg.chat.id;
             const raw = match?.[1]?.trim();
 
             if (!raw) {
-                this.bot.sendMessage(chatId, "Bitte gib eine BTC-Adresse an.");
+                this.bot.sendMessage(chatId, 'Befehl nicht erkannt, oder Wert fehlt');
                 return;
             }
 
@@ -190,13 +190,16 @@ Ich entschlüssle ihn und reagiere genau wie bei Klartext. 🔒`);
             }
 
             if (!validate(address)) {
-                this.bot.sendMessage(chatId, "Ungültige Adresse.");
+                this.bot.sendMessage(chatId, 'Ungültige Adresse.');
                 return;
             }
 
             try {
                 const workers = await this.clientService.getByAddress(address);
                 const addressSettings = await this.addressSettingsService.getSettings(address, false);
+                const shares = await this.clientStatisticsService.getTotalSharesForAddress(address);
+                const rejectedTotals = await this.clientRejectedStatisticsService.getTotalsSince(address, 0, undefined, true);
+                const rejected = Object.values(rejectedTotals).reduce((a, b) => a + b, 0);
 
                 if (!workers || workers.length === 0) {
                     this.bot.sendMessage(chatId, "Keine aktiven Worker für diese Adresse gefunden.");
@@ -211,11 +214,16 @@ Ich entschlüssle ihn und reagiere genau wie bei Klartext. 🔒`);
                 const bestDiffRaw = addressSettings?.bestDifficulty ?? 0;
                 const bestDifficultyG = bestDiffRaw / 1e9;
 
+                const sharesText = this.numberSuffix.to(shares);
+                const rejectedText = this.numberSuffix.to(rejected);
+
         this.bot.sendMessage(chatId,
 `📈 Stats für deine Adresse:
 - Aktuelle Hashrate: ${totalHashrateTH.toFixed(2)} TH/s
 - Letzter Share: vor ${lastSeenSeconds} Sekunden
-- Beste Difficulty: ${bestDifficultyG.toFixed(2)} G`);
+- Beste Difficulty: ${bestDifficultyG.toFixed(2)} G
+- Shares: ${sharesText}
+- Rejected: ${rejectedText}`);
         } catch (err) {
                 console.error("Fehler bei /stats:", err);
                 this.bot.sendMessage(chatId, "Fehler beim Abrufen der Statistiken.");
@@ -229,16 +237,23 @@ Ich entschlüssle ihn und reagiere genau wie bei Klartext. 🔒`);
 
             if (
                 text.startsWith('/subscribe ') ||
-                text.startsWith('/subscribe_bestdiff') ||
+                text.startsWith('/subscribe_bestdiff ') ||
+                text.startsWith('/stats ') ||
                 text === '/subscribe' ||
+                text === '/subscribe_bestdiff' ||
+                text === '/stats' ||
                 text === '/start' ||
                 text === '/difficulty' ||
-                text === '/next_difficulty'
+                text === '/next_difficulty' ||
+                text === '/poolhashrate'
             ) {
+                if (text === '/subscribe' || text === '/subscribe_bestdiff' || text === '/stats') {
+                    this.bot.sendMessage(msg.chat.id, 'Befehl nicht erkannt, oder Wert fehlt');
+                }
                 return;
             }
 
-            console.log("Unverarbeitete Nachricht:", text);
+            this.bot.sendMessage(msg.chat.id, 'Befehl nicht erkannt, oder Wert fehlt');
         });
     }
 

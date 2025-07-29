@@ -32,7 +32,7 @@ Command	Description
 - /subscribe_bestdiff	Toggle Best-Diff notifications on or off (default: on)
 - /difficulty	        Shows the current Bitcoin network difficulty
 - /next_difficulty	    Estimates the next network difficulty adjustment
-- /stats	            Displays detailed mining stats for your subscribed Bitcoin address
+- /stats                    Displays detailed mining stats for your Bitcoin address including share and reject totals
 - /poolhashrate          Shows the current pool hashrate
 
 - ➡️ Subscriptions are address-based and persistent – no account or login needed.
