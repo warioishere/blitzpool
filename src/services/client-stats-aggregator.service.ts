@@ -4,6 +4,7 @@ import { ClientService } from '../ORM/client/client.service';
 import { ClientStatisticsService } from '../ORM/client-statistics/client-statistics.service';
 import { AddressSettingsService } from '../ORM/address-settings/address-settings.service';
 import { ClientRejectedStatisticsService } from '../ORM/client-rejected-statistics/client-rejected-statistics.service';
+import { HashrateHistoryService } from './hashrate-history.service';
 
 export interface WorkerStats {
   workername: string;
@@ -42,6 +43,7 @@ export class ClientStatsAggregator {
     private readonly clientStatisticsService: ClientStatisticsService,
     private readonly addressSettingsService: AddressSettingsService,
     private readonly clientRejectedStatisticsService: ClientRejectedStatisticsService,
+    private readonly hashrateHistory: HashrateHistoryService,
   ) {}
 
   public async getStats(address: string): Promise<AddressStats> {
@@ -52,18 +54,16 @@ export class ClientStatsAggregator {
     const addrSettings = await this.addressSettingsService.getSettings(address, false);
     const now = Date.now();
 
+    const totalHashrateNow = workers.reduce((sum, w) => sum + (w.hashRate || 0), 0);
+    this.hashrateHistory.record(address, null, totalHashrateNow);
+    workers.forEach(w => this.hashrateHistory.record(address, w.clientName, w.hashRate || 0));
+
     const result: AddressStats = {
       hashrate1m: this.suffix.to(
-        await this.clientStatisticsService.getHashRate({
-          address,
-          since: now - 60 * 1000,
-        }),
+        this.hashrateHistory.getAverage(address, 1)
       ),
       hashrate5m: this.suffix.to(
-        await this.clientStatisticsService.getHashRate({
-          address,
-          since: now - 5 * 60 * 1000,
-        }),
+        this.hashrateHistory.getAverage(address, 5)
       ),
       hashrate1hr: this.suffix.to(
         await this.clientStatisticsService.getHashRate({
@@ -102,18 +102,10 @@ export class ClientStatsAggregator {
         return {
           workername: worker.clientName,
           hashrate1m: this.suffix.to(
-            await this.clientStatisticsService.getHashRate({
-              address,
-              clientName: worker.clientName,
-              since: now - 60 * 1000,
-            }),
+            this.hashrateHistory.getAverage(address, 1, worker.clientName)
           ),
           hashrate5m: this.suffix.to(
-            await this.clientStatisticsService.getHashRate({
-              address,
-              clientName: worker.clientName,
-              since: now - 5 * 60 * 1000,
-            }),
+            this.hashrateHistory.getAverage(address, 5, worker.clientName)
           ),
           hashrate1hr: this.suffix.to(
             await this.clientStatisticsService.getHashRate({

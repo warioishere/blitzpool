@@ -26,6 +26,7 @@ import { StratumV1Service } from './services/stratum-v1.service';
 import { TelegramService } from './services/telegram.service';
 import { ClientStatsAggregator } from './services/client-stats-aggregator.service';
 import { ExternalSharesService } from './services/external-shares.service';
+import { HashrateHistoryService } from './services/hashrate-history.service';
 import { ExternalShareController } from './controllers/external-share/external-share.controller';
 import { ExternalSharesModule } from './ORM/external-shares/external-shares.module';
 import { PoolShareStatisticsModule } from './ORM/pool-share-statistics/pool-share-statistics.module';
@@ -82,6 +83,7 @@ const ORMModules = [
         BraiinsService,
         ExternalSharesService,
         ClientStatsAggregator,
+        HashrateHistoryService,
     ],
 })
 export class AppModule {
