@@ -229,28 +229,6 @@ export class ClientStatisticsService {
     }
 
 
-    public async getHashRateForGroup(address: string, clientName: string) {
-
-        var oneHour = new Date(new Date().getTime() - (60 * 60 * 1000));
-
-        const query = `
-            SELECT
-            SUM(entry.shares) AS difficultySum
-            FROM
-                client_statistics_entity AS entry
-            WHERE
-                entry.address = ? AND entry.clientName = ? AND entry.time > ${oneHour.getTime()}
-        `;
-
-        const result = await this.clientStatisticsRepository.query(query, [address, clientName]);
-
-
-        const difficultySum = result[0].difficultySum;
-
-        return (difficultySum * 4294967296) / (600);
-
-    }
-
     public async getChartDataForGroup(address: string, clientName: string) {
         var yesterday = new Date(new Date().getTime() - (24 * 60 * 60 * 1000));
 
@@ -280,46 +258,95 @@ export class ClientStatisticsService {
     }
 
 
-    public async getHashRateForSession(address: string, clientName: string, sessionId: string) {
+    public async getHashRate(options: {
+        address: string;
+        since?: number;
+        clientName?: string;
+        sessionId?: string;
+    }): Promise<number> {
+        if (options.sessionId) {
+            const query = `
+                SELECT
+                    createdAt,
+                    updatedAt,
+                    shares
+                FROM
+                    client_statistics_entity AS entry
+                WHERE
+                    entry.address = ? AND entry.clientName = ? AND entry.sessionId = ?
+                ORDER BY time DESC
+                LIMIT 2;
+            `;
 
-        const query = `
-            SELECT
-                createdAt,
-                updatedAt,
-                shares
-            FROM
-                client_statistics_entity AS entry
-            WHERE
-                entry.address = ? AND entry.clientName = ? AND entry.sessionId = ?
-            ORDER BY time DESC
-            LIMIT 2;
-        `;
+            const result = await this.clientStatisticsRepository.query(query, [
+                options.address,
+                options.clientName,
+                options.sessionId,
+            ]);
 
-        const result = await this.clientStatisticsRepository.query(query, [address, clientName, sessionId]);
+            if (result.length < 1) {
+                return 0;
+            }
 
-        if (result.length < 1) {
+            const latestStat = result[0];
+
+            if (result.length < 2) {
+                const time =
+                    new Date(latestStat.updatedAt).getTime() -
+                    new Date(latestStat.createdAt).getTime();
+                if (time < 1000 * 60) {
+                    return 0;
+                }
+                return (latestStat.shares * 4294967296) / (time / 1000);
+            } else {
+                const secondLatestStat = result[1];
+                const time =
+                    new Date(latestStat.updatedAt).getTime() -
+                    new Date(secondLatestStat.createdAt).getTime();
+                if (time < 1000 * 60) {
+                    return 0;
+                }
+                return (
+                    (latestStat.shares + secondLatestStat.shares) * 4294967296 /
+                    (time / 1000)
+                );
+            }
+        }
+
+        const since = options.since ?? Date.now() - 60 * 60 * 1000;
+        const windowMs = Date.now() - since;
+
+        if (windowMs <= 5 * 60 * 1000) {
+            const minutes = Math.ceil(windowMs / 60000);
+            return this.clientService.getRecentHashRate(
+                options.address,
+                minutes,
+                options.clientName,
+            );
+        }
+
+        const qb = this.clientStatisticsRepository
+            .createQueryBuilder('entry')
+            .select('SUM(entry.shares)', 'sum')
+            .where('entry.address = :address', { address: options.address })
+            .andWhere('entry.time > :since', { since });
+        if (options.clientName) {
+            qb.andWhere('entry.clientName = :clientName', {
+                clientName: options.clientName,
+            });
+        }
+        if (options.sessionId) {
+            qb.andWhere('entry.sessionId = :sessionId', {
+                sessionId: options.sessionId,
+            });
+        }
+        const result = await qb.getRawOne();
+        const diffSum = result?.sum ? parseFloat(result.sum) : 0;
+        const seconds = windowMs / 1000;
+        if (seconds <= 0) {
             return 0;
         }
-
-        const latestStat = result[0];
-
-        if (result.length < 2) {
-            const time = new Date(latestStat.updatedAt).getTime() - new Date(latestStat.createdAt).getTime();
-            // 1min
-            if (time < 1000 * 60) {
-                return 0;
-            }
-            return (latestStat.shares * 4294967296) / (time / 1000);
-        } else {
-            const secondLatestStat = result[1];
-            const time = new Date(latestStat.updatedAt).getTime() - new Date(secondLatestStat.createdAt).getTime();
-            // 1min
-            if (time < 1000 * 60) {
-                return 0;
-            }
-            return ((latestStat.shares + secondLatestStat.shares) * 4294967296) / (time / 1000);
-        }
-
+        return (diffSum * 4294967296) / seconds;
     }
 
     public async getChartDataForSession(address: string, clientName: string, sessionId: string) {
@@ -369,29 +396,6 @@ export class ClientStatisticsService {
         return results.map(r => ({ clientName: r.clientName, total: parseFloat(r.total) }));
     }
 
-    public async getHashRateSince(address: string, since: number, clientName?: string): Promise<number> {
-        const windowMs = Date.now() - since;
-        if (windowMs <= 5 * 60 * 1000) {
-            const minutes = Math.ceil(windowMs / 60000);
-            return this.clientService.getRecentHashRate(address, minutes, clientName);
-        }
-
-        const qb = this.clientStatisticsRepository
-            .createQueryBuilder('entry')
-            .select('SUM(entry.shares)', 'sum')
-            .where('entry.address = :address', { address })
-            .andWhere('entry.time > :since', { since });
-        if (clientName) {
-            qb.andWhere('entry.clientName = :clientName', { clientName });
-        }
-        const result = await qb.getRawOne();
-        const diffSum = result?.sum ? parseFloat(result.sum) : 0;
-        const seconds = windowMs / 1000;
-        if (seconds <= 0) {
-            return 0;
-        }
-        return (diffSum * 4294967296) / seconds;
-    }
 
     public async getLastShareTime(address: string, clientName?: string): Promise<number | null> {
         const qb = this.clientStatisticsRepository

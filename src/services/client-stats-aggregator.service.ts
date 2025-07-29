@@ -53,11 +53,36 @@ export class ClientStatsAggregator {
     const now = Date.now();
 
     const result: AddressStats = {
-      hashrate1m: this.suffix.to(await this.clientStatisticsService.getHashRateSince(address, now - 60 * 1000)),
-      hashrate5m: this.suffix.to(await this.clientStatisticsService.getHashRateSince(address, now - 5 * 60 * 1000)),
-      hashrate1hr: this.suffix.to(await this.clientStatisticsService.getHashRateSince(address, now - 60 * 60 * 1000)),
-      hashrate1d: this.suffix.to(await this.clientStatisticsService.getHashRateSince(address, now - 24 * 60 * 60 * 1000)),
-      hashrate7d: this.suffix.to(await this.clientStatisticsService.getHashRateSince(address, now - 7 * 24 * 60 * 60 * 1000)),
+      hashrate1m: this.suffix.to(
+        await this.clientStatisticsService.getHashRate({
+          address,
+          since: now - 60 * 1000,
+        }),
+      ),
+      hashrate5m: this.suffix.to(
+        await this.clientStatisticsService.getHashRate({
+          address,
+          since: now - 5 * 60 * 1000,
+        }),
+      ),
+      hashrate1hr: this.suffix.to(
+        await this.clientStatisticsService.getHashRate({
+          address,
+          since: now - 60 * 60 * 1000,
+        }),
+      ),
+      hashrate1d: this.suffix.to(
+        await this.clientStatisticsService.getHashRate({
+          address,
+          since: now - 24 * 60 * 60 * 1000,
+        }),
+      ),
+      hashrate7d: this.suffix.to(
+        await this.clientStatisticsService.getHashRate({
+          address,
+          since: now - 7 * 24 * 60 * 60 * 1000,
+        }),
+      ),
       lastshare: await this.clientStatisticsService.getLastShareTime(address),
       workers: workers.length,
       shares,
@@ -76,11 +101,41 @@ export class ClientStatsAggregator {
         const bestShareEver = await this.clientService.getBestShareEver(address, worker.clientName);
         return {
           workername: worker.clientName,
-          hashrate1m: this.suffix.to(await this.clientStatisticsService.getHashRateSince(address, now - 60 * 1000, worker.clientName)),
-          hashrate5m: this.suffix.to(await this.clientStatisticsService.getHashRateSince(address, now - 5 * 60 * 1000, worker.clientName)),
-          hashrate1hr: this.suffix.to(await this.clientStatisticsService.getHashRateSince(address, now - 60 * 60 * 1000, worker.clientName)),
-          hashrate1d: this.suffix.to(await this.clientStatisticsService.getHashRateSince(address, now - 24 * 60 * 60 * 1000, worker.clientName)),
-          hashrate7d: this.suffix.to(await this.clientStatisticsService.getHashRateSince(address, now - 7 * 24 * 60 * 60 * 1000, worker.clientName)),
+          hashrate1m: this.suffix.to(
+            await this.clientStatisticsService.getHashRate({
+              address,
+              clientName: worker.clientName,
+              since: now - 60 * 1000,
+            }),
+          ),
+          hashrate5m: this.suffix.to(
+            await this.clientStatisticsService.getHashRate({
+              address,
+              clientName: worker.clientName,
+              since: now - 5 * 60 * 1000,
+            }),
+          ),
+          hashrate1hr: this.suffix.to(
+            await this.clientStatisticsService.getHashRate({
+              address,
+              clientName: worker.clientName,
+              since: now - 60 * 60 * 1000,
+            }),
+          ),
+          hashrate1d: this.suffix.to(
+            await this.clientStatisticsService.getHashRate({
+              address,
+              clientName: worker.clientName,
+              since: now - 24 * 60 * 60 * 1000,
+            }),
+          ),
+          hashrate7d: this.suffix.to(
+            await this.clientStatisticsService.getHashRate({
+              address,
+              clientName: worker.clientName,
+              since: now - 7 * 24 * 60 * 60 * 1000,
+            }),
+          ),
           lastshare: await this.clientStatisticsService.getLastShareTime(address, worker.clientName),
           shares: wShares,
           rejected: wRejected,
