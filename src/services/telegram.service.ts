@@ -8,6 +8,8 @@ import { decryptMessageIfNeeded } from '../utils/message-decryptor';
 import { TelegramSubscriptionsService } from '../ORM/telegram-subscriptions/telegram-subscriptions.service';
 import { ClientService } from '../ORM/client/client.service';
 import { AddressSettingsService } from '../ORM/address-settings/address-settings.service';
+import { ClientStatisticsService } from '../ORM/client-statistics/client-statistics.service';
+import { ClientRejectedStatisticsService } from '../ORM/client-rejected-statistics/client-rejected-statistics.service';
 
 @Injectable()
 export class TelegramService implements OnModuleInit {
@@ -24,8 +26,10 @@ export class TelegramService implements OnModuleInit {
     constructor(
         private readonly configService: ConfigService,
         private readonly telegramSubscriptionsService: TelegramSubscriptionsService,
-	private readonly clientService: ClientService,
-        private readonly addressSettingsService: AddressSettingsService
+        private readonly clientService: ClientService,
+        private readonly addressSettingsService: AddressSettingsService,
+        private readonly clientStatisticsService: ClientStatisticsService,
+        private readonly clientRejectedStatisticsService: ClientRejectedStatisticsService
     ) {
         const token: string | null = this.configService.get('TELEGRAM_BOT_TOKEN');
 
