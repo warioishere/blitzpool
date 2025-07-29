@@ -12,7 +12,7 @@ export class ClientRejectedStatisticsEntity extends TrackedEntity {
   @Column({ length: 62, type: 'varchar' })
   address: string;
 
-  @Column({ length: 64, type: 'varchar' })
+  @Column({ length: 64, type: 'varchar', default: '' })
   clientName: string;
 
   @Column({ type: 'integer' })
