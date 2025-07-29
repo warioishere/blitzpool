@@ -75,12 +75,14 @@ export class ClientStatsAggregator {
         await this.clientStatisticsService.getHashRate({
           address,
           since: now - 24 * 60 * 60 * 1000,
+          useActualWindow: true,
         }),
       ),
       hashrate7d: this.suffix.to(
         await this.clientStatisticsService.getHashRate({
           address,
           since: now - 7 * 24 * 60 * 60 * 1000,
+          useActualWindow: true,
         }),
       ),
       lastshare: await this.clientService.getLastShareTime(address),
@@ -119,6 +121,7 @@ export class ClientStatsAggregator {
               address,
               clientName: worker.clientName,
               since: now - 24 * 60 * 60 * 1000,
+              useActualWindow: true,
             }),
           ),
           hashrate7d: this.suffix.to(
@@ -126,6 +129,7 @@ export class ClientStatsAggregator {
               address,
               clientName: worker.clientName,
               since: now - 7 * 24 * 60 * 60 * 1000,
+              useActualWindow: true,
             }),
           ),
           lastshare: await this.clientService.getLastShareTime(address, worker.clientName),

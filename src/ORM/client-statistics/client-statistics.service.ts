@@ -263,6 +263,7 @@ export class ClientStatisticsService {
         since?: number;
         clientName?: string;
         sessionId?: string;
+        useActualWindow?: boolean;
     }): Promise<number> {
         if (options.sessionId) {
             const query = `
@@ -327,8 +328,12 @@ export class ClientStatisticsService {
 
         const qb = this.clientStatisticsRepository
             .createQueryBuilder('entry')
-            .select('SUM(entry.shares)', 'sum')
-            .where('entry.address = :address', { address: options.address })
+            .select('SUM(entry.shares)', 'sum');
+        if (options.useActualWindow) {
+            qb.addSelect('MIN(entry.time)', 'min')
+              .addSelect('MAX(entry.time)', 'max');
+        }
+        qb.where('entry.address = :address', { address: options.address })
             .andWhere('entry.time > :since', { since });
         if (options.clientName) {
             qb.andWhere('entry.clientName = :clientName', {
@@ -342,6 +347,14 @@ export class ClientStatisticsService {
         }
         const result = await qb.getRawOne();
         const diffSum = result?.sum ? parseFloat(result.sum) : 0;
+        if (diffSum === 0) {
+            return 0;
+        }
+        if (options.useActualWindow && result?.min != null && result?.max != null) {
+            const duration = (parseInt(result.max) - parseInt(result.min)) / 1000;
+            const seconds = duration > 0 ? duration : windowMs / 1000;
+            return (diffSum * 4294967296) / seconds;
+        }
         const seconds = windowMs / 1000;
         if (seconds <= 0) {
             return 0;
