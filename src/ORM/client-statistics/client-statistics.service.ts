@@ -133,16 +133,16 @@ export class ClientStatisticsService {
 
         const query = `
             SELECT
-                time AS label,
+                FLOOR(time / 600000) * 600000 AS label,
                 ROUND(((SUM(shares) * 4294967296) / 600)) AS data
             FROM
                 client_statistics_entity AS entry
             WHERE
                 entry.time > ${since.getTime()} AND entry.sessionId != 'AGG'
             GROUP BY
-                time
+                label
             ORDER BY
-                time
+                label
             LIMIT ${limit};
 
     `;
@@ -199,7 +199,7 @@ export class ClientStatisticsService {
 
         const query = `
                 SELECT
-                    time label,
+                    FLOOR(time / 600000) * 600000 AS label,
                     CASE
                         WHEN (MAX(strftime('%s', updatedAt)) - MIN(strftime('%s', createdAt))) < 1
                             THEN (SUM(shares) * 4294967296) / 600
@@ -211,9 +211,9 @@ export class ClientStatisticsService {
                 WHERE
                     entry.address = ? AND entry.time > ${since.getTime()}
                 GROUP BY
-                    time
+                    label
                 ORDER BY
-                    time
+                    label
                 LIMIT ${limit};
 
         `;
@@ -234,16 +234,16 @@ export class ClientStatisticsService {
 
         const query = `
             SELECT
-                time label,
+                FLOOR(time / 600000) * 600000 AS label,
                 (SUM(shares) * 4294967296) / 600 AS data
             FROM
                 client_statistics_entity AS entry
             WHERE
                 entry.address = ? AND entry.clientName = ? AND entry.time > ${yesterday.getTime()}
             GROUP BY
-                time
+                label
             ORDER BY
-                time
+                label
             LIMIT 144;
         `;
 
@@ -367,16 +367,16 @@ export class ClientStatisticsService {
 
         const query = `
             SELECT
-                time label,
+                FLOOR(time / 600000) * 600000 AS label,
                 (SUM(shares) * 4294967296) / 600 AS data
             FROM
                 client_statistics_entity AS entry
             WHERE
                 entry.address = ? AND entry.clientName = ? AND entry.sessionId = ? AND entry.time > ${yesterday.getTime()}
             GROUP BY
-                time
+                label
             ORDER BY
-                time
+                label
             LIMIT 144;
         `;
 
