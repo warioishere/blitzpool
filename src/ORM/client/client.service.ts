@@ -189,6 +189,22 @@ export class ClientService {
         return result?.total ? parseFloat(result.total) : 0;
     }
 
+    public async getLastShareTime(address: string, clientName?: string): Promise<number | null> {
+        const qb = this.clientRepository.createQueryBuilder('client')
+            .select('MAX(client.updatedAt)', 'last')
+            .where('client.address = :address', { address })
+            .andWhere('client.deletedAt IS NULL');
+        if (clientName) {
+            qb.andWhere('client.clientName = :clientName', { clientName });
+        }
+        const result = await qb.getRawOne();
+        if (!result || result.last == null) {
+            return null;
+        }
+        const ts = result.last instanceof Date ? result.last.getTime() : new Date(result.last).getTime();
+        return isNaN(ts) ? null : ts;
+    }
+
     public async deleteAll() {
         return await this.clientRepository.softDelete({})
     }
