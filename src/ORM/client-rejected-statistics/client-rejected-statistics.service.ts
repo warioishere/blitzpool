@@ -150,6 +150,27 @@ export class ClientRejectedStatisticsService {
     return totals;
   }
 
+  public async getTotalsByWorkerSince(
+    address: string,
+    time: number,
+    weighted: boolean = false,
+  ): Promise<Record<string, number>> {
+    const query = this.clientRejectedStatisticsRepository
+      .createQueryBuilder('stat')
+      .select('stat.clientName', 'clientName')
+      .addSelect(`SUM(stat.${weighted ? 'diff' : 'count'})`, 'count')
+      .where('stat.time > :time', { time })
+      .andWhere('stat.address = :address', { address })
+      .groupBy('stat.clientName');
+    const result = await query.getRawMany();
+
+    const totals: Record<string, number> = {};
+    result.forEach(r => {
+      totals[r.clientName] = r.count ? parseFloat(r.count) : 0;
+    });
+    return totals;
+  }
+
   public async getEntriesSince(
     address: string,
     time: number,

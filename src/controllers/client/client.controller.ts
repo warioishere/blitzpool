@@ -90,12 +90,12 @@ export class ClientController {
         const lastshare = await this.clientStatisticsService.getLastShareTime(address);
 
         const workerShareTotals = await this.clientStatisticsService.getTotalSharesForWorkers(address);
+        const workerRejectedTotals = await this.clientRejectedStatisticsService.getTotalsByWorkerSince(address, 0, true);
 
         const workerStats = await Promise.all(
             workers.map(async (worker) => {
                 const wShares = workerShareTotals.find(w => w.clientName === worker.clientName)?.total || 0;
-                const wRejectedTotals = await this.clientRejectedStatisticsService.getTotalsSince(address, 0, worker.clientName, true);
-                const wRejected = Object.values(wRejectedTotals).reduce((a, b) => a + b, 0);
+                const wRejected = workerRejectedTotals[worker.clientName] || 0;
                 const bestShareEver = await this.clientService.getBestShareEver(address, worker.clientName);
                 return {
                     workername: worker.clientName,
