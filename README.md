@@ -87,7 +87,6 @@ Example response from `/api/client/<btc_address>/stats`:
   "workers": 53,
   "shares": 703029762124,
   "rejected": 42,
-  "bestshare": 183996631107.3457,
   "bestever": 183996631107,
   "worker": [
     {
@@ -101,7 +100,7 @@ Example response from `/api/client/<btc_address>/stats`:
       "shares": 1404625542,
       "rejected": 1,
       "bestshare": 794572222.3472384,
-      "bestever": 794572222
+      "bestshareever": 794572222
     }
   ]
 }

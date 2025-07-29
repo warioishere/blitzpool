@@ -96,6 +96,7 @@ export class ClientController {
                 const wShares = workerShareTotals.find(w => w.clientName === worker.clientName)?.total || 0;
                 const wRejectedTotals = await this.clientRejectedStatisticsService.getTotalsSince(address, 0, worker.clientName, true);
                 const wRejected = Object.values(wRejectedTotals).reduce((a, b) => a + b, 0);
+                const bestShareEver = await this.clientService.getBestShareEver(address, worker.clientName);
                 return {
                     workername: worker.clientName,
                     hashrate1m: suffix.to(await this.clientStatisticsService.getHashRateSince(address, now - 60 * 1000, worker.clientName)),
@@ -107,7 +108,7 @@ export class ClientController {
                     shares: wShares,
                     rejected: wRejected,
                     bestshare: worker.bestDifficulty,
-                    bestever: worker.bestDifficulty
+                    bestshareever: bestShareEver
                 };
             })
         );
@@ -122,7 +123,6 @@ export class ClientController {
             workers: workers.length,
             shares,
             rejected,
-            bestshare: addrSettings?.bestDifficulty || 0,
             bestever: addrSettings?.bestDifficulty || 0,
             worker: workerStats
         };

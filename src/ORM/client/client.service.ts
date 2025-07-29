@@ -166,6 +166,15 @@ export class ClientService {
         })
     }
 
+    public async getBestShareEver(address: string, clientName: string): Promise<number> {
+        const result = await this.clientRepository.createQueryBuilder('client')
+            .withDeleted()
+            .select('MAX(client.bestDifficulty)', 'best')
+            .where('client.address = :address AND client.clientName = :clientName', { address, clientName })
+            .getRawOne();
+        return result?.best ? parseFloat(result.best) : 0;
+    }
+
     public async deleteAll() {
         return await this.clientRepository.softDelete({})
     }
