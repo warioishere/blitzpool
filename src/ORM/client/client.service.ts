@@ -175,6 +175,20 @@ export class ClientService {
         return result?.best ? parseFloat(result.best) : 0;
     }
 
+    public async getRecentHashRate(address: string, minutes: number, clientName?: string): Promise<number> {
+        const cutoff = new Date(Date.now() - minutes * 60 * 1000).toISOString();
+        const qb = this.clientRepository.createQueryBuilder('client')
+            .select('SUM(client.hashRate)', 'total')
+            .where('client.address = :address', { address })
+            .andWhere('client.updatedAt >= :cutoff', { cutoff })
+            .andWhere('client.deletedAt IS NULL');
+        if (clientName) {
+            qb.andWhere('client.clientName = :clientName', { clientName });
+        }
+        const result = await qb.getRawOne();
+        return result?.total ? parseFloat(result.total) : 0;
+    }
+
     public async deleteAll() {
         return await this.clientRepository.softDelete({})
     }

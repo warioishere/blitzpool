@@ -2,6 +2,8 @@ import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 
+import { ClientService } from '../client/client.service';
+
 import { ClientStatisticsEntity } from './client-statistics.entity';
 
 
@@ -10,9 +12,9 @@ export class ClientStatisticsService {
 
     constructor(
 
-
         @InjectRepository(ClientStatisticsEntity)
         private clientStatisticsRepository: Repository<ClientStatisticsEntity>,
+        private readonly clientService: ClientService,
     ) {
 
     }
@@ -368,6 +370,12 @@ export class ClientStatisticsService {
     }
 
     public async getHashRateSince(address: string, since: number, clientName?: string): Promise<number> {
+        const windowMs = Date.now() - since;
+        if (windowMs <= 5 * 60 * 1000) {
+            const minutes = Math.ceil(windowMs / 60000);
+            return this.clientService.getRecentHashRate(address, minutes, clientName);
+        }
+
         const qb = this.clientStatisticsRepository
             .createQueryBuilder('entry')
             .select('SUM(entry.shares)', 'sum')
@@ -378,7 +386,7 @@ export class ClientStatisticsService {
         }
         const result = await qb.getRawOne();
         const diffSum = result?.sum ? parseFloat(result.sum) : 0;
-        const seconds = (Date.now() - since) / 1000;
+        const seconds = windowMs / 1000;
         if (seconds <= 0) {
             return 0;
         }
