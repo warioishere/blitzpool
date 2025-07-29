@@ -69,6 +69,7 @@ export class ClientStatsAggregator {
         await this.clientStatisticsService.getHashRate({
           address,
           since: now - 60 * 60 * 1000,
+          useActualWindow: true,
         }),
       ),
       hashrate1d: this.suffix.to(
@@ -114,6 +115,7 @@ export class ClientStatsAggregator {
               address,
               clientName: worker.clientName,
               since: now - 60 * 60 * 1000,
+              useActualWindow: true,
             }),
           ),
           hashrate1d: this.suffix.to(
