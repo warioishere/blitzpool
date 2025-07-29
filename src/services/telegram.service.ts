@@ -6,10 +6,7 @@ import * as TelegramBot from 'node-telegram-bot-api';
 import { NumberSuffix } from '../utils/NumberSuffix';
 import { decryptMessageIfNeeded } from '../utils/message-decryptor';
 import { TelegramSubscriptionsService } from '../ORM/telegram-subscriptions/telegram-subscriptions.service';
-import { ClientService } from '../ORM/client/client.service';
-import { AddressSettingsService } from '../ORM/address-settings/address-settings.service';
-import { ClientStatisticsService } from '../ORM/client-statistics/client-statistics.service';
-import { ClientRejectedStatisticsService } from '../ORM/client-rejected-statistics/client-rejected-statistics.service';
+import { ClientStatsAggregator } from './client-stats-aggregator.service';
 
 @Injectable()
 export class TelegramService implements OnModuleInit {
@@ -26,10 +23,7 @@ export class TelegramService implements OnModuleInit {
     constructor(
         private readonly configService: ConfigService,
         private readonly telegramSubscriptionsService: TelegramSubscriptionsService,
-        private readonly clientService: ClientService,
-        private readonly addressSettingsService: AddressSettingsService,
-        private readonly clientStatisticsService: ClientStatisticsService,
-        private readonly clientRejectedStatisticsService: ClientRejectedStatisticsService
+        private readonly clientStatsAggregator: ClientStatsAggregator,
     ) {
         const token: string | null = this.configService.get('TELEGRAM_BOT_TOKEN');
 
@@ -228,30 +222,19 @@ export class TelegramService implements OnModuleInit {
             }
 
             try {
-                const workers = await this.clientService.getByAddress(address);
-                const addressSettings = await this.addressSettingsService.getSettings(address, false);
-                const shares = await this.clientStatisticsService.getTotalSharesForAddress(address);
-                const rejectedTotals = await this.clientRejectedStatisticsService.getTotalsSince(address, 0, undefined, true);
-                const rejected = Object.values(rejectedTotals).reduce((a, b) => a + b, 0);
-
-                if (!workers || workers.length === 0) {
+                const stats = await this.clientStatsAggregator.getStats(address);
+                if (stats.workers === 0) {
                     this.bot.sendMessage(chatId, this.t(chatId, 'Keine aktiven Worker für diese Adresse gefunden.', 'No active workers found for this address.'));
                     return;
                 }
 
-                const totalHashrate = workers.reduce((sum, w) => sum + (w.hashRate ?? 0), 0);
-                const totalHashrateTH = totalHashrate / 1e12;
+                const lastSeenSeconds = stats.lastshare ? Math.floor((Date.now() - stats.lastshare) / 1000) : 0;
+                const bestDifficultyG = (stats.bestever / 1e9).toFixed(2);
+                const sharesText = this.numberSuffix.to(stats.shares);
+                const rejectedText = this.numberSuffix.to(stats.rejected);
 
-                const lastSeenSeconds = Math.floor((Date.now() - new Date(workers[0].updatedAt).getTime()) / 1000);
-
-                const bestDiffRaw = addressSettings?.bestDifficulty ?? 0;
-                const bestDifficultyG = bestDiffRaw / 1e9;
-
-                const sharesText = this.numberSuffix.to(shares);
-                const rejectedText = this.numberSuffix.to(rejected);
-
-        const deText = `📈 Stats für deine Adresse:\n- Aktuelle Hashrate: ${totalHashrateTH.toFixed(2)} TH/s\n- Letzter Share: vor ${lastSeenSeconds} Sekunden\n- Beste Difficulty: ${bestDifficultyG.toFixed(2)} G\n- Shares: ${sharesText}\n- Rejected: ${rejectedText}`;
-        const enText = `📈 Stats for your address:\n- Current hashrate: ${totalHashrateTH.toFixed(2)} TH/s\n- Last share: ${lastSeenSeconds} seconds ago\n- Best difficulty: ${bestDifficultyG.toFixed(2)} G\n- Shares: ${sharesText}\n- Rejected: ${rejectedText}`;
+        const deText = `📈 Stats für deine Adresse:\n- Hashrate (1m): ${stats.hashrate1m}H\n- Letzter Share: vor ${lastSeenSeconds} Sekunden\n- Beste Difficulty: ${bestDifficultyG} G\n- Shares: ${sharesText}\n- Rejected: ${rejectedText}`;
+        const enText = `📈 Stats for your address:\n- Hashrate (1m): ${stats.hashrate1m}H\n- Last share: ${lastSeenSeconds} seconds ago\n- Best difficulty: ${bestDifficultyG} G\n- Shares: ${sharesText}\n- Rejected: ${rejectedText}`;
         this.bot.sendMessage(chatId, this.t(chatId, deText, enText));
         } catch (err) {
                 console.error("Fehler bei /stats:", err);

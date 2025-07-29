@@ -1,13 +1,13 @@
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Controller, Get, Inject, NotFoundException, Param, Query } from '@nestjs/common';
 import { Cache } from 'cache-manager';
-import { NumberSuffix } from '../../utils/NumberSuffix';
 
 import { AddressSettingsService } from '../../ORM/address-settings/address-settings.service';
 import { ClientStatisticsService } from '../../ORM/client-statistics/client-statistics.service';
 import { ClientService } from '../../ORM/client/client.service';
 import { ClientRejectedStatisticsService } from '../../ORM/client-rejected-statistics/client-rejected-statistics.service';
 import { eStratumErrorCode } from '../../models/enums/eStratumErrorCode';
+import { ClientStatsAggregator } from '../../services/client-stats-aggregator.service';
 
 
 @Controller('client')
@@ -18,7 +18,8 @@ export class ClientController {
         private readonly clientService: ClientService,
         private readonly clientStatisticsService: ClientStatisticsService,
         private readonly addressSettingsService: AddressSettingsService,
-        private readonly clientRejectedStatisticsService: ClientRejectedStatisticsService
+        private readonly clientRejectedStatisticsService: ClientRejectedStatisticsService,
+        private readonly clientStatsAggregator: ClientStatsAggregator,
     ) { }
 
 
@@ -75,58 +76,7 @@ export class ClientController {
         if (cached) {
             return cached;
         }
-        const suffix = new NumberSuffix();
-        const workers = await this.clientService.getByAddress(address);
-        const shares = await this.clientStatisticsService.getTotalSharesForAddress(address);
-        const rejectedTotals = await this.clientRejectedStatisticsService.getTotalsSince(address, 0, undefined, true);
-        const rejected = Object.values(rejectedTotals).reduce((a, b) => a + b, 0);
-        const addrSettings = await this.addressSettingsService.getSettings(address, false);
-        const now = Date.now();
-        const hashrate1m = await this.clientStatisticsService.getHashRateSince(address, now - 60 * 1000);
-        const hashrate5m = await this.clientStatisticsService.getHashRateSince(address, now - 5 * 60 * 1000);
-        const hashrate1hr = await this.clientStatisticsService.getHashRateSince(address, now - 60 * 60 * 1000);
-        const hashrate1d = await this.clientStatisticsService.getHashRateSince(address, now - 24 * 60 * 60 * 1000);
-        const hashrate7d = await this.clientStatisticsService.getHashRateSince(address, now - 7 * 24 * 60 * 60 * 1000);
-        const lastshare = await this.clientStatisticsService.getLastShareTime(address);
-
-        const workerShareTotals = await this.clientStatisticsService.getTotalSharesForWorkers(address);
-        const workerRejectedTotals = await this.clientRejectedStatisticsService.getTotalsByWorkerSince(address, 0, true);
-
-        const workerStats = await Promise.all(
-            workers.map(async (worker) => {
-                const wShares = workerShareTotals.find(w => w.clientName === worker.clientName)?.total || 0;
-                const wRejected = workerRejectedTotals[worker.clientName] || 0;
-                const bestShareEver = await this.clientService.getBestShareEver(address, worker.clientName);
-                return {
-                    workername: worker.clientName,
-                    hashrate1m: suffix.to(await this.clientStatisticsService.getHashRateSince(address, now - 60 * 1000, worker.clientName)),
-                    hashrate5m: suffix.to(await this.clientStatisticsService.getHashRateSince(address, now - 5 * 60 * 1000, worker.clientName)),
-                    hashrate1hr: suffix.to(await this.clientStatisticsService.getHashRateSince(address, now - 60 * 60 * 1000, worker.clientName)),
-                    hashrate1d: suffix.to(await this.clientStatisticsService.getHashRateSince(address, now - 24 * 60 * 60 * 1000, worker.clientName)),
-                    hashrate7d: suffix.to(await this.clientStatisticsService.getHashRateSince(address, now - 7 * 24 * 60 * 60 * 1000, worker.clientName)),
-                    lastshare: await this.clientStatisticsService.getLastShareTime(address, worker.clientName),
-                    shares: wShares,
-                    rejected: wRejected,
-                    bestshare: worker.bestDifficulty,
-                    bestshareever: bestShareEver
-                };
-            })
-        );
-
-        const data = {
-            hashrate1m: suffix.to(hashrate1m),
-            hashrate5m: suffix.to(hashrate5m),
-            hashrate1hr: suffix.to(hashrate1hr),
-            hashrate1d: suffix.to(hashrate1d),
-            hashrate7d: suffix.to(hashrate7d),
-            lastshare: lastshare,
-            workers: workers.length,
-            shares,
-            rejected,
-            bestever: addrSettings?.bestDifficulty || 0,
-            worker: workerStats
-        };
-
+        const data = await this.clientStatsAggregator.getStats(address);
         await this.cacheManager.set(CACHE_KEY, data, 60);
         return data;
     }
