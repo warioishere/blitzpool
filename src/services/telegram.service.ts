@@ -15,6 +15,11 @@ export class TelegramService implements OnModuleInit {
     private diffNotifications: boolean;
     private numberSuffix: NumberSuffix;
     private bestDiffCache: Map<string, number> = new Map();
+    private chatLang: Map<number, 'de' | 'en'> = new Map();
+
+    private t(chatId: number, de: string, en: string): string {
+        return (this.chatLang.get(chatId) ?? 'de') === 'en' ? en : de;
+    }
 
     constructor(
         private readonly configService: ConfigService,
@@ -42,6 +47,8 @@ export class TelegramService implements OnModuleInit {
         // Telegram Menübefehle registrieren
         await this.bot.setMyCommands([
             { command: '/start', description: 'Zeigt Willkommensnachricht' },
+            { command: '/english', description: 'Switch bot language to English' },
+            { command: '/deutsch', description: 'Bot Sprache auf Deutsch' },
             { command: '/subscribe', description: 'Benachrichtigung bei Blockhit aktivieren' },
             { command: '/subscribe_bestdiff', description: 'Best-Diff Benachrichtigungen (on/off, Standard: on)' },
             { command: '/difficulty', description: 'Zeigt aktuelle Netzwerk-Difficulty' },
@@ -50,10 +57,20 @@ export class TelegramService implements OnModuleInit {
             { command: '/poolhashrate', description: 'Zeigt die aktuelle Pool-Hashrate' }
         ]);
 
+        this.bot.onText(/\/english/, msg => {
+            this.chatLang.set(msg.chat.id, 'en');
+            this.bot.sendMessage(msg.chat.id, 'Language switched to English.');
+        });
+
+        this.bot.onText(/\/deutsch/, msg => {
+            this.chatLang.set(msg.chat.id, 'de');
+            this.bot.sendMessage(msg.chat.id, 'Sprache auf Deutsch umgestellt.');
+        });
+
         this.bot.onText(/\/subscribe (.+)/, async (msg, match) => {
             const raw = match?.[1]?.trim();
             if (!raw) {
-                this.bot.sendMessage(msg.chat.id, 'Befehl nicht erkannt, oder Wert fehlt');
+                this.bot.sendMessage(msg.chat.id, this.t(msg.chat.id, 'Befehl nicht erkannt, oder Wert fehlt', 'Command not recognized, or value missing'));
                 return;
             }
 
@@ -65,16 +82,16 @@ export class TelegramService implements OnModuleInit {
             }
 
             if (!validate(address)) {
-                this.bot.sendMessage(msg.chat.id, "Ungültige Adresse.");
+                this.bot.sendMessage(msg.chat.id, this.t(msg.chat.id, 'Ungültige Adresse.', 'Invalid address.'));
                 return;
             }
 
             const subscribers = await this.telegramSubscriptionsService.getSubscriptions(address);
             if (subscribers.length === 0) {
                 await this.telegramSubscriptionsService.saveSubscription(msg.chat.id, address);
-                this.bot.sendMessage(msg.chat.id, "Benachrichtigung aktiviert!");
+                this.bot.sendMessage(msg.chat.id, this.t(msg.chat.id, 'Benachrichtigung aktiviert!', 'Notification enabled!'));
             } else {
-                this.bot.sendMessage(msg.chat.id, "Bereits registriert!");
+                this.bot.sendMessage(msg.chat.id, this.t(msg.chat.id, 'Bereits registriert!', 'Already registered!'));
             }
         });
 
@@ -83,7 +100,7 @@ export class TelegramService implements OnModuleInit {
             const value = match?.[1]?.toLowerCase();
 
             if (!value) {
-                this.bot.sendMessage(chatId, 'Befehl nicht erkannt, oder Wert fehlt');
+                this.bot.sendMessage(chatId, this.t(chatId, 'Befehl nicht erkannt, oder Wert fehlt', 'Command not recognized, or value missing'));
                 return;
             }
 
@@ -91,32 +108,47 @@ export class TelegramService implements OnModuleInit {
 
             try {
                 await this.telegramSubscriptionsService.updateBestDiffNotification(chatId, enable);
-                this.bot.sendMessage(chatId, `Best Difficulty Benachrichtigungen wurden ${enable ? 'aktiviert' : 'deaktiviert'}.`);
+                this.bot.sendMessage(chatId, this.t(chatId, `Best Difficulty Benachrichtigungen wurden ${enable ? 'aktiviert' : 'deaktiviert'}.`, `Best difficulty notifications ${enable ? 'enabled' : 'disabled'}.`));
             } catch (error) {
                 console.error("Fehler bei /subscribe_bestdiff:", error);
-                this.bot.sendMessage(chatId, "Fehler beim Setzen der Einstellung. Bitte später erneut versuchen.");
+                this.bot.sendMessage(chatId, this.t(chatId, 'Fehler beim Setzen der Einstellung. Bitte später erneut versuchen.', 'Error saving setting. Please try again later.'));
             }
         });
 
         this.bot.onText(/\/start/, (msg) => {
-            this.bot.sendMessage(msg.chat.id,
-`Willkommen beim BlitzPool Status Bot! 💡
+            const de = `Willkommen beim BlitzPool Status Bot! 💡\n\n` +
+                `Nutze /english oder /deutsch, um die Sprache zu wechseln.\n\n` +
+                `Du kannst mir:\n` +
+                `– direkt schreiben (z. B. /subscribe BitcoinAdresse)\n` +
+                `– oder verschlüsselt senden (z. B. über das Verschlüsselungstool)\n\n` +
+                `🔐 Du kannst mir die BTC Worker Adresse auch verschlüsselt senden:\n` +
+                `1. Lesst euch die README durch: https://github.com/warioishere/blitzpool-message-encryptor-for-TG/blob/master/README.md\n` +
+                `2a. Ladet den Python-Script für Linux und Mac herunter: https://cloud.yourdevice.ch/s/TbqdwE24jTRmtRp\n` +
+                `2b. Oder für Windows: https://github.com/warioishere/blitzpool-message-encryptor-for-TG/releases/tag/v1.0.0\n` +
+                `3a. Führt den Script im Terminal aus mit './encrypt-message.py'\n` +
+                `3b. Oder auf Windows mit Doppelklick auf die .exe\n` +
+                `4. Gebt eure BTC-Adresse ein.\n` +
+                `5. Sende '/subscribe <verschlüsselte Adresse>' direkt an mich.\n` +
+                `6. Sende '/stats <verschlüsselte Adresse>' für deine Statistiken.\n\n` +
+                `Ich entschlüssle ihn und reagiere genau wie bei Klartext. 🔒`;
 
-Du kannst mir:
-– direkt schreiben (z. B. /subscribe BitcoinAdresse)
-– oder verschlüsselt senden (z. B. über das Verschlüsselungstool)
+            const en = `Welcome to the BlitzPool status bot! 💡\n\n` +
+                `Use /english or /deutsch to switch the language.\n\n` +
+                `You can:\n` +
+                `– message me directly (e.g. /subscribe BitcoinAddress)\n` +
+                `– or send it encrypted using the encryption tool\n\n` +
+                `🔐 You may also send the BTC worker address encrypted:\n` +
+                `1. Read the README: https://github.com/warioishere/blitzpool-message-encryptor-for-TG/blob/master/README.md\n` +
+                `2a. Download the Python script for Linux and Mac: https://cloud.yourdevice.ch/s/TbqdwE24jTRmtRp\n` +
+                `2b. Or for Windows: https://github.com/warioishere/blitzpool-message-encryptor-for-TG/releases/tag/v1.0.0\n` +
+                `3a. Run the script with './encrypt-message.py'\n` +
+                `3b. Or double-click the .exe on Windows\n` +
+                `4. Enter your BTC address.\n` +
+                `5. Send '/subscribe <encrypted address>' to me.\n` +
+                `6. Send '/stats <encrypted address>' for your stats.\n\n` +
+                `I will decrypt it and process it like a normal message. 🔒`;
 
-🔐 Du kannst mir die BTC Worker Adresse auch verschlüsselt senden:
-1. Lesst euch die README durch: https://github.com/warioishere/blitzpool-message-encryptor-for-TG/blob/master/README.md
-2a. Ladet den Python-Script für Linux und Mac herunter: https://cloud.yourdevice.ch/s/TbqdwE24jTRmtRp
-2b. Oder für Windows: https://github.com/warioishere/blitzpool-message-encryptor-for-TG/releases/tag/v1.0.0
-3a. Führt den Script im Terminal aus mit './encrypt-message.py'
-3b. Oder auf Windows mit Doppelklick auf die .exe
-4. Gebt eure BTC-Adresse ein.
-5. Sende '/subscribe <verschlüsselte Adresse>' direkt an mich.
-6. Sende '/stats <verschlüsselte Adresse>' für deine Statistiken.
-
-Ich entschlüssle ihn und reagiere genau wie bei Klartext. 🔒`);
+            this.bot.sendMessage(msg.chat.id, this.t(msg.chat.id, de, en));
         });
 
         this.bot.onText(/\/difficulty/, async (msg) => {
@@ -126,9 +158,9 @@ Ich entschlüssle ihn und reagiere genau wie bei Klartext. 🔒`);
                 const res = await fetch('https://mempool.space/api/v1/mining/hashrate/3d');
                 const json = await res.json();
                 const difficulty = (json.currentDifficulty / 1e12).toFixed(2);
-                this.bot.sendMessage(chatId, `Aktuelle Difficulty: ${difficulty} T`);
+                this.bot.sendMessage(chatId, this.t(chatId, `Aktuelle Difficulty: ${difficulty} T`, `Current difficulty: ${difficulty} T`));
             } catch (e) {
-                this.bot.sendMessage(chatId, "Konnte die Difficulty nicht abrufen.");
+                this.bot.sendMessage(chatId, this.t(chatId, 'Konnte die Difficulty nicht abrufen.', 'Could not fetch difficulty.'));
                 console.error(e);
             }
         });
@@ -146,15 +178,12 @@ Ich entschlüssle ihn und reagiere genau wie bei Klartext. 🔒`);
 
                 const changeText = change >= 0 ? `📈 +${change}%` : `📉 ${change}%`;
 
-                this.bot.sendMessage(chatId,
-`📊 Nächste Difficulty-Anpassung:
-
-• Fortschritt: ${progress}%
-• Geschätzt: ${estimatedDate}
-• Erwartete Änderung: ${changeText}`);
+                const deText = `📊 Nächste Difficulty-Anpassung:\n\n• Fortschritt: ${progress}%\n• Geschätzt: ${estimatedDate}\n• Erwartete Änderung: ${changeText}`;
+                const enText = `📊 Next difficulty adjustment:\n\n• Progress: ${progress}%\n• Estimated: ${estimatedDate}\n• Expected change: ${changeText}`;
+                this.bot.sendMessage(chatId, this.t(chatId, deText, enText));
             } catch (err) {
                 console.error("Fehler bei /next_difficulty:", err);
-                this.bot.sendMessage(chatId, "Konnte die nächste Difficulty-Anpassung nicht abrufen.");
+                this.bot.sendMessage(chatId, this.t(chatId, 'Konnte die nächste Difficulty-Anpassung nicht abrufen.', 'Could not fetch next difficulty adjustment.'));
             }
         });
 
@@ -166,10 +195,10 @@ Ich entschlüssle ihn und reagiere genau wie bei Klartext. 🔒`);
                 const res = await fetch(`http://localhost:${apiPort}/api/pool`);
                 const data = await res.json();
                 const hashrateTH = (data.totalHashRate / 1e12).toFixed(2);
-                this.bot.sendMessage(chatId, `Aktuelle Pool-Hashrate: ${hashrateTH} TH/s`);
+                this.bot.sendMessage(chatId, this.t(chatId, `Aktuelle Pool-Hashrate: ${hashrateTH} TH/s`, `Current pool hashrate: ${hashrateTH} TH/s`));
             } catch (err) {
                 console.error('Fehler bei /poolhashrate:', err);
-                this.bot.sendMessage(chatId, 'Konnte die Pool-Hashrate nicht abrufen.');
+                this.bot.sendMessage(chatId, this.t(chatId, 'Konnte die Pool-Hashrate nicht abrufen.', 'Could not fetch pool hashrate.'));
             }
         });
 
@@ -178,7 +207,7 @@ Ich entschlüssle ihn und reagiere genau wie bei Klartext. 🔒`);
             const raw = match?.[1]?.trim();
 
             if (!raw) {
-                this.bot.sendMessage(chatId, 'Befehl nicht erkannt, oder Wert fehlt');
+                this.bot.sendMessage(chatId, this.t(chatId, 'Befehl nicht erkannt, oder Wert fehlt', 'Command not recognized, or value missing'));
                 return;
             }
 
@@ -190,7 +219,7 @@ Ich entschlüssle ihn und reagiere genau wie bei Klartext. 🔒`);
             }
 
             if (!validate(address)) {
-                this.bot.sendMessage(chatId, 'Ungültige Adresse.');
+                this.bot.sendMessage(chatId, this.t(chatId, 'Ungültige Adresse.', 'Invalid address.'));
                 return;
             }
 
@@ -202,7 +231,7 @@ Ich entschlüssle ihn und reagiere genau wie bei Klartext. 🔒`);
                 const rejected = Object.values(rejectedTotals).reduce((a, b) => a + b, 0);
 
                 if (!workers || workers.length === 0) {
-                    this.bot.sendMessage(chatId, "Keine aktiven Worker für diese Adresse gefunden.");
+                    this.bot.sendMessage(chatId, this.t(chatId, 'Keine aktiven Worker für diese Adresse gefunden.', 'No active workers found for this address.'));
                     return;
                 }
 
@@ -217,16 +246,12 @@ Ich entschlüssle ihn und reagiere genau wie bei Klartext. 🔒`);
                 const sharesText = this.numberSuffix.to(shares);
                 const rejectedText = this.numberSuffix.to(rejected);
 
-        this.bot.sendMessage(chatId,
-`📈 Stats für deine Adresse:
-- Aktuelle Hashrate: ${totalHashrateTH.toFixed(2)} TH/s
-- Letzter Share: vor ${lastSeenSeconds} Sekunden
-- Beste Difficulty: ${bestDifficultyG.toFixed(2)} G
-- Shares: ${sharesText}
-- Rejected: ${rejectedText}`);
+        const deText = `📈 Stats für deine Adresse:\n- Aktuelle Hashrate: ${totalHashrateTH.toFixed(2)} TH/s\n- Letzter Share: vor ${lastSeenSeconds} Sekunden\n- Beste Difficulty: ${bestDifficultyG.toFixed(2)} G\n- Shares: ${sharesText}\n- Rejected: ${rejectedText}`;
+        const enText = `📈 Stats for your address:\n- Current hashrate: ${totalHashrateTH.toFixed(2)} TH/s\n- Last share: ${lastSeenSeconds} seconds ago\n- Best difficulty: ${bestDifficultyG.toFixed(2)} G\n- Shares: ${sharesText}\n- Rejected: ${rejectedText}`;
+        this.bot.sendMessage(chatId, this.t(chatId, deText, enText));
         } catch (err) {
                 console.error("Fehler bei /stats:", err);
-                this.bot.sendMessage(chatId, "Fehler beim Abrufen der Statistiken.");
+                this.bot.sendMessage(chatId, this.t(chatId, 'Fehler beim Abrufen der Statistiken.', 'Error fetching statistics.'));
             }
         });
 
@@ -248,12 +273,12 @@ Ich entschlüssle ihn und reagiere genau wie bei Klartext. 🔒`);
                 text === '/poolhashrate'
             ) {
                 if (text === '/subscribe' || text === '/subscribe_bestdiff' || text === '/stats') {
-                    this.bot.sendMessage(msg.chat.id, 'Befehl nicht erkannt, oder Wert fehlt');
+                    this.bot.sendMessage(msg.chat.id, this.t(msg.chat.id, 'Befehl nicht erkannt, oder Wert fehlt', 'Command not recognized, or value missing'));
                 }
                 return;
             }
 
-            this.bot.sendMessage(msg.chat.id, 'Befehl nicht erkannt, oder Wert fehlt');
+            this.bot.sendMessage(msg.chat.id, this.t(msg.chat.id, 'Befehl nicht erkannt, oder Wert fehlt', 'Command not recognized, or value missing'));
         });
     }
 
@@ -262,7 +287,8 @@ Ich entschlüssle ihn und reagiere genau wie bei Klartext. 🔒`);
 
         const subscribers = await this.telegramSubscriptionsService.getSubscriptions(address);
         const subscriberMessages = subscribers.map(subscriber => {
-            return this.bot.sendMessage(subscriber.telegramChatId, `Block gefunden! Result: ${message}, Höhe: ${height}`);
+            const text = this.t(subscriber.telegramChatId, `Block gefunden! Result: ${message}, Höhe: ${height}`, `Block found! Result: ${message}, height: ${height}`);
+            return this.bot.sendMessage(subscriber.telegramChatId, text);
         });
 
         Promise.all(subscriberMessages).then();
@@ -280,10 +306,11 @@ Ich entschlüssle ihn und reagiere genau wie bei Klartext. 🔒`);
             const subscriberMessages = subscribers
                 .filter(subscriber => subscriber.bestDiffNotificationsEnabled)
                 .map(subscriber => {
-                    return this.bot.sendMessage(
-                        subscriber.telegramChatId,
-                        `🏆 Neue beste Difficulty für deine Adresse!\nWert: ${this.numberSuffix.to(submissionDifficulty)}`
+                    const text = this.t(subscriber.telegramChatId,
+                        `🏆 Neue beste Difficulty für deine Adresse!\nWert: ${this.numberSuffix.to(submissionDifficulty)}`,
+                        `🏆 New best difficulty for your address!\nValue: ${this.numberSuffix.to(submissionDifficulty)}`
                     );
+                    return this.bot.sendMessage(subscriber.telegramChatId, text);
                 });
 
             Promise.all(subscriberMessages).then();

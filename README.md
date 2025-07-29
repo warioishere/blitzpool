@@ -28,6 +28,8 @@ BlitzPool extends the original `public-pool` implementation in multiple ways to 
 The BlitzPool Telegram bot offers real-time interaction and notification options via the following commands:
 Command	Description
 - /start	            Displays a welcome message and usage instructions
+- /english                  Switch bot replies to English
+- /deutsch                  Bot Antworten auf Deutsch
 - /subscribe	        Subscribe to receive block found notifications for your mining address
 - /subscribe_bestdiff	Toggle Best-Diff notifications on or off (default: on)
 - /difficulty	        Shows the current Bitcoin network difficulty
