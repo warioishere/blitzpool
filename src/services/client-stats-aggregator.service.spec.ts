@@ -8,7 +8,6 @@ import { HashrateHistoryService } from './hashrate-history.service';
 
 describe('ClientStatsAggregator', () => {
   let aggregator: ClientStatsAggregator;
-  let statsService: any;
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
@@ -17,6 +16,7 @@ describe('ClientStatsAggregator', () => {
         { provide: ClientService, useValue: {
             getByAddress: jest.fn().mockResolvedValue([{ clientName: 'worker1', bestDifficulty: 0, hashRate: 0 }]),
             getBestShareEver: jest.fn().mockResolvedValue(0),
+            getLastShareDiff: jest.fn().mockResolvedValue(42),
           }},
         { provide: ClientStatisticsService, useValue: {
             getTotalSharesForAddress: jest.fn().mockResolvedValue(0),
@@ -39,14 +39,10 @@ describe('ClientStatsAggregator', () => {
     }).compile();
 
     aggregator = module.get(ClientStatsAggregator);
-    statsService = module.get<ClientStatisticsService>(ClientStatisticsService);
   });
 
-  it('returns lastshare from ClientStatisticsService', async () => {
+  it('returns worker lastshare from ClientService', async () => {
     const stats = await aggregator.getStats('addr');
-    expect(stats.lastshare).toBe(123456);
-    expect(statsService.getLastShareTime).toHaveBeenCalledWith('addr');
-    expect(stats.worker[0].lastshare).toBe(234567);
-    expect(statsService.getLastShareTime).toHaveBeenCalledWith('addr', 'worker1');
+    expect(stats.worker[0].lastshare).toBe(42);
   });
 });

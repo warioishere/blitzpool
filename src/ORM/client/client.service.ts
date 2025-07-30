@@ -94,6 +94,10 @@ export class ClientService {
         return await this.clientRepository.update({ sessionId }, { bestDifficulty });
     }
 
+    public async updateLastShareDiff(sessionId: string, diff: number) {
+        return await this.clientRepository.update({ sessionId }, { lastShareDiff: diff });
+    }
+
     public async updateSessionId(address: string, clientName: string, oldSessionId: string, newSessionId: string) {
         return await this.clientRepository.createQueryBuilder()
             .update(ClientEntity)
@@ -187,6 +191,17 @@ export class ClientService {
         }
         const result = await qb.getRawOne();
         return result?.total ? parseFloat(result.total) : 0;
+    }
+
+    public async getLastShareDiff(address: string, clientName: string): Promise<number | null> {
+        const result = await this.clientRepository.createQueryBuilder('client')
+            .select('client.lastShareDiff', 'diff')
+            .where('client.address = :address', { address })
+            .andWhere('client.clientName = :clientName', { clientName })
+            .andWhere('client.deletedAt IS NULL')
+            .orderBy('client.updatedAt', 'DESC')
+            .getRawOne();
+        return result?.diff != null ? parseFloat(result.diff) : null;
     }
 
     public async getLastShareTime(address: string, clientName?: string): Promise<number | null> {

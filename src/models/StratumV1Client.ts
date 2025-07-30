@@ -684,6 +684,8 @@ export class StratumV1Client {
             }
             try {
                 await this.statistics.addShares(this.entity, this.sessionDifficulty);
+                await this.clientService.updateLastShareDiff(this.entity.sessionId, this.sessionDifficulty);
+                this.entity.lastShareDiff = this.sessionDifficulty;
                 const now = new Date();
                 // only update every minute
                 if (this.entity.updatedAt == null || now.getTime() - this.entity.updatedAt.getTime() > 1000 * 60) {

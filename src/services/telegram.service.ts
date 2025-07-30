@@ -7,6 +7,7 @@ import { NumberSuffix } from '../utils/NumberSuffix';
 import { decryptMessageIfNeeded } from '../utils/message-decryptor';
 import { TelegramSubscriptionsService } from '../ORM/telegram-subscriptions/telegram-subscriptions.service';
 import { ClientStatsAggregator } from './client-stats-aggregator.service';
+import { ClientStatisticsService } from '../ORM/client-statistics/client-statistics.service';
 
 @Injectable()
 export class TelegramService implements OnModuleInit {
@@ -24,6 +25,7 @@ export class TelegramService implements OnModuleInit {
         private readonly configService: ConfigService,
         private readonly telegramSubscriptionsService: TelegramSubscriptionsService,
         private readonly clientStatsAggregator: ClientStatsAggregator,
+        private readonly clientStatisticsService: ClientStatisticsService,
     ) {
         const token: string | null = this.configService.get('TELEGRAM_BOT_TOKEN');
 
@@ -227,8 +229,8 @@ export class TelegramService implements OnModuleInit {
                     this.bot.sendMessage(chatId, this.t(chatId, 'Keine aktiven Worker für diese Adresse gefunden.', 'No active workers found for this address.'));
                     return;
                 }
-
-                const lastSeenSeconds = stats.lastshare ? Math.floor((Date.now() - stats.lastshare) / 1000) : 0;
+                const lastShareTime = await this.clientStatisticsService.getLastShareTime(address);
+                const lastSeenSeconds = lastShareTime ? Math.floor((Date.now() - lastShareTime) / 1000) : 0;
                 const bestDifficultyG = (stats.bestever / 1e9).toFixed(2);
                 const sharesText = this.numberSuffix.to(stats.shares);
                 const rejectedText = this.numberSuffix.to(stats.rejected);

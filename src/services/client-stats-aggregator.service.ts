@@ -26,7 +26,6 @@ export interface AddressStats {
   hashrate1hr: string;
   hashrate1d: string;
   hashrate7d: string;
-  lastshare: number | null;
   workers: number;
   shares: number;
   rejected: number;
@@ -86,7 +85,6 @@ export class ClientStatsAggregator {
           useActualWindow: true,
         }),
       ),
-      lastshare: await this.clientStatisticsService.getLastShareTime(address),
       workers: workers.length,
       shares,
       rejected,
@@ -134,10 +132,7 @@ export class ClientStatsAggregator {
               useActualWindow: true,
             }),
           ),
-          lastshare: await this.clientStatisticsService.getLastShareTime(
-            address,
-            worker.clientName,
-          ),
+          lastshare: await this.clientService.getLastShareDiff(address, worker.clientName),
           shares: wShares,
           rejected: wRejected,
           bestshare: worker.bestDifficulty,
