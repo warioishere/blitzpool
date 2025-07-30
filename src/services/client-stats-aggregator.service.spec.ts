@@ -4,7 +4,6 @@ import { ClientService } from '../ORM/client/client.service';
 import { ClientStatisticsService } from '../ORM/client-statistics/client-statistics.service';
 import { AddressSettingsService } from '../ORM/address-settings/address-settings.service';
 import { ClientRejectedStatisticsService } from '../ORM/client-rejected-statistics/client-rejected-statistics.service';
-import { HashrateHistoryService } from './hashrate-history.service';
 
 describe('ClientStatsAggregator', () => {
   let aggregator: ClientStatsAggregator;
@@ -30,10 +29,6 @@ describe('ClientStatsAggregator', () => {
         { provide: ClientRejectedStatisticsService, useValue: {
             getTotalsSince: jest.fn().mockResolvedValue({}),
             getTotalsByWorkerSince: jest.fn().mockResolvedValue({}),
-          }},
-        { provide: HashrateHistoryService, useValue: {
-            record: jest.fn(),
-            getAverage: jest.fn().mockReturnValue(0),
           }},
       ],
     }).compile();

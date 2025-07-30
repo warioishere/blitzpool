@@ -2,7 +2,6 @@ import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 
-import { ClientService } from '../client/client.service';
 
 import { ClientStatisticsEntity } from './client-statistics.entity';
 
@@ -14,7 +13,6 @@ export class ClientStatisticsService {
 
         @InjectRepository(ClientStatisticsEntity)
         private clientStatisticsRepository: Repository<ClientStatisticsEntity>,
-        private readonly clientService: ClientService,
     ) {
 
     }
@@ -316,15 +314,6 @@ export class ClientStatisticsService {
 
         const since = options.since ?? Date.now() - 60 * 60 * 1000;
         const windowMs = Date.now() - since;
-
-        if (windowMs <= 5 * 60 * 1000) {
-            const minutes = Math.ceil(windowMs / 60000);
-            return this.clientService.getRecentHashRate(
-                options.address,
-                minutes,
-                options.clientName,
-            );
-        }
 
         const qb = this.clientStatisticsRepository
             .createQueryBuilder('entry')

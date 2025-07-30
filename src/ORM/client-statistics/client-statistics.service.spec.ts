@@ -24,7 +24,7 @@ describe('ClientStatisticsService.getLastShareTime', () => {
       ],
       providers: [
         ClientStatisticsService,
-        { provide: ClientService, useValue: {} },
+        { provide: ClientService, useValue: { getRecentHashRate: jest.fn() } },
       ],
     }).compile();
 
@@ -59,5 +59,21 @@ describe('ClientStatisticsService.getLastShareTime', () => {
     });
     const ts = await service.getLastShareTime('addr', 'worker1');
     expect(ts).toBe(new Date('2023-01-02T00:00:00Z').getTime());
+  });
+
+  it('computes hashrate for short windows from DB', async () => {
+    const now = Date.now();
+    await repo.insert({
+      address: 'addr',
+      clientName: 'worker1',
+      sessionId: 's1',
+      time: now - 30_000,
+      shares: 1,
+      acceptedCount: 0,
+      createdAt: new Date(now - 30_000),
+      updatedAt: new Date(now - 30_000),
+    });
+    const rate = await service.getHashRate({ address: 'addr', since: now - 60_000 });
+    expect(rate).toBeGreaterThan(0);
   });
 });
