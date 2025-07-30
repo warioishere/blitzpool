@@ -413,13 +413,13 @@ export class ClientStatisticsService {
     public async getLastShareTime(address: string, clientName?: string): Promise<number | null> {
         const qb = this.clientStatisticsRepository
             .createQueryBuilder('entry')
-            .select('MAX(entry.time)', 'last')
+            .select('MAX(entry.updatedAt)', 'last')
             .where('entry.address = :address', { address });
         if (clientName) {
             qb.andWhere('entry.clientName = :clientName', { clientName });
         }
         const result = await qb.getRawOne();
-        return result?.last ? parseInt(result.last, 10) : null;
+        return result?.last ? new Date(result.last).getTime() : null;
     }
 
     public async deleteAll() {

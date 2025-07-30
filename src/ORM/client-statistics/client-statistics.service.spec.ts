@@ -1,0 +1,63 @@
+import { Test, TestingModule } from '@nestjs/testing';
+import { TypeOrmModule, getRepositoryToken } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+import { ClientStatisticsEntity } from './client-statistics.entity';
+import { ClientStatisticsService } from './client-statistics.service';
+import { ClientService } from '../client/client.service';
+
+describe('ClientStatisticsService.getLastShareTime', () => {
+  let service: ClientStatisticsService;
+  let repo: Repository<ClientStatisticsEntity>;
+  let module: TestingModule;
+
+  beforeAll(async () => {
+    module = await Test.createTestingModule({
+      imports: [
+        TypeOrmModule.forRoot({
+          type: 'sqlite',
+          database: ':memory:',
+          dropSchema: true,
+          synchronize: true,
+          entities: [ClientStatisticsEntity],
+        }),
+        TypeOrmModule.forFeature([ClientStatisticsEntity]),
+      ],
+      providers: [
+        ClientStatisticsService,
+        { provide: ClientService, useValue: {} },
+      ],
+    }).compile();
+
+    service = module.get(ClientStatisticsService);
+    repo = module.get<Repository<ClientStatisticsEntity>>(getRepositoryToken(ClientStatisticsEntity));
+  });
+
+  afterAll(async () => {
+    await module.close();
+  });
+
+  it('returns timestamp of latest updated record', async () => {
+    await repo.insert({
+      address: 'addr',
+      clientName: 'worker1',
+      sessionId: 's1',
+      time: 1,
+      shares: 1,
+      acceptedCount: 0,
+      createdAt: new Date('2023-01-01T00:00:00Z'),
+      updatedAt: new Date('2023-01-01T00:00:00Z'),
+    });
+    await repo.insert({
+      address: 'addr',
+      clientName: 'worker1',
+      sessionId: 's1',
+      time: 2,
+      shares: 1,
+      acceptedCount: 0,
+      createdAt: new Date('2023-01-02T00:00:00Z'),
+      updatedAt: new Date('2023-01-02T00:00:00Z'),
+    });
+    const ts = await service.getLastShareTime('addr', 'worker1');
+    expect(ts).toBe(new Date('2023-01-02T00:00:00Z').getTime());
+  });
+});
