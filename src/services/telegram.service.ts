@@ -8,6 +8,7 @@ import { decryptMessageIfNeeded } from '../utils/message-decryptor';
 import { TelegramSubscriptionsService } from '../ORM/telegram-subscriptions/telegram-subscriptions.service';
 import { ClientService } from '../ORM/client/client.service';
 import { AddressSettingsService } from '../ORM/address-settings/address-settings.service';
+import { ClientStatisticsService } from '../ORM/client-statistics/client-statistics.service';
 
 @Injectable()
 export class TelegramService implements OnModuleInit {
@@ -33,8 +34,9 @@ export class TelegramService implements OnModuleInit {
     constructor(
         private readonly configService: ConfigService,
         private readonly telegramSubscriptionsService: TelegramSubscriptionsService,
-	private readonly clientService: ClientService,
-        private readonly addressSettingsService: AddressSettingsService
+        private readonly clientService: ClientService,
+        private readonly addressSettingsService: AddressSettingsService,
+        private readonly clientStatisticsService: ClientStatisticsService
     ) {
         const token: string | null = this.configService.get('TELEGRAM_BOT_TOKEN');
 
@@ -361,6 +363,7 @@ I will decrypt it and respond just like with plain text. 🔒`
             try {
                 const workers = await this.clientService.getByAddress(address);
                 const addressSettings = await this.addressSettingsService.getSettings(address, false);
+                const totalShares = await this.clientStatisticsService.getTotalSharesForAddress(address);
 
                 if (!workers || workers.length === 0) {
                     this.reply(chatId, {
@@ -381,10 +384,12 @@ I will decrypt it and respond just like with plain text. 🔒`
                 this.reply(chatId, {
                     de: `📈 Stats für deine Adresse:
 - Aktuelle Hashrate: ${totalHashrateTH.toFixed(2)} TH/s
+- Gesamt-Shares: ${this.numberSuffix.to(totalShares)}
 - Letzter Share: vor ${lastSeenSeconds} Sekunden
 - Beste Difficulty: ${bestDifficultyG.toFixed(2)} G`,
                     en: `📈 Stats for your address:
 - Current hashrate: ${totalHashrateTH.toFixed(2)} TH/s
+- Total shares: ${this.numberSuffix.to(totalShares)}
 - Last share: ${lastSeenSeconds} seconds ago
 - Best difficulty: ${bestDifficultyG.toFixed(2)} G`
                 });
