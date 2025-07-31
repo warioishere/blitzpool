@@ -17,6 +17,10 @@ export class TelegramService implements OnModuleInit {
     private bestDiffCache: Map<string, number> = new Map();
     private chatLanguages: Map<number, 'de' | 'en'> = new Map();
 
+    private formatAddress(address: string): string {
+        return `${address.slice(0, 4)}...${address.slice(-5)}`;
+    }
+
     private getLanguage(chatId: number): 'de' | 'en' {
         return this.chatLanguages.get(chatId) ?? 'de';
     }
@@ -58,6 +62,8 @@ export class TelegramService implements OnModuleInit {
             { command: '/next_difficulty', description: 'Zeigt erwartete Änderung der Netzwerk-Difficulty' },
             { command: '/stats', description: 'Zeigt die Stats für deine Miner Adresse an' },
             { command: '/poolhashrate', description: 'Zeigt die aktuelle Pool-Hashrate' },
+            { command: '/remove', description: 'Adresse entfernen' },
+            { command: '/show_addresses', description: 'Zeigt gespeicherte Adressen' },
             { command: '/deutsch', description: 'Bot-Antworten auf Deutsch' },
             { command: '/english', description: 'Bot replies in English' }
         ]);
@@ -102,18 +108,20 @@ export class TelegramService implements OnModuleInit {
                 });
                 return;
             }
+            const existingForChat = await this.telegramSubscriptionsService.getChatSubscriptions(msg.chat.id);
+            const wasSubscribed = existingForChat.some(s => s.address === address);
 
-            const subscribers = await this.telegramSubscriptionsService.getSubscriptions(address);
-            if (subscribers.length === 0) {
-                await this.telegramSubscriptionsService.saveSubscription(msg.chat.id, address);
+            await this.telegramSubscriptionsService.saveSubscription(msg.chat.id, address);
+
+            if (wasSubscribed) {
                 this.reply(msg.chat.id, {
-                    de: 'Benachrichtigung aktiviert!',
-                    en: 'Notification enabled!'
+                    de: 'Adresse als Standard gesetzt!',
+                    en: 'Address set as default!'
                 });
             } else {
                 this.reply(msg.chat.id, {
-                    de: 'Bereits registriert!',
-                    en: 'Already registered!'
+                    de: 'Benachrichtigung aktiviert!',
+                    en: 'Notification enabled!'
                 });
             }
         });
@@ -261,16 +269,78 @@ I will decrypt it and respond just like with plain text. 🔒`
             }
         });
 
-        this.bot.onText(/\/stats (.+)/, async (msg, match) => {
+        this.bot.onText(/\/remove (.+)/, async (msg, match) => {
             const chatId = msg.chat.id;
             const raw = match?.[1]?.trim();
-
             if (!raw) {
                 this.reply(chatId, {
-                    de: 'Bitte gib eine BTC-Adresse an.',
-                    en: 'Please provide a BTC address.'
+                    de: 'Bitte gib eine Adresse an.',
+                    en: 'Please provide an address.'
                 });
                 return;
+            }
+
+            let address = raw;
+            const decrypted = decryptMessageIfNeeded(raw);
+            if (decrypted) address = decrypted.trim();
+
+            if (!validate(address)) {
+                this.reply(chatId, {
+                    de: 'Ungültige Adresse.',
+                    en: 'Invalid address.'
+                });
+                return;
+            }
+
+            await this.telegramSubscriptionsService.removeSubscription(chatId, address);
+            this.reply(chatId, {
+                de: 'Adresse entfernt.',
+                en: 'Address removed.'
+            });
+        });
+
+        this.bot.onText(/\/show_addresses/, async (msg) => {
+            const chatId = msg.chat.id;
+            const subs = await this.telegramSubscriptionsService.getChatSubscriptions(chatId);
+            if (subs.length === 0) {
+                this.reply(chatId, {
+                    de: 'Keine Adresse gespeichert.',
+                    en: 'No addresses stored.'
+                });
+                return;
+            }
+            const lines = subs.map(s => `${s.isDefault ? '*' : ''}${this.formatAddress(s.address)}`).join('\n');
+            this.reply(chatId, {
+                de: `Gespeicherte Adressen:\n${lines}\n* = Standard`,
+                en: `Stored addresses:\n${lines}\n* = default`
+            });
+        });
+
+        this.bot.onText(/\/stats(?:\s+(.+))?/, async (msg, match) => {
+            const chatId = msg.chat.id;
+            let raw = match?.[1]?.trim();
+
+            if (!raw) {
+                const subs = await this.telegramSubscriptionsService.getChatSubscriptions(chatId);
+                if (subs.length === 0) {
+                    this.reply(chatId, {
+                        de: 'Keine Adresse gespeichert. Nutze /subscribe, um eine hinzuzufügen.',
+                        en: 'No address stored. Use /subscribe to add one.'
+                    });
+                    return;
+                }
+
+                const defaultSub = subs.find(s => s.isDefault);
+                if (subs.length === 1 || defaultSub) {
+                    raw = (defaultSub ?? subs[0]).address;
+                } else {
+                    const list = subs.map(s => `${s.isDefault ? '*' : ''}${this.formatAddress(s.address)}`).join('\n');
+                    this.reply(chatId, {
+                        de: `Mehrere Adressen gespeichert:\n${list}\nBitte Adresse angeben.`,
+                        en: `Multiple addresses stored:\n${list}\nPlease specify an address.`
+                    });
+                    return;
+                }
             }
 
             let address = raw;
@@ -308,17 +378,17 @@ I will decrypt it and respond just like with plain text. 🔒`
                 const bestDiffRaw = addressSettings?.bestDifficulty ?? 0;
                 const bestDifficultyG = bestDiffRaw / 1e9;
 
-        this.reply(chatId, {
-            de: `📈 Stats für deine Adresse:
+                this.reply(chatId, {
+                    de: `📈 Stats für deine Adresse:
 - Aktuelle Hashrate: ${totalHashrateTH.toFixed(2)} TH/s
 - Letzter Share: vor ${lastSeenSeconds} Sekunden
 - Beste Difficulty: ${bestDifficultyG.toFixed(2)} G`,
-            en: `📈 Stats for your address:
+                    en: `📈 Stats for your address:
 - Current hashrate: ${totalHashrateTH.toFixed(2)} TH/s
 - Last share: ${lastSeenSeconds} seconds ago
 - Best difficulty: ${bestDifficultyG.toFixed(2)} G`
-        });
-        } catch (err) {
+                });
+            } catch (err) {
                 console.error("Fehler bei /stats:", err);
                 this.reply(chatId, {
                     de: 'Fehler beim Abrufen der Statistiken.',
