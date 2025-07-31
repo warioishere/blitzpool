@@ -16,11 +16,33 @@ export class TelegramSubscriptionsService {
         return await this.telegramSubscriptions.find({ where: { address } });
     }
 
+    public async getChatSubscriptions(chatId: number) {
+        return await this.telegramSubscriptions.find({ where: { telegramChatId: chatId } });
+    }
+
+    public async getDefault(chatId: number) {
+        return await this.telegramSubscriptions.findOne({ where: { telegramChatId: chatId, isDefault: true } });
+    }
+
     public async saveSubscription(chatId: number, address: string) {
+        await this.telegramSubscriptions.update({ telegramChatId: chatId }, { isDefault: false });
+        const existing = await this.telegramSubscriptions.findOne({ where: { telegramChatId: chatId, address } });
+        if (existing) {
+            return await this.telegramSubscriptions.update({ telegramChatId: chatId, address }, { isDefault: true });
+        }
         return await this.telegramSubscriptions.save({
             telegramChatId: chatId,
-            address
+            address,
+            isDefault: true
         });
+    }
+
+    public async removeSubscription(chatId: number, address: string) {
+        await this.telegramSubscriptions.delete({ telegramChatId: chatId, address });
+        const remaining = await this.getChatSubscriptions(chatId);
+        if (remaining.length > 0 && !remaining.some(r => r.isDefault)) {
+            await this.telegramSubscriptions.update({ id: remaining[0].id }, { isDefault: true });
+        }
     }
 
     public async updateBestDiffNotification(chatId: number, enabled: boolean): Promise<void> {
