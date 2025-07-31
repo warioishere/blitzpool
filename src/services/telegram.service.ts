@@ -67,7 +67,8 @@ export class TelegramService implements OnModuleInit {
             { command: '/remove', description: 'Adresse entfernen' },
             { command: '/show_addresses', description: 'Zeigt gespeicherte Adressen' },
             { command: '/deutsch', description: 'Bot-Antworten auf Deutsch' },
-            { command: '/english', description: 'Bot replies in English' }
+            { command: '/english', description: 'Bot replies in English' },
+            { command: '/encryption_help', description: 'Anleitung zum Verschlüsseln' }
         ]);
 
         this.bot.onText(/\/deutsch/, (msg) => {
@@ -83,6 +84,19 @@ export class TelegramService implements OnModuleInit {
             this.reply(msg.chat.id, {
                 de: 'Sprache auf Englisch gestellt.',
                 en: 'Language switched to English.'
+            });
+        });
+
+        this.bot.onText(/\/encryption_help/, (msg) => {
+            this.reply(msg.chat.id, {
+                de: `So verschlüsselst du deine BTC-Adresse:\n` +
+                    `1. Nutze das Tool: https://github.com/warioishere/blitzpool-message-encryptor-for-TG\n` +
+                    `   oder melde dich mit deiner BTC-Adresse auf dem Web-UI an und verwende den integrierten Verschlüssler.\n` +
+                    `2. Sende mir dann /subscribe <verschlüsselte Adresse>`,
+                en: `How to encrypt your BTC address:\n` +
+                    `1. Use the tool: https://github.com/warioishere/blitzpool-message-encryptor-for-TG\n` +
+                    `   or log in with your BTC address on the web UI and use the integrated encryptor.\n` +
+                    `2. Then send /subscribe <encrypted address>`
             });
         });
 
