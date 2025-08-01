@@ -51,4 +51,12 @@ export class TelegramSubscriptionsService {
             { bestDiffNotificationsEnabled: enabled }
         );
     }
+
+    public async getAllAddresses(): Promise<string[]> {
+        const rows = await this.telegramSubscriptions
+            .createQueryBuilder('sub')
+            .select('DISTINCT sub.address', 'address')
+            .getRawMany();
+        return rows.map(r => r.address);
+    }
 }

@@ -24,32 +24,19 @@ export class PoolShareStatisticsService {
     await this.flush();
   }
 
-  private async handleShare(accepted: number, rejected: number) {
+  private getTimeSlot(): number {
     const coeff = 1000 * 60 * 10;
-    const now = Date.now();
-    const timeSlot = Math.floor(now / coeff) * coeff;
+    return Math.floor(Date.now() / coeff) * coeff;
+  }
+
+  private async handleShare(accepted: number, rejected: number) {
+    const timeSlot = this.getTimeSlot();
 
     if (this.currentTimeSlot === null) {
       this.currentTimeSlot = timeSlot;
-      const existing = await this.poolShareStatisticsRepository.findOneBy({ time: timeSlot });
-      if (existing) {
-        this.accepted = existing.accepted;
-        this.rejected = existing.rejected;
-      } else {
-        this.accepted = 0;
-        this.rejected = 0;
-      }
     } else if (this.currentTimeSlot !== timeSlot) {
       await this.flush();
       this.currentTimeSlot = timeSlot;
-      const existing = await this.poolShareStatisticsRepository.findOneBy({ time: timeSlot });
-      if (existing) {
-        this.accepted = existing.accepted;
-        this.rejected = existing.rejected;
-      } else {
-        this.accepted = 0;
-        this.rejected = 0;
-      }
     }
 
     this.accepted += accepted;
@@ -57,16 +44,31 @@ export class PoolShareStatisticsService {
   }
 
   private async flush() {
+    if (this.currentTimeSlot == null) return;
+
     await this.mutex.runExclusive(async () => {
-      if (this.currentTimeSlot == null) {
-        return;
-      }
+      if (this.accepted === 0 && this.rejected === 0) return;
+
       const existing = await this.poolShareStatisticsRepository.findOneBy({ time: this.currentTimeSlot });
       if (existing) {
-        await this.update({ time: this.currentTimeSlot, accepted: this.accepted, rejected: this.rejected });
+        await this.poolShareStatisticsRepository.update(
+          { time: this.currentTimeSlot },
+          {
+            accepted: existing.accepted + this.accepted,
+            rejected: existing.rejected + this.rejected,
+            updatedAt: new Date(),
+          },
+        );
       } else {
-        await this.insert({ time: this.currentTimeSlot, accepted: this.accepted, rejected: this.rejected });
+        await this.poolShareStatisticsRepository.insert({
+          time: this.currentTimeSlot,
+          accepted: this.accepted,
+          rejected: this.rejected,
+        });
       }
+
+      this.accepted = 0;
+      this.rejected = 0;
     });
   }
 

@@ -55,6 +55,15 @@ export class TelegramService implements OnModuleInit {
     async onModuleInit(): Promise<void> {
         if (!this.bot) return;
 
+        const addresses = await this.telegramSubscriptionsService.getAllAddresses();
+        if (addresses.length > 0) {
+            const values = await Promise.all(addresses.map(a => this.addressSettingsService.getSettings(a, false)));
+            addresses.forEach((addr, idx) => {
+                const best = values[idx]?.bestDifficulty ?? 0;
+                this.bestDiffCache.set(addr, best);
+            });
+        }
+
         // Telegram Menübefehle registrieren
         await this.bot.setMyCommands([
             { command: '/start', description: 'Zeigt Willkommensnachricht' },
@@ -128,6 +137,8 @@ export class TelegramService implements OnModuleInit {
             const wasSubscribed = existingForChat.some(s => s.address === address);
 
             await this.telegramSubscriptionsService.saveSubscription(msg.chat.id, address);
+            const settings = await this.addressSettingsService.getSettings(address, false);
+            this.bestDiffCache.set(address, settings?.bestDifficulty ?? 0);
 
             if (wasSubscribed) {
                 this.reply(msg.chat.id, {
@@ -309,6 +320,7 @@ I will decrypt it and respond just like with plain text. 🔒`
             }
 
             await this.telegramSubscriptionsService.removeSubscription(chatId, address);
+            this.bestDiffCache.delete(address);
             this.reply(chatId, {
                 de: 'Adresse entfernt.',
                 en: 'Address removed.'
@@ -455,7 +467,12 @@ I will decrypt it and respond just like with plain text. 🔒`
     public async notifySubscribersBestDiff(address: string, submissionDifficulty: number) {
         if (!this.bot || !this.diffNotifications) return;
 
-        const currentBest = this.bestDiffCache.get(address) ?? 0;
+        let currentBest = this.bestDiffCache.get(address);
+        if (currentBest === undefined) {
+            const settings = await this.addressSettingsService.getSettings(address, false);
+            currentBest = settings?.bestDifficulty ?? 0;
+            this.bestDiffCache.set(address, currentBest);
+        }
 
         if (submissionDifficulty > currentBest) {
             this.bestDiffCache.set(address, submissionDifficulty);
