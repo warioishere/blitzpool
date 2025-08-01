@@ -689,14 +689,17 @@ export class StratumV1Client {
                 console.log(e);
             }
 
+            if (submissionDifficulty > this.entity.bestDifficulty) {
+                await this.clientService.updateBestDifficulty(this.entity.sessionId, submissionDifficulty);
+                this.entity.bestDifficulty = submissionDifficulty;
+            }
+
             const addressSettings = await this.addressSettingsService.getSettings(this.clientAuthorization.address, true);
             const storedBestDifficulty = addressSettings?.bestDifficulty ?? 0;
 
-            if (submissionDifficulty > this.entity.bestDifficulty && submissionDifficulty > storedBestDifficulty) {
+            if (submissionDifficulty > storedBestDifficulty) {
                 await this.notificationService.notifySubscribersBestDiff(this.clientAuthorization.address, submissionDifficulty);
-                await this.clientService.updateBestDifficulty(this.entity.sessionId, submissionDifficulty);
                 await this.addressSettingsService.updateBestDifficulty(this.clientAuthorization.address, submissionDifficulty, this.entity.userAgent);
-                this.entity.bestDifficulty = submissionDifficulty;
             }
 
 
