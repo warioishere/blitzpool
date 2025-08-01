@@ -479,12 +479,19 @@ I will decrypt it and respond just like with plain text. 🔒`
 
             const subscribers = await this.telegramSubscriptionsService.getSubscriptions(address);
             const subscriberMessages = subscribers
-                .filter(subscriber => subscriber.bestDiffNotificationsEnabled)
-                .map(subscriber => {
-                    const msg = this.getLanguage(subscriber.telegramChatId) === 'de'
-                        ? `🏆 Neue beste Difficulty für deine Adresse!\nWert: ${this.numberSuffix.to(submissionDifficulty)}`
-                        : `🏆 New best difficulty for your address!\nValue: ${this.numberSuffix.to(submissionDifficulty)}`;
-                    return this.bot.sendMessage(subscriber.telegramChatId, msg);
+                .filter(sub => sub.bestDiffNotificationsEnabled)
+                .map(async sub => {
+                    const chatSubs = await this.telegramSubscriptionsService.getChatSubscriptions(sub.telegramChatId);
+                    const includeAddress = chatSubs.length > 1;
+                    const formatted = this.formatAddress(address);
+                    const msg = this.getLanguage(sub.telegramChatId) === 'de'
+                        ? includeAddress
+                            ? `🏆 Neue beste Difficulty für Adresse ${formatted}!\nWert: ${this.numberSuffix.to(submissionDifficulty)}`
+                            : `🏆 Neue beste Difficulty für deine Adresse!\nWert: ${this.numberSuffix.to(submissionDifficulty)}`
+                        : includeAddress
+                            ? `🏆 New best difficulty for address ${formatted}!\nValue: ${this.numberSuffix.to(submissionDifficulty)}`
+                            : `🏆 New best difficulty for your address!\nValue: ${this.numberSuffix.to(submissionDifficulty)}`;
+                    return this.bot.sendMessage(sub.telegramChatId, msg);
                 });
 
             Promise.all(subscriberMessages).then();
