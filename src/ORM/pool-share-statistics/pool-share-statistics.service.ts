@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { Interval } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Mutex } from 'async-mutex';
@@ -15,56 +16,64 @@ export class PoolShareStatisticsService {
   private mutex = new Mutex();
 
   private currentTimeSlot: number = null;
-  private lastSave: number = null;
   private accepted = 0;
   private rejected = 0;
 
-  private async addShares(accepted: number, rejected: number) {
+  @Interval(60 * 1000)
+  private async flushInterval() {
+    await this.flush();
+  }
+
+  private getTimeSlot(): number {
+    const coeff = 1000 * 60 * 10;
+    return Math.floor(Date.now() / coeff) * coeff;
+  }
+
+  private async handleShare(accepted: number, rejected: number) {
+    const timeSlot = this.getTimeSlot();
+
+    if (this.currentTimeSlot === null) {
+      this.currentTimeSlot = timeSlot;
+    } else if (this.currentTimeSlot !== timeSlot) {
+      await this.flush();
+      this.currentTimeSlot = timeSlot;
+    }
+
+    this.accepted += accepted;
+    this.rejected += rejected;
+  }
+
+  private async flush() {
+    if (this.currentTimeSlot == null) return;
+
     await this.mutex.runExclusive(async () => {
-      const coeff = 1000 * 60 * 10;
-      const now = Date.now();
-      const timeSlot = Math.floor(now / coeff) * coeff;
+      if (this.accepted === 0 && this.rejected === 0) return;
 
-      if (this.currentTimeSlot == null) {
-        const existing = await this.poolShareStatisticsRepository.findOneBy({ time: timeSlot });
-        if (existing) {
-          this.currentTimeSlot = existing.time;
-          this.accepted = existing.accepted;
-          this.rejected = existing.rejected;
-          this.lastSave = now;
-        } else {
-          this.currentTimeSlot = timeSlot;
-          this.accepted = 0;
-          this.rejected = 0;
-          await this.insert({ time: this.currentTimeSlot, accepted: 0, rejected: 0 });
-          this.lastSave = now;
-        }
+      const existing = await this.poolShareStatisticsRepository.findOneBy({ time: this.currentTimeSlot });
+      if (existing) {
+        await this.poolShareStatisticsRepository.update(
+          { time: this.currentTimeSlot },
+          {
+            accepted: existing.accepted + this.accepted,
+            rejected: existing.rejected + this.rejected,
+            updatedAt: new Date(),
+          },
+        );
+      } else {
+        await this.poolShareStatisticsRepository.insert({
+          time: this.currentTimeSlot,
+          accepted: this.accepted,
+          rejected: this.rejected,
+        });
       }
 
-      if (this.currentTimeSlot !== timeSlot) {
-        await this.update({ time: this.currentTimeSlot, accepted: this.accepted, rejected: this.rejected });
-        const existing = await this.poolShareStatisticsRepository.findOneBy({ time: timeSlot });
-        if (existing) {
-          this.currentTimeSlot = existing.time;
-          this.accepted = existing.accepted;
-          this.rejected = existing.rejected;
-        } else {
-          this.currentTimeSlot = timeSlot;
-          this.accepted = 0;
-          this.rejected = 0;
-          await this.insert({ time: this.currentTimeSlot, accepted: 0, rejected: 0 });
-        }
-        this.lastSave = now;
-      }
-
-      this.accepted += accepted;
-      this.rejected += rejected;
-
-      if (now - this.lastSave > 60 * 1000) {
-        await this.update({ time: this.currentTimeSlot, accepted: this.accepted, rejected: this.rejected });
-        this.lastSave = now;
-      }
+      this.accepted = 0;
+      this.rejected = 0;
     });
+  }
+
+  private async addShares(accepted: number, rejected: number) {
+    await this.handleShare(accepted, rejected);
   }
 
   public async addAcceptedShare(difficulty: number) {
