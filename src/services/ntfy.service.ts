@@ -9,6 +9,7 @@ import { TelegramSubscriptionsService } from '../ORM/telegram-subscriptions/tele
 import { ClientService } from '../ORM/client/client.service';
 import { AddressSettingsService } from '../ORM/address-settings/address-settings.service';
 import { ClientStatisticsService } from '../ORM/client-statistics/client-statistics.service';
+import { buildStatsMessage } from './common-command-handlers';
 
 @Injectable()
 export class NtfyService implements OnModuleInit {
@@ -96,32 +97,21 @@ export class NtfyService implements OnModuleInit {
             this.subscribe(address);
             await this.publish(origin, `Subscribed to ${address}.`);
         } else if (text.startsWith('/stats')) {
-            await this.sendStats(origin);
+            const messages = await buildStatsMessage(
+                origin,
+                this.clientService,
+                this.addressSettingsService,
+                this.clientStatisticsService,
+                this.numberSuffix
+            );
+            if (!messages) {
+                await this.publish(origin, 'No active workers found for this address.');
+            } else {
+                await this.publish(origin, messages.en);
+            }
         } else {
             await this.publish(origin, 'Unknown command.');
         }
-    }
-
-    private async sendStats(address: string) {
-        const workers = await this.clientService.getByAddress(address);
-        if (!workers || workers.length === 0) {
-            await this.publish(address, 'No active workers found for this address.');
-            return;
-        }
-        const totalHashrate = workers.reduce((sum, w) => sum + (w.hashRate ?? 0), 0);
-        const totalHashrateTH = totalHashrate / 1e12;
-        const lastSeenSeconds = Math.floor((Date.now() - new Date(workers[0].updatedAt).getTime()) / 1000);
-        const totalShares = await this.clientStatisticsService.getTotalSharesForAddress(address);
-        const addressSettings = await this.addressSettingsService.getSettings(address, false);
-        const bestDiffRaw = addressSettings?.bestDifficulty ?? 0;
-        const bestDifficultyG = bestDiffRaw / 1e9;
-        const msg =
-            `📈 Stats for your address:\n` +
-            `- Current hashrate: ${totalHashrateTH.toFixed(2)} TH/s\n` +
-            `- Total shares: ${this.numberSuffix.to(totalShares)}\n` +
-            `- Last share: ${lastSeenSeconds} seconds ago\n` +
-            `- Best difficulty: ${bestDifficultyG.toFixed(2)} G`;
-        await this.publish(address, msg);
     }
 
     private async publish(address: string, message: string) {
