@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import EventSource from 'eventsource';
 import { validate } from 'bitcoin-address-validation';
+import { Block } from 'bitcoinjs-lib';
 import { NumberSuffix } from '../utils/NumberSuffix';
 import { TelegramSubscriptionsService } from '../ORM/telegram-subscriptions/telegram-subscriptions.service';
 import { ClientService } from '../ORM/client/client.service';
@@ -16,6 +17,8 @@ export class NtfyService implements OnModuleInit {
     private readonly topicPrefix?: string;
     private readonly numberSuffix = new NumberSuffix();
     private sources: Map<string, EventSource> = new Map();
+    private readonly diffNotifications: boolean;
+    private bestDiffCache: Map<string, number> = new Map();
 
     constructor(
         private readonly configService: ConfigService,
@@ -27,6 +30,7 @@ export class NtfyService implements OnModuleInit {
         this.serverUrl = this.configService.get<string>('NTFY_SERVER_URL');
         this.accessToken = this.configService.get<string>('NTFY_ACCESS_TOKEN');
         this.topicPrefix = this.configService.get<string>('NTFY_TOPIC_PREFIX');
+        this.diffNotifications = (this.configService.get<string>('NTFY_DIFF_NOTIFICATIONS')?.toLowerCase() === 'true') || false;
     }
 
     async onModuleInit(): Promise<void> {
@@ -38,7 +42,11 @@ export class NtfyService implements OnModuleInit {
             this.clientService.getAllAddresses(),
         ]);
         const addresses = Array.from(new Set([...telegramAddresses, ...clientAddresses]));
-        addresses.forEach(addr => this.subscribe(addr));
+        const bests = await Promise.all(addresses.map(a => this.addressSettingsService.getSettings(a, false)));
+        addresses.forEach((addr, idx) => {
+            this.bestDiffCache.set(addr, bests[idx]?.bestDifficulty ?? 0);
+            this.subscribe(addr);
+        });
     }
 
     private topicFor(address: string): string {
@@ -131,6 +139,26 @@ export class NtfyService implements OnModuleInit {
 
     public async notify(address: string, message: string) {
         await this.publish(address, message);
+    }
+
+    public async notifySubscribersBlockFound(address: string, height: number, _block: any, message: string) {
+        await this.publish(address, `Block found! Result: ${message}, Height: ${height}`);
+    }
+
+    public async notifySubscribersBestDiff(address: string, submissionDifficulty: number) {
+        if (!this.diffNotifications) return;
+
+        let currentBest = this.bestDiffCache.get(address);
+        if (currentBest === undefined) {
+            const settings = await this.addressSettingsService.getSettings(address, false);
+            currentBest = settings?.bestDifficulty ?? 0;
+            this.bestDiffCache.set(address, currentBest);
+        }
+
+        if (submissionDifficulty > currentBest) {
+            this.bestDiffCache.set(address, submissionDifficulty);
+            await this.publish(address, `\uD83C\uDFC6 New best difficulty!\nValue: ${this.numberSuffix.to(submissionDifficulty)}`);
+        }
     }
 }
 
