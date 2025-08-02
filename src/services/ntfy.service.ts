@@ -33,7 +33,11 @@ export class NtfyService implements OnModuleInit {
         if (!this.serverUrl) {
             return;
         }
-        const addresses = await this.telegramSubscriptionsService.getAllAddresses();
+        const [telegramAddresses, clientAddresses] = await Promise.all([
+            this.telegramSubscriptionsService.getAllAddresses(),
+            this.clientService.getAllAddresses(),
+        ]);
+        const addresses = Array.from(new Set([...telegramAddresses, ...clientAddresses]));
         addresses.forEach(addr => this.subscribe(addr));
     }
 
