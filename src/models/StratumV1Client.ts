@@ -814,14 +814,14 @@ export class StratumV1Client {
                 return true;
             } else {
                 console.error(`Error: Cannot write to closed or ended socket. ${this.extraNonceAndSessionId} ${message}`);
-                this.destroy();
+                await this.destroy();
                 if (!this.socket.destroyed) {
                     this.socket.destroy();
                 }
                 return false;
             }
         } catch (error) {
-            this.destroy();
+            await this.destroy();
             if (!this.socket.writableEnded) {
                 await this.socket.end();
             } else if (!this.socket.destroyed) {
