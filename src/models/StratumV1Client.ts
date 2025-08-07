@@ -747,6 +747,7 @@ export class StratumV1Client {
 
         if (targetDiff != this.sessionDifficulty) {
             //console.log(`Adjusting ${this.extraNonceAndSessionId} difficulty from ${this.sessionDifficulty} to ${targetDiff}`);
+            if (!Number.isFinite(targetDiff)) return;
             this.sessionDifficulty = targetDiff;
 
             const data = JSON.stringify({
