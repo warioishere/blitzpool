@@ -77,6 +77,14 @@ To start BlitzPool with PostgreSQL using Docker Compose, run:
 docker compose -f docker-compose.postgres.yml up
 ```
 
+To migrate an existing SQLite database to PostgreSQL, ensure the `DB_*` environment variables point to your Postgres instance and run:
+
+```bash
+npm run migrate:pg
+```
+
+The script reads from `DB/public-pool.sqlite` and copies all entities into the configured PostgreSQL database.
+
 ## API
 
 - `GET /api/info/chart?range=1d|1m` – Returns pool hashrate statistics.
