@@ -637,6 +637,23 @@ export class StratumV1Client {
         }
         const jobTemplate = this.stratumV1JobsService.getJobTemplateById(job.jobTemplateId);
 
+        if (jobTemplate == null) {
+            await this.poolShareStatisticsService.addRejectedShare(this.sessionDifficulty);
+            await this.poolRejectedStatisticsService.addRejectedShare(eStratumErrorCode[eStratumErrorCode.JobNotFound], this.sessionDifficulty);
+            await this.clientRejectedStatisticsService.addRejectedShare(this.clientAuthorization.address, eStratumErrorCode[eStratumErrorCode.JobNotFound], 1);
+            console.warn(`Job template ${job.jobTemplateId} not found for job ${submission.jobId}`);
+            delete this.stratumV1JobsService.jobs[submission.jobId];
+            const err = new StratumErrorMessage(
+                submission.id,
+                eStratumErrorCode.JobNotFound,
+                'Job not found').response();
+            const success = await this.write(err);
+            if (!success) {
+                return false;
+            }
+            return false;
+        }
+
         const updatedJobBlock = job.copyAndUpdateBlock(
             jobTemplate,
             parseInt(submission.versionMask, 16),
