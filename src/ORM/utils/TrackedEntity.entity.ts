@@ -1,14 +1,12 @@
 import { CreateDateColumn, DeleteDateColumn, UpdateDateColumn } from 'typeorm';
 
-import { DateTimeTransformer } from './DateTimeTransformer';
-
 export abstract class TrackedEntity {
-    @DeleteDateColumn({ nullable: true, type: 'datetime', transformer: new DateTimeTransformer() })
+    @DeleteDateColumn({ nullable: true })
     public deletedAt?: Date;
 
-    @CreateDateColumn({ type: 'datetime', transformer: new DateTimeTransformer() })
-    public createdAt?: Date
+    @CreateDateColumn()
+    public createdAt?: Date;
 
-    @UpdateDateColumn({ type: 'datetime', transformer: new DateTimeTransformer() })
-    public updatedAt?: Date
+    @UpdateDateColumn()
+    public updatedAt?: Date;
 }

@@ -1,6 +1,5 @@
 import { Column, Entity, Index, PrimaryColumn } from 'typeorm';
 
-import { DateTimeTransformer } from '../utils/DateTimeTransformer';
 import { TrackedEntity } from '../utils/TrackedEntity.entity';
 
 //https://www.sqlite.org/withoutrowid.html
@@ -28,10 +27,10 @@ export class ClientEntity extends TrackedEntity {
 
 
 
-    @Column({ type: 'datetime', transformer: new DateTimeTransformer() })
+    @Column()
     startTime: Date;
 
-    @Column({ type: 'datetime', transformer: new DateTimeTransformer(), nullable: true })
+    @Column({ nullable: true })
     firstSeen: Date;
 
     @Column({ type: 'real', default: 0 })
