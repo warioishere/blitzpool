@@ -1,13 +1,15 @@
-import { Column, Entity, Index, PrimaryColumn } from 'typeorm';
+import { Column, Index, PrimaryColumn } from 'typeorm';
 
 import { TrackedEntity } from '../utils/TrackedEntity.entity';
+import { DbAwareEntity } from '../utils/EntityFactory';
 
 //https://www.sqlite.org/withoutrowid.html
 
 //The WITHOUT ROWID optimization is likely to be helpful for tables that have non-integer
 // or composite (multi-column) PRIMARY KEYs and that do not store large strings or BLOBs.
 //WITHOUT ROWID tables work best when individual rows are not too large.
-@Entity({ withoutRowid: true })
+//Apply WITHOUT ROWID only when using SQLite
+@DbAwareEntity()
 @Index(['address', 'clientName', 'sessionId'], { unique: true })
 export class ClientEntity extends TrackedEntity {
 
