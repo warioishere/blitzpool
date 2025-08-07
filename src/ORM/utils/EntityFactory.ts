@@ -5,7 +5,7 @@ import { Entity, EntityOptions } from 'typeorm';
  * running against SQLite. For other databases the option is omitted.
  */
 export function DbAwareEntity(options: EntityOptions = {}): ClassDecorator {
-    if (process.env.DB_TYPE === 'sqlite') {
+    if (!process.env.DB_TYPE || process.env.DB_TYPE === 'sqlite') {
         return Entity({ ...options, withoutRowid: true });
     }
     const { withoutRowid, ...rest } = options;

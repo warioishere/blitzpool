@@ -1,7 +1,7 @@
 import { HttpModule } from '@nestjs/axios';
 import { CacheModule } from '@nestjs/cache-manager';
 import { Module } from '@nestjs/common';
-import { ConfigModule } from '@nestjs/config';
+import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
 import { TypeOrmModule } from '@nestjs/typeorm';
 
@@ -44,33 +44,38 @@ const ORMModules = [
     ClientRejectedStatisticsModule
 ]
 
-const dbType = process.env.DB_TYPE || 'sqlite';
-const typeOrmOptions = dbType === 'postgres'
-    ? {
-        type: 'postgres',
-        host: process.env.DB_HOST,
-        port: parseInt(process.env.DB_PORT || '5432', 10),
-        username: process.env.DB_USER,
-        password: process.env.DB_PASSWORD,
-        database: process.env.DB_NAME,
-        synchronize: true,
-        autoLoadEntities: true,
-        logging: false,
-    }
-    : {
-        type: 'sqlite',
-        database: './DB/public-pool.sqlite',
-        synchronize: true,
-        autoLoadEntities: true,
-        logging: false,
-        enableWAL: true,
-        busyTimeout: 30 * 1000,
-    };
-
 @Module({
     imports: [
         ConfigModule.forRoot(),
-        TypeOrmModule.forRoot(typeOrmOptions),
+        TypeOrmModule.forRootAsync({
+            imports: [ConfigModule],
+            inject: [ConfigService],
+            useFactory: (config: ConfigService) => {
+                const dbType = config.get<string>('DB_TYPE', 'sqlite');
+                if (dbType === 'postgres') {
+                    return {
+                        type: 'postgres',
+                        host: config.get<string>('DB_HOST'),
+                        port: parseInt(config.get<string>('DB_PORT') ?? '5432', 10),
+                        username: config.get<string>('DB_USER'),
+                        password: config.get<string>('DB_PASSWORD'),
+                        database: config.get<string>('DB_NAME'),
+                        synchronize: true,
+                        autoLoadEntities: true,
+                        logging: false,
+                    } as const;
+                }
+                return {
+                    type: 'sqlite',
+                    database: './DB/public-pool.sqlite',
+                    synchronize: true,
+                    autoLoadEntities: true,
+                    logging: false,
+                    enableWAL: true,
+                    busyTimeout: 30 * 1000,
+                } as const;
+            },
+        }),
         CacheModule.register(),
         ScheduleModule.forRoot(),
         HttpModule,
