@@ -44,19 +44,33 @@ const ORMModules = [
     ClientRejectedStatisticsModule
 ]
 
+const dbType = process.env.DB_TYPE || 'sqlite';
+const typeOrmOptions = dbType === 'postgres'
+    ? {
+        type: 'postgres',
+        host: process.env.DB_HOST,
+        port: parseInt(process.env.DB_PORT || '5432', 10),
+        username: process.env.DB_USER,
+        password: process.env.DB_PASSWORD,
+        database: process.env.DB_NAME,
+        synchronize: true,
+        autoLoadEntities: true,
+        logging: false,
+    }
+    : {
+        type: 'sqlite',
+        database: './DB/public-pool.sqlite',
+        synchronize: true,
+        autoLoadEntities: true,
+        logging: false,
+        enableWAL: true,
+        busyTimeout: 30 * 1000,
+    };
+
 @Module({
     imports: [
         ConfigModule.forRoot(),
-        TypeOrmModule.forRoot({
-            type: 'sqlite',
-            database: './DB/public-pool.sqlite',
-            synchronize: true,
-            autoLoadEntities: true,
-            logging: false,
-            enableWAL: true,
-            busyTimeout: 30 * 1000,
-
-        }),
+        TypeOrmModule.forRoot(typeOrmOptions),
         CacheModule.register(),
         ScheduleModule.forRoot(),
         HttpModule,
