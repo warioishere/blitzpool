@@ -25,8 +25,10 @@ export class AppService implements OnModuleInit {
         //https://phiresky.github.io/blog/2020/sqlite-performance-tuning/
         // //500 MB DB cache
         // await this.dataSource.query(`PRAGMA cache_size = -500000;`);
-        //Normal is still completely corruption safe in WAL mode, and means only WAL checkpoints have to wait for FSYNC. 
-        await this.dataSource.query(`PRAGMA synchronous = off;`);
+        //Normal is still completely corruption safe in WAL mode, and means only WAL checkpoints have to wait for FSYNC.
+        if (process.env.DB_TYPE === 'sqlite') {
+            await this.dataSource.query(`PRAGMA synchronous = off;`);
+        }
         // //6Gb
         // await this.dataSource.query(`PRAGMA mmap_size = 6000000000;`);
 
