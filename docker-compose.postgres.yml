@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:17
+    container_name: postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=blitzpool
+      - POSTGRES_PASSWORD=blitzpool
+      - POSTGRES_DB=blitzpool
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  public-pool:
+    container_name: public-pool
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - postgres
+    ports:
+      - "127.0.0.1:${STRATUM_PORT}:${STRATUM_PORT}/tcp"
+      - "127.0.0.1:${API_PORT}:${API_PORT}/tcp"
+    volumes:
+      - "./${NETWORK}-DB:/public-pool/DB"
+      - "./.env:/public-pool/.env:ro"
+    environment:
+      - NODE_ENV=production
+      - DB_TYPE=postgres
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=blitzpool
+      - DB_PASSWORD=blitzpool
+      - DB_NAME=blitzpool
+
+volumes:
+  pgdata:

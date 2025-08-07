@@ -71,6 +71,12 @@ BlitzPool supports SQLite (default) and PostgreSQL backends. Select the database
 
 See `.env.example` or `full-setup/blitzpool-example.env` for sample values.
 
+To start BlitzPool with PostgreSQL using Docker Compose, run:
+
+```bash
+docker compose -f docker-compose.postgres.yml up
+```
+
 ## API
 
 - `GET /api/info/chart?range=1d|1m` – Returns pool hashrate statistics.
