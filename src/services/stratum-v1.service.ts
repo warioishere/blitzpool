@@ -88,7 +88,10 @@ export class StratumV1Service implements OnModuleInit {
         socket.destroy();
       });
 
-      socket.on('error', async (error: Error) => { });
+      socket.on('error', async (error: Error) => {
+        console.error('Socket error', error);
+        socket.destroy();
+      });
 
       //   //console.log(`Client disconnected, socket error,  ${client.extraNonceAndSessionId}`);
 

@@ -774,7 +774,10 @@ export class StratumV1Client {
             }) + '\n';
 
 
-            await this.socket.write(data);
+            const success = await this.write(data);
+            if (!success) {
+                return;
+            }
 
             const jobTemplate = await firstValueFrom(this.stratumV1JobsService.newMiningJob$);
             // we need to clear the jobs so that the difficulty set takes effect. Otherwise the different miner implementations can cause issues
@@ -811,14 +814,14 @@ export class StratumV1Client {
                 return true;
             } else {
                 console.error(`Error: Cannot write to closed or ended socket. ${this.extraNonceAndSessionId} ${message}`);
-                this.destroy();
+                await this.destroy();
                 if (!this.socket.destroyed) {
                     this.socket.destroy();
                 }
                 return false;
             }
         } catch (error) {
-            this.destroy();
+            await this.destroy();
             if (!this.socket.writableEnded) {
                 await this.socket.end();
             } else if (!this.socket.destroyed) {
