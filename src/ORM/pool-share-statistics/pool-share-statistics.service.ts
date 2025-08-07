@@ -30,6 +30,12 @@ export class PoolShareStatisticsService {
   }
 
   private async handleShare(accepted: number, rejected: number) {
+    if (!Number.isFinite(accepted) || !Number.isFinite(rejected)) {
+      console.warn(
+        `discarded non-finite share stats: accepted=${accepted}, rejected=${rejected}`,
+      );
+      return;
+    }
     const timeSlot = this.getTimeSlot();
 
     if (this.currentTimeSlot === null) {

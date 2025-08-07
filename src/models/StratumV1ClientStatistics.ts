@@ -147,10 +147,12 @@ export class StratumV1ClientStatistics {
             return pre;
         }, 0);
         const diffSeconds = (this.submissionCache[this.submissionCache.length - 1].time.getTime() - this.submissionCache[0].time.getTime()) / 1000;
+        if (diffSeconds <= 0) return null;
 
         const difficultyPerSecond = sum / diffSeconds;
-
         const targetDifficulty = difficultyPerSecond * this.targetSubmissionPerSecond;
+        if (!Number.isFinite(difficultyPerSecond) || !Number.isFinite(targetDifficulty))
+            return null;
 
         if ((clientDifficulty * 2) < targetDifficulty || (clientDifficulty / 2) > targetDifficulty) {
             return this.nearestDifficultyStep(targetDifficulty)
