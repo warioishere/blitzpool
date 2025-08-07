@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { DataSource } from 'typeorm';
 
 import { AddressSettingsEntity } from '../src/ORM/address-settings/address-settings.entity';
@@ -46,14 +47,41 @@ async function migrate() {
     await sqliteDataSource.initialize();
     await postgresDataSource.initialize();
 
+    const batchSize = 1000;
     for (const entity of entities) {
-      const sqliteRepo = sqliteDataSource.getRepository(entity);
-      const pgRepo = postgresDataSource.getRepository(entity);
-      const records = await sqliteRepo.find();
-      if (records.length > 0) {
-        await pgRepo.save(records);
+      try {
+        const sqliteRepo = sqliteDataSource.getRepository(entity);
+        const pgRepo = postgresDataSource.getRepository(entity);
+
+        let offset = 0;
+        let migratedCount = 0;
+        while (true) {
+          const records = await sqliteRepo.find({ skip: offset, take: batchSize });
+          if (records.length === 0) break;
+
+          await pgRepo.save(records);
+          offset += records.length;
+          migratedCount += records.length;
+          console.log(
+            `Migrated batch of ${records.length} ${entity.name} records (total: ${migratedCount})`,
+          );
+        }
+
+        if (
+          pgRepo.metadata.generatedColumns.some(
+            (col) => col.isPrimary && col.generationStrategy === 'increment',
+          )
+        ) {
+          const tableName = pgRepo.metadata.tableName;
+          const sequenceName = `${tableName}_id_seq`;
+          await pgRepo.query(
+            `SELECT setval('${sequenceName}', (SELECT COALESCE(MAX(id), 0) FROM "${tableName}"));`,
+          );
+          console.log(`Adjusted sequence ${sequenceName} for ${entity.name}`);
+        }
+      } catch (err) {
+        console.error(`Error migrating ${entity.name}:`, err);
       }
-      console.log(`Migrated ${records.length} ${entity.name} records`);
     }
 
     console.log('Migration completed successfully');
