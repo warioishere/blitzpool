@@ -62,6 +62,15 @@ https://github.com/warioishere/blitzpool-message-encryptor-for-TG
 - Desired share rate per worker can be tuned with `TARGET_SHARES_PER_MINUTE` (default `6`)
 - How often miners are checked for new difficulty can be set via `DIFFICULTY_CHECK_INTERVAL_MS` (default `60000` ms)
 
+## Database Configuration
+
+BlitzPool supports SQLite (default) and PostgreSQL backends. Select the database with the `DB_TYPE` environment variable:
+
+- `DB_TYPE=sqlite` uses a local file-based database and requires no further settings.
+- `DB_TYPE=postgres` enables PostgreSQL. Configure connection details with `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, and `DB_NAME`. Default credentials in example env files use `blitzpool` for user, password, and database name.
+
+See `.env.example` or `full-setup/blitzpool-example.env` for sample values.
+
 ## API
 
 - `GET /api/info/chart?range=1d|1m` – Returns pool hashrate statistics.
