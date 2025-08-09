@@ -83,7 +83,14 @@ To migrate an existing SQLite database to PostgreSQL, ensure the `DB_*` environm
 npm run migrate:pg
 ```
 
-The script reads from `DB/public-pool.sqlite` and copies all entities into the configured PostgreSQL database.
+By default the script reads from `DB/public-pool.sqlite` and copies all entities into the configured PostgreSQL database.  To
+migrate a database created via the `full-setup` scripts, run:
+
+```bash
+npm run migrate:pg_fullsetup
+```
+
+Alternatively, set `SQLITE_DB_PATH` to the location of your SQLite file before invoking the migration command.
 
 ## API
 

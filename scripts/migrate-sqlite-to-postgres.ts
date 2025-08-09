@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import path from 'path';
 import { DataSource } from 'typeorm';
 
 import { AddressSettingsEntity } from '../src/ORM/address-settings/address-settings.entity';
@@ -26,9 +27,13 @@ const entities = [
 ];
 
 async function migrate() {
+  const sqlitePath =
+    process.env.SQLITE_DB_PATH || path.resolve('DB', 'public-pool.sqlite');
+  console.log(`Using SQLite database at ${sqlitePath}`);
+
   const sqliteDataSource = new DataSource({
     type: 'sqlite',
-    database: './DB/public-pool.sqlite',
+    database: sqlitePath,
     entities,
   });
 
