@@ -45,8 +45,9 @@ export class ClientStatisticsService {
         const monthCutoff = new Date(now - 30 * 24 * 60 * 60 * 1000);
 
         // Aggregate old statistics so that only pool hashrate and worker totals are retained
-        await this.clientStatisticsRepository.query(`
-            INSERT INTO client_statistics_entity (
+        const nowDate = new Date();
+        await this.clientStatisticsRepository.query(
+            `INSERT INTO client_statistics_entity (
                 address,
                 clientName,
                 sessionId,
@@ -63,15 +64,15 @@ export class ClientStatisticsService {
                 time,
                 SUM(shares),
                 SUM(acceptedCount),
-                datetime('now'),
-                datetime('now')
+                ?, ?
             FROM client_statistics_entity
-            WHERE time < ${detailCutoff.getTime()} AND NOT (address = 'POOL' AND clientName = 'POOL' AND sessionId = 'POOL') AND sessionId != 'AGG'
-            GROUP BY time;
-        `);
+            WHERE time < ? AND NOT (address = 'POOL' AND clientName = 'POOL' AND sessionId = 'POOL') AND sessionId != 'AGG'
+            GROUP BY time;`,
+            [nowDate, nowDate, detailCutoff.getTime()],
+        );
 
-        await this.clientStatisticsRepository.query(`
-            INSERT INTO client_statistics_entity (
+        await this.clientStatisticsRepository.query(
+            `INSERT INTO client_statistics_entity (
                 address,
                 clientName,
                 sessionId,
@@ -85,15 +86,15 @@ export class ClientStatisticsService {
                 address,
                 clientName,
                 'AGG',
-                ${detailCutoff.getTime()},
+                ?,
                 SUM(shares),
                 SUM(acceptedCount),
-                datetime('now'),
-                datetime('now')
+                ?, ?
             FROM client_statistics_entity
-            WHERE time < ${detailCutoff.getTime()} AND NOT (sessionId = 'AGG' OR (address = 'POOL' AND clientName = 'POOL' AND sessionId = 'POOL'))
-            GROUP BY address, clientName;
-        `);
+            WHERE time < ? AND NOT (sessionId = 'AGG' OR (address = 'POOL' AND clientName = 'POOL' AND sessionId = 'POOL'))
+            GROUP BY address, clientName;`,
+            [detailCutoff.getTime(), nowDate, nowDate, detailCutoff.getTime()],
+        );
 
         // Delete detailed records older than one day
         await this.clientStatisticsRepository.query(`
@@ -195,14 +196,21 @@ export class ClientStatisticsService {
         const since = new Date(Date.now() - diffDays * 24 * 60 * 60 * 1000);
         const limit = diffDays * 144;
 
+        const epochFn = (column: string) => process.env.DB_TYPE === 'postgres'
+            ? `EXTRACT(EPOCH FROM ${column})`
+            : `strftime('%s', ${column})`;
+
+        const updatedEpoch = epochFn('entry."updatedAt"');
+        const createdEpoch = epochFn('entry."createdAt"');
+
         const query = `
                 SELECT
                     time label,
                     CASE
-                        WHEN (MAX(strftime('%s', updatedAt)) - MIN(strftime('%s', createdAt))) < 1
+                        WHEN (MAX(${updatedEpoch}) - MIN(${createdEpoch})) < 1
                             THEN (SUM(shares) * 4294967296) / 600
                         ELSE (SUM(shares) * 4294967296) /
-                             (MAX(strftime('%s', updatedAt)) - MIN(strftime('%s', createdAt)))
+                             (MAX(${updatedEpoch}) - MIN(${createdEpoch}))
                     END AS data
                 FROM
                     client_statistics_entity AS entry
