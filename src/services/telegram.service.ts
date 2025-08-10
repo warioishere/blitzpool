@@ -9,6 +9,7 @@ import { TelegramSubscriptionsService } from '../ORM/telegram-subscriptions/tele
 import { ClientService } from '../ORM/client/client.service';
 import { AddressSettingsService } from '../ORM/address-settings/address-settings.service';
 import { ClientStatisticsService } from '../ORM/client-statistics/client-statistics.service';
+import { buildStatsMessage } from './common-command-handlers';
 
 @Injectable()
 export class TelegramService implements OnModuleInit {
@@ -387,38 +388,21 @@ I will decrypt it and respond just like with plain text. 🔒`
             }
 
             try {
-                const workers = await this.clientService.getByAddress(address);
-                const addressSettings = await this.addressSettingsService.getSettings(address, false);
-                const totalShares = await this.clientStatisticsService.getTotalSharesForAddress(address);
-
-                if (!workers || workers.length === 0) {
+                const messages = await buildStatsMessage(
+                    address,
+                    this.clientService,
+                    this.addressSettingsService,
+                    this.clientStatisticsService,
+                    this.numberSuffix
+                );
+                if (!messages) {
                     this.reply(chatId, {
                         de: 'Keine aktiven Worker für diese Adresse gefunden.',
                         en: 'No active workers found for this address.'
                     });
                     return;
                 }
-
-                const totalHashrate = workers.reduce((sum, w) => sum + (w.hashRate ?? 0), 0);
-                const totalHashrateTH = totalHashrate / 1e12;
-
-                const lastSeenSeconds = Math.floor((Date.now() - new Date(workers[0].updatedAt).getTime()) / 1000);
-
-                const bestDiffRaw = addressSettings?.bestDifficulty ?? 0;
-                const bestDifficultyG = bestDiffRaw / 1e9;
-
-                this.reply(chatId, {
-                    de: `📈 Stats für deine Adresse:
-- Aktuelle Hashrate: ${totalHashrateTH.toFixed(2)} TH/s
-- Gesamt-Shares: ${this.numberSuffix.to(totalShares)}
-- Letzter Share: vor ${lastSeenSeconds} Sekunden
-- Beste Difficulty: ${bestDifficultyG.toFixed(2)} G`,
-                    en: `📈 Stats for your address:
-- Current hashrate: ${totalHashrateTH.toFixed(2)} TH/s
-- Total shares: ${this.numberSuffix.to(totalShares)}
-- Last share: ${lastSeenSeconds} seconds ago
-- Best difficulty: ${bestDifficultyG.toFixed(2)} G`
-                });
+                this.reply(chatId, messages);
             } catch (err) {
                 console.error("Fehler bei /stats:", err);
                 this.reply(chatId, {
