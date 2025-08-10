@@ -20,6 +20,7 @@ export class NtfyService implements OnModuleInit {
     private sources: Map<string, EventSource> = new Map();
     private readonly diffNotifications: boolean;
     private bestDiffCache: Map<string, number> = new Map();
+    private bestDiffOptIn: Map<string, boolean> = new Map();
 
     constructor(
         private readonly configService: ConfigService,
@@ -96,6 +97,19 @@ export class NtfyService implements OnModuleInit {
             console.error('NTFY connection error', err);
         };
         this.sources.set(address, es);
+        if (!this.bestDiffOptIn.has(address)) {
+            this.bestDiffOptIn.set(address, true);
+        }
+    }
+
+    private unsubscribe(address: string) {
+        const es = this.sources.get(address);
+        if (es) {
+            es.close();
+            this.sources.delete(address);
+        }
+        this.bestDiffCache.delete(address);
+        this.bestDiffOptIn.delete(address);
     }
 
     private async handleCommand(origin: string, text: string) {
@@ -112,6 +126,19 @@ export class NtfyService implements OnModuleInit {
             }
             this.subscribe(address);
             await this.publish(origin, `Subscribed to ${address}.`);
+        } else if (text.startsWith('/unsubscribe')) {
+            const raw = text.replace('/unsubscribe', '').trim();
+            const target = raw || origin;
+            this.unsubscribe(target);
+            await this.publish(origin, `Removed ${target}.`);
+        } else if (text.startsWith('/remove')) {
+            const raw = text.replace('/remove', '').trim();
+            const target = raw || origin;
+            this.unsubscribe(target);
+            await this.publish(origin, `Removed ${target}.`);
+        } else if (text.startsWith('/show_addresses')) {
+            const list = Array.from(this.sources.keys());
+            await this.publish(origin, list.length ? list.join('\n') : 'No addresses subscribed.');
         } else if (text.startsWith('/stats')) {
             const messages = await buildStatsMessage(
                 origin,
@@ -125,6 +152,65 @@ export class NtfyService implements OnModuleInit {
             } else {
                 await this.publish(origin, messages.en);
             }
+        } else if (text.startsWith('/poolhashrate')) {
+            try {
+                const apiPort = process.env.API_PORT || '3334';
+                const res = await fetch(`http://localhost:${apiPort}/api/pool`);
+                const data = await res.json();
+                const hashrateTH = (data.totalHashRate / 1e12).toFixed(2);
+                await this.publish(origin, `Current pool hashrate: ${hashrateTH} TH/s`);
+            } catch (err) {
+                await this.publish(origin, 'Could not fetch pool hashrate.');
+                console.error('NTFY /poolhashrate error', err);
+            }
+        } else if (text.startsWith('/difficulty')) {
+            try {
+                const res = await fetch('https://mempool.space/api/v1/mining/hashrate/3d');
+                const json = await res.json();
+                const difficulty = (json.currentDifficulty / 1e12).toFixed(2);
+                await this.publish(origin, `Current difficulty: ${difficulty} T`);
+            } catch (err) {
+                await this.publish(origin, 'Could not fetch difficulty.');
+                console.error('NTFY /difficulty error', err);
+            }
+        } else if (text.startsWith('/next_difficulty')) {
+            try {
+                const res = await fetch('https://mempool.space/api/v1/difficulty-adjustment');
+                const data = await res.json();
+                const progress = data.progressPercent.toFixed(2);
+                const change = data.difficultyChange.toFixed(2);
+                const estimatedDate = new Date(data.estimatedRetargetDate).toLocaleString('de-CH');
+                const changeText = change >= 0 ? `📈 +${change}%` : `📉 ${change}%`;
+                await this.publish(origin, `📊 Next difficulty adjustment:\n• Progress: ${progress}%\n• Estimated: ${estimatedDate}\n• Expected change: ${changeText}`);
+            } catch (err) {
+                await this.publish(origin, 'Could not fetch next difficulty adjustment.');
+                console.error('NTFY /next_difficulty error', err);
+            }
+        } else if (text.startsWith('/subscribe_bestdiff')) {
+            const match = text.match(/\/subscribe_bestdiff\s+(on|off)/i);
+            const value = match?.[1]?.toLowerCase();
+            if (!value) {
+                await this.publish(origin, "Please provide 'on' or 'off'.");
+                return;
+            }
+            const enable = value === 'on';
+            this.bestDiffOptIn.set(origin, enable);
+            await this.publish(origin, `Best difficulty notifications ${enable ? 'enabled' : 'disabled'}.`);
+        } else if (text.startsWith('/encryption_help')) {
+            await this.publish(origin, 'How to encrypt your BTC address:\n1. Use https://github.com/warioishere/blitzpool-message-encryptor-for-TG\n2. Then send /subscribe <encrypted address>');
+        } else if (text.startsWith('/start')) {
+            await this.publish(
+                origin,
+                'Welcome to the BlitzPool notifier! Available commands:\n' +
+                '/subscribe <address> - follow another address\n' +
+                '/unsubscribe <address> - stop following an address\n' +
+                '/stats - show worker stats\n' +
+                '/poolhashrate - show current pool hashrate\n' +
+                '/difficulty - show current network difficulty\n' +
+                '/next_difficulty - show expected difficulty change\n' +
+                '/show_addresses - list subscribed addresses\n' +
+                '/encryption_help - how to encrypt an address'
+            );
         } else {
             await this.publish(origin, 'Unknown command.');
         }
@@ -166,7 +252,9 @@ export class NtfyService implements OnModuleInit {
 
         if (submissionDifficulty > currentBest) {
             this.bestDiffCache.set(address, submissionDifficulty);
-            await this.publish(address, `\uD83C\uDFC6 New best difficulty!\nValue: ${this.numberSuffix.to(submissionDifficulty)}`);
+            if (this.bestDiffOptIn.get(address) !== false) {
+                await this.publish(address, `\uD83C\uDFC6 New best difficulty!\nValue: ${this.numberSuffix.to(submissionDifficulty)}`);
+            }
         }
     }
 }
