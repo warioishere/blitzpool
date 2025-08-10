@@ -1,7 +1,7 @@
 import { Injectable, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
-import EventSource from 'eventsource';
+import { EventSource } from 'eventsource';
 import { validate } from 'bitcoin-address-validation';
 import { Block } from 'bitcoinjs-lib';
 import { NumberSuffix } from '../utils/NumberSuffix';
@@ -60,11 +60,19 @@ export class NtfyService implements OnModuleInit {
         }
         const topic = this.topicFor(address);
         const url = `${this.serverUrl}/${topic}/sse`;
-        const headers: Record<string, string> = {};
+        let es: EventSource;
         if (this.accessToken) {
-            headers['Authorization'] = `Bearer ${this.accessToken}`;
+            const fetchWithAuth = (input: string | URL, init: any) => {
+                init.headers = {
+                    ...(init.headers || {}),
+                    Authorization: `Bearer ${this.accessToken}`,
+                };
+                return fetch(input, init);
+            };
+            es = new EventSource(url, { fetch: fetchWithAuth } as any);
+        } else {
+            es = new EventSource(url);
         }
-        const es = new EventSource(url, { headers });
         es.onmessage = async (event) => {
             try {
                 const data = JSON.parse(event.data);
