@@ -76,6 +76,14 @@ export class NtfyService implements OnModuleInit {
         es.onmessage = async (event) => {
             try {
                 const data = JSON.parse(event.data);
+                const tags: string[] = Array.isArray(data.tags)
+                    ? data.tags
+                    : typeof data.tags === 'string'
+                        ? data.tags.split(',')
+                        : [];
+                if (tags.includes('bot')) {
+                    return;
+                }
                 const text: string | undefined = data.message?.trim();
                 if (text) {
                     await this.handleCommand(address, text);
@@ -128,7 +136,10 @@ export class NtfyService implements OnModuleInit {
         }
         const topic = this.topicFor(address);
         const url = `${this.serverUrl}/${topic}`;
-        const headers: Record<string, string> = { 'Content-Type': 'text/plain' };
+        const headers: Record<string, string> = {
+            'Content-Type': 'text/plain',
+            'Tags': 'bot',
+        };
         if (this.accessToken) {
             headers['Authorization'] = `Bearer ${this.accessToken}`;
         }
