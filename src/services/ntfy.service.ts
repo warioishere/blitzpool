@@ -196,8 +196,6 @@ export class NtfyService implements OnModuleInit {
             const enable = value === 'on';
             this.bestDiffOptIn.set(origin, enable);
             await this.publish(origin, `Best difficulty notifications ${enable ? 'enabled' : 'disabled'}.`);
-        } else if (text.startsWith('/encryption_help')) {
-            await this.publish(origin, 'How to encrypt your BTC address:\n1. Use https://github.com/warioishere/blitzpool-message-encryptor-for-TG\n2. Then send /subscribe <encrypted address>');
         } else if (text.startsWith('/start')) {
             await this.publish(
                 origin,
@@ -208,8 +206,7 @@ export class NtfyService implements OnModuleInit {
                 '/poolhashrate - show current pool hashrate\n' +
                 '/difficulty - show current network difficulty\n' +
                 '/next_difficulty - show expected difficulty change\n' +
-                '/show_addresses - list subscribed addresses\n' +
-                '/encryption_help - how to encrypt an address'
+                '/show_addresses - list subscribed addresses'
             );
         } else {
             await this.publish(origin, 'Unknown command.');
