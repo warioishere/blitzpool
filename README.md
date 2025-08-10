@@ -47,6 +47,27 @@ Use our Encryption tool for btc worker addresses here:
 
 https://github.com/warioishere/blitzpool-message-encryptor-for-TG
 
+### 📢 NTFY Notifications
+
+BlitzPool can mirror its Telegram bot interactions over [ntfy](https://ntfy.sh/) topics.
+Enable the service by setting the following optional environment variables:
+
+```
+NTFY_SERVER_URL=<https://your-ntfy-server>
+NTFY_ACCESS_TOKEN=<token if required>
+NTFY_TOPIC_PREFIX=<optional prefix>
+NTFY_DIFF_NOTIFICATIONS=true   # publish best-diff alerts
+```
+
+On startup the pool subscribes to topics for all known BTC addresses using the
+`<prefix><address>` convention. Post commands like `/subscribe` or `/stats` to the
+topic of your address and the service will reply on the same channel:
+
+```
+curl -d /stats $NTFY_SERVER_URL/myPrefix1ABC...
+curl -d "/subscribe 1DEF..." $NTFY_SERVER_URL/myPrefix1ABC...
+```
+
 #### 🛠️ Extra Services
 - Integrated `blockTemplateInterval` configuration
 - Hashrate corrections and updated statistics endpoints

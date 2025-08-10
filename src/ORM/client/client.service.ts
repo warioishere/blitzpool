@@ -182,4 +182,12 @@ export class ClientService {
         return result;
     }
 
+    public async getAllAddresses(): Promise<string[]> {
+        const rows = await this.clientRepository
+            .createQueryBuilder('client')
+            .select('DISTINCT client.address', 'address')
+            .getRawMany();
+        return rows.map(r => r.address);
+    }
+
 }
