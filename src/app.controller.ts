@@ -164,6 +164,44 @@ export class AppController {
 
   }
 
+  @Get('info/accepted')
+  public async infoAccepted(
+    @Query('range') range: '1d' | '3d' | '7d' = '1d',
+  ) {
+    const CACHE_KEY = `POOL_ACCEPTED_STATS_${range}`;
+    const cachedResult = await this.cacheManager.get(CACHE_KEY);
+
+    if (cachedResult != null) {
+      return cachedResult;
+    }
+
+    const now = Date.now();
+    const oneDay = 24 * 60 * 60 * 1000;
+    const days = range === '7d' ? 7 : range === '3d' ? 3 : 1;
+    const sinceTime = now - days * oneDay;
+
+    const entries = await this.poolShareStatisticsService.getEntriesSince(sinceTime);
+    const slotMap = new Map<number, number>();
+    for (const entry of entries) {
+      slotMap.set(entry.time, entry.accepted);
+    }
+
+    const coeff = 1000 * 60 * 10;
+    const startSlot = Math.floor(sinceTime / coeff) * coeff;
+    const endSlot = Math.floor(now / coeff) * coeff;
+    const slotData: { time: string; counts: { accepted: number } }[] = [];
+    for (let t = startSlot; t <= endSlot; t += coeff) {
+      slotData.push({
+        time: new Date(t).toISOString(),
+        counts: { accepted: slotMap.get(t) || 0 },
+      });
+    }
+
+    await this.cacheManager.set(CACHE_KEY, { slotData }, 10 * 60 * 1000);
+
+    return { slotData };
+  }
+
   @Get('info/rejected')
   public async infoRejected(
     @Query('range') range: '1d' | '3d' | '7d' = '1d',
