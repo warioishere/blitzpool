@@ -21,6 +21,7 @@ export class NtfyService implements OnModuleInit {
   private bestDiffOptIn: Map<string, boolean> = new Map();
   private subscribed: Set<string> = new Set();
   private eventSource?: EventSource;
+  private retryTimer?: NodeJS.Timeout;
 
   constructor(
     private readonly configService: ConfigService,
@@ -65,6 +66,10 @@ export class NtfyService implements OnModuleInit {
   }
 
   private reconnect() {
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = undefined;
+    }
     if (this.eventSource) {
       this.eventSource.close();
       this.eventSource = undefined;
@@ -112,7 +117,11 @@ export class NtfyService implements OnModuleInit {
         console.error('NTFY parse error', err);
       }
     };
-    es.onerror = (err) => {
+    es.onerror = (err: any) => {
+      if (err?.status === 429) {
+        this.retryTimer = setTimeout(() => this.reconnect(), 10_000);
+        return;
+      }
       console.error('NTFY connection error', err);
     };
     this.eventSource = es;
