@@ -347,6 +347,20 @@ export class ClientStatisticsService {
 
     }
 
+    public async getAcceptedEntriesSince(address: string, time: number): Promise<Array<{ time: number; accepted: number }>> {
+        const query = this.clientStatisticsRepository
+            .createQueryBuilder('stat')
+            .select('stat.time', 'time')
+            .addSelect('SUM(stat.acceptedCount)', 'accepted')
+            .where('stat.address = :address', { address })
+            .andWhere('stat.time > :time', { time })
+            .groupBy('stat.time')
+            .orderBy('stat.time', 'ASC');
+
+        const result = await query.getRawMany();
+        return result.map(r => ({ time: Number(r.time), accepted: Number(r.accepted) }));
+    }
+
     public async getTotalSharesForAddress(address: string): Promise<number> {
         const result = await this.clientStatisticsRepository
             .createQueryBuilder('entry')

@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Interval } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, MoreThan } from 'typeorm';
 import { Mutex } from 'async-mutex';
 
 import { PoolShareStatisticsEntity } from './pool-share-statistics.entity';
@@ -118,5 +118,14 @@ export class PoolShareStatisticsService {
       accepted: result?.accepted ? parseFloat(result.accepted) : 0,
       rejected: result?.rejected ? parseFloat(result.rejected) : 0,
     };
+  }
+
+  public async getEntriesSince(
+    time: number,
+  ): Promise<PoolShareStatisticsEntity[]> {
+    return this.poolShareStatisticsRepository.find({
+      where: { time: MoreThan(time) },
+      order: { time: 'ASC' },
+    });
   }
 }
