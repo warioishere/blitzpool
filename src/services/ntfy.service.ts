@@ -49,16 +49,14 @@ export class NtfyService implements OnModuleInit {
     const addresses = Array.from(
       new Set([...telegramAddresses, ...clientAddresses]),
     );
-    const bests = await Promise.all(
-      addresses.map((a) => this.addressSettingsService.getSettings(a, false)),
-    );
-    addresses.forEach((addr, idx) => {
-      this.bestDiffCache.set(addr, bests[idx]?.bestDifficulty ?? 0);
-      this.subscribed.add(addr);
-      if (!this.bestDiffOptIn.has(addr)) {
-        this.bestDiffOptIn.set(addr, true);
-      }
-    });
+    for (const addr of addresses) {
+      const settings = await this.addressSettingsService.getSettings(
+        addr,
+        false,
+      );
+      this.bestDiffCache.set(addr, settings?.bestDifficulty ?? 0);
+      this.subscribe(addr, false);
+    }
     this.reconnect();
   }
 
@@ -120,7 +118,7 @@ export class NtfyService implements OnModuleInit {
     this.eventSource = es;
   }
 
-  private subscribe(address: string) {
+  private subscribe(address: string, reconnect = true) {
     if (!this.serverUrl || this.subscribed.has(address)) {
       return;
     }
@@ -128,7 +126,9 @@ export class NtfyService implements OnModuleInit {
     if (!this.bestDiffOptIn.has(address)) {
       this.bestDiffOptIn.set(address, true);
     }
-    this.reconnect();
+    if (reconnect) {
+      this.reconnect();
+    }
   }
 
   private unsubscribe(address: string) {
