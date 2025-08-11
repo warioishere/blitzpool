@@ -77,7 +77,7 @@ export class ClientController {
         const entries = await this.clientStatisticsService.getAcceptedEntriesSince(address, sinceTime);
         const slotMap = new Map<number, number>();
         for (const entry of entries) {
-            slotMap.set(entry.time, entry.accepted);
+            slotMap.set(entry.time, entry.shares);
         }
 
         const coeff = 1000 * 60 * 10;
