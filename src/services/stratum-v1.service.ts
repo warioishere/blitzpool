@@ -19,6 +19,8 @@ import { ClientRejectedStatisticsService } from '../ORM/client-rejected-statisti
 @Injectable()
 export class StratumV1Service implements OnModuleInit {
 
+  private readonly clientsByAddress = new Map<string, Set<StratumV1Client>>();
+
   constructor(
     private readonly bitcoinRpcService: BitcoinRpcService,
     private readonly clientService: ClientService,
@@ -70,7 +72,8 @@ export class StratumV1Service implements OnModuleInit {
         this.poolShareStatisticsService,
         this.poolRejectedStatisticsService,
         this.clientRejectedStatisticsService,
-        this.externalSharesService
+        this.externalSharesService,
+        this,
       );
 
 
@@ -78,6 +81,7 @@ export class StratumV1Service implements OnModuleInit {
         if (client.extraNonceAndSessionId != null) {
           // Handle socket disconnection
           await client.destroy();
+          this.unregisterClient(client.address, client);
           console.log(`Client ${client.extraNonceAndSessionId} disconnected, hadError?:${hadError}`);
         }
       });
@@ -102,6 +106,46 @@ export class StratumV1Service implements OnModuleInit {
       console.log(`Stratum server is listening on port ${process.env.STRATUM_PORT}`);
     });
 
+  }
+
+  registerClient(address: string, client: StratumV1Client) {
+    if (!address) {
+      return;
+    }
+    if (!this.clientsByAddress.has(address)) {
+      this.clientsByAddress.set(address, new Set());
+    }
+    this.clientsByAddress.get(address).add(client);
+  }
+
+  unregisterClient(address: string | undefined, client: StratumV1Client) {
+    if (!address) {
+      return;
+    }
+    const clients = this.clientsByAddress.get(address);
+    if (!clients) {
+      return;
+    }
+    clients.delete(client);
+    if (clients.size === 0) {
+      this.clientsByAddress.delete(address);
+    }
+  }
+
+  resetClientsForAddress(address: string) {
+    const clients = this.clientsByAddress.get(address);
+    if (!clients) {
+      return;
+    }
+    for (const client of clients) {
+      try {
+        client.socket.end();
+        client.socket.destroy();
+      } catch {
+        // ignore errors while closing sockets
+      }
+    }
+    this.clientsByAddress.delete(address);
   }
 
 }
