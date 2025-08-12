@@ -1,10 +1,11 @@
-import { Controller, Get, NotFoundException, Param, Query } from '@nestjs/common';
+import { Controller, Get, NotFoundException, Param, Query, Post } from '@nestjs/common';
 
 import { AddressSettingsService } from '../../ORM/address-settings/address-settings.service';
 import { ClientStatisticsService } from '../../ORM/client-statistics/client-statistics.service';
 import { ClientService } from '../../ORM/client/client.service';
 import { ClientRejectedStatisticsService } from '../../ORM/client-rejected-statistics/client-rejected-statistics.service';
 import { eStratumErrorCode } from '../../models/enums/eStratumErrorCode';
+import { StratumV1Service } from '../../services/stratum-v1.service';
 
 
 @Controller('client')
@@ -14,7 +15,8 @@ export class ClientController {
         private readonly clientService: ClientService,
         private readonly clientStatisticsService: ClientStatisticsService,
         private readonly addressSettingsService: AddressSettingsService,
-        private readonly clientRejectedStatisticsService: ClientRejectedStatisticsService
+        private readonly clientRejectedStatisticsService: ClientRejectedStatisticsService,
+        private readonly stratumV1Service: StratumV1Service,
     ) { }
 
 
@@ -41,6 +43,12 @@ export class ClientController {
                 })
             )
         }
+    }
+
+    @Post(':address/reset')
+    resetClients(@Param('address') address: string) {
+        this.stratumV1Service.resetClientsForAddress(address);
+        return { status: 'reset' };
     }
 
     @Get(':address/chart')

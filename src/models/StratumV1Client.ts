@@ -32,6 +32,7 @@ import { DifficultyUtils } from '../utils/difficulty.utils';
 import { PoolShareStatisticsService } from '../ORM/pool-share-statistics/pool-share-statistics.service';
 import { PoolRejectedStatisticsService } from '../ORM/pool-rejected-statistics/pool-rejected-statistics.service';
 import { ClientRejectedStatisticsService } from '../ORM/client-rejected-statistics/client-rejected-statistics.service';
+import { StratumV1Service } from '../services/stratum-v1.service';
 
 
 export class StratumV1Client {
@@ -84,7 +85,8 @@ export class StratumV1Client {
         private readonly poolShareStatisticsService: PoolShareStatisticsService,
         private readonly poolRejectedStatisticsService: PoolRejectedStatisticsService,
         private readonly clientRejectedStatisticsService: ClientRejectedStatisticsService,
-        private readonly externalSharesService: ExternalSharesService
+        private readonly externalSharesService: ExternalSharesService,
+        private readonly stratumV1Service: StratumV1Service,
     ) {
 
         const networkConfig = this.configService.get('NETWORK');
@@ -121,11 +123,19 @@ export class StratumV1Client {
 
     }
 
+    public get address(): string | undefined {
+        return this.clientAuthorization?.address;
+    }
+
     public async destroy() {
 
         const sid = this.entity?.sessionId || this.extraNonceAndSessionId;
         if (sid) {
             await this.clientService.delete(sid);
+        }
+
+        if (this.clientAuthorization) {
+            this.stratumV1Service.unregisterClient(this.clientAuthorization.address, this);
         }
 
         if (this.stratumSubscription != null) {
@@ -261,6 +271,7 @@ export class StratumV1Client {
                 if (errors.length === 0) {
                     this.clientAuthorization = authorizationMessage;
                     this.authorizeResponse = JSON.stringify(this.clientAuthorization.response()) + '\n';
+                    this.stratumV1Service.registerClient(this.clientAuthorization.address, this);
                 } else {
                     console.error('Authorization validation error');
                     const err = new StratumErrorMessage(
