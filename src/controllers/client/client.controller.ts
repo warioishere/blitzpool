@@ -1,3 +1,4 @@
+/* eslint-disable prettier/prettier */
 import { Controller, Get, NotFoundException, Param, Query, Post } from '@nestjs/common';
 
 import { AddressSettingsService } from '../../ORM/address-settings/address-settings.service';
@@ -57,6 +58,19 @@ export class ClientController {
         @Query('range') range: '1d' | '3d' | '7d' = '1d'
     ) {
         const chartData = await this.clientStatisticsService.getChartDataForAddress(address, range);
+
+        const coeff = 1000 * 60 * 10;
+        const currentSlot = Math.floor(Date.now() / coeff) * coeff;
+        const liveClients = this.stratumV1Service.getClientsByAddress(address);
+        let liveHashRate = 0;
+
+        for (const client of liveClients) {
+            if (client.statistics.currentTimeSlot === currentSlot) {
+                liveHashRate += client.statistics.hashRate;
+            }
+        }
+
+        chartData.push({ label: new Date(currentSlot).toISOString(), data: liveHashRate });
         return chartData;
     }
 
@@ -91,6 +105,16 @@ export class ClientController {
         const coeff = 1000 * 60 * 10;
         const startSlot = Math.floor(sinceTime / coeff) * coeff;
         const endSlot = Math.floor(now / coeff) * coeff;
+
+        const liveClients = this.stratumV1Service.getClientsByAddress(address);
+        for (const client of liveClients) {
+            const slot = client.statistics.currentTimeSlot;
+            if (slot != null && slot >= startSlot) {
+                const unsavedShares = client.statistics.shares - client.statistics.savedShares;
+                slotMap.set(slot, (slotMap.get(slot) || 0) + unsavedShares);
+            }
+        }
+
         const slotData: { time: string; counts: { accepted: number } }[] = [];
         for (let t = startSlot; t <= endSlot; t += coeff) {
             slotData.push({ time: new Date(t).toISOString(), counts: { accepted: slotMap.get(t) || 0 } });
