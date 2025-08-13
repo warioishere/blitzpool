@@ -15,10 +15,8 @@ import { PoolShareStatisticsService } from '../ORM/pool-share-statistics/pool-sh
 import { PoolRejectedStatisticsService } from '../ORM/pool-rejected-statistics/pool-rejected-statistics.service';
 import { ClientRejectedStatisticsService } from '../ORM/client-rejected-statistics/client-rejected-statistics.service';
 
-
 @Injectable()
 export class StratumV1Service implements OnModuleInit {
-
   private readonly clientsByAddress = new Map<string, Set<StratumV1Client>>();
 
   constructor(
@@ -33,25 +31,20 @@ export class StratumV1Service implements OnModuleInit {
     private readonly poolShareStatisticsService: PoolShareStatisticsService,
     private readonly poolRejectedStatisticsService: PoolRejectedStatisticsService,
     private readonly clientRejectedStatisticsService: ClientRejectedStatisticsService,
-    private readonly externalSharesService: ExternalSharesService
-  ) {
-
-  }
+    private readonly externalSharesService: ExternalSharesService,
+  ) {}
 
   async onModuleInit(): Promise<void> {
-
-      if (process.env.NODE_APP_INSTANCE == '0') {
-        await this.clientService.deleteAll();
-      }
-      setTimeout(() => {
-        this.startSocketServer();
-      }, 1000 * 10)
-
+    if (process.env.NODE_APP_INSTANCE == '0') {
+      await this.clientService.deleteAll();
+    }
+    setTimeout(() => {
+      this.startSocketServer();
+    }, 1000 * 10);
   }
 
   private startSocketServer() {
     const server = new Server(async (socket: Socket) => {
-
       // Disable Nagle's algorithm and use UTF-8 encoding for better latency
       socket.setNoDelay(true);
       socket.setEncoding('utf8');
@@ -76,13 +69,13 @@ export class StratumV1Service implements OnModuleInit {
         this,
       );
 
-
       socket.on('close', async (hadError: boolean) => {
         if (client.extraNonceAndSessionId != null) {
           // Handle socket disconnection
           await client.destroy();
-          this.unregisterClient(client.address, client);
-          console.log(`Client ${client.extraNonceAndSessionId} disconnected, hadError?:${hadError}`);
+          console.log(
+            `Client ${client.extraNonceAndSessionId} disconnected, hadError?:${hadError}`,
+          );
         }
       });
 
@@ -98,14 +91,13 @@ export class StratumV1Service implements OnModuleInit {
       });
 
       //   //console.log(`Client disconnected, socket error,  ${client.extraNonceAndSessionId}`);
-
-
     });
 
     server.listen(process.env.STRATUM_PORT, () => {
-      console.log(`Stratum server is listening on port ${process.env.STRATUM_PORT}`);
+      console.log(
+        `Stratum server is listening on port ${process.env.STRATUM_PORT}`,
+      );
     });
-
   }
 
   registerClient(address: string, client: StratumV1Client) {
@@ -147,5 +139,4 @@ export class StratumV1Service implements OnModuleInit {
     }
     this.clientsByAddress.delete(address);
   }
-
 }
