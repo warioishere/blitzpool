@@ -229,11 +229,13 @@ export class ClientStatisticsService {
 
     public async getHashRateForGroup(address: string, clientName: string) {
 
-        var oneHour = new Date(new Date().getTime() - (60 * 60 * 1000));
+        const oneHour = new Date(Date.now() - (60 * 60 * 1000));
 
         const query = `
             SELECT
-            SUM(entry.shares) AS difficultySum
+                SUM(entry.shares) AS difficultySum,
+                MAX(strftime('%s', entry.updatedAt)) AS maxUpdated,
+                MIN(strftime('%s', entry.createdAt)) AS minCreated
             FROM
                 client_statistics_entity AS entry
             WHERE
@@ -242,10 +244,14 @@ export class ClientStatisticsService {
 
         const result = await this.clientStatisticsRepository.query(query, [address, clientName]);
 
+        const { difficultySum = 0, maxUpdated = 0, minCreated = 0 } = result[0] || {};
 
-        const difficultySum = result[0].difficultySum;
+        const totalSeconds = maxUpdated - minCreated;
+        if (difficultySum === 0 || totalSeconds <= 0) {
+            return 0;
+        }
 
-        return (difficultySum * 4294967296) / (600);
+        return (difficultySum * 4294967296) / totalSeconds;
 
     }
 
