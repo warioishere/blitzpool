@@ -34,6 +34,11 @@ import { PoolRejectedStatisticsService } from '../ORM/pool-rejected-statistics/p
 import { ClientRejectedStatisticsService } from '../ORM/client-rejected-statistics/client-rejected-statistics.service';
 import { StratumV1Service } from '../services/stratum-v1.service';
 
+const NETWORKS: Record<string, bitcoinjs.Network> = {
+    mainnet: bitcoinjs.networks.bitcoin,
+    testnet: bitcoinjs.networks.testnet,
+    regtest: bitcoinjs.networks.regtest,
+};
 
 export class StratumV1Client {
 
@@ -59,7 +64,7 @@ export class StratumV1Client {
 
     private buffer: string = '';
 
-    private miningSubmissionHashes = new Set<string>()
+    private miningSubmissionHashes = new Set<string>();
     private extraNonceSubscribed: boolean = false;
     private sentExtraNonce: boolean = false;
 
@@ -90,15 +95,11 @@ export class StratumV1Client {
     ) {
 
         const networkConfig = this.configService.get('NETWORK');
-        if (networkConfig === 'mainnet') {
-            this.network = bitcoinjs.networks.bitcoin;
-        } else if (networkConfig === 'testnet') {
-            this.network = bitcoinjs.networks.testnet;
-        } else if (networkConfig === 'regtest') {
-            this.network = bitcoinjs.networks.regtest;
-        } else {
+        const network = networkConfig ? NETWORKS[networkConfig] : undefined;
+        if (!network) {
             throw new Error('Invalid network configuration');
         }
+        this.network = network;
 
         const parsed = parseInt(this.configService.get('DIFFICULTY_CHECK_INTERVAL_MS') ?? '60000');
         this.difficultyCheckIntervalMs = isNaN(parsed) ? 60000 : parsed;
@@ -114,7 +115,7 @@ export class StratumV1Client {
                     try {
                         await this.handleMessage(m);
                     } catch (e) {
-                        await this.socket.end();
+                        this.socket.end();
                         console.error(e);
                     }
                 });
@@ -168,7 +169,7 @@ export class StratumV1Client {
             parsedMessage = JSON.parse(message);
         } catch (e) {
             //console.log("Invalid JSON");
-            await this.socket.end();
+            this.socket.end();
             return;
         }
 
@@ -375,7 +376,7 @@ export class StratumV1Client {
 
                 if (this.stratumInitialized == false) {
                     console.log('Submit before initalized');
-                    await this.socket.end();
+                    this.socket.end();
                     return;
                 }
 
@@ -420,7 +421,7 @@ export class StratumV1Client {
             // default: {
             //     console.log("Invalid message");
             //     console.log(parsedMessage);
-            //     await this.socket.end();
+            //     this.socket.end();
             //     return;
             // }
         }
@@ -498,7 +499,7 @@ export class StratumV1Client {
                 }
                 await this.sendNewMiningJob(jobTemplate);
             } catch (e) {
-                await this.socket.end();
+                this.socket.end();
                 console.error(e);
             }
         });
@@ -834,7 +835,7 @@ export class StratumV1Client {
         } catch (error) {
             await this.destroy();
             if (!this.socket.writableEnded) {
-                await this.socket.end();
+                this.socket.end();
             } else if (!this.socket.destroyed) {
                 this.socket.destroy();
             }
