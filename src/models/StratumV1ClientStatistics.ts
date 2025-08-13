@@ -114,8 +114,8 @@ export class StratumV1ClientStatistics {
                 sessionId: client.sessionId
             });
             this.lastSave = new Date().getTime();
-        } else if ((date.getTime() - 60 * 1000) > this.lastSave) {
-            // If we haven't saved for a minute, update the table
+        } else if ((date.getTime() - 30 * 1000) > this.lastSave) {
+            // If we haven't saved for ~30 seconds, update the table
             this._shares += targetDifficulty;
             this.acceptedCount++;
             await this.clientStatisticsService.update({
