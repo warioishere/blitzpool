@@ -35,7 +35,7 @@ export class StratumV1Service implements OnModuleInit {
   ) {}
 
   async onModuleInit(): Promise<void> {
-    if (process.env.NODE_APP_INSTANCE == '0') {
+    if (process.env.NODE_APP_INSTANCE === '0') {
       await this.clientService.deleteAll();
     }
     setTimeout(() => {
@@ -81,7 +81,6 @@ export class StratumV1Service implements OnModuleInit {
 
       socket.on('timeout', () => {
         console.log('socket timeout');
-        socket.end();
         socket.destroy();
       });
 
