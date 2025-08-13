@@ -105,21 +105,19 @@ export class StratumV1Client {
         const parsed = parseInt(this.configService.get('DIFFICULTY_CHECK_INTERVAL_MS') ?? '60000');
         this.difficultyCheckIntervalMs = isNaN(parsed) ? 60000 : parsed;
 
-        this.socket.on('data', (data: string) => {
+        this.socket.on('data', async (data: string) => {
             this.buffer += data;
             const lines = this.buffer.split('\n');
             this.buffer = lines.pop() || ''; // Save the last part of the data (incomplete line) to the buffer
 
-            lines
-                .filter(m => m.length > 0)
-                .forEach(async (m) => {
-                    try {
-                        await this.handleMessage(m);
-                    } catch (e) {
-                        this.socket.end();
-                        console.error(e);
-                    }
-                });
+            for (const m of lines.filter(x => x.length > 0)) {
+                try {
+                    await this.handleMessage(m);
+                } catch (e) {
+                    this.socket.end();
+                    console.error(e);
+                }
+            }
         });
 
 
