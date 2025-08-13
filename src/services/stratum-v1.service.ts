@@ -18,6 +18,7 @@ import { ClientRejectedStatisticsService } from '../ORM/client-rejected-statisti
 @Injectable()
 export class StratumV1Service implements OnModuleInit {
   private readonly clientsByAddress = new Map<string, Set<StratumV1Client>>();
+  private readonly liveHashRateByAddress = new Map<string, number>();
 
   constructor(
     private readonly bitcoinRpcService: BitcoinRpcService,
@@ -116,6 +117,7 @@ export class StratumV1Service implements OnModuleInit {
       return;
     }
     clients.delete(client);
+    this.adjustCurrentHashRate(address, -(client.statistics?.hashRate || 0));
     if (clients.size === 0) {
       this.clientsByAddress.delete(address);
     }
@@ -138,5 +140,22 @@ export class StratumV1Service implements OnModuleInit {
 
   getClientsByAddress(address: string): StratumV1Client[] {
     return Array.from(this.clientsByAddress.get(address) || []);
+  }
+
+  adjustCurrentHashRate(address: string, delta: number) {
+    if (!address || !Number.isFinite(delta)) {
+      return;
+    }
+    const current = this.liveHashRateByAddress.get(address) || 0;
+    const next = current + delta;
+    if (next === 0) {
+      this.liveHashRateByAddress.delete(address);
+    } else {
+      this.liveHashRateByAddress.set(address, next);
+    }
+  }
+
+  getCurrentHashRate(address: string): number {
+    return this.liveHashRateByAddress.get(address) || 0;
   }
 }

@@ -2,6 +2,7 @@
 import { ClientStatisticsService } from '../ORM/client-statistics/client-statistics.service';
 import { ClientEntity } from '../ORM/client/client.entity';
 import { ConfigService } from '@nestjs/config';
+import { StratumV1Service } from '../services/stratum-v1.service';
 
 const CACHE_SIZE = 30;
 const CACHE_WINDOW_SECONDS = 300;
@@ -30,6 +31,7 @@ export class StratumV1ClientStatistics {
     constructor(
         private readonly clientStatisticsService: ClientStatisticsService,
         private readonly configService: ConfigService,
+        private readonly stratumV1Service: StratumV1Service,
     ) {
         this.submissionCacheStart = new Date();
         const tpm = parseFloat(this.configService.get('TARGET_SHARES_PER_MINUTE') ?? '6');
@@ -141,7 +143,12 @@ export class StratumV1ClientStatistics {
 
         const elapsed = Date.now() - this.previousTimeSlotTime.getTime();
         if (elapsed > 0) {
+            const prevRate = this.hashRate;
             this.hashRate = ((this.previousShares + this._shares) * 4294967296) / (elapsed / 1000);
+            this.stratumV1Service.adjustCurrentHashRate(
+                client.address,
+                this.hashRate - prevRate,
+            );
         }
 
     }

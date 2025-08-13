@@ -194,7 +194,11 @@ export class StratumV1Client {
 
                     if (this.sessionStart == null) {
                         this.sessionStart = new Date();
-                        this.statistics = new StratumV1ClientStatistics(this.clientStatisticsService, this.configService);
+                        this.statistics = new StratumV1ClientStatistics(
+                            this.clientStatisticsService,
+                            this.configService,
+                            this.stratumV1Service,
+                        );
                         this.extraNonceAndSessionId = this.getRandomHexString();
                         console.log(`New client ID: : ${this.extraNonceAndSessionId}, ${this.socket.remoteAddress}:${this.socket.remotePort}`);
                     }
