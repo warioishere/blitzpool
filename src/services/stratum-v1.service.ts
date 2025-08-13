@@ -135,4 +135,8 @@ export class StratumV1Service implements OnModuleInit {
     }
     this.clientsByAddress.delete(address);
   }
+
+  getClientsByAddress(address: string): StratumV1Client[] {
+    return Array.from(this.clientsByAddress.get(address) || []);
+  }
 }

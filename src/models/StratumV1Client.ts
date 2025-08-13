@@ -1,3 +1,4 @@
+/* eslint-disable prettier/prettier */
 import { ConfigService } from '@nestjs/config';
 import * as bitcoinjs from 'bitcoinjs-lib';
 import { plainToInstance } from 'class-transformer';
@@ -49,10 +50,10 @@ export class StratumV1Client {
     private stratumSubscription: Subscription;
     private backgroundWork: NodeJS.Timer[] = [];
 
-    private statistics: StratumV1ClientStatistics;
+    public statistics: StratumV1ClientStatistics;
     private stratumInitialized = false;
     private usedSuggestedDifficulty = false;
-    private sessionDifficulty: number = 16384;
+    private sessionDifficulty = 16384;
 
     private entity: ClientEntity;
     private creatingEntity: Promise<void>;
@@ -60,13 +61,13 @@ export class StratumV1Client {
     public extraNonceAndSessionId: string;
     public sessionStart: Date;
     public noFee: boolean;
-    public hashRate: number = 0;
+    public hashRate = 0;
 
-    private buffer: string = '';
+    private buffer = '';
 
     private miningSubmissionHashes = new Set<string>();
-    private extraNonceSubscribed: boolean = false;
-    private sentExtraNonce: boolean = false;
+    private extraNonceSubscribed = false;
+    private sentExtraNonce = false;
 
     private network: bitcoinjs.networks.Network;
 
@@ -106,7 +107,7 @@ export class StratumV1Client {
 
         this.socket.on('data', (data: string) => {
             this.buffer += data;
-            let lines = this.buffer.split('\n');
+            const lines = this.buffer.split('\n');
             this.buffer = lines.pop() || ''; // Save the last part of the data (incomplete line) to the buffer
 
             lines

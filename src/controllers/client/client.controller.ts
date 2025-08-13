@@ -1,3 +1,4 @@
+/* eslint-disable prettier/prettier */
 import { Controller, Get, NotFoundException, Param, Query, Post } from '@nestjs/common';
 
 import { AddressSettingsService } from '../../ORM/address-settings/address-settings.service';
@@ -91,6 +92,15 @@ export class ClientController {
         const coeff = 1000 * 60 * 10;
         const startSlot = Math.floor(sinceTime / coeff) * coeff;
         const endSlot = Math.floor(now / coeff) * coeff;
+
+        const liveClients = this.stratumV1Service.getClientsByAddress(address);
+        for (const client of liveClients) {
+            const slot = client.statistics.currentTimeSlot;
+            if (slot != null && slot >= startSlot) {
+                slotMap.set(slot, (slotMap.get(slot) || 0) + client.statistics.shares);
+            }
+        }
+
         const slotData: { time: string; counts: { accepted: number } }[] = [];
         for (let t = startSlot; t <= endSlot; t += coeff) {
             slotData.push({ time: new Date(t).toISOString(), counts: { accepted: slotMap.get(t) || 0 } });
