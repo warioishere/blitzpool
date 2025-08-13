@@ -198,12 +198,12 @@ export class ClientStatisticsService {
         const query = `
                 SELECT
                     time label,
-                    CASE
-                        WHEN (MAX(strftime('%s', updatedAt)) - MIN(strftime('%s', createdAt))) < 1
-                            THEN (SUM(shares) * 4294967296) / 600
-                        ELSE (SUM(shares) * 4294967296) /
-                             (MAX(strftime('%s', updatedAt)) - MIN(strftime('%s', createdAt)))
-                    END AS data
+                    SUM((shares * 4294967296) /
+                        CASE
+                            WHEN (strftime('%s', updatedAt) - strftime('%s', createdAt)) < 1 THEN 600
+                            ELSE (strftime('%s', updatedAt) - strftime('%s', createdAt))
+                        END
+                    ) AS data
                 FROM
                     client_statistics_entity AS entry
                 WHERE
