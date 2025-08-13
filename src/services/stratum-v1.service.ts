@@ -84,12 +84,10 @@ export class StratumV1Service implements OnModuleInit {
         socket.destroy();
       });
 
-      socket.on('error', async (error: Error) => {
+      socket.on('error', (error: Error) => {
         console.error('Socket error', error);
         socket.destroy();
       });
-
-      //   //console.log(`Client disconnected, socket error,  ${client.extraNonceAndSessionId}`);
     });
 
     server.listen(process.env.STRATUM_PORT, () => {
@@ -130,7 +128,6 @@ export class StratumV1Service implements OnModuleInit {
     }
     for (const client of clients) {
       try {
-        client.socket.end();
         client.socket.destroy();
       } catch {
         // ignore errors while closing sockets
