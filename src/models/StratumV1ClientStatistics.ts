@@ -49,6 +49,10 @@ export class StratumV1ClientStatistics {
         return this._currentTimeSlot;
     }
 
+    public get currentTimeSlotStart(): Date {
+        return this.currentTimeSlotTime;
+    }
+
 
     // We don't want to save them here because it can be DB intensive, instead do it every once in
     // awhile with saveShares()

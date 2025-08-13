@@ -226,7 +226,7 @@ export class ClientStatisticsService {
         return result.map(res => {
             res.label = new Date(res.label).toISOString();
             return res;
-        }).slice(0, result.length - 1);
+        });
 
 
     }

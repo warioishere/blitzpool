@@ -61,16 +61,22 @@ export class ClientController {
 
         const coeff = 1000 * 60 * 10;
         const currentSlot = Math.floor(Date.now() / coeff) * coeff;
+        const currentLabel = new Date(currentSlot).toISOString();
         const liveClients = this.stratumV1Service.getClientsByAddress(address);
-        let liveHashRate = 0;
 
         for (const client of liveClients) {
             if (client.statistics.currentTimeSlot === currentSlot) {
-                liveHashRate += client.statistics.hashRate;
+                const elapsed = Date.now() - client.statistics.currentTimeSlotStart.getTime();
+                const rate = (client.statistics.shares * 4294967296) / (elapsed / 1000);
+                let entry = chartData.find(e => e.label === currentLabel);
+                if (!entry) {
+                    entry = { label: currentLabel, data: 0 };
+                    chartData.push(entry);
+                }
+                entry.data += rate;
             }
         }
 
-        chartData.push({ label: new Date(currentSlot).toISOString(), data: liveHashRate });
         return chartData;
     }
 
