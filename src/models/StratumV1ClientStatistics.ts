@@ -74,15 +74,15 @@ export class StratumV1ClientStatistics {
             time: date,
             difficulty: targetDifficulty,
         });
+        this._shares += targetDifficulty;
+        this.acceptedCount++;
 
 
         if (this._currentTimeSlot == null) {
             // First record, insert it
-			this.previousTimeSlotTime = new Date();
+                        this.previousTimeSlotTime = new Date();
             this.currentTimeSlotTime = new Date();
             this._currentTimeSlot = timeSlot;
-            this._shares += targetDifficulty;
-            this.acceptedCount++;
             await this.clientStatisticsService.insert({
                 time: this._currentTimeSlot,
                 shares: this._shares,
@@ -98,13 +98,13 @@ export class StratumV1ClientStatistics {
             // First update the old time slot with the latest data
             await this.clientStatisticsService.update({
                 time: this._currentTimeSlot,
-                shares: this._shares,
-                acceptedCount: this.acceptedCount,
+                shares: this._shares - targetDifficulty,
+                acceptedCount: this.acceptedCount - 1,
                 address: client.address,
                 clientName: client.clientName,
                 sessionId: client.sessionId
             });
-                         this.previousShares = this._shares;
+                         this.previousShares = this._shares - targetDifficulty;
             this.previousTimeSlotTime = this.currentTimeSlotTime;
             this.currentTimeSlotTime = new Date();
             // Set the new time slot and add incoming shares then insert it
@@ -123,8 +123,6 @@ export class StratumV1ClientStatistics {
             this._savedShares = this._shares;
         } else if ((date.getTime() - 30 * 1000) > this.lastSave) {
             // If we haven't saved for ~30 seconds, update the table
-            this._shares += targetDifficulty;
-            this.acceptedCount++;
             await this.clientStatisticsService.update({
                 time: this._currentTimeSlot,
                 shares: this._shares,
@@ -135,15 +133,11 @@ export class StratumV1ClientStatistics {
             });
             this.lastSave = new Date().getTime();
             this._savedShares = this._shares;
-        } else {
-            // Accept the shares if none of the prior conditions are met,
-            // saving to memory for storing later
-            this._shares += targetDifficulty;
-            this.acceptedCount++;
-                        if(this._shares > 0) {
-            const time = new Date().getTime() - this.previousTimeSlotTime.getTime();
-            this.hashRate = ((this.previousShares + this._shares) * 4294967296) / (time / 1000);
         }
+
+        const elapsed = Date.now() - this.previousTimeSlotTime.getTime();
+        if (elapsed > 0) {
+            this.hashRate = ((this.previousShares + this._shares) * 4294967296) / (elapsed / 1000);
         }
 
     }
