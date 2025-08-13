@@ -66,10 +66,11 @@ export class ClientController {
         if (liveRate > 0) {
             let entry = chartData.find(e => e.label === currentLabel);
             if (!entry) {
-                entry = { label: currentLabel, data: 0 };
+                entry = { label: currentLabel, data: liveRate };
                 chartData.push(entry);
+            } else {
+                entry.data = liveRate;
             }
-            entry.data += liveRate;
         }
 
         return chartData;
