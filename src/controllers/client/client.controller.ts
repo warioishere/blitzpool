@@ -58,6 +58,19 @@ export class ClientController {
         @Query('range') range: '1d' | '3d' | '7d' = '1d'
     ) {
         const chartData = await this.clientStatisticsService.getChartDataForAddress(address, range);
+
+        const coeff = 1000 * 60 * 10;
+        const currentSlot = Math.floor(Date.now() / coeff) * coeff;
+        const liveClients = this.stratumV1Service.getClientsByAddress(address);
+        let liveHashRate = 0;
+
+        for (const client of liveClients) {
+            if (client.statistics.currentTimeSlot === currentSlot) {
+                liveHashRate += client.statistics.hashRate;
+            }
+        }
+
+        chartData.push({ label: new Date(currentSlot).toISOString(), data: liveHashRate });
         return chartData;
     }
 
