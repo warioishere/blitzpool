@@ -1,3 +1,4 @@
+/* eslint-disable prettier/prettier */
 import { Controller, Get, NotFoundException, Param, Query, Post } from '@nestjs/common';
 
 import { AddressSettingsService } from '../../ORM/address-settings/address-settings.service';
@@ -57,6 +58,21 @@ export class ClientController {
         @Query('range') range: '1d' | '3d' | '7d' = '1d'
     ) {
         const chartData = await this.clientStatisticsService.getChartDataForAddress(address, range);
+
+        const coeff = 1000 * 60 * 10;
+        const currentSlot = Math.floor(Date.now() / coeff) * coeff;
+        const currentLabel = new Date(currentSlot).toISOString();
+        const liveRate = this.stratumV1Service.getCurrentHashRate(address);
+        if (liveRate > 0) {
+            let entry = chartData.find(e => e.label === currentLabel);
+            if (!entry) {
+                entry = { label: currentLabel, data: liveRate };
+                chartData.push(entry);
+            } else {
+                entry.data = liveRate;
+            }
+        }
+
         return chartData;
     }
 
@@ -91,6 +107,16 @@ export class ClientController {
         const coeff = 1000 * 60 * 10;
         const startSlot = Math.floor(sinceTime / coeff) * coeff;
         const endSlot = Math.floor(now / coeff) * coeff;
+
+        const liveClients = this.stratumV1Service.getClientsByAddress(address);
+        for (const client of liveClients) {
+            const slot = client.statistics.currentTimeSlot;
+            if (slot != null && slot >= startSlot) {
+                const unsavedShares = client.statistics.shares - client.statistics.savedShares;
+                slotMap.set(slot, (slotMap.get(slot) || 0) + unsavedShares);
+            }
+        }
+
         const slotData: { time: string; counts: { accepted: number } }[] = [];
         for (let t = startSlot; t <= endSlot; t += coeff) {
             slotData.push({ time: new Date(t).toISOString(), counts: { accepted: slotMap.get(t) || 0 } });
@@ -162,7 +188,7 @@ export class ClientController {
 
         const worker = await this.clientService.getBySessionId(address, workerName, sessionId);
         if (worker == null) {
-            return new NotFoundException();
+            throw new NotFoundException();
         }
         const chartData = await this.clientStatisticsService.getChartDataForSession(worker.address, worker.clientName, worker.sessionId);
 

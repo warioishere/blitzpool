@@ -132,7 +132,12 @@ export class ClientStatisticsService {
         const query = `
             SELECT
                 time AS label,
-                ROUND(((SUM(shares) * 4294967296) / 600)) AS data
+                SUM((shares * 4294967296) /
+                    CASE
+                        WHEN (strftime('%s', updatedAt) - strftime('%s', createdAt)) < 1 THEN 600
+                        ELSE (strftime('%s', updatedAt) - strftime('%s', createdAt))
+                    END
+                ) AS data
             FROM
                 client_statistics_entity AS entry
             WHERE
@@ -198,12 +203,12 @@ export class ClientStatisticsService {
         const query = `
                 SELECT
                     time label,
-                    CASE
-                        WHEN (MAX(strftime('%s', updatedAt)) - MIN(strftime('%s', createdAt))) < 1
-                            THEN (SUM(shares) * 4294967296) / 600
-                        ELSE (SUM(shares) * 4294967296) /
-                             (MAX(strftime('%s', updatedAt)) - MIN(strftime('%s', createdAt)))
-                    END AS data
+                    SUM((shares * 4294967296) /
+                        CASE
+                            WHEN (strftime('%s', updatedAt) - strftime('%s', createdAt)) < 1 THEN 600
+                            ELSE (strftime('%s', updatedAt) - strftime('%s', createdAt))
+                        END
+                    ) AS data
                 FROM
                     client_statistics_entity AS entry
                 WHERE
@@ -221,7 +226,7 @@ export class ClientStatisticsService {
         return result.map(res => {
             res.label = new Date(res.label).toISOString();
             return res;
-        }).slice(0, result.length - 1);
+        });
 
 
     }
@@ -229,11 +234,13 @@ export class ClientStatisticsService {
 
     public async getHashRateForGroup(address: string, clientName: string) {
 
-        var oneHour = new Date(new Date().getTime() - (60 * 60 * 1000));
+        const oneHour = new Date(Date.now() - (60 * 60 * 1000));
 
         const query = `
             SELECT
-            SUM(entry.shares) AS difficultySum
+                SUM(entry.shares) AS difficultySum,
+                MAX(strftime('%s', entry.updatedAt)) AS maxUpdated,
+                MIN(strftime('%s', entry.createdAt)) AS minCreated
             FROM
                 client_statistics_entity AS entry
             WHERE
@@ -242,10 +249,14 @@ export class ClientStatisticsService {
 
         const result = await this.clientStatisticsRepository.query(query, [address, clientName]);
 
+        const { difficultySum = 0, maxUpdated = 0, minCreated = 0 } = result[0] || {};
 
-        const difficultySum = result[0].difficultySum;
+        const totalSeconds = maxUpdated - minCreated;
+        if (difficultySum === 0 || totalSeconds <= 0) {
+            return 0;
+        }
 
-        return (difficultySum * 4294967296) / (600);
+        return (difficultySum * 4294967296) / totalSeconds;
 
     }
 
@@ -255,7 +266,12 @@ export class ClientStatisticsService {
         const query = `
             SELECT
                 time label,
-                (SUM(shares) * 4294967296) / 600 AS data
+                SUM((shares * 4294967296) /
+                    CASE
+                        WHEN (strftime('%s', updatedAt) - strftime('%s', createdAt)) < 1 THEN 600
+                        ELSE (strftime('%s', updatedAt) - strftime('%s', createdAt))
+                    END
+                ) AS data
             FROM
                 client_statistics_entity AS entry
             WHERE
@@ -272,7 +288,7 @@ export class ClientStatisticsService {
         return result.map(res => {
             res.label = new Date(res.label).toISOString();
             return res;
-        }).slice(0, result.length - 1);
+        });
 
 
     }
@@ -326,7 +342,12 @@ export class ClientStatisticsService {
         const query = `
             SELECT
                 time label,
-                (SUM(shares) * 4294967296) / 600 AS data
+                SUM((shares * 4294967296) /
+                    CASE
+                        WHEN (strftime('%s', updatedAt) - strftime('%s', createdAt)) < 1 THEN 600
+                        ELSE (strftime('%s', updatedAt) - strftime('%s', createdAt))
+                    END
+                ) AS data
             FROM
                 client_statistics_entity AS entry
             WHERE
@@ -343,7 +364,7 @@ export class ClientStatisticsService {
         return result.map(res => {
             res.label = new Date(res.label).toISOString();
             return res;
-        }).slice(0, result.length - 1);
+        });
 
     }
 
