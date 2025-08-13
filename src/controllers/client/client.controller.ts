@@ -188,7 +188,7 @@ export class ClientController {
 
         const worker = await this.clientService.getBySessionId(address, workerName, sessionId);
         if (worker == null) {
-            return new NotFoundException();
+            throw new NotFoundException();
         }
         const chartData = await this.clientStatisticsService.getChartDataForSession(worker.address, worker.clientName, worker.sessionId);
 
