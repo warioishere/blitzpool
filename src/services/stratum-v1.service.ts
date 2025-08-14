@@ -180,4 +180,12 @@ export class StratumV1Service implements OnModuleInit {
   getCurrentHashRate(address: string): number {
     return this.liveHashRateByAddress.get(address) || 0;
   }
+
+  getTotalHashRate(): number {
+    let total = 0;
+    for (const rate of this.liveHashRateByAddress.values()) {
+      total += rate;
+    }
+    return total;
+  }
 }

@@ -12,6 +12,7 @@ import { PoolRejectedStatisticsService } from './ORM/pool-rejected-statistics/po
 import { ClientStatisticsService } from './ORM/client-statistics/client-statistics.service';
 import { ClientService } from './ORM/client/client.service';
 import { BitcoinRpcService } from './services/bitcoin-rpc.service';
+import { StratumV1Service } from './services/stratum-v1.service';
 import { eStratumErrorCode } from './models/enums/eStratumErrorCode';
 
 @Controller()
@@ -29,6 +30,7 @@ export class AppController {
     private readonly poolRejectedStatisticsService: PoolRejectedStatisticsService,
     private readonly bitcoinRpcService: BitcoinRpcService,
     private readonly addressSettingsService: AddressSettingsService,
+    private readonly stratumV1Service: StratumV1Service,
   ) {
     const packagePath = join(__dirname, '..', 'package.json');
     this.version = JSON.parse(readFileSync(packagePath, 'utf8')).version;
@@ -108,9 +110,8 @@ export class AppController {
 
   @Get('info/chart')
   public async infoChart(@Query('range') range: '1d' | '1m' = '1d') {
-
-
-    const CACHE_KEY = `SITE_HASHRATE_GRAPH_${range}`;
+    const currentSlot = Math.floor(Date.now() / 600000) * 600000;
+    const CACHE_KEY = `SITE_HASHRATE_GRAPH_${range}_${currentSlot}`;
     const cachedResult = await this.cacheManager.get(CACHE_KEY);
 
     if (cachedResult != null) {
@@ -118,13 +119,16 @@ export class AppController {
     }
 
     const chartData = await this.clientStatisticsService.getChartDataForSite(range);
+    const liveRate = this.stratumV1Service.getTotalHashRate();
+    chartData.push({
+      label: new Date(currentSlot).toISOString(),
+      data: liveRate,
+    });
 
     //10 min
     await this.cacheManager.set(CACHE_KEY, chartData, 10 * 60 * 1000);
 
     return chartData;
-
-
   }
 
   @Get('info/shares')
