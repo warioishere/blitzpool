@@ -401,6 +401,18 @@ export class ClientStatisticsService {
         return results.map(r => ({ clientName: r.clientName, total: parseFloat(r.total) }));
     }
 
+    public async removeStaleSessions() {
+        const cutoff = new Date(Date.now() - 10 * 60 * 1000);
+        await this.clientStatisticsRepository
+            .createQueryBuilder()
+            .delete()
+            .from(ClientStatisticsEntity)
+            .where('updatedAt < :cutoff', { cutoff })
+            .andWhere('sessionId != :agg', { agg: 'AGG' })
+            .andWhere('NOT (address = :pool AND clientName = :pool AND sessionId = :pool)', { pool: 'POOL' })
+            .execute();
+    }
+
     public async deleteAll() {
         return await this.clientStatisticsRepository.delete({})
     }

@@ -38,6 +38,7 @@ export class StratumV1Service implements OnModuleInit {
   async onModuleInit(): Promise<void> {
     await this.clientService.deleteAll();
     await this.clientService.killDeadClients();
+    await this.clientStatisticsService.removeStaleSessions();
     setTimeout(() => {
       this.startSocketServer();
     }, 1000 * 10);
