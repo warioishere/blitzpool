@@ -1,4 +1,3 @@
-/* eslint-disable prettier/prettier */
 import { ConfigService } from '@nestjs/config';
 import * as bitcoinjs from 'bitcoinjs-lib';
 import { plainToInstance } from 'class-transformer';
@@ -35,11 +34,6 @@ import { PoolRejectedStatisticsService } from '../ORM/pool-rejected-statistics/p
 import { ClientRejectedStatisticsService } from '../ORM/client-rejected-statistics/client-rejected-statistics.service';
 import { StratumV1Service } from '../services/stratum-v1.service';
 
-const NETWORKS: Record<string, bitcoinjs.Network> = {
-    mainnet: bitcoinjs.networks.bitcoin,
-    testnet: bitcoinjs.networks.testnet,
-    regtest: bitcoinjs.networks.regtest,
-};
 
 export class StratumV1Client {
 
@@ -50,10 +44,10 @@ export class StratumV1Client {
     private stratumSubscription: Subscription;
     private backgroundWork: NodeJS.Timer[] = [];
 
-    public statistics: StratumV1ClientStatistics;
+    private statistics: StratumV1ClientStatistics;
     private stratumInitialized = false;
     private usedSuggestedDifficulty = false;
-    private sessionDifficulty = 16384;
+    private sessionDifficulty: number = 16384;
 
     private entity: ClientEntity;
     private creatingEntity: Promise<void>;
@@ -61,13 +55,13 @@ export class StratumV1Client {
     public extraNonceAndSessionId: string;
     public sessionStart: Date;
     public noFee: boolean;
-    public hashRate = 0;
+    public hashRate: number = 0;
 
-    private buffer = '';
+    private buffer: string = '';
 
-    private miningSubmissionHashes = new Set<string>();
-    private extraNonceSubscribed = false;
-    private sentExtraNonce = false;
+    private miningSubmissionHashes = new Set<string>()
+    private extraNonceSubscribed: boolean = false;
+    private sentExtraNonce: boolean = false;
 
     private network: bitcoinjs.networks.Network;
 
@@ -96,28 +90,34 @@ export class StratumV1Client {
     ) {
 
         const networkConfig = this.configService.get('NETWORK');
-        const network = networkConfig ? NETWORKS[networkConfig] : undefined;
-        if (!network) {
+        if (networkConfig === 'mainnet') {
+            this.network = bitcoinjs.networks.bitcoin;
+        } else if (networkConfig === 'testnet') {
+            this.network = bitcoinjs.networks.testnet;
+        } else if (networkConfig === 'regtest') {
+            this.network = bitcoinjs.networks.regtest;
+        } else {
             throw new Error('Invalid network configuration');
         }
-        this.network = network;
 
         const parsed = parseInt(this.configService.get('DIFFICULTY_CHECK_INTERVAL_MS') ?? '60000');
         this.difficultyCheckIntervalMs = isNaN(parsed) ? 60000 : parsed;
 
-        this.socket.on('data', async (data: string) => {
+        this.socket.on('data', (data: string) => {
             this.buffer += data;
-            const lines = this.buffer.split('\n');
+            let lines = this.buffer.split('\n');
             this.buffer = lines.pop() || ''; // Save the last part of the data (incomplete line) to the buffer
 
-            for (const m of lines.filter(x => x.length > 0)) {
-                try {
-                    await this.handleMessage(m);
-                } catch (e) {
-                    this.socket.end();
-                    console.error(e);
-                }
-            }
+            lines
+                .filter(m => m.length > 0)
+                .forEach(async (m) => {
+                    try {
+                        await this.handleMessage(m);
+                    } catch (e) {
+                        await this.socket.end();
+                        console.error(e);
+                    }
+                });
         });
 
 
@@ -168,7 +168,7 @@ export class StratumV1Client {
             parsedMessage = JSON.parse(message);
         } catch (e) {
             //console.log("Invalid JSON");
-            this.socket.end();
+            await this.socket.end();
             return;
         }
 
@@ -192,11 +192,7 @@ export class StratumV1Client {
 
                     if (this.sessionStart == null) {
                         this.sessionStart = new Date();
-                        this.statistics = new StratumV1ClientStatistics(
-                            this.clientStatisticsService,
-                            this.configService,
-                            this.stratumV1Service,
-                        );
+                        this.statistics = new StratumV1ClientStatistics(this.clientStatisticsService, this.configService);
                         this.extraNonceAndSessionId = this.getRandomHexString();
                         console.log(`New client ID: : ${this.extraNonceAndSessionId}, ${this.socket.remoteAddress}:${this.socket.remotePort}`);
                     }
@@ -379,7 +375,7 @@ export class StratumV1Client {
 
                 if (this.stratumInitialized == false) {
                     console.log('Submit before initalized');
-                    this.socket.end();
+                    await this.socket.end();
                     return;
                 }
 
@@ -424,7 +420,7 @@ export class StratumV1Client {
             // default: {
             //     console.log("Invalid message");
             //     console.log(parsedMessage);
-            //     this.socket.end();
+            //     await this.socket.end();
             //     return;
             // }
         }
@@ -502,7 +498,7 @@ export class StratumV1Client {
                 }
                 await this.sendNewMiningJob(jobTemplate);
             } catch (e) {
-                this.socket.end();
+                await this.socket.end();
                 console.error(e);
             }
         });
@@ -706,7 +702,6 @@ export class StratumV1Client {
             }
             try {
                 await this.statistics.addShares(this.entity, this.sessionDifficulty);
-                this.hashRate = this.statistics.hashRate;
                 const now = new Date();
                 // only update every minute
                 if (this.entity.updatedAt == null || now.getTime() - this.entity.updatedAt.getTime() > 1000 * 60) {
@@ -839,7 +834,7 @@ export class StratumV1Client {
         } catch (error) {
             await this.destroy();
             if (!this.socket.writableEnded) {
-                this.socket.end();
+                await this.socket.end();
             } else if (!this.socket.destroyed) {
                 this.socket.destroy();
             }
