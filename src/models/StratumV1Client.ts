@@ -288,6 +288,9 @@ export class StratumV1Client {
                             this.hashRate = 0;
                         }
                         this.stratumV1Service.unregisterClient(this.clientAuthorization.address, this);
+                        if (this.entity?.sessionId) {
+                            await this.clientService.delete(this.entity.sessionId);
+                        }
                         this.entity = undefined;
                     }
                     this.clientAuthorization = authorizationMessage;
