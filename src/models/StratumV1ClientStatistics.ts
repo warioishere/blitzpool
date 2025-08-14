@@ -153,6 +153,38 @@ export class StratumV1ClientStatistics {
 
     }
 
+    public async flush(client?: ClientEntity) {
+
+        if (client && this._currentTimeSlot != null) {
+            await this.clientStatisticsService.update({
+                time: this._currentTimeSlot,
+                shares: this._shares,
+                acceptedCount: this.acceptedCount,
+                address: client.address,
+                clientName: client.clientName,
+                sessionId: client.sessionId
+            });
+        }
+
+        if (client && this.hashRate !== 0) {
+            this.stratumV1Service.adjustCurrentHashRate(client.address, -this.hashRate);
+        }
+
+        this.hashRate = 0;
+        this._savedShares = 0;
+        this._shares = 0;
+        this.acceptedCount = 0;
+        this._currentTimeSlot = null;
+        this.previousShares = 0;
+        const now = new Date();
+        this.previousTimeSlotTime = now;
+        this.currentTimeSlotTime = now;
+        this.lastSave = null;
+        this.submissionCache = [];
+        this.submissionCacheStart = new Date();
+
+    }
+
     public getSuggestedDifficulty(clientDifficulty: number) {
 
         // miner hasn't submitted shares in one minute

@@ -238,9 +238,13 @@ export class ClientStatisticsService {
 
         const query = `
             SELECT
-                SUM(entry.shares) AS difficultySum,
-                MAX(strftime('%s', entry.updatedAt)) AS maxUpdated,
-                MIN(strftime('%s', entry.createdAt)) AS minCreated
+                SUM(
+                    (entry.shares * 4294967296) /
+                    CASE
+                        WHEN (strftime('%s', entry.updatedAt) - strftime('%s', entry.createdAt)) < 1 THEN 600
+                        ELSE (strftime('%s', entry.updatedAt) - strftime('%s', entry.createdAt))
+                    END
+                ) AS hashRate
             FROM
                 client_statistics_entity AS entry
             WHERE
@@ -249,14 +253,9 @@ export class ClientStatisticsService {
 
         const result = await this.clientStatisticsRepository.query(query, [address, clientName]);
 
-        const { difficultySum = 0, maxUpdated = 0, minCreated = 0 } = result[0] || {};
+        const hashRate = result[0]?.hashRate ?? 0;
 
-        const totalSeconds = maxUpdated - minCreated;
-        if (difficultySum === 0 || totalSeconds <= 0) {
-            return 0;
-        }
-
-        return (difficultySum * 4294967296) / totalSeconds;
+        return Number(hashRate);
 
     }
 

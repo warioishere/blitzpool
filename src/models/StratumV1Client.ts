@@ -129,6 +129,11 @@ export class StratumV1Client {
 
     public async destroy() {
 
+        if (this.statistics) {
+            await this.statistics.flush(this.entity);
+            this.hashRate = 0;
+        }
+
         const sid = this.entity?.sessionId || this.extraNonceAndSessionId;
         if (sid) {
             await this.clientService.delete(sid);
@@ -273,6 +278,14 @@ export class StratumV1Client {
                 const errors = await validate(authorizationMessage, validatorOptions);
 
                 if (errors.length === 0) {
+                    if (this.clientAuthorization && this.clientAuthorization.address !== authorizationMessage.address) {
+                        if (this.statistics) {
+                            await this.statistics.flush(this.entity);
+                            this.hashRate = 0;
+                        }
+                        this.stratumV1Service.unregisterClient(this.clientAuthorization.address, this);
+                        this.entity = undefined;
+                    }
                     this.clientAuthorization = authorizationMessage;
                     this.authorizeResponse = JSON.stringify(this.clientAuthorization.response()) + '\n';
                     this.stratumV1Service.registerClient(this.clientAuthorization.address, this);
