@@ -206,10 +206,10 @@ export class ClientStatisticsService {
                 SELECT
                     time label,
                     SUM((shares * 4294967296) /
-                        CASE
-                            WHEN (strftime('%s','now') - strftime('%s', createdAt)) < 600 THEN 600
-                            ELSE (strftime('%s','now') - strftime('%s', createdAt))
-                        END
+                        MIN(
+                            600,
+                            strftime('%s', entry.updatedAt) - strftime('%s', entry.createdAt)
+                        )
                     ) AS data
                 FROM
                     client_statistics_entity AS entry
@@ -269,10 +269,10 @@ export class ClientStatisticsService {
             SELECT
                 time label,
                 SUM((shares * 4294967296) /
-                    CASE
-                        WHEN (strftime('%s','now') - strftime('%s', createdAt)) < 600 THEN 600
-                        ELSE (strftime('%s','now') - strftime('%s', createdAt))
-                    END
+                    MIN(
+                        600,
+                        strftime('%s', entry.updatedAt) - strftime('%s', entry.createdAt)
+                    )
                 ) AS data
             FROM
                 client_statistics_entity AS entry
@@ -346,10 +346,10 @@ export class ClientStatisticsService {
             SELECT
                 time label,
                 SUM((shares * 4294967296) /
-                    CASE
-                        WHEN (strftime('%s','now') - strftime('%s', createdAt)) < 600 THEN 600
-                        ELSE (strftime('%s','now') - strftime('%s', createdAt))
-                    END
+                    MIN(
+                        600,
+                        strftime('%s', entry.updatedAt) - strftime('%s', entry.createdAt)
+                    )
                 ) AS data
             FROM
                 client_statistics_entity AS entry
