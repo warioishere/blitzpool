@@ -128,6 +128,7 @@ export class ClientStatisticsService {
 
         const since = new Date(Date.now() - diffDays * 24 * 60 * 60 * 1000);
         const limit = diffDays * 144;
+        const currentSlot = Math.floor(Date.now() / 600000) * 600000;
 
         const query = `
             SELECT
@@ -141,7 +142,7 @@ export class ClientStatisticsService {
             FROM
                 client_statistics_entity AS entry
             WHERE
-                entry.time > ${since.getTime()} AND entry.sessionId != 'AGG'
+                entry.time > ${since.getTime()} AND entry.time < ${currentSlot} AND entry.sessionId != 'AGG'
             GROUP BY
                 time
             ORDER BY
@@ -156,7 +157,7 @@ export class ClientStatisticsService {
         return result.map(res => {
             res.label = new Date(res.label).toISOString();
             return res;
-        }).slice(0, result.length - 1)
+        });
 
     }
 
@@ -199,6 +200,7 @@ export class ClientStatisticsService {
 
         const since = new Date(Date.now() - diffDays * 24 * 60 * 60 * 1000);
         const limit = diffDays * 144;
+        const currentSlot = Math.floor(Date.now() / 600000) * 600000;
 
         const query = `
                 SELECT
@@ -212,7 +214,7 @@ export class ClientStatisticsService {
                 FROM
                     client_statistics_entity AS entry
                 WHERE
-                    entry.address = ? AND entry.time > ${since.getTime()}
+                    entry.address = ? AND entry.time > ${since.getTime()} AND entry.time < ${currentSlot}
                 GROUP BY
                     time
                 ORDER BY
@@ -261,6 +263,7 @@ export class ClientStatisticsService {
 
     public async getChartDataForGroup(address: string, clientName: string) {
         var yesterday = new Date(new Date().getTime() - (24 * 60 * 60 * 1000));
+        const currentSlot = Math.floor(Date.now() / 600000) * 600000;
 
         const query = `
             SELECT
@@ -274,7 +277,7 @@ export class ClientStatisticsService {
             FROM
                 client_statistics_entity AS entry
             WHERE
-                entry.address = ? AND entry.clientName = ? AND entry.time > ${yesterday.getTime()}
+                entry.address = ? AND entry.clientName = ? AND entry.time > ${yesterday.getTime()} AND entry.time < ${currentSlot}
             GROUP BY
                 time
             ORDER BY
@@ -337,6 +340,7 @@ export class ClientStatisticsService {
 
     public async getChartDataForSession(address: string, clientName: string, sessionId: string) {
         var yesterday = new Date(new Date().getTime() - (24 * 60 * 60 * 1000));
+        const currentSlot = Math.floor(Date.now() / 600000) * 600000;
 
         const query = `
             SELECT
@@ -350,7 +354,7 @@ export class ClientStatisticsService {
             FROM
                 client_statistics_entity AS entry
             WHERE
-                entry.address = ? AND entry.clientName = ? AND entry.sessionId = ? AND entry.time > ${yesterday.getTime()}
+                entry.address = ? AND entry.clientName = ? AND entry.sessionId = ? AND entry.time > ${yesterday.getTime()} AND entry.time < ${currentSlot}
             GROUP BY
                 time
             ORDER BY
