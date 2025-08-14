@@ -19,6 +19,7 @@ import { ClientRejectedStatisticsService } from '../ORM/client-rejected-statisti
 export class StratumV1Service implements OnModuleInit {
   private readonly clientsByAddress = new Map<string, Set<StratumV1Client>>();
   private readonly liveHashRateByAddress = new Map<string, number>();
+  private server!: Server;
 
   constructor(
     private readonly bitcoinRpcService: BitcoinRpcService,
@@ -45,7 +46,7 @@ export class StratumV1Service implements OnModuleInit {
   }
 
   private startSocketServer() {
-    const server = new Server(async (socket: Socket) => {
+    this.server = new Server(async (socket: Socket) => {
       // Disable Nagle's algorithm and use UTF-8 encoding for better latency
       socket.setNoDelay(true);
       socket.setEncoding('utf8');
@@ -91,10 +92,30 @@ export class StratumV1Service implements OnModuleInit {
       });
     });
 
-    server.listen(process.env.STRATUM_PORT, () => {
+    this.server.listen(process.env.STRATUM_PORT, () => {
       console.log(
         `Stratum server is listening on port ${process.env.STRATUM_PORT}`,
       );
+    });
+
+    const shutdown = async () => {
+      for (const clients of this.clientsByAddress.values()) {
+        for (const client of Array.from(clients)) {
+          try {
+            await client.destroy();
+          } catch (err) {
+            console.error('Failed to destroy client during shutdown', err);
+          }
+        }
+      }
+      await new Promise<void>((resolve) => this.server.close(() => resolve()));
+    };
+
+    process.on('SIGINT', () => {
+      shutdown().finally(() => process.exit(0));
+    });
+    process.on('SIGTERM', () => {
+      shutdown().finally(() => process.exit(0));
     });
   }
 
