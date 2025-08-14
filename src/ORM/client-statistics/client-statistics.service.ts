@@ -130,14 +130,14 @@ export class ClientStatisticsService {
         const limit = diffDays * 144;
         const currentSlot = Math.floor(Date.now() / 600000) * 600000;
 
-        const query = `
+            const query = `
             SELECT
                 time AS label,
                 SUM((shares * 4294967296) /
-                    CASE
-                        WHEN (strftime('%s','now') - strftime('%s', createdAt)) < 600 THEN 600
-                        ELSE (strftime('%s','now') - strftime('%s', createdAt))
-                    END
+                    MIN(
+                        600,
+                        strftime('%s', entry.updatedAt) - strftime('%s', entry.createdAt)
+                    )
                 ) AS data
             FROM
                 client_statistics_entity AS entry
