@@ -143,8 +143,9 @@ export class StratumV1ClientStatistics {
 
         const elapsed = Date.now() - this.previousTimeSlotTime.getTime();
         if (elapsed > 0) {
+            const interval = Math.max(elapsed, 1000);
             const prevRate = this.hashRate;
-            this.hashRate = ((this.previousShares + this._shares) * 4294967296) / (elapsed / 1000);
+            this.hashRate = ((this.previousShares + this._shares) * 4294967296) / (interval / 1000);
             this.stratumV1Service.adjustCurrentHashRate(
                 client.address,
                 this.hashRate - prevRate,
