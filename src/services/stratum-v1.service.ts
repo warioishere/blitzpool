@@ -15,10 +15,11 @@ import { PoolShareStatisticsService } from '../ORM/pool-share-statistics/pool-sh
 import { PoolRejectedStatisticsService } from '../ORM/pool-rejected-statistics/pool-rejected-statistics.service';
 import { ClientRejectedStatisticsService } from '../ORM/client-rejected-statistics/client-rejected-statistics.service';
 
+
 @Injectable()
 export class StratumV1Service implements OnModuleInit {
+
   private readonly clientsByAddress = new Map<string, Set<StratumV1Client>>();
-  private readonly liveHashRateByAddress = new Map<string, number>();
 
   constructor(
     private readonly bitcoinRpcService: BitcoinRpcService,
@@ -32,20 +33,25 @@ export class StratumV1Service implements OnModuleInit {
     private readonly poolShareStatisticsService: PoolShareStatisticsService,
     private readonly poolRejectedStatisticsService: PoolRejectedStatisticsService,
     private readonly clientRejectedStatisticsService: ClientRejectedStatisticsService,
-    private readonly externalSharesService: ExternalSharesService,
-  ) {}
+    private readonly externalSharesService: ExternalSharesService
+  ) {
+
+  }
 
   async onModuleInit(): Promise<void> {
-    if (process.env.NODE_APP_INSTANCE === '0') {
-      await this.clientService.deleteAll();
-    }
-    setTimeout(() => {
-      this.startSocketServer();
-    }, 1000 * 10);
+
+      if (process.env.NODE_APP_INSTANCE == '0') {
+        await this.clientService.deleteAll();
+      }
+      setTimeout(() => {
+        this.startSocketServer();
+      }, 1000 * 10)
+
   }
 
   private startSocketServer() {
     const server = new Server(async (socket: Socket) => {
+
       // Disable Nagle's algorithm and use UTF-8 encoding for better latency
       socket.setNoDelay(true);
       socket.setEncoding('utf8');
@@ -70,32 +76,36 @@ export class StratumV1Service implements OnModuleInit {
         this,
       );
 
+
       socket.on('close', async (hadError: boolean) => {
         if (client.extraNonceAndSessionId != null) {
           // Handle socket disconnection
           await client.destroy();
-          console.log(
-            `Client ${client.extraNonceAndSessionId} disconnected, hadError?:${hadError}`,
-          );
+          this.unregisterClient(client.address, client);
+          console.log(`Client ${client.extraNonceAndSessionId} disconnected, hadError?:${hadError}`);
         }
       });
 
       socket.on('timeout', () => {
         console.log('socket timeout');
+        socket.end();
         socket.destroy();
       });
 
-      socket.on('error', (error: Error) => {
+      socket.on('error', async (error: Error) => {
         console.error('Socket error', error);
         socket.destroy();
       });
+
+      //   //console.log(`Client disconnected, socket error,  ${client.extraNonceAndSessionId}`);
+
+
     });
 
     server.listen(process.env.STRATUM_PORT, () => {
-      console.log(
-        `Stratum server is listening on port ${process.env.STRATUM_PORT}`,
-      );
+      console.log(`Stratum server is listening on port ${process.env.STRATUM_PORT}`);
     });
+
   }
 
   registerClient(address: string, client: StratumV1Client) {
@@ -117,7 +127,6 @@ export class StratumV1Service implements OnModuleInit {
       return;
     }
     clients.delete(client);
-    this.adjustCurrentHashRate(address, -(client.statistics?.hashRate || 0));
     if (clients.size === 0) {
       this.clientsByAddress.delete(address);
     }
@@ -130,6 +139,7 @@ export class StratumV1Service implements OnModuleInit {
     }
     for (const client of clients) {
       try {
+        client.socket.end();
         client.socket.destroy();
       } catch {
         // ignore errors while closing sockets
@@ -138,24 +148,4 @@ export class StratumV1Service implements OnModuleInit {
     this.clientsByAddress.delete(address);
   }
 
-  getClientsByAddress(address: string): StratumV1Client[] {
-    return Array.from(this.clientsByAddress.get(address) || []);
-  }
-
-  adjustCurrentHashRate(address: string, delta: number) {
-    if (!address || !Number.isFinite(delta)) {
-      return;
-    }
-    const current = this.liveHashRateByAddress.get(address) || 0;
-    const next = current + delta;
-    if (next === 0) {
-      this.liveHashRateByAddress.delete(address);
-    } else {
-      this.liveHashRateByAddress.set(address, next);
-    }
-  }
-
-  getCurrentHashRate(address: string): number {
-    return this.liveHashRateByAddress.get(address) || 0;
-  }
 }
