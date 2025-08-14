@@ -134,8 +134,8 @@ export class ClientStatisticsService {
                 time AS label,
                 SUM((shares * 4294967296) /
                     CASE
-                        WHEN (strftime('%s', updatedAt) - strftime('%s', createdAt)) < 1 THEN 600
-                        ELSE (strftime('%s', updatedAt) - strftime('%s', createdAt))
+                        WHEN (strftime('%s','now') - strftime('%s', createdAt)) < 1 THEN 600
+                        ELSE (strftime('%s','now') - strftime('%s', createdAt))
                     END
                 ) AS data
             FROM
@@ -205,8 +205,8 @@ export class ClientStatisticsService {
                     time label,
                     SUM((shares * 4294967296) /
                         CASE
-                            WHEN (strftime('%s', updatedAt) - strftime('%s', createdAt)) < 1 THEN 600
-                            ELSE (strftime('%s', updatedAt) - strftime('%s', createdAt))
+                            WHEN (strftime('%s','now') - strftime('%s', createdAt)) < 1 THEN 600
+                            ELSE (strftime('%s','now') - strftime('%s', createdAt))
                         END
                     ) AS data
                 FROM
@@ -241,8 +241,8 @@ export class ClientStatisticsService {
                 SUM(
                     (entry.shares * 4294967296) /
                     CASE
-                        WHEN (strftime('%s', entry.updatedAt) - strftime('%s', entry.createdAt)) < 1 THEN 600
-                        ELSE (strftime('%s', entry.updatedAt) - strftime('%s', entry.createdAt))
+                        WHEN (strftime('%s','now') - strftime('%s', entry.createdAt)) < 1 THEN 600
+                        ELSE (strftime('%s','now') - strftime('%s', entry.createdAt))
                     END
                 ) AS hashRate
             FROM
@@ -267,8 +267,8 @@ export class ClientStatisticsService {
                 time label,
                 SUM((shares * 4294967296) /
                     CASE
-                        WHEN (strftime('%s', updatedAt) - strftime('%s', createdAt)) < 1 THEN 600
-                        ELSE (strftime('%s', updatedAt) - strftime('%s', createdAt))
+                        WHEN (strftime('%s','now') - strftime('%s', createdAt)) < 1 THEN 600
+                        ELSE (strftime('%s','now') - strftime('%s', createdAt))
                     END
                 ) AS data
             FROM
@@ -317,7 +317,7 @@ export class ClientStatisticsService {
         const latestStat = result[0];
 
         if (result.length < 2) {
-            const time = new Date(latestStat.updatedAt).getTime() - new Date(latestStat.createdAt).getTime();
+            const time = Date.now() - new Date(latestStat.createdAt).getTime();
             // 1min
             if (time < 1000 * 60) {
                 return 0;
@@ -325,7 +325,7 @@ export class ClientStatisticsService {
             return (latestStat.shares * 4294967296) / (time / 1000);
         } else {
             const secondLatestStat = result[1];
-            const time = new Date(latestStat.updatedAt).getTime() - new Date(secondLatestStat.createdAt).getTime();
+            const time = Date.now() - new Date(secondLatestStat.createdAt).getTime();
             // 1min
             if (time < 1000 * 60) {
                 return 0;
@@ -343,8 +343,8 @@ export class ClientStatisticsService {
                 time label,
                 SUM((shares * 4294967296) /
                     CASE
-                        WHEN (strftime('%s', updatedAt) - strftime('%s', createdAt)) < 1 THEN 600
-                        ELSE (strftime('%s', updatedAt) - strftime('%s', createdAt))
+                        WHEN (strftime('%s','now') - strftime('%s', createdAt)) < 1 THEN 600
+                        ELSE (strftime('%s','now') - strftime('%s', createdAt))
                     END
                 ) AS data
             FROM
