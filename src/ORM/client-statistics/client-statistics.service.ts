@@ -413,6 +413,16 @@ export class ClientStatisticsService {
             .execute();
     }
 
+    public async deleteRecentSessions() {
+        await this.clientStatisticsRepository
+            .createQueryBuilder()
+            .delete()
+            .from(ClientStatisticsEntity)
+            .where('sessionId != :agg', { agg: 'AGG' })
+            .andWhere('NOT (address = :pool AND clientName = :pool)', { pool: 'POOL' })
+            .execute();
+    }
+
     public async deleteAll() {
         return await this.clientStatisticsRepository.delete({})
     }
