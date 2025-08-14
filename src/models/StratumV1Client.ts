@@ -278,7 +278,11 @@ export class StratumV1Client {
                 const errors = await validate(authorizationMessage, validatorOptions);
 
                 if (errors.length === 0) {
-                    if (this.clientAuthorization && this.clientAuthorization.address !== authorizationMessage.address) {
+                    if (
+                        this.clientAuthorization &&
+                        (this.clientAuthorization.address !== authorizationMessage.address ||
+                            this.clientAuthorization.worker !== authorizationMessage.worker)
+                    ) {
                         if (this.statistics) {
                             await this.statistics.flush(this.entity);
                             this.hashRate = 0;
