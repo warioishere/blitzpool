@@ -134,7 +134,7 @@ export class ClientStatisticsService {
                 time AS label,
                 SUM((shares * 4294967296) /
                     CASE
-                        WHEN (strftime('%s','now') - strftime('%s', createdAt)) < 1 THEN 600
+                        WHEN (strftime('%s','now') - strftime('%s', createdAt)) < 600 THEN 600
                         ELSE (strftime('%s','now') - strftime('%s', createdAt))
                     END
                 ) AS data
@@ -205,7 +205,7 @@ export class ClientStatisticsService {
                     time label,
                     SUM((shares * 4294967296) /
                         CASE
-                            WHEN (strftime('%s','now') - strftime('%s', createdAt)) < 1 THEN 600
+                            WHEN (strftime('%s','now') - strftime('%s', createdAt)) < 600 THEN 600
                             ELSE (strftime('%s','now') - strftime('%s', createdAt))
                         END
                     ) AS data
@@ -241,7 +241,7 @@ export class ClientStatisticsService {
                 SUM(
                     (entry.shares * 4294967296) /
                     CASE
-                        WHEN (strftime('%s','now') - strftime('%s', entry.createdAt)) < 1 THEN 600
+                        WHEN (strftime('%s','now') - strftime('%s', entry.createdAt)) < 600 THEN 600
                         ELSE (strftime('%s','now') - strftime('%s', entry.createdAt))
                     END
                 ) AS hashRate
@@ -267,7 +267,7 @@ export class ClientStatisticsService {
                 time label,
                 SUM((shares * 4294967296) /
                     CASE
-                        WHEN (strftime('%s','now') - strftime('%s', createdAt)) < 1 THEN 600
+                        WHEN (strftime('%s','now') - strftime('%s', createdAt)) < 600 THEN 600
                         ELSE (strftime('%s','now') - strftime('%s', createdAt))
                     END
                 ) AS data
@@ -343,7 +343,7 @@ export class ClientStatisticsService {
                 time label,
                 SUM((shares * 4294967296) /
                     CASE
-                        WHEN (strftime('%s','now') - strftime('%s', createdAt)) < 1 THEN 600
+                        WHEN (strftime('%s','now') - strftime('%s', createdAt)) < 600 THEN 600
                         ELSE (strftime('%s','now') - strftime('%s', createdAt))
                     END
                 ) AS data
