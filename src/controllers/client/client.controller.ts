@@ -27,9 +27,14 @@ export class ClientController {
 
         const addressSettings = await this.addressSettingsService.getSettings(address, false);
 
+        const totalShares = await this.clientStatisticsService.getTotalSharesForAddress(address);
+        const totalHashrate = workers.reduce((sum, w) => sum + (w.hashRate ?? 0), 0);
+
         return {
             bestDifficulty: addressSettings?.bestDifficulty,
             workersCount: workers.length,
+            totalShares,
+            totalHashrate,
             workers: await Promise.all(
                 workers.map(async (worker) => {
                     return {
@@ -58,12 +63,6 @@ export class ClientController {
     ) {
         const chartData = await this.clientStatisticsService.getChartDataForAddress(address, range);
         return chartData;
-    }
-
-    @Get(':address/shares')
-    async getAddressShares(@Param('address') address: string) {
-        const totalShares = await this.clientStatisticsService.getTotalSharesForAddress(address);
-        return { totalShares };
     }
 
     @Get(':address/worker-shares')

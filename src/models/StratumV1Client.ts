@@ -52,7 +52,8 @@ export class StratumV1Client {
     private entity: ClientEntity;
     private creatingEntity: Promise<void>;
 
-    public extraNonceAndSessionId: string;
+    public sessionId: string;
+    public extraNonce: string;
     public sessionStart: Date;
     public noFee: boolean;
     public hashRate: number = 0;
@@ -129,7 +130,7 @@ export class StratumV1Client {
 
     public async destroy() {
 
-        const sid = this.entity?.sessionId || this.extraNonceAndSessionId;
+        const sid = this.entity?.sessionId || this.sessionId;
         if (sid) {
             await this.clientService.delete(sid);
         }
@@ -160,7 +161,7 @@ export class StratumV1Client {
 
 
     private async handleMessage(message: string) {
-        //console.log(`Received from ${this.extraNonceAndSessionId}`, message);
+        //console.log(`Received from ${this.sessionId}`, message);
 
         // Parse the message and check if it's the initial subscription message
         let parsedMessage = null;
@@ -193,12 +194,13 @@ export class StratumV1Client {
                     if (this.sessionStart == null) {
                         this.sessionStart = new Date();
                         this.statistics = new StratumV1ClientStatistics(this.clientStatisticsService, this.configService);
-                        this.extraNonceAndSessionId = this.getRandomHexString();
-                        console.log(`New client ID: : ${this.extraNonceAndSessionId}, ${this.socket.remoteAddress}:${this.socket.remotePort}`);
+                        this.sessionId = this.getRandomHexString();
+                        this.extraNonce = this.sessionId;
+                        console.log(`New client ID: : ${this.sessionId}, ${this.socket.remoteAddress}:${this.socket.remotePort}`);
                     }
 
                     this.clientSubscription = subscriptionMessage;
-                    this.subscribeResponse = JSON.stringify(this.clientSubscription.response(this.extraNonceAndSessionId)) + '\n';
+                    this.subscribeResponse = JSON.stringify(this.clientSubscription.response(this.sessionId, this.extraNonce)) + '\n';
                     await this.write(this.subscribeResponse);
                 } else {
                     console.error('Subscription validation error');
@@ -514,19 +516,8 @@ export class StratumV1Client {
     private async sendNewMiningJob(jobTemplate: IJobTemplate) {
 
         if (jobTemplate.blockData.clearJobs && this.extraNonceSubscribed) {
-            this.extraNonceAndSessionId = this.getRandomHexString();
+            this.extraNonce = this.getRandomHexString();
             await this.sendSetExtraNonce();
-
-            if (this.entity) {
-                const previous = this.entity.sessionId;
-                this.entity.sessionId = this.extraNonceAndSessionId;
-                await this.clientService.updateSessionId(
-                    this.entity.address,
-                    this.entity.clientName,
-                    previous,
-                    this.entity.sessionId,
-                );
-            }
         }
 
         let payoutInformation;
@@ -574,7 +565,7 @@ export class StratumV1Client {
         }
 
 
-        //console.log(`Sent new job to ${this.clientAuthorization.worker}.${this.extraNonceAndSessionId}. (clearJobs: ${jobTemplate.blockData.clearJobs}, fee?: ${!this.noFee})`)
+        //console.log(`Sent new job to ${this.clientAuthorization.worker}.${this.sessionId}. (clearJobs: ${jobTemplate.blockData.clearJobs}, fee?: ${!this.noFee})`)
 
     }
 
@@ -590,7 +581,7 @@ export class StratumV1Client {
                             this.clientAuthorization.worker
                         );
                         this.entity = await this.clientService.insert({
-                            sessionId: this.extraNonceAndSessionId,
+                            sessionId: this.sessionId,
                             address: this.clientAuthorization.address,
                             clientName: this.clientAuthorization.worker,
                             userAgent: this.clientSubscription.userAgent,
@@ -669,14 +660,14 @@ export class StratumV1Client {
             jobTemplate,
             parseInt(submission.versionMask, 16),
             parseInt(submission.nonce, 16),
-            this.extraNonceAndSessionId,
+            this.extraNonce,
             submission.extraNonce2,
             parseInt(submission.ntime, 16)
         );
         const header = updatedJobBlock.toBuffer(true);
         const { submissionDifficulty } = DifficultyUtils.calculateDifficulty(header);
 
-        //console.log(`DIFF: ${submissionDifficulty} of ${this.sessionDifficulty} from ${this.clientAuthorization.worker + '.' + this.extraNonceAndSessionId}`);
+        //console.log(`DIFF: ${submissionDifficulty} of ${this.sessionDifficulty} from ${this.clientAuthorization.worker + '.' + this.sessionId}`);
 
 
         if (submissionDifficulty >= this.sessionDifficulty) {
@@ -774,7 +765,7 @@ export class StratumV1Client {
         }
 
         if (targetDiff != this.sessionDifficulty) {
-            //console.log(`Adjusting ${this.extraNonceAndSessionId} difficulty from ${this.sessionDifficulty} to ${targetDiff}`);
+            //console.log(`Adjusting ${this.sessionId} difficulty from ${this.sessionDifficulty} to ${targetDiff}`);
             if (!Number.isFinite(targetDiff)) return;
             this.sessionDifficulty = targetDiff;
 
@@ -802,7 +793,7 @@ export class StratumV1Client {
         const data = JSON.stringify({
             id: null,
             method: eResponseMethod.SET_EXTRANONCE,
-            params: [this.extraNonceAndSessionId, 4]
+            params: [this.extraNonce, 4]
         }) + '\n';
         await this.write(data);
         this.sentExtraNonce = true;
@@ -824,7 +815,7 @@ export class StratumV1Client {
 
                 return true;
             } else {
-                console.error(`Error: Cannot write to closed or ended socket. ${this.extraNonceAndSessionId} ${message}`);
+                console.error(`Error: Cannot write to closed or ended socket. ${this.sessionId} ${message}`);
                 await this.destroy();
                 if (!this.socket.destroyed) {
                     this.socket.destroy();
@@ -838,7 +829,7 @@ export class StratumV1Client {
             } else if (!this.socket.destroyed) {
                 this.socket.destroy();
             }
-            console.error(`Error occurred while writing to socket: ${this.extraNonceAndSessionId}`, error);
+            console.error(`Error occurred while writing to socket: ${this.sessionId}`, error);
             return false;
         }
     }
