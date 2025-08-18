@@ -4,6 +4,8 @@ import { Repository } from 'typeorm';
 
 import { ClientStatisticsEntity } from './client-statistics.entity';
 
+const DIFFICULTY_1 = 4294967296;
+
 @Injectable()
 export class ClientStatisticsService {
   constructor(
@@ -11,19 +13,8 @@ export class ClientStatisticsService {
     private clientStatisticsRepository: Repository<ClientStatisticsEntity>,
   ) {}
 
-  private calcHashRate(
-    shares: number,
-    start: Date | string | number,
-    end: Date | string | number,
-  ) {
-    const startMs =
-      typeof start === 'number' ? start : new Date(start).getTime();
-    const endMs = typeof end === 'number' ? end : new Date(end).getTime();
-    const diffSeconds = (endMs - startMs) / 1000;
-    if (diffSeconds < 60) {
-      return 0;
-    }
-    return (shares * 4294967296) / diffSeconds;
+  private calcHashRate(shares: number) {
+    return (shares * DIFFICULTY_1) / 600;
   }
 
   public async update(clientStatistic: Partial<ClientStatisticsEntity>) {
@@ -140,14 +131,7 @@ export class ClientStatisticsService {
     const query = `
             SELECT
                 time AS label,
-                ROUND(
-                    CASE
-                        WHEN (MAX(strftime('%s', updatedAt)) - MIN(strftime('%s', createdAt))) < 1
-                            THEN (SUM(shares) * 4294967296) / 600
-                        ELSE (SUM(shares) * 4294967296) /
-                            (MAX(strftime('%s', updatedAt)) - MIN(strftime('%s', createdAt)))
-                    END
-                ) AS data
+                ROUND((SUM(shares) * ${DIFFICULTY_1}) / 600) AS data
             FROM
                 client_statistics_entity AS entry
             WHERE
@@ -214,12 +198,7 @@ export class ClientStatisticsService {
     const query = `
                 SELECT
                     time label,
-                    CASE
-                        WHEN (MAX(strftime('%s', updatedAt)) - MIN(strftime('%s', createdAt))) < 1
-                            THEN (SUM(shares) * 4294967296) / 600
-                        ELSE (SUM(shares) * 4294967296) /
-                             (MAX(strftime('%s', updatedAt)) - MIN(strftime('%s', createdAt)))
-                    END AS data
+                    (SUM(shares) * ${DIFFICULTY_1}) / 600 AS data
                 FROM
                     client_statistics_entity AS entry
                 WHERE
@@ -247,8 +226,6 @@ export class ClientStatisticsService {
   public async getHashRateForGroup(address: string, clientName: string) {
     const query = `
             SELECT
-                MIN(createdAt) as createdAt,
-                MAX(updatedAt) as updatedAt,
                 SUM(shares) as shares
             FROM client_statistics_entity
             WHERE address = ? AND clientName = ?
@@ -266,22 +243,9 @@ export class ClientStatisticsService {
       return 0;
     }
 
-    const latest = result[0];
+    const shares = result.reduce((sum, row) => sum + Number(row.shares), 0);
 
-    if (result.length < 2) {
-      return this.calcHashRate(
-        latest.shares,
-        latest.createdAt,
-        latest.updatedAt,
-      );
-    } else {
-      const second = result[1];
-      return this.calcHashRate(
-        latest.shares + second.shares,
-        second.createdAt,
-        latest.updatedAt,
-      );
-    }
+    return this.calcHashRate(shares);
   }
 
   public async getChartDataForGroup(address: string, clientName: string) {
@@ -290,12 +254,7 @@ export class ClientStatisticsService {
     const query = `
             SELECT
                 time label,
-                CASE
-                    WHEN (MAX(strftime('%s', updatedAt)) - MIN(strftime('%s', createdAt))) < 1
-                        THEN (SUM(shares) * 4294967296) / 600
-                    ELSE (SUM(shares) * 4294967296) /
-                        (MAX(strftime('%s', updatedAt)) - MIN(strftime('%s', createdAt)))
-                END AS data
+                (SUM(shares) * ${DIFFICULTY_1}) / 600 AS data
             FROM
                 client_statistics_entity AS entry
             WHERE
@@ -327,13 +286,12 @@ export class ClientStatisticsService {
   ) {
     const query = `
             SELECT
-                createdAt,
-                updatedAt,
-                shares
+                SUM(shares) as shares
             FROM
                 client_statistics_entity AS entry
             WHERE
                 entry.address = ? AND entry.clientName = ? AND entry.sessionId = ?
+            GROUP BY time
             ORDER BY time DESC
             LIMIT 2;
         `;
@@ -348,22 +306,9 @@ export class ClientStatisticsService {
       return 0;
     }
 
-    const latestStat = result[0];
+    const shares = result.reduce((sum, row) => sum + Number(row.shares), 0);
 
-    if (result.length < 2) {
-      return this.calcHashRate(
-        latestStat.shares,
-        latestStat.createdAt,
-        latestStat.updatedAt,
-      );
-    } else {
-      const secondLatestStat = result[1];
-      return this.calcHashRate(
-        latestStat.shares + secondLatestStat.shares,
-        secondLatestStat.createdAt,
-        latestStat.updatedAt,
-      );
-    }
+    return this.calcHashRate(shares);
   }
 
   public async getChartDataForSession(
@@ -376,12 +321,7 @@ export class ClientStatisticsService {
     const query = `
             SELECT
                 time label,
-                CASE
-                    WHEN (MAX(strftime('%s', updatedAt)) - MIN(strftime('%s', createdAt))) < 1
-                        THEN (SUM(shares) * 4294967296) / 600
-                    ELSE (SUM(shares) * 4294967296) /
-                        (MAX(strftime('%s', updatedAt)) - MIN(strftime('%s', createdAt)))
-                END AS data
+                (SUM(shares) * ${DIFFICULTY_1}) / 600 AS data
             FROM
                 client_statistics_entity AS entry
             WHERE
