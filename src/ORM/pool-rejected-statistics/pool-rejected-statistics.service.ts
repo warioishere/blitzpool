@@ -19,6 +19,19 @@ export class PoolRejectedStatisticsService {
   private counts: Map<string, number> = new Map();
   private recentDiffs: Map<string, number[]> = new Map();
 
+  private getBucket(diff: number): string {
+    if (diff < 10) {
+      return '<10';
+    }
+    if (diff < 1000) {
+      return '10-1k';
+    }
+    if (diff < 50000) {
+      return '1k-50k';
+    }
+    return '>=50k';
+  }
+
   @Interval(60 * 1000)
   private async flushInterval() {
     if (this.currentTimeSlot != null) {
@@ -56,25 +69,27 @@ export class PoolRejectedStatisticsService {
         this.lastSave = now;
       }
 
-      let history = this.recentDiffs.get(reason) || [];
-      if (history.length > 0) {
-        const avg = history.reduce((sum, d) => sum + d, 0) / history.length;
-        if (avg > 0 && diff > avg * 4) {
-          history.push(diff);
-          if (history.length > 20) {
-            history.shift();
+        const bucket = this.getBucket(diff);
+        const key = `${reason}:${bucket}`;
+        let history = this.recentDiffs.get(key) || [];
+        if (history.length > 0) {
+          const avg = history.reduce((sum, d) => sum + d, 0) / history.length;
+          if (avg > 0 && diff > avg * 4) {
+            history.push(diff);
+            if (history.length > 20) {
+              history.shift();
+            }
+            this.recentDiffs.set(key, history);
+            console.warn(`Anomalous diff ${diff} for reason ${reason} (avg ${avg})`);
+            return false;
           }
-          this.recentDiffs.set(reason, history);
-          console.warn(`Anomalous diff ${diff} for reason ${reason} (avg ${avg})`);
-          return false;
         }
-      }
 
-      history.push(diff);
-      if (history.length > 20) {
-        history.shift();
-      }
-      this.recentDiffs.set(reason, history);
+        history.push(diff);
+        if (history.length > 20) {
+          history.shift();
+        }
+        this.recentDiffs.set(key, history);
 
       const current = this.counts.get(reason) || 0;
       this.counts.set(reason, current + diff);
