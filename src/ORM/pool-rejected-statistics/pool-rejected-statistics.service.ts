@@ -29,7 +29,13 @@ export class PoolRejectedStatisticsService {
     if (diff < 50000) {
       return '1k-50k';
     }
-    return '>=50k';
+    if (diff < 250000) {
+      return '50k-250k';
+    }
+    if (diff < 1000000) {
+      return '250k-1M';
+    }
+    return '>=1M';
   }
 
   @Interval(60 * 1000)
