@@ -179,6 +179,11 @@ export class StratumV1JobsService {
         return this.blocks[jobTemplateId];
     }
 
+    public getLatestJobTemplate(): IJobTemplate | null {
+        const latestId = (this.latestJobTemplateId - 1).toString(16);
+        return this.blocks[latestId] ?? null;
+    }
+
     public addJob(job: MiningJob) {
         this.jobs[job.jobId] = job;
         this.latestJobId++;

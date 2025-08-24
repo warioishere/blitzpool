@@ -26,6 +26,7 @@ import { StratumV1Service } from './services/stratum-v1.service';
 import { TelegramService } from './services/telegram.service';
 import { NtfyService } from './services/ntfy.service';
 import { ExternalSharesService } from './services/external-shares.service';
+import { BackgroundQueueService } from './services/background-queue.service';
 import { ExternalShareController } from './controllers/external-share/external-share.controller';
 import { ExternalSharesModule } from './ORM/external-shares/external-shares.module';
 import { PoolShareStatisticsModule } from './ORM/pool-share-statistics/pool-share-statistics.module';
@@ -82,6 +83,7 @@ const ORMModules = [
         BTCPayService,
         BraiinsService,
         ExternalSharesService,
+        BackgroundQueueService,
     ],
 })
 export class AppModule {

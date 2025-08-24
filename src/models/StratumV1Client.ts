@@ -4,7 +4,7 @@ import { plainToInstance } from 'class-transformer';
 import { validate, ValidatorOptions } from 'class-validator';
 import * as crypto from 'crypto';
 import { Socket } from 'net';
-import { firstValueFrom, Subscription } from 'rxjs';
+import { firstValueFrom, Subscription, timeout } from 'rxjs';
 import { clearInterval } from 'timers';
 
 import { AddressSettingsService } from '../ORM/address-settings/address-settings.service';
@@ -33,6 +33,7 @@ import { PoolShareStatisticsService } from '../ORM/pool-share-statistics/pool-sh
 import { PoolRejectedStatisticsService } from '../ORM/pool-rejected-statistics/pool-rejected-statistics.service';
 import { ClientRejectedStatisticsService } from '../ORM/client-rejected-statistics/client-rejected-statistics.service';
 import { StratumV1Service } from '../services/stratum-v1.service';
+import { BackgroundQueueService } from '../services/background-queue.service';
 
 
 export class StratumV1Client {
@@ -42,7 +43,7 @@ export class StratumV1Client {
     private clientAuthorization: AuthorizationMessage;
     private clientSuggestedDifficulty: SuggestDifficulty;
     private stratumSubscription: Subscription;
-    private backgroundWork: NodeJS.Timer[] = [];
+    private backgroundWork: NodeJS.Timeout[] = [];
 
     private statistics: StratumV1ClientStatistics;
     private stratumInitialized = false;
@@ -88,6 +89,7 @@ export class StratumV1Client {
         private readonly clientRejectedStatisticsService: ClientRejectedStatisticsService,
         private readonly externalSharesService: ExternalSharesService,
         private readonly stratumV1Service: StratumV1Service,
+        private readonly backgroundQueueService: BackgroundQueueService,
     ) {
 
         const networkConfig = this.configService.get('NETWORK');
@@ -143,6 +145,14 @@ export class StratumV1Client {
             this.stratumSubscription.unsubscribe();
         }
 
+        if (this.entity) {
+            this.statistics.flush(this.entity);
+        }
+
+        // Ensure all queued statistics and background tasks are persisted
+        // before tearing down the client instance.
+        await this.backgroundQueueService.drain();
+
         this.backgroundWork.forEach(work => {
             clearInterval(work);
         });
@@ -193,7 +203,11 @@ export class StratumV1Client {
 
                     if (this.sessionStart == null) {
                         this.sessionStart = new Date();
-                        this.statistics = new StratumV1ClientStatistics(this.clientStatisticsService, this.configService);
+                        this.statistics = new StratumV1ClientStatistics(
+                            this.clientStatisticsService,
+                            this.configService,
+                            this.backgroundQueueService,
+                        );
                         this.sessionId = this.getRandomHexString();
                         this.extraNonce = this.sessionId;
                         console.log(`New client ID: : ${this.sessionId}, ${this.socket.remoteAddress}:${this.socket.remotePort}`);
@@ -511,6 +525,14 @@ export class StratumV1Client {
             }, this.difficultyCheckIntervalMs)
         );
 
+        this.backgroundWork.push(
+            setInterval(() => {
+                if (this.entity) {
+                    this.statistics.flush(this.entity);
+                }
+            }, 60_000)
+        );
+
     }
 
     private async sendNewMiningJob(jobTemplate: IJobTemplate) {
@@ -602,58 +624,40 @@ export class StratumV1Client {
         }
 
         const submissionHash = submission.hash();
-        if(this.miningSubmissionHashes.has(submissionHash)){
-            await this.poolShareStatisticsService.addRejectedShare(this.sessionDifficulty);
-            await this.poolRejectedStatisticsService.addRejectedShare(eStratumErrorCode[eStratumErrorCode.DuplicateShare], this.sessionDifficulty);
-            await this.clientRejectedStatisticsService.addRejectedShare(this.clientAuthorization.address, eStratumErrorCode[eStratumErrorCode.DuplicateShare], 1);
+
+        const reject = async (code: eStratumErrorCode, reason: string, difficulty: number = this.sessionDifficulty): Promise<boolean> => {
+            this.backgroundQueueService.enqueue(async () => {
+                await this.poolShareStatisticsService.addRejectedShare(difficulty);
+                await this.poolRejectedStatisticsService.addRejectedShare(eStratumErrorCode[code], difficulty);
+                await this.clientRejectedStatisticsService.addRejectedShare(this.clientAuthorization.address, eStratumErrorCode[code], 1);
+            });
+
             const err = new StratumErrorMessage(
                 submission.id,
-                eStratumErrorCode.DuplicateShare,
-                'Duplicate share').response();
+                code,
+                reason
+            ).response();
             const success = await this.write(err);
             if (!success) {
                 return false;
             }
             return false;
-        }else{
-            this.miningSubmissionHashes.add(submissionHash);
-        }
+        };
 
         const job = this.stratumV1JobsService.getJobById(submission.jobId);
 
         // a miner may submit a job that doesn't exist anymore if it was removed by a new block notification (or expired, 5 min)
         if (job == null) {
-            await this.poolShareStatisticsService.addRejectedShare(this.sessionDifficulty);
-            await this.poolRejectedStatisticsService.addRejectedShare(eStratumErrorCode[eStratumErrorCode.JobNotFound], this.sessionDifficulty);
-            await this.clientRejectedStatisticsService.addRejectedShare(this.clientAuthorization.address, eStratumErrorCode[eStratumErrorCode.JobNotFound], 1);
-            const err = new StratumErrorMessage(
-                submission.id,
-                eStratumErrorCode.JobNotFound,
-                'Job not found').response();
-            //console.log(err);
-            const success = await this.write(err);
-            if (!success) {
-                return false;
-            }
-            return false;
+            const submissionDifficulty = this.sessionDifficulty;
+            return await reject(eStratumErrorCode.JobNotFound, 'Job not found', submissionDifficulty);
         }
         const jobTemplate = this.stratumV1JobsService.getJobTemplateById(job.jobTemplateId);
 
         if (jobTemplate == null) {
-            await this.poolShareStatisticsService.addRejectedShare(this.sessionDifficulty);
-            await this.poolRejectedStatisticsService.addRejectedShare(eStratumErrorCode[eStratumErrorCode.JobNotFound], this.sessionDifficulty);
-            await this.clientRejectedStatisticsService.addRejectedShare(this.clientAuthorization.address, eStratumErrorCode[eStratumErrorCode.JobNotFound], 1);
             console.warn(`Job template ${job.jobTemplateId} not found for job ${submission.jobId}`);
             delete this.stratumV1JobsService.jobs[submission.jobId];
-            const err = new StratumErrorMessage(
-                submission.id,
-                eStratumErrorCode.JobNotFound,
-                'Job not found').response();
-            const success = await this.write(err);
-            if (!success) {
-                return false;
-            }
-            return false;
+            const submissionDifficulty = this.sessionDifficulty;
+            return await reject(eStratumErrorCode.JobNotFound, 'Job not found', submissionDifficulty);
         }
 
         const updatedJobBlock = job.copyAndUpdateBlock(
@@ -669,63 +673,70 @@ export class StratumV1Client {
 
         //console.log(`DIFF: ${submissionDifficulty} of ${this.sessionDifficulty} from ${this.clientAuthorization.worker + '.' + this.sessionId}`);
 
+        if (this.miningSubmissionHashes.has(submissionHash)) {
+            return await reject(eStratumErrorCode.DuplicateShare, 'Duplicate share', submissionDifficulty);
+        } else {
+            this.miningSubmissionHashes.add(submissionHash);
+        }
 
         if (submissionDifficulty >= this.sessionDifficulty) {
-            await this.poolShareStatisticsService.addAcceptedShare(this.sessionDifficulty);
+            const diff = submissionDifficulty;
+            this.backgroundQueueService.enqueue(async () => {
+                await this.poolShareStatisticsService.addAcceptedShare(diff);
 
-            if (submissionDifficulty >= jobTemplate.blockData.networkDifficulty) {
-                console.log('!!! BLOCK FOUND !!!');
-                const blockHex = updatedJobBlock.toHex(false);
-                const result = await this.bitcoinRpcService.SUBMIT_BLOCK(blockHex);
-                await this.blocksService.save({
-                    height: jobTemplate.blockData.height,
-                    minerAddress: this.clientAuthorization.address,
-                    worker: this.clientAuthorization.worker,
-                    sessionId: this.entity.sessionId,
-                    blockData: blockHex
-                });
+                if (diff >= jobTemplate.blockData.networkDifficulty) {
+                    console.log('!!! BLOCK FOUND !!!');
+                    const blockHex = updatedJobBlock.toHex(false);
+                    const result = await this.bitcoinRpcService.SUBMIT_BLOCK(blockHex);
+                    await this.blocksService.save({
+                        height: jobTemplate.blockData.height,
+                        minerAddress: this.clientAuthorization.address,
+                        worker: this.clientAuthorization.worker,
+                        sessionId: this.entity.sessionId,
+                        blockData: blockHex
+                    });
 
-                await this.notificationService.notifySubscribersBlockFound(this.clientAuthorization.address, jobTemplate.blockData.height, updatedJobBlock, result);
-                //success
-                if (result == null) {
-                    await this.addressSettingsService.resetBestDifficultyAndShares();
+                    await this.notificationService.notifySubscribersBlockFound(this.clientAuthorization.address, jobTemplate.blockData.height, updatedJobBlock, result);
+                    if (result == null) {
+                        await this.addressSettingsService.resetBestDifficultyAndShares();
+                    }
                 }
-            }
-            try {
-                await this.statistics.addShares(this.entity, this.sessionDifficulty);
-                const now = new Date();
-                // only update every minute
-                if (this.entity.updatedAt == null || now.getTime() - this.entity.updatedAt.getTime() > 1000 * 60) {
-                    await this.clientService.heartbeat(this.entity.address, this.entity.clientName, this.entity.sessionId, this.hashRate, now);
-                    this.entity.updatedAt = now;
+                try {
+                    this.statistics.addShares(this.entity, diff);
+                    const now = new Date();
+                    if (this.entity.updatedAt == null || now.getTime() - this.entity.updatedAt.getTime() > 1000 * 60) {
+                        await this.clientService.heartbeat(this.entity.address, this.entity.clientName, this.entity.sessionId, this.hashRate, now);
+                        this.entity.updatedAt = now;
+                    }
+
+                    if (now.getTime() - this.lastDifficultyCheck >= this.difficultyCheckIntervalMs) {
+                        await this.checkDifficulty();
+                    }
+
+                } catch (e) {
+                    console.log(e);
                 }
 
-                if (now.getTime() - this.lastDifficultyCheck >= this.difficultyCheckIntervalMs) {
-                    await this.checkDifficulty();
+                if (diff > this.entity.bestDifficulty) {
+                    await this.clientService.updateBestDifficulty(this.entity.sessionId, diff);
                 }
 
-            } catch (e) {
-                console.log(e);
-            }
+                const addressSettings = await this.addressSettingsService.getSettings(this.clientAuthorization.address, true);
+                const storedBestDifficulty = addressSettings?.bestDifficulty ?? 0;
+
+                if (diff > storedBestDifficulty) {
+                    await this.notificationService.notifySubscribersBestDiff(this.clientAuthorization.address, diff);
+                    await this.addressSettingsService.updateBestDifficulty(this.clientAuthorization.address, diff, this.entity.userAgent);
+                }
+            });
 
             if (submissionDifficulty > this.entity.bestDifficulty) {
-                await this.clientService.updateBestDifficulty(this.entity.sessionId, submissionDifficulty);
                 this.entity.bestDifficulty = submissionDifficulty;
             }
-
-            const addressSettings = await this.addressSettingsService.getSettings(this.clientAuthorization.address, true);
-            const storedBestDifficulty = addressSettings?.bestDifficulty ?? 0;
-
-            if (submissionDifficulty > storedBestDifficulty) {
-                await this.notificationService.notifySubscribersBestDiff(this.clientAuthorization.address, submissionDifficulty);
-                await this.addressSettingsService.updateBestDifficulty(this.clientAuthorization.address, submissionDifficulty, this.entity.userAgent);
-            }
-
 
             const externalShareSubmissionEnabled: boolean = this.configService.get('EXTERNAL_SHARE_SUBMISSION_ENABLED')?.toLowerCase() == 'true';
             const minimumDifficulty: number = parseFloat(this.configService.get('MINIMUM_DIFFICULTY')) || 1000000000000.0; // 1T
             if (externalShareSubmissionEnabled && submissionDifficulty >= minimumDifficulty) {
-                // Submit share to API if enabled
                 this.externalSharesService.submitShare({
                     worker: this.clientAuthorization.worker,
                     address: this.clientAuthorization.address,
@@ -736,20 +747,7 @@ export class StratumV1Client {
             }
 
         } else {
-            await this.poolShareStatisticsService.addRejectedShare(this.sessionDifficulty);
-            await this.poolRejectedStatisticsService.addRejectedShare(eStratumErrorCode[eStratumErrorCode.LowDifficultyShare], this.sessionDifficulty);
-            await this.clientRejectedStatisticsService.addRejectedShare(this.clientAuthorization.address, eStratumErrorCode[eStratumErrorCode.LowDifficultyShare], 1);
-            const err = new StratumErrorMessage(
-                submission.id,
-                eStratumErrorCode.LowDifficultyShare,
-                'Difficulty too low').response();
-
-            const success = await this.write(err);
-            if (!success) {
-                return false;
-            }
-
-            return false;
+            return await reject(eStratumErrorCode.LowDifficultyShare, 'Difficulty too low', submissionDifficulty);
         }
 
         //await this.checkDifficulty();
@@ -759,10 +757,17 @@ export class StratumV1Client {
 
     private async checkDifficulty() {
         this.lastDifficultyCheck = Date.now();
-        const targetDiff = this.statistics.getSuggestedDifficulty(this.sessionDifficulty);
+        let targetDiff = this.statistics.getSuggestedDifficulty(this.sessionDifficulty);
         if (targetDiff == null) {
             return;
         }
+
+        const minDifficulty = parseFloat(this.configService.get('MIN_DIFFICULTY')) || 0.00001;
+        const maxDifficulty = parseFloat(this.configService.get('MAX_DIFFICULTY')) || Number.MAX_SAFE_INTEGER;
+        if (targetDiff > this.sessionDifficulty) {
+            targetDiff = Math.min(targetDiff, this.sessionDifficulty * 4);
+        }
+        targetDiff = Math.min(Math.max(targetDiff, minDifficulty), maxDifficulty);
 
         if (targetDiff != this.sessionDifficulty) {
             //console.log(`Adjusting ${this.sessionId} difficulty from ${this.sessionDifficulty} to ${targetDiff}`);
@@ -781,7 +786,16 @@ export class StratumV1Client {
                 return;
             }
 
-            const jobTemplate = await firstValueFrom(this.stratumV1JobsService.newMiningJob$);
+            let jobTemplate = this.stratumV1JobsService.getLatestJobTemplate();
+            if (!jobTemplate) {
+                try {
+                    jobTemplate = await firstValueFrom(
+                        this.stratumV1JobsService.newMiningJob$.pipe(timeout(5000))
+                    );
+                } catch {
+                    return;
+                }
+            }
             // we need to clear the jobs so that the difficulty set takes effect. Otherwise the different miner implementations can cause issues
             jobTemplate.blockData.clearJobs = true;
             await this.sendNewMiningJob(jobTemplate);

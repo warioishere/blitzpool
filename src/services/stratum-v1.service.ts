@@ -14,6 +14,7 @@ import { ExternalSharesService } from './external-shares.service';
 import { PoolShareStatisticsService } from '../ORM/pool-share-statistics/pool-share-statistics.service';
 import { PoolRejectedStatisticsService } from '../ORM/pool-rejected-statistics/pool-rejected-statistics.service';
 import { ClientRejectedStatisticsService } from '../ORM/client-rejected-statistics/client-rejected-statistics.service';
+import { BackgroundQueueService } from './background-queue.service';
 
 
 @Injectable()
@@ -33,7 +34,8 @@ export class StratumV1Service implements OnModuleInit {
     private readonly poolShareStatisticsService: PoolShareStatisticsService,
     private readonly poolRejectedStatisticsService: PoolRejectedStatisticsService,
     private readonly clientRejectedStatisticsService: ClientRejectedStatisticsService,
-    private readonly externalSharesService: ExternalSharesService
+    private readonly externalSharesService: ExternalSharesService,
+    private readonly backgroundQueueService: BackgroundQueueService
   ) {
 
   }
@@ -74,6 +76,7 @@ export class StratumV1Service implements OnModuleInit {
         this.clientRejectedStatisticsService,
         this.externalSharesService,
         this,
+        this.backgroundQueueService,
       );
 
 
