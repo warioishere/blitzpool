@@ -17,6 +17,7 @@ export class PoolRejectedStatisticsService {
   private currentTimeSlot: number = null;
   private lastSave: number = null;
   private counts: Map<string, number> = new Map();
+  private recentDiffs: Map<string, number[]> = new Map();
 
   @Interval(60 * 1000)
   private async flushInterval() {
@@ -28,8 +29,8 @@ export class PoolRejectedStatisticsService {
     }
   }
 
-  public async addRejectedShare(reason: string, diff: number) {
-    await this.mutex.runExclusive(async () => {
+  public async addRejectedShare(reason: string, diff: number): Promise<boolean> {
+    return await this.mutex.runExclusive(async () => {
       const coeff = 1000 * 60 * 10;
       const now = Date.now();
       const timeSlot = Math.floor(now / coeff) * coeff;
@@ -55,6 +56,26 @@ export class PoolRejectedStatisticsService {
         this.lastSave = now;
       }
 
+      let history = this.recentDiffs.get(reason) || [];
+      if (history.length > 0) {
+        const avg = history.reduce((sum, d) => sum + d, 0) / history.length;
+        if (avg > 0 && diff > avg * 4) {
+          history.push(diff);
+          if (history.length > 20) {
+            history.shift();
+          }
+          this.recentDiffs.set(reason, history);
+          console.warn(`Anomalous diff ${diff} for reason ${reason} (avg ${avg})`);
+          return false;
+        }
+      }
+
+      history.push(diff);
+      if (history.length > 20) {
+        history.shift();
+      }
+      this.recentDiffs.set(reason, history);
+
       const current = this.counts.get(reason) || 0;
       this.counts.set(reason, current + diff);
 
@@ -62,6 +83,8 @@ export class PoolRejectedStatisticsService {
         await this.saveCurrent();
         this.lastSave = now;
       }
+
+      return true;
     });
   }
 
