@@ -18,24 +18,54 @@ export class PoolRejectedStatisticsService {
   private lastSave: number = null;
   private counts: Map<string, number> = new Map();
   private recentDiffs: Map<string, number[]> = new Map();
+  private static readonly buckets = [
+    { label: '<10', lower: 0, upper: 10 },
+    { label: '10-1k', lower: 10, upper: 1000 },
+    { label: '1k-50k', lower: 1000, upper: 50000 },
+    { label: '50k-250k', lower: 50000, upper: 250000 },
+    { label: '250k-1M', lower: 250000, upper: 1000000 },
+    { label: '>=1M', lower: 1000000, upper: Infinity },
+  ];
 
-  private getBucket(diff: number): string {
-    if (diff < 10) {
-      return '<10';
+  private lastBuckets: Map<string, string> = new Map();
+
+  private getBucket(diff: number, reason: string): string {
+    let idx = PoolRejectedStatisticsService.buckets.findIndex(
+      b => diff >= b.lower && diff < b.upper,
+    );
+    if (idx === -1) {
+      idx = PoolRejectedStatisticsService.buckets.length - 1;
     }
-    if (diff < 1000) {
-      return '10-1k';
+
+    const last = this.lastBuckets.get(reason);
+    if (last) {
+      let lastIdx = PoolRejectedStatisticsService.buckets.findIndex(
+        b => b.label === last,
+      );
+      if (lastIdx === -1) {
+        lastIdx = idx;
+      }
+
+      while (
+        lastIdx < PoolRejectedStatisticsService.buckets.length - 1 &&
+        diff >=
+          PoolRejectedStatisticsService.buckets[lastIdx].upper * 1.1
+      ) {
+        lastIdx++;
+      }
+      while (
+        lastIdx > 0 &&
+        diff <=
+          PoolRejectedStatisticsService.buckets[lastIdx].lower * 0.9
+      ) {
+        lastIdx--;
+      }
+      idx = lastIdx;
     }
-    if (diff < 50000) {
-      return '1k-50k';
-    }
-    if (diff < 250000) {
-      return '50k-250k';
-    }
-    if (diff < 1000000) {
-      return '250k-1M';
-    }
-    return '>=1M';
+
+    const bucket = PoolRejectedStatisticsService.buckets[idx].label;
+    this.lastBuckets.set(reason, bucket);
+    return bucket;
   }
 
   @Interval(60 * 1000)
@@ -75,7 +105,7 @@ export class PoolRejectedStatisticsService {
         this.lastSave = now;
       }
 
-        const bucket = this.getBucket(diff);
+        const bucket = this.getBucket(diff, reason);
         const key = `${reason}:${bucket}`;
         let history = this.recentDiffs.get(key) || [];
         if (history.length > 0) {
