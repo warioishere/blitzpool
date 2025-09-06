@@ -84,8 +84,4 @@ const ORMModules = [
         ExternalSharesService,
     ],
 })
-export class AppModule {
-    constructor() {
-
-    }
-}
+export class AppModule {}

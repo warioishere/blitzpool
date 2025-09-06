@@ -202,6 +202,61 @@ export class AppController {
     return { slotData };
   }
 
+  @Get('info/workers')
+  public async infoWorkers(
+    @Query('range') range: '1d' | '3d' | '7d' = '1d',
+  ) {
+    const CACHE_KEY = `POOL_WORKER_STATS_${range}`;
+    const cachedResult = await this.cacheManager.get(CACHE_KEY);
+
+    if (cachedResult != null) {
+      return cachedResult;
+    }
+
+    const now = Date.now();
+    const oneDay = 24 * 60 * 60 * 1000;
+    const days = range === '7d' ? 7 : range === '3d' ? 3 : 1;
+    const sinceTime = now - days * oneDay;
+
+    const entries = await this.clientStatisticsService.getActiveCountsSince(
+      sinceTime,
+    );
+    const slotMap = new Map<
+      number,
+      { addresses: number; workers: number; sessions: number }
+    >();
+    for (const entry of entries) {
+      slotMap.set(entry.time, {
+        addresses: entry.addresses,
+        workers: entry.workers,
+        sessions: entry.sessions,
+      });
+    }
+
+    const coeff = 1000 * 60 * 10;
+    const startSlot = Math.floor(sinceTime / coeff) * coeff;
+    const endSlot = Math.floor(now / coeff) * coeff;
+    const slotData: {
+      time: string;
+      counts: { addresses: number; workers: number; sessions: number };
+    }[] = [];
+    for (let t = startSlot; t <= endSlot; t += coeff) {
+      const counts = slotMap.get(t) || {
+        addresses: 0,
+        workers: 0,
+        sessions: 0,
+      };
+      slotData.push({
+        time: new Date(t).toISOString(),
+        counts,
+      });
+    }
+
+    await this.cacheManager.set(CACHE_KEY, { slotData }, 10 * 60 * 1000);
+
+    return { slotData };
+  }
+
   @Get('info/rejected')
   public async infoRejected(
     @Query('range') range: '1d' | '3d' | '7d' = '1d',
