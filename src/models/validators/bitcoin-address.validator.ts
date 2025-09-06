@@ -22,7 +22,7 @@ export class BitcoinAddressValidator implements ValidatorConstraintInterface {
 }
 
 export function IsBitcoinAddress(validationOptions?: ValidationOptions) {
-    return function (object: Record<string, any>, propertyName: string) {
+    return function (object: Object, propertyName: string) {
         registerDecorator({
             name: 'isBitcoinAddress',
             target: object.constructor,
