@@ -347,6 +347,73 @@ export class ClientStatisticsService {
       .slice(0, result.length - 1);
   }
 
+  public async getActiveCountsSince(time: number): Promise<
+    Array<{
+      time: number;
+      addresses: number;
+      workers: number;
+      sessions: number;
+    }>
+  > {
+    const query = this.clientStatisticsRepository
+      .createQueryBuilder('stat')
+      .select('stat.time', 'time')
+      .addSelect('COUNT(DISTINCT stat.address)', 'addresses')
+      .addSelect(
+        "COUNT(DISTINCT stat.address || '-' || stat.clientName)",
+        'workers',
+      )
+      .addSelect(
+        "COUNT(DISTINCT stat.address || '-' || stat.clientName || '-' || stat.sessionId)",
+        'sessions',
+      )
+      .where('stat.time > :since', { since: time })
+      .andWhere("stat.sessionId != 'AGG'")
+      .andWhere("stat.address != 'POOL'")
+      .groupBy('stat.time')
+      .orderBy('stat.time', 'ASC');
+
+    const result = await query.getRawMany();
+    return result.map((r) => ({
+      time: Number(r.time),
+      addresses: Number(r.addresses),
+      workers: Number(r.workers),
+      sessions: Number(r.sessions),
+    }));
+  }
+
+  public async getActiveCountsForAddress(
+    address: string,
+    time: number,
+  ): Promise<
+    Array<{
+      time: number;
+      workers: number;
+      sessions: number;
+    }>
+  > {
+    const query = this.clientStatisticsRepository
+      .createQueryBuilder('stat')
+      .select('stat.time', 'time')
+      .addSelect('COUNT(DISTINCT stat.clientName)', 'workers')
+      .addSelect(
+        "COUNT(DISTINCT stat.clientName || '-' || stat.sessionId)",
+        'sessions',
+      )
+      .where('stat.address = :address', { address })
+      .andWhere('stat.time > :since', { since: time })
+      .andWhere("stat.sessionId != 'AGG'")
+      .groupBy('stat.time')
+      .orderBy('stat.time', 'ASC');
+
+    const result = await query.getRawMany();
+    return result.map((r) => ({
+      time: Number(r.time),
+      workers: Number(r.workers),
+      sessions: Number(r.sessions),
+    }));
+  }
+
   public async getAcceptedEntriesSince(
     address: string,
     time: number,

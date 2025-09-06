@@ -71,6 +71,34 @@ export class ClientController {
         return workerShares.map(ws => ({ workerName: ws.clientName, totalShares: ws.total }));
     }
 
+    @Get(':address/workers')
+    async getAddressWorkers(
+        @Param('address') address: string,
+        @Query('range') range: '1d' | '3d' | '7d' = '1d'
+    ) {
+        const now = Date.now();
+        const oneDay = 24 * 60 * 60 * 1000;
+        const days = range === '7d' ? 7 : range === '3d' ? 3 : 1;
+        const sinceTime = now - days * oneDay;
+
+        const entries = await this.clientStatisticsService.getActiveCountsForAddress(address, sinceTime);
+        const slotMap = new Map<number, { workers: number; sessions: number }>();
+        for (const entry of entries) {
+            slotMap.set(entry.time, { workers: entry.workers, sessions: entry.sessions });
+        }
+
+        const coeff = 1000 * 60 * 10;
+        const startSlot = Math.floor(sinceTime / coeff) * coeff;
+        const endSlot = Math.floor(now / coeff) * coeff;
+        const slotData: { time: string; counts: { workers: number; sessions: number } }[] = [];
+        for (let t = startSlot; t <= endSlot; t += coeff) {
+            const counts = slotMap.get(t) || { workers: 0, sessions: 0 };
+            slotData.push({ time: new Date(t).toISOString(), counts });
+        }
+
+        return { slotData };
+    }
+
     @Get(':address/accepted')
     async getAddressAccepted(
         @Param('address') address: string,
