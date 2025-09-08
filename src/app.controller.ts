@@ -145,7 +145,11 @@ export class AppController {
       peers.map(async p => {
         const host = extractHost(p.addr);
         let location: string;
-        if (p.addr.includes('.onion') || !isPublicIp(host)) {
+        if (host.includes('.onion')) {
+          location = 'hidden through tor';
+        } else if (host.includes('.i2p')) {
+          location = 'hidden through i2p';
+        } else if (!isPublicIp(host)) {
           location = 'hidden through tor';
         } else {
           const geo = await this.geoIpService.getLocation(host);
@@ -156,6 +160,9 @@ export class AppController {
           version: p.subver,
           direction: p.inbound ? 'inbound' : 'outbound',
           location,
+          addrlocal: p.addrlocal,
+          bytesrecv: p.bytesrecv,
+          bytessent: p.bytessent,
         };
       })
     );
