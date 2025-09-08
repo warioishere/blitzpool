@@ -12,7 +12,37 @@ import { PoolRejectedStatisticsService } from './ORM/pool-rejected-statistics/po
 import { ClientStatisticsService } from './ORM/client-statistics/client-statistics.service';
 import { ClientService } from './ORM/client/client.service';
 import { BitcoinRpcService } from './services/bitcoin-rpc.service';
+import { GeoIpService } from './services/geoip.service';
 import { eStratumErrorCode } from './models/enums/eStratumErrorCode';
+import { isIP } from 'net';
+
+function extractHost(addr: string): string {
+  if (!addr) return '';
+  if (addr.startsWith('[')) {
+    const end = addr.indexOf(']');
+    return addr.substring(1, end);
+  }
+  return addr.split(':')[0];
+}
+
+function isPublicIp(ip: string): boolean {
+  const version = isIP(ip);
+  if (version === 4) {
+    const [a, b] = ip.split('.').map(Number);
+    if (a === 10) return false;
+    if (a === 172 && b >= 16 && b <= 31) return false;
+    if (a === 192 && b === 168) return false;
+    if (a === 127) return false;
+    return true;
+  } else if (version === 6) {
+    const normalized = ip.toLowerCase();
+    if (normalized === '::1') return false;
+    if (normalized.startsWith('fc') || normalized.startsWith('fd')) return false;
+    if (normalized.startsWith('fe8') || normalized.startsWith('fe9') || normalized.startsWith('fea') || normalized.startsWith('feb')) return false;
+    return true;
+  }
+  return false;
+}
 
 @Controller()
 export class AppController {
@@ -29,6 +59,7 @@ export class AppController {
     private readonly poolRejectedStatisticsService: PoolRejectedStatisticsService,
     private readonly bitcoinRpcService: BitcoinRpcService,
     private readonly addressSettingsService: AddressSettingsService,
+    private readonly geoIpService: GeoIpService,
   ) {
     const packagePath = join(__dirname, '..', 'package.json');
     this.version = JSON.parse(readFileSync(packagePath, 'utf8')).version;
@@ -99,6 +130,38 @@ export class AppController {
   public async network() {
     const miningInfo = await firstValueFrom(this.bitcoinRpcService.newBlock$);
     return miningInfo;
+  }
+
+  @Get('info/peers')
+  public async infoPeers() {
+    const CACHE_KEY = 'PEER_INFO';
+    const cachedResult = await this.cacheManager.get(CACHE_KEY);
+    if (cachedResult != null) {
+      return cachedResult;
+    }
+
+    const peers = await this.bitcoinRpcService.getPeerInfo() || [];
+    const result = await Promise.all(
+      peers.map(async p => {
+        const host = extractHost(p.addr);
+        let location: string;
+        if (p.addr.includes('.onion') || !isPublicIp(host)) {
+          location = 'hidden through tor';
+        } else {
+          const geo = await this.geoIpService.getLocation(host);
+          location = geo ? `${geo.city}, ${geo.country}` : null;
+        }
+        return {
+          addr: p.addr,
+          version: p.subver,
+          direction: p.inbound ? 'inbound' : 'outbound',
+          location,
+        };
+      })
+    );
+
+    await this.cacheManager.set(CACHE_KEY, result, 1 * 60 * 1000);
+    return result;
   }
 
   @Get('info/version')
