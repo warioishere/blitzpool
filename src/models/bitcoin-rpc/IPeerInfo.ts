@@ -4,5 +4,7 @@ export interface IPeerInfo {
     subver: string,
     inbound: boolean,
     bytesrecv: number,
-    bytessent: number
+    bytessent: number,
+    network: string,
+    pingtime: number
 }
