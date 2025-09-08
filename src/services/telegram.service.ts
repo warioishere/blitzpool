@@ -112,7 +112,7 @@ export class TelegramService implements OnModuleInit {
             });
         });
 
-        this.bot.onText(/\/subscribe (.+)/, async (msg, match) => {
+        this.bot.onText(/\/subscribe(?:\s+(.+))?/, async (msg, match) => {
             const raw = match?.[1]?.trim();
             if (!raw) {
                 this.reply(msg.chat.id, {
@@ -156,12 +156,12 @@ export class TelegramService implements OnModuleInit {
             }
         });
 
-        this.bot.onText(/\/subscribe_bestdiff (on|off|reset)(?:\s+(.+))?/i, async (msg, match) => {
+        this.bot.onText(/\/subscribe_bestdiff(?:\s+(\S+))?(?:\s+(.+))?/i, async (msg, match) => {
             const chatId = msg.chat.id;
             const action = match?.[1]?.toLowerCase();
             const addressParam = match?.[2]?.trim();
 
-            if (!action) {
+            if (!action || !['on', 'off', 'reset'].includes(action)) {
                 this.reply(chatId, {
                     de: "Bitte gib 'on', 'off' oder 'reset' an.",
                     en: "Please provide 'on', 'off' or 'reset'.",
@@ -353,7 +353,7 @@ I will decrypt it and respond just like with plain text. 🔒`
             }
         });
 
-        this.bot.onText(/\/remove (.+)/, async (msg, match) => {
+        this.bot.onText(/\/remove(?:\s+(.+))?/, async (msg, match) => {
             const chatId = msg.chat.id;
             const raw = match?.[1]?.trim();
             if (!raw) {
