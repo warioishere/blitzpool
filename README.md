@@ -68,6 +68,15 @@ curl -d /stats $NTFY_SERVER_URL/myPrefix1ABC...
 curl -d "/subscribe 1DEF..." $NTFY_SERVER_URL/myPrefix1ABC...
 ```
 
+### 🌍 GeoIP service
+
+To attach city and country information to peer addresses, configure a GeoIP lookup provider via environment variables:
+
+```
+GEOIP_URL=<https://your-geoip-provider/lookup?ip=>
+GEOIP_KEY=<optional api key>
+```
+
 #### 🛠️ Extra Services
 - Integrated `blockTemplateInterval` configuration
 - Hashrate corrections and updated statistics endpoints
