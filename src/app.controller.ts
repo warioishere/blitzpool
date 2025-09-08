@@ -163,6 +163,8 @@ export class AppController {
           addrlocal: p.addrlocal,
           bytesrecv: p.bytesrecv,
           bytessent: p.bytessent,
+          network: p.network,
+          pingtime: p.pingtime,
         };
       })
     );
