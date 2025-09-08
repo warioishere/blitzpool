@@ -44,9 +44,10 @@ describe('AppController info/peers', () => {
 
   it('should map peer info and resolve locations', async () => {
     const peers: IPeerInfo[] = [
-      { addr: '1.2.3.4:8333', subver: '/Satoshi:25.0.0/', inbound: false, bytesrecv: 0, bytessent: 0 },
-      { addr: '[2001:db8::1]:8333', subver: '/Satoshi:25.0.0/', inbound: true, bytesrecv: 0, bytessent: 0 },
-      { addr: 'abcd.onion:8333', subver: '/Satoshi:25.0.0/', inbound: true, bytesrecv: 0, bytessent: 0 },
+      { addr: '1.2.3.4:8333', addrlocal: '10.0.0.1:8333', subver: '/Satoshi:25.0.0/', inbound: false, bytesrecv: 100, bytessent: 200 },
+      { addr: '[2001:db8::1]:8333', addrlocal: '[::ffff:127.0.0.1]:8333', subver: '/Satoshi:25.0.0/', inbound: true, bytesrecv: 300, bytessent: 400 },
+      { addr: 'abcd.onion:8333', addrlocal: '127.0.0.1:8333', subver: '/Satoshi:25.0.0/', inbound: true, bytesrecv: 500, bytessent: 600 },
+      { addr: 'efgh.i2p:8333', addrlocal: '127.0.0.1:8334', subver: '/Satoshi:25.0.0/', inbound: true, bytesrecv: 700, bytessent: 800 },
     ];
     (bitcoinRpcService.getPeerInfo as jest.Mock).mockResolvedValue(peers);
     (geoIpService.getLocation as jest.Mock).mockImplementation((ip: string) => {
@@ -57,9 +58,10 @@ describe('AppController info/peers', () => {
 
     const result = await appController.infoPeers();
     expect(result).toEqual([
-      { addr: '1.2.3.4:8333', version: '/Satoshi:25.0.0/', direction: 'outbound', location: 'City, Country' },
-      { addr: '[2001:db8::1]:8333', version: '/Satoshi:25.0.0/', direction: 'inbound', location: 'Metro, World' },
-      { addr: 'abcd.onion:8333', version: '/Satoshi:25.0.0/', direction: 'inbound', location: 'hidden through tor' },
+      { addr: '1.2.3.4:8333', version: '/Satoshi:25.0.0/', direction: 'outbound', location: 'City, Country', addrlocal: '10.0.0.1:8333', bytesrecv: 100, bytessent: 200 },
+      { addr: '[2001:db8::1]:8333', version: '/Satoshi:25.0.0/', direction: 'inbound', location: 'Metro, World', addrlocal: '[::ffff:127.0.0.1]:8333', bytesrecv: 300, bytessent: 400 },
+      { addr: 'abcd.onion:8333', version: '/Satoshi:25.0.0/', direction: 'inbound', location: 'hidden through tor', addrlocal: '127.0.0.1:8333', bytesrecv: 500, bytessent: 600 },
+      { addr: 'efgh.i2p:8333', version: '/Satoshi:25.0.0/', direction: 'inbound', location: 'hidden through i2p', addrlocal: '127.0.0.1:8334', bytesrecv: 700, bytessent: 800 },
     ]);
   });
 });
