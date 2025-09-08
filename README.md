@@ -70,12 +70,7 @@ curl -d "/subscribe 1DEF..." $NTFY_SERVER_URL/myPrefix1ABC...
 
 ### 🌍 GeoIP service
 
-To attach city and country information to peer addresses, configure a GeoIP lookup provider via environment variables:
-
-```
-GEOIP_URL=<https://your-geoip-provider/lookup?ip=>
-GEOIP_KEY=<optional api key>
-```
+BlitzPool enriches peer information using the free [ip-api.com](https://ip-api.com) geolocation service to resolve city and country details. No configuration is required.
 
 #### 🛠️ Extra Services
 - Integrated `blockTemplateInterval` configuration
