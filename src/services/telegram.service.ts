@@ -9,6 +9,7 @@ import { TelegramSubscriptionsService } from '../ORM/telegram-subscriptions/tele
 import { ClientService } from '../ORM/client/client.service';
 import { AddressSettingsService } from '../ORM/address-settings/address-settings.service';
 import { ClientStatisticsService } from '../ORM/client-statistics/client-statistics.service';
+import { StratumV1Service } from './stratum-v1.service';
 import { buildStatsMessage } from './common-command-handlers';
 
 @Injectable()
@@ -37,7 +38,8 @@ export class TelegramService implements OnModuleInit {
         private readonly telegramSubscriptionsService: TelegramSubscriptionsService,
         private readonly clientService: ClientService,
         private readonly addressSettingsService: AddressSettingsService,
-        private readonly clientStatisticsService: ClientStatisticsService
+        private readonly clientStatisticsService: ClientStatisticsService,
+        private readonly stratumV1Service: StratumV1Service
     ) {
         const token: string | null = this.configService.get('TELEGRAM_BOT_TOKEN');
 
@@ -69,7 +71,7 @@ export class TelegramService implements OnModuleInit {
         await this.bot.setMyCommands([
             { command: '/start', description: 'Zeigt Willkommensnachricht' },
             { command: '/subscribe', description: 'Benachrichtigung bei Blockhit aktivieren' },
-            { command: '/subscribe_bestdiff', description: 'Best-Diff Benachrichtigungen (on/off, Standard: on)' },
+            { command: '/subscribe_bestdiff', description: 'Best-Diff Benachrichtigungen (on/off/reset, Standard: on)' },
             { command: '/difficulty', description: 'Zeigt aktuelle Netzwerk-Difficulty' },
             { command: '/next_difficulty', description: 'Zeigt erwartete Änderung der Netzwerk-Difficulty' },
             { command: '/stats', description: 'Zeigt die Stats für deine Miner Adresse an' },
@@ -110,7 +112,7 @@ export class TelegramService implements OnModuleInit {
             });
         });
 
-        this.bot.onText(/\/subscribe (.+)/, async (msg, match) => {
+        this.bot.onText(/\/subscribe(?:\s+(.+))?/, async (msg, match) => {
             const raw = match?.[1]?.trim();
             if (!raw) {
                 this.reply(msg.chat.id, {
@@ -154,19 +156,73 @@ export class TelegramService implements OnModuleInit {
             }
         });
 
-        this.bot.onText(/\/subscribe_bestdiff (on|off)/i, async (msg, match) => {
+        this.bot.onText(/\/subscribe_bestdiff(?:\s+(\S+))?(?:\s+(.+))?/i, async (msg, match) => {
             const chatId = msg.chat.id;
-            const value = match?.[1]?.toLowerCase();
+            const action = match?.[1]?.toLowerCase();
+            const addressParam = match?.[2]?.trim();
 
-            if (!value) {
+            if (!action || !['on', 'off', 'reset'].includes(action)) {
                 this.reply(chatId, {
-                    de: "Bitte gib 'on' oder 'off' an.",
-                    en: "Please provide 'on' or 'off'."
+                    de: "Bitte gib 'on', 'off' oder 'reset' an.",
+                    en: "Please provide 'on', 'off' or 'reset'.",
                 });
                 return;
             }
 
-            const enable = value === 'on';
+            if (action === 'reset') {
+                let address = addressParam;
+
+                if (!address) {
+                    const subs = await this.telegramSubscriptionsService.getChatSubscriptions(chatId);
+                    if (subs.length === 0) {
+                        this.reply(chatId, {
+                            de: 'Keine Adresse gespeichert. Nutze /subscribe, um eine hinzuzufügen.',
+                            en: 'No address stored. Use /subscribe to add one.'
+                        });
+                        return;
+                    }
+                    const defaultSub = subs.find(s => s.isDefault);
+                    if (subs.length === 1 || defaultSub) {
+                        address = (defaultSub ?? subs[0]).address;
+                    } else {
+                        const list = subs.map(s => `${s.isDefault ? '*' : ''}${this.formatAddress(s.address)}`).join('\n');
+                        this.reply(chatId, {
+                            de: `Mehrere Adressen gespeichert:\n${list}\nBitte Adresse angeben.`,
+                            en: `Multiple addresses stored:\n${list}\nPlease specify an address.`
+                        });
+                        return;
+                    }
+                } else {
+                    const decrypted = decryptMessageIfNeeded(address);
+                    if (decrypted) address = decrypted.trim();
+                    if (!validate(address)) {
+                        this.reply(chatId, {
+                            de: 'Ungültige Adresse.',
+                            en: 'Invalid address.'
+                        });
+                        return;
+                    }
+                }
+
+                try {
+                    await this.addressSettingsService.updateBestDifficulty(address, 0, null);
+                    this.bestDiffCache.delete(address);
+                    this.stratumV1Service.resetClientsForAddress(address);
+                    this.reply(chatId, {
+                        de: `Best Difficulty für ${this.formatAddress(address)} zurückgesetzt.`,
+                        en: `Best difficulty for ${this.formatAddress(address)} reset.`
+                    });
+                } catch (error) {
+                    console.error("Fehler bei /subscribe_bestdiff reset:", error);
+                    this.reply(chatId, {
+                        de: 'Fehler beim Zurücksetzen der Best Difficulty. Bitte später erneut versuchen.',
+                        en: 'Failed to reset best difficulty. Please try again later.'
+                    });
+                }
+                return;
+            }
+
+            const enable = action === 'on';
 
             try {
                 await this.telegramSubscriptionsService.updateBestDiffNotification(chatId, enable);
@@ -297,7 +353,7 @@ I will decrypt it and respond just like with plain text. 🔒`
             }
         });
 
-        this.bot.onText(/\/remove (.+)/, async (msg, match) => {
+        this.bot.onText(/\/remove(?:\s+(.+))?/, async (msg, match) => {
             const chatId = msg.chat.id;
             const raw = match?.[1]?.trim();
             if (!raw) {
