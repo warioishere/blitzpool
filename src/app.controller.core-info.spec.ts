@@ -1,7 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
-import { of } from 'rxjs';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import { of } from 'rxjs';
 
 import { AppController } from './app.controller';
 import { BitcoinRpcService } from './services/bitcoin-rpc.service';
@@ -15,24 +15,24 @@ import { AddressSettingsService } from './ORM/address-settings/address-settings.
 import { ConfigService } from '@nestjs/config';
 import { StratumV1JobsService } from './services/stratum-v1-jobs.service';
 
-describe('AppController /api/info/block-template', () => {
+describe('AppController /api/info/core', () => {
   let app: NestFastifyApplication;
   let bitcoinRpcService: BitcoinRpcService;
+  let cache: { get: jest.Mock; set: jest.Mock };
 
   beforeEach(async () => {
+    cache = { get: jest.fn().mockResolvedValue(null), set: jest.fn() };
+
     const module: TestingModule = await Test.createTestingModule({
       controllers: [AppController],
       providers: [
-        { provide: CACHE_MANAGER, useValue: { get: jest.fn(), set: jest.fn() } },
+        { provide: CACHE_MANAGER, useValue: cache },
         { provide: ClientService, useValue: {} },
         { provide: ClientStatisticsService, useValue: {} },
         { provide: BlocksService, useValue: {} },
         { provide: PoolShareStatisticsService, useValue: {} },
         { provide: PoolRejectedStatisticsService, useValue: {} },
-        {
-          provide: BitcoinRpcService,
-          useValue: { newBlock$: of({ blocks: 123 }), getBlockTemplate: jest.fn() },
-        },
+        { provide: BitcoinRpcService, useValue: { getNetworkInfo: jest.fn(), newBlock$: of({}) } },
         { provide: AddressSettingsService, useValue: {} },
         { provide: GeoIpService, useValue: {} },
         { provide: ConfigService, useValue: { get: jest.fn() } },
@@ -50,13 +50,14 @@ describe('AppController /api/info/block-template', () => {
     await app.close();
   });
 
-  it('should return the current block template', async () => {
-    const template = { test: 'template' };
-    (bitcoinRpcService.getBlockTemplate as jest.Mock).mockResolvedValue(template);
+  it('should return network info from rpc service', async () => {
+    const info = { version: 123, subversion: '/Satoshi:25.0.0/', protocolversion: 70015, connections: 8, warnings: '' };
+    (bitcoinRpcService.getNetworkInfo as jest.Mock).mockResolvedValue(info);
 
-    const res = await app.inject({ method: 'GET', url: '/api/info/block-template' });
+    const res = await app.inject({ method: 'GET', url: '/api/info/core' });
     expect(res.statusCode).toBe(200);
-    expect(JSON.parse(res.payload)).toEqual(template);
-    expect(bitcoinRpcService.getBlockTemplate).toHaveBeenCalledWith(123);
+    expect(JSON.parse(res.payload)).toEqual(info);
+    expect(bitcoinRpcService.getNetworkInfo).toHaveBeenCalled();
+    expect(cache.set).toHaveBeenCalled();
   });
 });

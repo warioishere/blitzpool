@@ -8,6 +8,7 @@ import * as zmq from 'zeromq';
 import { IBlockTemplate } from '../models/bitcoin-rpc/IBlockTemplate';
 import { IMiningInfo } from '../models/bitcoin-rpc/IMiningInfo';
 import { IPeerInfo } from '../models/bitcoin-rpc/IPeerInfo';
+import { INetworkInfo } from '../models/bitcoin-rpc/INetworkInfo';
 import * as fs from 'node:fs';
 
 @Injectable()
@@ -169,6 +170,15 @@ export class BitcoinRpcService implements OnModuleInit {
             return await this.client.getpeerinfo();
         } catch (e) {
             console.error('Error getpeerinfo', e.message);
+            return null;
+        }
+    }
+
+    public async getNetworkInfo(): Promise<INetworkInfo> {
+        try {
+            return await this.client.getnetworkinfo();
+        } catch (e) {
+            console.error('Error getnetworkinfo', e.message);
             return null;
         }
     }

@@ -90,6 +90,11 @@ export class MiningJob {
 
     }
 
+    public getCoinbaseTxHex(): string {
+        // @ts-ignore
+        return this.coinbaseTransaction.__toBuffer().toString('hex');
+    }
+
     public copyAndUpdateBlock(jobTemplate: IJobTemplate, versionMask: number, nonce: number, extraNonce: string, extraNonce2: string, timestamp: number): bitcoinjs.Block {
 
         const testBlock = Object.assign(new bitcoinjs.Block(), jobTemplate.block);

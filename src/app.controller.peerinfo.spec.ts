@@ -10,6 +10,9 @@ import { BlocksService } from './ORM/blocks/blocks.service';
 import { PoolShareStatisticsService } from './ORM/pool-share-statistics/pool-share-statistics.service';
 import { PoolRejectedStatisticsService } from './ORM/pool-rejected-statistics/pool-rejected-statistics.service';
 import { AddressSettingsService } from './ORM/address-settings/address-settings.service';
+import { ConfigService } from '@nestjs/config';
+import { StratumV1JobsService } from './services/stratum-v1-jobs.service';
+import { of } from 'rxjs';
 
 import { IPeerInfo } from './models/bitcoin-rpc/IPeerInfo';
 
@@ -34,6 +37,8 @@ describe('AppController info/peers', () => {
         { provide: BitcoinRpcService, useValue: { getPeerInfo: jest.fn() } },
         { provide: AddressSettingsService, useValue: {} },
         { provide: GeoIpService, useValue: { getLocation: jest.fn() } },
+        { provide: ConfigService, useValue: { get: jest.fn() } },
+        { provide: StratumV1JobsService, useValue: { newMiningJob$: of({}), getNextId: jest.fn() } },
       ],
     }).compile();
 
