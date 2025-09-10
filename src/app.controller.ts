@@ -1,5 +1,5 @@
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import { Controller, Get, Inject, Query } from '@nestjs/common';
+import { Controller, Get, Inject, Query, Param } from '@nestjs/common';
 import { Cache } from 'cache-manager';
 import { firstValueFrom } from 'rxjs';
 import { readFileSync } from 'fs';
@@ -15,6 +15,10 @@ import { BitcoinRpcService } from './services/bitcoin-rpc.service';
 import { GeoIpService } from './services/geoip.service';
 import { eStratumErrorCode } from './models/enums/eStratumErrorCode';
 import { isIP } from 'net';
+import { ConfigService } from '@nestjs/config';
+import { StratumV1JobsService } from './services/stratum-v1-jobs.service';
+import { MiningJob } from './models/MiningJob';
+import * as bitcoinjs from 'bitcoinjs-lib';
 
 function extractHost(addr: string): string {
   if (!addr) return '';
@@ -60,6 +64,8 @@ export class AppController {
     private readonly bitcoinRpcService: BitcoinRpcService,
     private readonly addressSettingsService: AddressSettingsService,
     private readonly geoIpService: GeoIpService,
+    private readonly configService: ConfigService,
+    private readonly stratumV1JobsService: StratumV1JobsService,
   ) {
     const packagePath = join(__dirname, '..', 'package.json');
     this.version = JSON.parse(readFileSync(packagePath, 'utf8')).version;
@@ -99,6 +105,62 @@ export class AppController {
   public async blockTemplate() {
     const height = (await firstValueFrom(this.bitcoinRpcService.newBlock$)).blocks;
     return this.bitcoinRpcService.getBlockTemplate(height);
+  }
+
+  @Get('client/:address/block-template')
+  public async clientBlockTemplate(@Param('address') address: string) {
+    const tpl = await firstValueFrom(this.stratumV1JobsService.newMiningJob$);
+
+    const devFeeAddress = this.configService.get('DEV_FEE_ADDRESS');
+    const devFeePercent = parseFloat(
+      this.configService.get('DEV_FEE_PERCENT') ?? '1.5',
+    );
+
+    let payoutInformation;
+    if (devFeeAddress == null || devFeeAddress.length < 1) {
+      payoutInformation = [{ address, percent: 100 }];
+    } else {
+      payoutInformation = [
+        { address: devFeeAddress, percent: devFeePercent },
+        { address, percent: 100 - devFeePercent },
+      ];
+    }
+
+    const networkConfig = this.configService.get('NETWORK');
+    let network: bitcoinjs.networks.Network;
+    if (networkConfig === 'mainnet') {
+      network = bitcoinjs.networks.bitcoin;
+    } else if (networkConfig === 'testnet') {
+      network = bitcoinjs.networks.testnet;
+    } else if (networkConfig === 'regtest') {
+      network = bitcoinjs.networks.regtest;
+    } else {
+      throw new Error('Invalid network configuration');
+    }
+
+    const job = new MiningJob(
+      this.configService,
+      network,
+      this.stratumV1JobsService.getNextId(),
+      payoutInformation,
+      tpl,
+    );
+
+    const block = job.copyAndUpdateBlock(
+      tpl,
+      0,
+      0,
+      '00000000',
+      '0000000000000000',
+      tpl.block.timestamp,
+    );
+
+    return {
+      block: block.toHex(),
+      blockData: tpl.blockData,
+      merkle_branch: tpl.merkle_branch,
+      coinbaseTxHex: job.getCoinbaseTxHex(),
+    };
   }
 
   @Get('pool')

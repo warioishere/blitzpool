@@ -12,6 +12,8 @@ import { BlocksService } from './ORM/blocks/blocks.service';
 import { PoolShareStatisticsService } from './ORM/pool-share-statistics/pool-share-statistics.service';
 import { PoolRejectedStatisticsService } from './ORM/pool-rejected-statistics/pool-rejected-statistics.service';
 import { AddressSettingsService } from './ORM/address-settings/address-settings.service';
+import { ConfigService } from '@nestjs/config';
+import { StratumV1JobsService } from './services/stratum-v1-jobs.service';
 
 describe('AppController /api/info/block-template', () => {
   let app: NestFastifyApplication;
@@ -33,6 +35,8 @@ describe('AppController /api/info/block-template', () => {
         },
         { provide: AddressSettingsService, useValue: {} },
         { provide: GeoIpService, useValue: {} },
+        { provide: ConfigService, useValue: { get: jest.fn() } },
+        { provide: StratumV1JobsService, useValue: { newMiningJob$: of({}), getNextId: jest.fn() } },
       ],
     }).compile();
 
