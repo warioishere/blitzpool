@@ -1,4 +1,4 @@
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import { Injectable, OnModuleInit, Inject, forwardRef } from '@nestjs/common';
 import { Block } from 'bitcoinjs-lib';
 
 import { DiscordService } from './discord.service';
@@ -10,6 +10,7 @@ import { NtfyService } from './ntfy.service';
 export class NotificationService implements OnModuleInit {
 
     constructor(
+        @Inject(forwardRef(() => TelegramService))
         private readonly telegramService: TelegramService,
         private readonly discordService: DiscordService,
         private readonly ntfyService: NtfyService,

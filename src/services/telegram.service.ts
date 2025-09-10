@@ -1,4 +1,4 @@
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import { Injectable, OnModuleInit, Inject, forwardRef } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { validate } from 'bitcoin-address-validation';
 import { Block } from 'bitcoinjs-lib';
@@ -39,6 +39,7 @@ export class TelegramService implements OnModuleInit {
         private readonly clientService: ClientService,
         private readonly addressSettingsService: AddressSettingsService,
         private readonly clientStatisticsService: ClientStatisticsService,
+        @Inject(forwardRef(() => StratumV1Service))
         private readonly stratumV1Service: StratumV1Service
     ) {
         const token: string | null = this.configService.get('TELEGRAM_BOT_TOKEN');
