@@ -107,6 +107,7 @@ STRATUM_RATE_BLOCK_MS=1800000  # how long to block the IP (default 30m)
 - `GET /api/info/rejected?range=1d|3d|7d` – Lists rejected share reasons pool-wide (difficulty weighted).
 - `GET /api/info/accepted?range=1d|3d|7d` – Lists accepted share counts pool-wide per 10-minute slot.
 - `GET /api/info/block-template` – Returns the current block template used for mining.
+- `GET /api/info/core` – returns Bitcoin Core’s getnetworkinfo output (version, connections, warnings, etc.).
 - `GET /api/info/version` – Returns the BlitzPool version.
 - `GET /api/client/<btc_address>/rejected?range=1d|3d|7d` – Returns per 10-minute slot each rejected reason with its share count and diff-1 weighted total (`diffMinusOne`).
 - `GET /api/client/<btc_address>/accepted?range=1d|3d|7d` – Shows diff-1 weighted accepted share counts for a specific address per 10-minute slot.

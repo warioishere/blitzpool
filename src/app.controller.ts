@@ -107,6 +107,18 @@ export class AppController {
     return this.bitcoinRpcService.getBlockTemplate(height);
   }
 
+  @Get('info/core')
+  public async infoCore() {
+    const CACHE_KEY = 'CORE_INFO';
+    const cached = await this.cacheManager.get(CACHE_KEY);
+    if (cached != null) {
+      return cached;
+    }
+    const data = await this.bitcoinRpcService.getNetworkInfo();
+    await this.cacheManager.set(CACHE_KEY, data, 60 * 1000);
+    return data;
+  }
+
   @Get('client/:address/block-template')
   public async clientBlockTemplate(@Param('address') address: string) {
     const tpl = await firstValueFrom(this.stratumV1JobsService.newMiningJob$);
