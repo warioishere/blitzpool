@@ -610,7 +610,11 @@ export class StratumV1Client {
             if (accepted) {
                 await this.poolShareStatisticsService.addRejectedShare(this.sessionDifficulty);
             }
-            await this.clientRejectedStatisticsService.addRejectedShare(this.clientAuthorization.address, eStratumErrorCode[eStratumErrorCode.DuplicateShare], 1);
+            await this.clientRejectedStatisticsService.addRejectedShare(
+                this.clientAuthorization.address,
+                eStratumErrorCode[eStratumErrorCode.DuplicateShare],
+                this.sessionDifficulty,
+            );
             const err = new StratumErrorMessage(
                 submission.id,
                 eStratumErrorCode.DuplicateShare,
@@ -635,7 +639,11 @@ export class StratumV1Client {
             if (accepted) {
                 await this.poolShareStatisticsService.addRejectedShare(this.sessionDifficulty);
             }
-            await this.clientRejectedStatisticsService.addRejectedShare(this.clientAuthorization.address, eStratumErrorCode[eStratumErrorCode.JobNotFound], 1);
+            await this.clientRejectedStatisticsService.addRejectedShare(
+                this.clientAuthorization.address,
+                eStratumErrorCode[eStratumErrorCode.JobNotFound],
+                this.sessionDifficulty,
+            );
             const err = new StratumErrorMessage(
                 submission.id,
                 eStratumErrorCode.JobNotFound,
@@ -657,7 +665,11 @@ export class StratumV1Client {
             if (accepted) {
                 await this.poolShareStatisticsService.addRejectedShare(this.sessionDifficulty);
             }
-            await this.clientRejectedStatisticsService.addRejectedShare(this.clientAuthorization.address, eStratumErrorCode[eStratumErrorCode.JobNotFound], 1);
+            await this.clientRejectedStatisticsService.addRejectedShare(
+                this.clientAuthorization.address,
+                eStratumErrorCode[eStratumErrorCode.JobNotFound],
+                this.sessionDifficulty,
+            );
             console.warn(`Job template ${job.jobTemplateId} not found for job ${submission.jobId}`);
             delete this.stratumV1JobsService.jobs[submission.jobId];
             const err = new StratumErrorMessage(
@@ -758,7 +770,11 @@ export class StratumV1Client {
             if (accepted) {
                 await this.poolShareStatisticsService.addRejectedShare(this.sessionDifficulty);
             }
-            await this.clientRejectedStatisticsService.addRejectedShare(this.clientAuthorization.address, eStratumErrorCode[eStratumErrorCode.LowDifficultyShare], 1);
+            await this.clientRejectedStatisticsService.addRejectedShare(
+                this.clientAuthorization.address,
+                eStratumErrorCode[eStratumErrorCode.LowDifficultyShare],
+                this.sessionDifficulty,
+            );
             const err = new StratumErrorMessage(
                 submission.id,
                 eStratumErrorCode.LowDifficultyShare,
