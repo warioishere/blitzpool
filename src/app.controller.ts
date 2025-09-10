@@ -95,6 +95,12 @@ export class AppController {
 
   }
 
+  @Get('info/block-template')
+  public async blockTemplate() {
+    const height = (await firstValueFrom(this.bitcoinRpcService.newBlock$)).blocks;
+    return this.bitcoinRpcService.getBlockTemplate(height);
+  }
+
   @Get('pool')
   public async pool() {
 
