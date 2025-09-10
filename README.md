@@ -82,9 +82,9 @@ BlitzPool enriches peer information using the free [ip-api.com](https://ip-api.c
 - Telegram bot subscriptions managed via a custom ORM
 - New `/api/info/shares` endpoint provides pool-wide accepted and rejected share totals
 - New `/api/info/rejected` endpoint lists rejected share reasons pool-wide (supports `range=1d|3d|7d`)
-- New `/api/client/<btc_address>/rejected` shows rejected reasons for a specific address (supports `range=1d|3d|7d`)
+- New `/api/client/<btc_address>/rejected` shows rejected reasons for a specific address with per-reason share counts and diff-1 weighted totals (supports `range=1d|3d|7d`)
 - New `/api/info/accepted` endpoint lists pool-wide accepted share counts per 10-minute slot (supports `range=1d|3d|7d`)
-- New `/api/client/<btc_address>/accepted` shows diff-1 weighted accepted share counts for a specific address (supports `range=1d|3d|7d`), unlike the rejected endpoint which reports full-share counts
+- New `/api/client/<btc_address>/accepted` shows diff-1 weighted accepted share counts for a specific address per 10-minute slot
 - Old jobs are cleaned after 90 seconds by default (`JOB_RETENTION_MS` can adjust this)
 - Desired share rate per worker can be tuned with `TARGET_SHARES_PER_MINUTE` (default `6`)
 - How often miners are checked for new difficulty can be set via `DIFFICULTY_CHECK_INTERVAL_MS` (default `60000` ms)
@@ -96,8 +96,8 @@ BlitzPool enriches peer information using the free [ip-api.com](https://ip-api.c
 - `GET /api/info/rejected?range=1d|3d|7d` – Lists rejected share reasons pool-wide (difficulty weighted).
 - `GET /api/info/accepted?range=1d|3d|7d` – Lists accepted share counts pool-wide per 10-minute slot.
 - `GET /api/info/version` – Returns the BlitzPool version.
-- `GET /api/client/<btc_address>/rejected?range=1d|3d|7d` – Shows rejected reasons for a specific address (counts per share).
-- `GET /api/client/<btc_address>/accepted?range=1d|3d|7d` – Shows diff-1 weighted accepted share counts for a specific address per 10-minute slot (unlike the rejected endpoint's full-share counts).
+- `GET /api/client/<btc_address>/rejected?range=1d|3d|7d` – Returns per 10-minute slot each rejected reason with its share count and diff-1 weighted total (`diffMinusOne`).
+- `GET /api/client/<btc_address>/accepted?range=1d|3d|7d` – Shows diff-1 weighted accepted share counts for a specific address per 10-minute slot.
 
 #### Blitzpool-UI
 

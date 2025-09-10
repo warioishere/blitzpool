@@ -137,24 +137,25 @@ export class ClientController {
         const sinceTime = now - days * oneDay;
 
         const entries = await this.clientRejectedStatisticsService.getEntriesSince(address, sinceTime);
-        const slotMap = new Map<number, Record<string, number>>();
+        const slotMap = new Map<number, Record<string, { count: number; diffMinusOne: number }>>();
         for (const entry of entries) {
             if (!slotMap.has(entry.time)) {
                 slotMap.set(entry.time, {});
             }
             const r = slotMap.get(entry.time);
-            r[entry.reason] = entry.count;
+            r[entry.reason] = { count: entry.count, diffMinusOne: entry.shares };
         }
 
         const coeff = 1000 * 60 * 10;
         const startSlot = Math.floor(sinceTime / coeff) * coeff;
         const endSlot = Math.floor(now / coeff) * coeff;
         const allReasons = Object.keys(eStratumErrorCode).filter(k => isNaN(Number(k)));
-        const slotData: { time: string; counts: Record<string, number> }[] = [];
+        const slotData: { time: string; counts: Record<string, { count: number; diffMinusOne: number }> }[] = [];
         for (let t = startSlot; t <= endSlot; t += coeff) {
-            const counts: Record<string, number> = {};
+            const counts: Record<string, { count: number; diffMinusOne: number }> = {};
             for (const reason of allReasons) {
-                counts[reason] = slotMap.get(t)?.[reason] || 0;
+                const current = slotMap.get(t)?.[reason] || { count: 0, diffMinusOne: 0 };
+                counts[reason] = current;
             }
             slotData.push({ time: new Date(t).toISOString(), counts });
         }
