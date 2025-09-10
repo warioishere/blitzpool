@@ -14,12 +14,12 @@ import { ExternalSharesService } from './external-shares.service';
 import { PoolShareStatisticsService } from '../ORM/pool-share-statistics/pool-share-statistics.service';
 import { PoolRejectedStatisticsService } from '../ORM/pool-rejected-statistics/pool-rejected-statistics.service';
 import { ClientRejectedStatisticsService } from '../ORM/client-rejected-statistics/client-rejected-statistics.service';
-
+import { RateLimiter } from '../utils/rate-limiter';
 
 @Injectable()
 export class StratumV1Service implements OnModuleInit {
-
   private readonly clientsByAddress = new Map<string, Set<StratumV1Client>>();
+  private readonly rateLimiter: RateLimiter;
 
   constructor(
     private readonly bitcoinRpcService: BitcoinRpcService,
@@ -33,24 +33,34 @@ export class StratumV1Service implements OnModuleInit {
     private readonly poolShareStatisticsService: PoolShareStatisticsService,
     private readonly poolRejectedStatisticsService: PoolRejectedStatisticsService,
     private readonly clientRejectedStatisticsService: ClientRejectedStatisticsService,
-    private readonly externalSharesService: ExternalSharesService
+    private readonly externalSharesService: ExternalSharesService,
   ) {
-
+    const windowMs =
+      parseInt(process.env.STRATUM_RATE_WINDOW_MS ?? '', 10) || 60_000;
+    const threshold =
+      parseInt(process.env.STRATUM_RATE_THRESHOLD ?? '', 10) || 5;
+    const blockMs =
+      parseInt(process.env.STRATUM_RATE_BLOCK_MS ?? '', 10) || 30 * 60_000;
+    this.rateLimiter = new RateLimiter({ windowMs, threshold, blockMs });
   }
 
   async onModuleInit(): Promise<void> {
-
-      if (process.env.NODE_APP_INSTANCE == '0') {
-        await this.clientService.deleteAll();
-      }
-      setTimeout(() => {
-        this.startSocketServer();
-      }, 1000 * 10)
-
+    if (process.env.NODE_APP_INSTANCE == '0') {
+      await this.clientService.deleteAll();
+    }
+    setTimeout(() => {
+      this.startSocketServer();
+    }, 1000 * 10);
   }
 
   private startSocketServer() {
     const server = new Server(async (socket: Socket) => {
+      const ip = socket.remoteAddress;
+      if (ip && this.rateLimiter.isBlocked(ip)) {
+        console.log(`Blocking connection from ${ip}`);
+        socket.destroy();
+        return;
+      }
 
       // Disable Nagle's algorithm and use UTF-8 encoding for better latency
       socket.setNoDelay(true);
@@ -76,13 +86,17 @@ export class StratumV1Service implements OnModuleInit {
         this,
       );
 
-
       socket.on('close', async (hadError: boolean) => {
         if (client.sessionId != null) {
           // Handle socket disconnection
           await client.destroy();
           this.unregisterClient(client.address, client);
-          console.log(`Client ${client.sessionId} disconnected, hadError?:${hadError}`);
+          console.log(
+            `Client ${client.sessionId} disconnected, hadError?:${hadError}`,
+          );
+        }
+        if (ip) {
+          this.rateLimiter.recordDisconnect(ip);
         }
       });
 
@@ -98,14 +112,13 @@ export class StratumV1Service implements OnModuleInit {
       });
 
       //   //console.log(`Client disconnected, socket error,  ${client.sessionId}`);
-
-
     });
 
     server.listen(process.env.STRATUM_PORT, () => {
-      console.log(`Stratum server is listening on port ${process.env.STRATUM_PORT}`);
+      console.log(
+        `Stratum server is listening on port ${process.env.STRATUM_PORT}`,
+      );
     });
-
   }
 
   registerClient(address: string, client: StratumV1Client) {
@@ -147,5 +160,4 @@ export class StratumV1Service implements OnModuleInit {
     }
     this.clientsByAddress.delete(address);
   }
-
 }

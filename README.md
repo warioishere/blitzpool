@@ -72,6 +72,17 @@ curl -d "/subscribe 1DEF..." $NTFY_SERVER_URL/myPrefix1ABC...
 
 BlitzPool enriches peer information using the free [ip-api.com](https://ip-api.com) geolocation service to resolve city and country details. No configuration is required.
 
+### ⏱️ Stratum rate limiter
+BlitzPool tracks how often a peer disconnects within a short window and temporarily blocks IPs that exceed a threshold.
+
+Configure via:
+
+```
+STRATUM_RATE_WINDOW_MS=60000   # time window for counting disconnects (default 60s)
+STRATUM_RATE_THRESHOLD=5       # disconnects within the window to trigger a block
+STRATUM_RATE_BLOCK_MS=1800000  # how long to block the IP (default 30m)
+```
+
 #### 🛠️ Extra Services
 - Integrated `blockTemplateInterval` configuration
 - Hashrate corrections and updated statistics endpoints
