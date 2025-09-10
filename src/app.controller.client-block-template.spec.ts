@@ -52,7 +52,13 @@ describe('AppController /api/client/:address/block-template', () => {
         { provide: BlocksService, useValue: {} },
         { provide: PoolShareStatisticsService, useValue: {} },
         { provide: PoolRejectedStatisticsService, useValue: {} },
-        { provide: BitcoinRpcService, useValue: { newBlock$: of({ blocks: 123 }), getBlockTemplate: jest.fn() } },
+        {
+          provide: BitcoinRpcService,
+          useValue: {
+            newBlock$: of({ blocks: 123 }),
+            getBlockTemplate: jest.fn().mockResolvedValue({ version: 1 }),
+          },
+        },
         { provide: AddressSettingsService, useValue: {} },
         { provide: GeoIpService, useValue: {} },
         {
@@ -101,6 +107,10 @@ describe('AppController /api/client/:address/block-template', () => {
     const payload = JSON.parse(res.payload);
     expect(payload.coinbaseTxHex).toBeDefined();
     expect(typeof payload.coinbaseTxHex).toBe('string');
-    expect(payload.block).toBeDefined();
+    expect(payload.blockHex).toBeDefined();
+    expect(payload.blockTemplate).toEqual({ version: 1 });
+
+    const bitcoinRpcService = app.get(BitcoinRpcService);
+    expect(bitcoinRpcService.getBlockTemplate).toHaveBeenCalledWith(1);
   });
 });

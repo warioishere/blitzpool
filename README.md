@@ -111,7 +111,7 @@ STRATUM_RATE_BLOCK_MS=1800000  # how long to block the IP (default 30m)
 - `GET /api/info/version` – Returns the BlitzPool version.
 - `GET /api/client/<btc_address>/rejected?range=1d|3d|7d` – Returns per 10-minute slot each rejected reason with its share count and diff-1 weighted total (`diffMinusOne`).
 - `GET /api/client/<btc_address>/accepted?range=1d|3d|7d` – Shows diff-1 weighted accepted share counts for a specific address per 10-minute slot.
-- `GET /api/client/<btc_address>/block-template` – Returns the block template a miner would use, including the coinbase transaction paying to the specified address.
+- `GET /api/client/<btc_address>/block-template` – Returns the block template a miner would use, including the coinbase transaction paying to the specified address. The response provides a human‑readable `blockTemplate` and the raw serialized `blockHex`.
 
 #### Blitzpool-UI
 

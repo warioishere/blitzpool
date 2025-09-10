@@ -167,10 +167,13 @@ export class AppController {
       tpl.block.timestamp,
     );
 
+    const blockTemplate = await this.bitcoinRpcService.getBlockTemplate(
+      tpl.blockData.height,
+    );
+
     return {
-      block: block.toHex(),
-      blockData: tpl.blockData,
-      merkle_branch: tpl.merkle_branch,
+      blockTemplate,
+      blockHex: block.toHex(),
       coinbaseTxHex: job.getCoinbaseTxHex(),
     };
   }
