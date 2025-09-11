@@ -14,12 +14,10 @@ import { ExternalSharesService } from './external-shares.service';
 import { PoolShareStatisticsService } from '../ORM/pool-share-statistics/pool-share-statistics.service';
 import { PoolRejectedStatisticsService } from '../ORM/pool-rejected-statistics/pool-rejected-statistics.service';
 import { ClientRejectedStatisticsService } from '../ORM/client-rejected-statistics/client-rejected-statistics.service';
-import { RateLimiter } from '../utils/rate-limiter';
 
 @Injectable()
 export class StratumV1Service implements OnModuleInit {
   private readonly clientsByAddress = new Map<string, Set<StratumV1Client>>();
-  private readonly rateLimiter: RateLimiter;
 
   constructor(
     private readonly bitcoinRpcService: BitcoinRpcService,
@@ -34,15 +32,7 @@ export class StratumV1Service implements OnModuleInit {
     private readonly poolRejectedStatisticsService: PoolRejectedStatisticsService,
     private readonly clientRejectedStatisticsService: ClientRejectedStatisticsService,
     private readonly externalSharesService: ExternalSharesService,
-  ) {
-    const windowMs =
-      parseInt(process.env.STRATUM_RATE_WINDOW_MS ?? '', 10) || 60_000;
-    const threshold =
-      parseInt(process.env.STRATUM_RATE_THRESHOLD ?? '', 10) || 5;
-    const blockMs =
-      parseInt(process.env.STRATUM_RATE_BLOCK_MS ?? '', 10) || 30 * 60_000;
-    this.rateLimiter = new RateLimiter({ windowMs, threshold, blockMs });
-  }
+  ) {}
 
   async onModuleInit(): Promise<void> {
     if (process.env.NODE_APP_INSTANCE == '0') {
@@ -55,13 +45,6 @@ export class StratumV1Service implements OnModuleInit {
 
   private startSocketServer() {
     const server = new Server(async (socket: Socket) => {
-      const ip = socket.remoteAddress;
-      if (ip && this.rateLimiter.isBlocked(ip)) {
-        console.log(`Blocking connection from ${ip}`);
-        socket.destroy();
-        return;
-      }
-
       // Disable Nagle's algorithm and use UTF-8 encoding for better latency
       socket.setNoDelay(true);
       socket.setEncoding('utf8');
@@ -94,9 +77,6 @@ export class StratumV1Service implements OnModuleInit {
           console.log(
             `Client ${client.sessionId} disconnected, hadError?:${hadError}`,
           );
-        }
-        if (ip) {
-          this.rateLimiter.recordDisconnect(ip);
         }
       });
 
