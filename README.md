@@ -70,7 +70,7 @@ curl -d "/subscribe 1DEF..." $NTFY_SERVER_URL/myPrefix1ABC...
 
 ### 🌍 GeoIP service
 
-BlitzPool enriches peer information using the free [ip-api.com](https://ip-api.com) geolocation service to resolve city and country details. No configuration is required.
+BlitzPool enriches peer information using the free [ip-api.com](https://ip-api.com) geolocation service to resolve city and country details. Lookups are cached for ten minutes and automatically refreshed to keep data current. No configuration is required.
 
 #### 🛠️ Extra Services
 - Integrated `blockTemplateInterval` configuration
