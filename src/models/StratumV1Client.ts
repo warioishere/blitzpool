@@ -67,6 +67,7 @@ export class StratumV1Client {
     private network: bitcoinjs.networks.Network;
 
     private subscribeResponse?: string;
+    private authorizeResponse?: string;
     private extranonceResponse?: string;
     private initTimer?: NodeJS.Timeout;
     private difficultyCheckIntervalMs: number;
@@ -272,7 +273,8 @@ export class StratumV1Client {
                 if (errors.length === 0) {
                     this.clientAuthorization = authorizationMessage;
                     this.stratumV1Service.registerClient(this.clientAuthorization.address, this);
-                    const success = await this.write(JSON.stringify(this.clientAuthorization.response()) + '\n');
+                    this.authorizeResponse = JSON.stringify(this.clientAuthorization.response()) + '\n';
+                    const success = await this.write(this.authorizeResponse);
                     if (!success) {
                         return;
                     }
