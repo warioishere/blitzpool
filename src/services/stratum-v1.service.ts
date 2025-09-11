@@ -86,8 +86,10 @@ export class StratumV1Service implements OnModuleInit {
         socket.destroy();
       });
 
-      socket.on('error', async (error: Error) => {
-        console.error('Socket error', error);
+      socket.on('error', async (error: NodeJS.ErrnoException) => {
+        if (error.code !== 'ECONNRESET') {
+          console.error('Socket error', error);
+        }
         socket.destroy();
       });
 
