@@ -239,11 +239,9 @@ export class AppController {
           location = geo ? `${geo.city}, ${geo.country}` : null;
         }
         return {
-          addr: p.addr,
           version: p.subver,
           direction: p.inbound ? 'inbound' : 'outbound',
           location,
-          addrlocal: p.addrlocal,
           bytesrecv: p.bytesrecv,
           bytessent: p.bytessent,
           network: p.network,
