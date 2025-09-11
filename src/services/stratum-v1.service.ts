@@ -70,12 +70,14 @@ export class StratumV1Service implements OnModuleInit {
       );
 
       socket.on('close', async (hadError: boolean) => {
-        // Handle socket disconnection
-        await client.destroy();
-        this.unregisterClient(client.address, client);
-        console.log(
-          `Client ${client.sessionId} disconnected, hadError?:${hadError}`,
-        );
+        // Handle socket disconnection for initialized clients only
+        if (client.sessionId != null) {
+          await client.destroy();
+          this.unregisterClient(client.address, client);
+          console.log(
+            `Client ${client.sessionId} disconnected, hadError?:${hadError}`,
+          );
+        }
       });
 
       socket.on('timeout', () => {
