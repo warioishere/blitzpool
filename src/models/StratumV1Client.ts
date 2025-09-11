@@ -67,7 +67,6 @@ export class StratumV1Client {
     private network: bitcoinjs.networks.Network;
 
     private subscribeResponse?: string;
-    private authorizeResponse?: string;
     private extranonceResponse?: string;
     private initTimer?: NodeJS.Timeout;
     private difficultyCheckIntervalMs: number;
@@ -272,8 +271,15 @@ export class StratumV1Client {
 
                 if (errors.length === 0) {
                     this.clientAuthorization = authorizationMessage;
-                    this.authorizeResponse = JSON.stringify(this.clientAuthorization.response()) + '\n';
                     this.stratumV1Service.registerClient(this.clientAuthorization.address, this);
+                    const success = await this.write(JSON.stringify(this.clientAuthorization.response()) + '\n');
+                    if (!success) {
+                        return;
+                    }
+                    if (this.stratumInitialized) {
+                        const jobTemplate = await firstValueFrom(this.stratumV1JobsService.newMiningJob$);
+                        await this.sendNewMiningJob(jobTemplate);
+                    }
                 } else {
                     console.error('Authorization validation error');
                     const err = new StratumErrorMessage(
@@ -309,12 +315,9 @@ export class StratumV1Client {
                     if (this.stratumInitialized) {
                         await this.write(this.extranonceResponse);
                         await this.sendSetExtraNonce();
-                    } else if (this.clientSubscription && this.clientAuthorization) {
-                        if (this.initTimer) {
-                            clearTimeout(this.initTimer);
-                            this.initTimer = undefined;
-                        }
-                        this.flushInit(true);
+                        const jobTemplate = await firstValueFrom(this.stratumV1JobsService.newMiningJob$);
+                        jobTemplate.blockData.clearJobs = true;
+                        await this.sendNewMiningJob(jobTemplate);
                     }
                 } else {
                     console.error('Extranonce subscribe validation error');
@@ -375,13 +378,6 @@ export class StratumV1Client {
             }
             case eRequestMethod.SUBMIT: {
 
-                if (this.stratumInitialized == false) {
-                    console.log('Submit before initalized');
-                    await this.socket.end();
-                    return;
-                }
-
-
                 const miningSubmitMessage = plainToInstance(
                     MiningSubmitMessage,
                     parsedMessage,
@@ -394,7 +390,7 @@ export class StratumV1Client {
 
                 const errors = await validate(miningSubmitMessage, validatorOptions);
 
-                if (errors.length === 0 && this.stratumInitialized == true) {
+                if (errors.length === 0 && this.stratumInitialized && this.clientAuthorization) {
                     const result = await this.handleMiningSubmission(miningSubmitMessage);
                     if (result == true) {
                         const success = await this.write(JSON.stringify(miningSubmitMessage.response()) + '\n');
@@ -402,8 +398,24 @@ export class StratumV1Client {
                             return;
                         }
                     }
-
-
+                } else if (errors.length === 0 && !this.clientAuthorization) {
+                    const err = new StratumErrorMessage(
+                        miningSubmitMessage.id,
+                        eStratumErrorCode.UnauthorizedWorker,
+                        'Unauthorized worker').response();
+                    const success = await this.write(err);
+                    if (!success) {
+                        return;
+                    }
+                } else if (errors.length === 0 && !this.stratumInitialized) {
+                    const err = new StratumErrorMessage(
+                        miningSubmitMessage.id,
+                        eStratumErrorCode.NotSubscribed,
+                        'Not subscribed').response();
+                    const success = await this.write(err);
+                    if (!success) {
+                        return;
+                    }
                 } else {
                     console.log('Mining Submit validation error');
                     const err = new StratumErrorMessage(
@@ -436,7 +448,7 @@ export class StratumV1Client {
             return;
         }
 
-        if (this.clientSubscription && this.clientAuthorization) {
+        if (this.clientSubscription) {
             if (this.extraNonceSubscribed && this.extranonceResponse) {
                 if (this.initTimer) {
                     clearTimeout(this.initTimer);
@@ -459,10 +471,6 @@ export class StratumV1Client {
         if (this.initTimer) {
             clearTimeout(this.initTimer);
             this.initTimer = undefined;
-        }
-
-        if (this.authorizeResponse) {
-            await this.write(this.authorizeResponse);
         }
 
         if (withXNSub && this.extranonceResponse) {
@@ -526,24 +534,33 @@ export class StratumV1Client {
             this.configService.get('DEV_FEE_PERCENT') ?? '1.5',
         );
 
-        if (this.entity) {
+        if (this.entity && this.clientAuthorization) {
             this.hashRate = this.statistics.hashRate;
         }
 
-        this.noFee = devFeeAddress == null || devFeeAddress.length < 1;
-
-        if (this.noFee) {
+        if (!this.clientAuthorization) {
+            if (!devFeeAddress) {
+                return;
+            }
+            this.noFee = false;
             payoutInformation = [
-                { address: this.clientAuthorization.address, percent: 100 },
+                { address: devFeeAddress, percent: 100 },
             ];
         } else {
-            payoutInformation = [
-                { address: devFeeAddress, percent: devFeePercent },
-                {
-                    address: this.clientAuthorization.address,
-                    percent: 100 - devFeePercent,
-                },
-            ];
+            this.noFee = devFeeAddress == null || devFeeAddress.length < 1;
+            if (this.noFee) {
+                payoutInformation = [
+                    { address: this.clientAuthorization.address, percent: 100 },
+                ];
+            } else {
+                payoutInformation = [
+                    { address: devFeeAddress, percent: devFeePercent },
+                    {
+                        address: this.clientAuthorization.address,
+                        percent: 100 - devFeePercent,
+                    },
+                ];
+            }
         }
 
         const network = this.network;
