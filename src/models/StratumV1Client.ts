@@ -109,16 +109,16 @@ export class StratumV1Client {
             let lines = this.buffer.split('\n');
             this.buffer = lines.pop() || ''; // Save the last part of the data (incomplete line) to the buffer
 
-            lines
-                .filter(m => m.length > 0)
-                .forEach(async (m) => {
+            (async () => {
+                for (const m of lines.filter(l => l.length > 0)) {
                     try {
                         await this.handleMessage(m);
                     } catch (e) {
                         await this.socket.end();
                         console.error(e);
                     }
-                });
+                }
+            })()
         });
 
 
