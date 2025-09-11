@@ -177,25 +177,27 @@ export class TelegramService implements OnModuleInit {
                     const defaultSub = await this.telegramSubscriptionsService.getDefault(chatId);
                     if (defaultSub) {
                         address = defaultSub.address;
+                    }
+                }
+
+                if (!address) {
+                    const subs = await this.telegramSubscriptionsService.getChatSubscriptions(chatId);
+                    if (subs.length === 0) {
+                        this.reply(chatId, {
+                            de: 'Keine Adresse gespeichert. Nutze /subscribe, um eine hinzuzufügen.',
+                            en: 'No address stored. Use /subscribe to add one.'
+                        });
+                        return;
+                    }
+                    if (subs.length === 1) {
+                        address = subs[0].address;
                     } else {
-                        const subs = await this.telegramSubscriptionsService.getChatSubscriptions(chatId);
-                        if (subs.length === 0) {
-                            this.reply(chatId, {
-                                de: 'Keine Adresse gespeichert. Nutze /subscribe, um eine hinzuzufügen.',
-                                en: 'No address stored. Use /subscribe to add one.'
-                            });
-                            return;
-                        }
-                        if (subs.length === 1) {
-                            address = subs[0].address;
-                        } else {
-                            const list = subs.map(s => `${s.isDefault ? '*' : ''}${this.formatAddress(s.address)}`).join('\n');
-                            this.reply(chatId, {
-                                de: `Mehrere Adressen gespeichert:\n${list}\nBitte Adresse angeben.`,
-                                en: `Multiple addresses stored:\n${list}\nPlease specify an address.`
-                            });
-                            return;
-                        }
+                        const list = subs.map(s => `${s.isDefault ? '*' : ''}${this.formatAddress(s.address)}`).join('\n');
+                        this.reply(chatId, {
+                            de: `Mehrere Adressen gespeichert:\n${list}\nBitte Adresse angeben.`,
+                            en: `Multiple addresses stored:\n${list}\nPlease specify an address.`
+                        });
+                        return;
                     }
                 } else {
                     const decrypted = decryptMessageIfNeeded(address);

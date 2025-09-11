@@ -21,7 +21,7 @@ export class TelegramSubscriptionsService {
     }
 
     public async getDefault(chatId: number) {
-        return await this.telegramSubscriptions.findOne({ where: { telegramChatId: chatId, isDefault: true } });
+        return await this.telegramSubscriptions.findOneBy({ telegramChatId: chatId, isDefault: true });
     }
 
     public async saveSubscription(chatId: number, address: string) {
