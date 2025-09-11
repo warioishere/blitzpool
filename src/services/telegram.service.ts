@@ -113,7 +113,7 @@ export class TelegramService implements OnModuleInit {
             });
         });
 
-        this.bot.onText(/\/subscribe(?:\s+(.+))?/, async (msg, match) => {
+        this.bot.onText(/^\/subscribe(?:\s+(.+))?$/, async (msg, match) => {
             const raw = match?.[1]?.trim();
             if (!raw) {
                 this.reply(msg.chat.id, {
