@@ -28,6 +28,7 @@ export class ClientStatisticsService {
       {
         shares: clientStatistic.shares,
         acceptedCount: clientStatistic.acceptedCount,
+        rejectedCount: clientStatistic.rejectedCount,
         updatedAt: new Date(),
       },
     );
@@ -53,6 +54,7 @@ export class ClientStatisticsService {
                 time,
                 shares,
                 acceptedCount,
+                rejectedCount,
                 "createdAt",
                 "updatedAt"
             )
@@ -63,6 +65,7 @@ export class ClientStatisticsService {
                 time,
                 SUM(shares),
                 SUM(acceptedCount),
+                SUM(rejectedCount),
                 datetime('now'),
                 datetime('now')
             FROM client_statistics_entity
@@ -78,6 +81,7 @@ export class ClientStatisticsService {
                 time,
                 shares,
                 acceptedCount,
+                rejectedCount,
                 "createdAt",
                 "updatedAt"
             )
@@ -88,6 +92,7 @@ export class ClientStatisticsService {
                 ${detailCutoff.getTime()},
                 SUM(shares),
                 SUM(acceptedCount),
+                SUM(rejectedCount),
                 datetime('now'),
                 datetime('now')
             FROM client_statistics_entity
@@ -248,22 +253,42 @@ export class ClientStatisticsService {
     return this.calcHashRate(shares);
   }
 
-  public async getChartDataForGroup(address: string, clientName: string) {
-    const yesterday = new Date(new Date().getTime() - 24 * 60 * 60 * 1000);
+  public async getChartDataForGroup(
+    address: string,
+    clientName: string,
+    range: '1d' | '3d' | '7d' = '1d',
+  ) {
+    let diffDays = 1;
+
+    switch (range) {
+      case '3d':
+        diffDays = 3;
+        break;
+      case '7d':
+        diffDays = 7;
+        break;
+      default:
+        diffDays = 1;
+    }
+
+    const since = new Date(Date.now() - diffDays * 24 * 60 * 60 * 1000);
+    const limit = diffDays * 144;
 
     const query = `
             SELECT
                 time label,
-                (SUM(shares) * ${DIFFICULTY_1}) / 600 AS data
+                (SUM(shares) * ${DIFFICULTY_1}) / 600 AS data,
+                SUM(entry.acceptedCount) AS accepted,
+                SUM(entry.rejectedCount) AS rejected
             FROM
                 client_statistics_entity AS entry
             WHERE
-                entry.address = ? AND entry.clientName = ? AND entry.time > ${yesterday.getTime()}
+                entry.address = ? AND entry.clientName = ? AND entry.time > ${since.getTime()}
             GROUP BY
                 time
             ORDER BY
                 time
-            LIMIT 144;
+            LIMIT ${limit};
         `;
 
     const result = await this.clientStatisticsRepository.query(query, [
@@ -271,12 +296,14 @@ export class ClientStatisticsService {
       clientName,
     ]);
 
-    return result
-      .map((res) => {
-        res.label = new Date(res.label).toISOString();
-        return res;
-      })
-      .slice(0, result.length - 1);
+    const parsed = result.map((res) => ({
+      label: new Date(res.label).toISOString(),
+      data: res.data == null ? 0 : Number(res.data),
+      accepted: res.accepted == null ? 0 : Number(res.accepted),
+      rejected: res.rejected == null ? 0 : Number(res.rejected),
+    }));
+
+    return parsed.slice(0, parsed.length - 1);
   }
 
   public async getHashRateForSession(

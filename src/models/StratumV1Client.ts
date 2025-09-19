@@ -634,6 +634,7 @@ export class StratumV1Client {
                 eStratumErrorCode[eStratumErrorCode.DuplicateShare],
                 this.sessionDifficulty,
             );
+            await this.statistics.addRejectedShare(this.entity);
             const err = new StratumErrorMessage(
                 submission.id,
                 eStratumErrorCode.DuplicateShare,
@@ -663,6 +664,7 @@ export class StratumV1Client {
                 eStratumErrorCode[eStratumErrorCode.JobNotFound],
                 this.sessionDifficulty,
             );
+            await this.statistics.addRejectedShare(this.entity);
             const err = new StratumErrorMessage(
                 submission.id,
                 eStratumErrorCode.JobNotFound,
@@ -689,6 +691,7 @@ export class StratumV1Client {
                 eStratumErrorCode[eStratumErrorCode.JobNotFound],
                 this.sessionDifficulty,
             );
+            await this.statistics.addRejectedShare(this.entity);
             console.warn(`Job template ${job.jobTemplateId} not found for job ${submission.jobId}`);
             delete this.stratumV1JobsService.jobs[submission.jobId];
             const err = new StratumErrorMessage(
@@ -794,6 +797,7 @@ export class StratumV1Client {
                 eStratumErrorCode[eStratumErrorCode.LowDifficultyShare],
                 this.sessionDifficulty,
             );
+            await this.statistics.addRejectedShare(this.entity);
             const err = new StratumErrorMessage(
                 submission.id,
                 eStratumErrorCode.LowDifficultyShare,
