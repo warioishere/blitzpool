@@ -18,7 +18,17 @@ describe('ClientController worker chart data', () => {
   beforeEach(async () => {
     clientStatisticsService = {
       getChartDataForGroup: jest.fn().mockResolvedValue([
-        { label: '2023-11-14T00:00:00.000Z', data: 100, accepted: 5, rejected: 1 },
+        {
+          label: '2023-11-14T00:00:00.000Z',
+          data: 100,
+          accepted: 5,
+          rejectedJobNotFound: 1,
+          rejectedJobNotFoundDiff1: 2000,
+          rejectedDuplicatedShare: 0,
+          rejectedDuplicatedShareDiff1: 0,
+          rejectedLowDifficultyShare: 2,
+          rejectedLowDifficultyShareDiff1: 4000,
+        },
       ]),
     };
     clientService = {
@@ -56,7 +66,17 @@ describe('ClientController worker chart data', () => {
     expect(res.statusCode).toBe(200);
     const payload = JSON.parse(res.payload);
     expect(payload.chartData).toEqual([
-      { label: '2023-11-14T00:00:00.000Z', data: 100, accepted: 5, rejected: 1 },
+      {
+        label: '2023-11-14T00:00:00.000Z',
+        data: 100,
+        accepted: 5,
+        rejectedJobNotFound: 1,
+        rejectedJobNotFoundDiff1: 2000,
+        rejectedDuplicatedShare: 0,
+        rejectedDuplicatedShareDiff1: 0,
+        rejectedLowDifficultyShare: 2,
+        rejectedLowDifficultyShareDiff1: 4000,
+      },
     ]);
     expect(clientStatisticsService.getChartDataForGroup).toHaveBeenCalledWith(
       'addr123',
@@ -74,7 +94,17 @@ describe('ClientController worker chart data', () => {
     expect(res.statusCode).toBe(200);
     const payload = JSON.parse(res.payload);
     expect(payload.chartData).toEqual([
-      { label: '2023-11-14T00:00:00.000Z', data: 100, accepted: 5, rejected: 1 },
+      {
+        label: '2023-11-14T00:00:00.000Z',
+        data: 100,
+        accepted: 5,
+        rejectedJobNotFound: 1,
+        rejectedJobNotFoundDiff1: 2000,
+        rejectedDuplicatedShare: 0,
+        rejectedDuplicatedShareDiff1: 0,
+        rejectedLowDifficultyShare: 2,
+        rejectedLowDifficultyShareDiff1: 4000,
+      },
     ]);
     const lastCall =
       clientStatisticsService.getChartDataForGroup.mock.calls[

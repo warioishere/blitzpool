@@ -29,6 +29,14 @@ export class ClientStatisticsService {
         shares: clientStatistic.shares,
         acceptedCount: clientStatistic.acceptedCount,
         rejectedCount: clientStatistic.rejectedCount,
+        rejectedJobNotFoundCount: clientStatistic.rejectedJobNotFoundCount,
+        rejectedJobNotFoundDiff1: clientStatistic.rejectedJobNotFoundDiff1,
+        rejectedDuplicateShareCount: clientStatistic.rejectedDuplicateShareCount,
+        rejectedDuplicateShareDiff1: clientStatistic.rejectedDuplicateShareDiff1,
+        rejectedLowDifficultyShareCount:
+          clientStatistic.rejectedLowDifficultyShareCount,
+        rejectedLowDifficultyShareDiff1:
+          clientStatistic.rejectedLowDifficultyShareDiff1,
         updatedAt: new Date(),
       },
     );
@@ -55,6 +63,12 @@ export class ClientStatisticsService {
                 shares,
                 acceptedCount,
                 rejectedCount,
+                rejectedJobNotFoundCount,
+                rejectedJobNotFoundDiff1,
+                rejectedDuplicateShareCount,
+                rejectedDuplicateShareDiff1,
+                rejectedLowDifficultyShareCount,
+                rejectedLowDifficultyShareDiff1,
                 "createdAt",
                 "updatedAt"
             )
@@ -66,6 +80,12 @@ export class ClientStatisticsService {
                 SUM(shares),
                 SUM(acceptedCount),
                 SUM(rejectedCount),
+                SUM(rejectedJobNotFoundCount),
+                SUM(rejectedJobNotFoundDiff1),
+                SUM(rejectedDuplicateShareCount),
+                SUM(rejectedDuplicateShareDiff1),
+                SUM(rejectedLowDifficultyShareCount),
+                SUM(rejectedLowDifficultyShareDiff1),
                 datetime('now'),
                 datetime('now')
             FROM client_statistics_entity
@@ -82,6 +102,12 @@ export class ClientStatisticsService {
                 shares,
                 acceptedCount,
                 rejectedCount,
+                rejectedJobNotFoundCount,
+                rejectedJobNotFoundDiff1,
+                rejectedDuplicateShareCount,
+                rejectedDuplicateShareDiff1,
+                rejectedLowDifficultyShareCount,
+                rejectedLowDifficultyShareDiff1,
                 "createdAt",
                 "updatedAt"
             )
@@ -93,6 +119,12 @@ export class ClientStatisticsService {
                 SUM(shares),
                 SUM(acceptedCount),
                 SUM(rejectedCount),
+                SUM(rejectedJobNotFoundCount),
+                SUM(rejectedJobNotFoundDiff1),
+                SUM(rejectedDuplicateShareCount),
+                SUM(rejectedDuplicateShareDiff1),
+                SUM(rejectedLowDifficultyShareCount),
+                SUM(rejectedLowDifficultyShareDiff1),
                 datetime('now'),
                 datetime('now')
             FROM client_statistics_entity
@@ -279,7 +311,12 @@ export class ClientStatisticsService {
                 time label,
                 (SUM(shares) * ${DIFFICULTY_1}) / 600 AS data,
                 SUM(entry.acceptedCount) AS accepted,
-                SUM(entry.rejectedCount) AS rejected
+                SUM(entry.rejectedJobNotFoundCount) AS rejectedJobNotFound,
+                SUM(entry.rejectedJobNotFoundDiff1) AS rejectedJobNotFoundDiff1,
+                SUM(entry.rejectedDuplicateShareCount) AS rejectedDuplicatedShare,
+                SUM(entry.rejectedDuplicateShareDiff1) AS rejectedDuplicatedShareDiff1,
+                SUM(entry.rejectedLowDifficultyShareCount) AS rejectedLowDifficultyShare,
+                SUM(entry.rejectedLowDifficultyShareDiff1) AS rejectedLowDifficultyShareDiff1
             FROM
                 client_statistics_entity AS entry
             WHERE
@@ -300,7 +337,28 @@ export class ClientStatisticsService {
       label: new Date(res.label).toISOString(),
       data: res.data == null ? 0 : Number(res.data),
       accepted: res.accepted == null ? 0 : Number(res.accepted),
-      rejected: res.rejected == null ? 0 : Number(res.rejected),
+      rejectedJobNotFound:
+        res.rejectedJobNotFound == null ? 0 : Number(res.rejectedJobNotFound),
+      rejectedJobNotFoundDiff1:
+        res.rejectedJobNotFoundDiff1 == null
+          ? 0
+          : Number(res.rejectedJobNotFoundDiff1),
+      rejectedDuplicatedShare:
+        res.rejectedDuplicatedShare == null
+          ? 0
+          : Number(res.rejectedDuplicatedShare),
+      rejectedDuplicatedShareDiff1:
+        res.rejectedDuplicatedShareDiff1 == null
+          ? 0
+          : Number(res.rejectedDuplicatedShareDiff1),
+      rejectedLowDifficultyShare:
+        res.rejectedLowDifficultyShare == null
+          ? 0
+          : Number(res.rejectedLowDifficultyShare),
+      rejectedLowDifficultyShareDiff1:
+        res.rejectedLowDifficultyShareDiff1 == null
+          ? 0
+          : Number(res.rejectedLowDifficultyShareDiff1),
     }));
 
     return parsed.slice(0, parsed.length - 1);

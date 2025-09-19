@@ -10,6 +10,12 @@ export class StratumV1ClientStatistics {
     private shares: number = 0;
     private acceptedCount: number = 0;
     private rejectedCount: number = 0;
+    private rejectedJobNotFoundCount: number = 0;
+    private rejectedJobNotFoundDiff1: number = 0;
+    private rejectedDuplicateShareCount: number = 0;
+    private rejectedDuplicateShareDiff1: number = 0;
+    private rejectedLowDifficultyShareCount: number = 0;
+    private rejectedLowDifficultyShareDiff1: number = 0;
 
     private submissionCacheStart: Date;
     private submissionCache: { time: Date, difficulty: number }[] = [];
@@ -34,6 +40,56 @@ export class StratumV1ClientStatistics {
         const tpm = parseFloat(this.configService.get('TARGET_SHARES_PER_MINUTE') ?? '6');
         this.targetSharesPerMinute = isNaN(tpm) ? 6 : tpm;
         this.targetSubmissionPerSecond = 60 / this.targetSharesPerMinute;
+    }
+
+    private resetRejectedStats() {
+        this.rejectedCount = 0;
+        this.rejectedJobNotFoundCount = 0;
+        this.rejectedJobNotFoundDiff1 = 0;
+        this.rejectedDuplicateShareCount = 0;
+        this.rejectedDuplicateShareDiff1 = 0;
+        this.rejectedLowDifficultyShareCount = 0;
+        this.rejectedLowDifficultyShareDiff1 = 0;
+    }
+
+    private incrementRejectedStats(reason: string, difficulty: number) {
+        const diff1 = Number.isFinite(difficulty) ? difficulty : 0;
+        this.rejectedCount++;
+
+        switch (reason) {
+            case 'JobNotFound':
+                this.rejectedJobNotFoundCount++;
+                this.rejectedJobNotFoundDiff1 += diff1;
+                break;
+            case 'DuplicateShare':
+                this.rejectedDuplicateShareCount++;
+                this.rejectedDuplicateShareDiff1 += diff1;
+                break;
+            case 'LowDifficultyShare':
+                this.rejectedLowDifficultyShareCount++;
+                this.rejectedLowDifficultyShareDiff1 += diff1;
+                break;
+            default:
+                break;
+        }
+    }
+
+    private buildPersistencePayload(client: ClientEntity) {
+        return {
+            time: this.currentTimeSlot,
+            shares: this.shares,
+            acceptedCount: this.acceptedCount,
+            rejectedCount: this.rejectedCount,
+            rejectedJobNotFoundCount: this.rejectedJobNotFoundCount,
+            rejectedJobNotFoundDiff1: this.rejectedJobNotFoundDiff1,
+            rejectedDuplicateShareCount: this.rejectedDuplicateShareCount,
+            rejectedDuplicateShareDiff1: this.rejectedDuplicateShareDiff1,
+            rejectedLowDifficultyShareCount: this.rejectedLowDifficultyShareCount,
+            rejectedLowDifficultyShareDiff1: this.rejectedLowDifficultyShareDiff1,
+            address: client.address,
+            clientName: client.clientName,
+            sessionId: client.sessionId
+        };
     }
 
 
@@ -65,65 +121,33 @@ export class StratumV1ClientStatistics {
 
         if (this.currentTimeSlot == null) {
             // First record, insert it
-			this.previousTimeSlotTime = new Date();
+                        this.previousTimeSlotTime = new Date();
             this.currentTimeSlotTime = new Date();
             this.currentTimeSlot = timeSlot;
             this.shares += targetDifficulty;
             this.acceptedCount++;
-            this.rejectedCount = 0;
-            await this.clientStatisticsService.insert({
-                time: this.currentTimeSlot,
-                shares: this.shares,
-                acceptedCount: this.acceptedCount,
-                rejectedCount: this.rejectedCount,
-                address: client.address,
-                clientName: client.clientName,
-                sessionId: client.sessionId
-            });
+            this.resetRejectedStats();
+            await this.clientStatisticsService.insert(this.buildPersistencePayload(client));
             this.lastSave = new Date().getTime();
         } else if (this.currentTimeSlot != timeSlot) {
             // Transitioning to a new time slot,
             // First update the old time slot with the latest data
-            await this.clientStatisticsService.update({
-                time: this.currentTimeSlot,
-                shares: this.shares,
-                acceptedCount: this.acceptedCount,
-                rejectedCount: this.rejectedCount,
-                address: client.address,
-                clientName: client.clientName,
-                sessionId: client.sessionId
-            });
-			 this.previousShares = this.shares;
+            await this.clientStatisticsService.update(this.buildPersistencePayload(client));
+                         this.previousShares = this.shares;
             this.previousTimeSlotTime = this.currentTimeSlotTime;
             this.currentTimeSlotTime = new Date();
             // Set the new time slot and add incoming shares then insert it
             this.currentTimeSlot = timeSlot;
             this.shares = targetDifficulty;
             this.acceptedCount = 1;
-            this.rejectedCount = 0;
-            await this.clientStatisticsService.insert({
-                time: this.currentTimeSlot,
-                shares: this.shares,
-                acceptedCount: this.acceptedCount,
-                rejectedCount: this.rejectedCount,
-                address: client.address,
-                clientName: client.clientName,
-                sessionId: client.sessionId
-            });
+            this.resetRejectedStats();
+            await this.clientStatisticsService.insert(this.buildPersistencePayload(client));
             this.lastSave = new Date().getTime();
         } else if ((date.getTime() - 60 * 1000) > this.lastSave) {
             // If we haven't saved for a minute, update the table
             this.shares += targetDifficulty;
             this.acceptedCount++;
-            await this.clientStatisticsService.update({
-                time: this.currentTimeSlot,
-                shares: this.shares,
-                acceptedCount: this.acceptedCount,
-                rejectedCount: this.rejectedCount,
-                address: client.address,
-                clientName: client.clientName,
-                sessionId: client.sessionId
-            });
+            await this.clientStatisticsService.update(this.buildPersistencePayload(client));
             this.lastSave = new Date().getTime();
         } else {
             // Accept the shares if none of the prior conditions are met,
@@ -138,7 +162,7 @@ export class StratumV1ClientStatistics {
 
     }
 
-    public async addRejectedShare(client: ClientEntity) {
+    public async addRejectedShare(client: ClientEntity, reason: string, difficulty: number) {
 
         var coeff = 1000 * 60 * 10;
         var date = new Date();
@@ -150,60 +174,30 @@ export class StratumV1ClientStatistics {
             this.currentTimeSlot = timeSlot;
             this.shares = this.shares ?? 0;
             this.acceptedCount = this.acceptedCount ?? 0;
-            this.rejectedCount = 1;
-            await this.clientStatisticsService.insert({
-                time: this.currentTimeSlot,
-                shares: this.shares,
-                acceptedCount: this.acceptedCount,
-                rejectedCount: this.rejectedCount,
-                address: client.address,
-                clientName: client.clientName,
-                sessionId: client.sessionId
-            });
+            this.resetRejectedStats();
+            this.incrementRejectedStats(reason, difficulty);
+            await this.clientStatisticsService.insert(this.buildPersistencePayload(client));
             this.lastSave = null;
             return;
         }
 
         if (this.currentTimeSlot != timeSlot) {
-            await this.clientStatisticsService.update({
-                time: this.currentTimeSlot,
-                shares: this.shares,
-                acceptedCount: this.acceptedCount,
-                rejectedCount: this.rejectedCount,
-                address: client.address,
-                clientName: client.clientName,
-                sessionId: client.sessionId
-            });
+            await this.clientStatisticsService.update(this.buildPersistencePayload(client));
             this.previousShares = this.shares;
             this.previousTimeSlotTime = this.currentTimeSlotTime;
             this.currentTimeSlotTime = new Date();
             this.currentTimeSlot = timeSlot;
             this.shares = 0;
             this.acceptedCount = 0;
-            this.rejectedCount = 1;
-            await this.clientStatisticsService.insert({
-                time: this.currentTimeSlot,
-                shares: this.shares,
-                acceptedCount: this.acceptedCount,
-                rejectedCount: this.rejectedCount,
-                address: client.address,
-                clientName: client.clientName,
-                sessionId: client.sessionId
-            });
+            this.resetRejectedStats();
+            this.incrementRejectedStats(reason, difficulty);
+            await this.clientStatisticsService.insert(this.buildPersistencePayload(client));
             this.lastSave = null;
             return;
         }
 
-        this.rejectedCount++;
-        await this.clientStatisticsService.update({
-            time: this.currentTimeSlot,
-            shares: this.shares,
-            acceptedCount: this.acceptedCount,
-            rejectedCount: this.rejectedCount,
-            address: client.address,
-            clientName: client.clientName,
-            sessionId: client.sessionId
-        });
+        this.incrementRejectedStats(reason, difficulty);
+        await this.clientStatisticsService.update(this.buildPersistencePayload(client));
         this.lastSave = null;
     }
 

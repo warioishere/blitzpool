@@ -34,5 +34,23 @@ export class ClientStatisticsEntity extends TrackedEntity {
     @Column({ default: 0, type: 'integer' })
     rejectedCount: number;
 
+    @Column({ default: 0, type: 'integer' })
+    rejectedJobNotFoundCount: number;
+
+    @Column({ default: 0, type: 'real' })
+    rejectedJobNotFoundDiff1: number;
+
+    @Column({ default: 0, type: 'integer' })
+    rejectedDuplicateShareCount: number;
+
+    @Column({ default: 0, type: 'real' })
+    rejectedDuplicateShareDiff1: number;
+
+    @Column({ default: 0, type: 'integer' })
+    rejectedLowDifficultyShareCount: number;
+
+    @Column({ default: 0, type: 'real' })
+    rejectedLowDifficultyShareDiff1: number;
+
 
 }
