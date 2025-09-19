@@ -163,6 +163,16 @@ export class ClientController {
         return { slotData };
     }
 
+    @Get(':address/:workerName/chart')
+    async getWorkerGroupChart(
+        @Param('address') address: string,
+        @Param('workerName') workerName: string,
+        @Query('range') range: '1d' | '3d' | '7d' = '1d'
+    ) {
+        const chartData = await this.clientStatisticsService.getChartDataForGroup(address, workerName, range);
+        return chartData;
+    }
+
     @Get(':address/:workerName')
     async getWorkerGroupInfo(@Param('address') address: string, @Param('workerName') workerName: string) {
 

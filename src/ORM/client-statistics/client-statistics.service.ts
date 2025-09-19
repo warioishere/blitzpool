@@ -248,8 +248,26 @@ export class ClientStatisticsService {
     return this.calcHashRate(shares);
   }
 
-  public async getChartDataForGroup(address: string, clientName: string) {
-    const yesterday = new Date(new Date().getTime() - 24 * 60 * 60 * 1000);
+  public async getChartDataForGroup(
+    address: string,
+    clientName: string,
+    range: '1d' | '3d' | '7d' = '1d',
+  ) {
+    let diffDays = 1;
+
+    switch (range) {
+      case '3d':
+        diffDays = 3;
+        break;
+      case '7d':
+        diffDays = 7;
+        break;
+      default:
+        diffDays = 1;
+    }
+
+    const since = new Date(Date.now() - diffDays * 24 * 60 * 60 * 1000);
+    const limit = diffDays * 144;
 
     const query = `
             SELECT
@@ -258,12 +276,12 @@ export class ClientStatisticsService {
             FROM
                 client_statistics_entity AS entry
             WHERE
-                entry.address = ? AND entry.clientName = ? AND entry.time > ${yesterday.getTime()}
+                entry.address = ? AND entry.clientName = ? AND entry.time > ${since.getTime()}
             GROUP BY
                 time
             ORDER BY
                 time
-            LIMIT 144;
+            LIMIT ${limit};
         `;
 
     const result = await this.clientStatisticsRepository.query(query, [
