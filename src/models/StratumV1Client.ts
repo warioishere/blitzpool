@@ -634,6 +634,11 @@ export class StratumV1Client {
                 eStratumErrorCode[eStratumErrorCode.DuplicateShare],
                 this.sessionDifficulty,
             );
+            await this.statistics.addRejectedShare(
+                this.entity,
+                eStratumErrorCode[eStratumErrorCode.DuplicateShare],
+                this.sessionDifficulty,
+            );
             const err = new StratumErrorMessage(
                 submission.id,
                 eStratumErrorCode.DuplicateShare,
@@ -663,6 +668,11 @@ export class StratumV1Client {
                 eStratumErrorCode[eStratumErrorCode.JobNotFound],
                 this.sessionDifficulty,
             );
+            await this.statistics.addRejectedShare(
+                this.entity,
+                eStratumErrorCode[eStratumErrorCode.JobNotFound],
+                this.sessionDifficulty,
+            );
             const err = new StratumErrorMessage(
                 submission.id,
                 eStratumErrorCode.JobNotFound,
@@ -686,6 +696,11 @@ export class StratumV1Client {
             }
             await this.clientRejectedStatisticsService.addRejectedShare(
                 this.clientAuthorization.address,
+                eStratumErrorCode[eStratumErrorCode.JobNotFound],
+                this.sessionDifficulty,
+            );
+            await this.statistics.addRejectedShare(
+                this.entity,
                 eStratumErrorCode[eStratumErrorCode.JobNotFound],
                 this.sessionDifficulty,
             );
@@ -791,6 +806,11 @@ export class StratumV1Client {
             }
             await this.clientRejectedStatisticsService.addRejectedShare(
                 this.clientAuthorization.address,
+                eStratumErrorCode[eStratumErrorCode.LowDifficultyShare],
+                this.sessionDifficulty,
+            );
+            await this.statistics.addRejectedShare(
+                this.entity,
                 eStratumErrorCode[eStratumErrorCode.LowDifficultyShare],
                 this.sessionDifficulty,
             );

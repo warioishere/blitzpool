@@ -164,7 +164,11 @@ export class ClientController {
     }
 
     @Get(':address/:workerName')
-    async getWorkerGroupInfo(@Param('address') address: string, @Param('workerName') workerName: string) {
+    async getWorkerGroupInfo(
+        @Param('address') address: string,
+        @Param('workerName') workerName: string,
+        @Query('range') range: '1d' | '3d' | '7d' = '7d',
+    ) {
 
         const workers = await this.clientService.getByName(address, workerName);
 
@@ -175,7 +179,7 @@ export class ClientController {
             return pre;
         }, 0);
 
-        const chartData = await this.clientStatisticsService.getChartDataForGroup(address, workerName);
+        const chartData = await this.clientStatisticsService.getChartDataForGroup(address, workerName, range);
         return {
 
             name: workerName,

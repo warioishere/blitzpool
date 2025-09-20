@@ -28,6 +28,15 @@ export class ClientStatisticsService {
       {
         shares: clientStatistic.shares,
         acceptedCount: clientStatistic.acceptedCount,
+        rejectedCount: clientStatistic.rejectedCount,
+        rejectedJobNotFoundCount: clientStatistic.rejectedJobNotFoundCount,
+        rejectedJobNotFoundDiff1: clientStatistic.rejectedJobNotFoundDiff1,
+        rejectedDuplicateShareCount: clientStatistic.rejectedDuplicateShareCount,
+        rejectedDuplicateShareDiff1: clientStatistic.rejectedDuplicateShareDiff1,
+        rejectedLowDifficultyShareCount:
+          clientStatistic.rejectedLowDifficultyShareCount,
+        rejectedLowDifficultyShareDiff1:
+          clientStatistic.rejectedLowDifficultyShareDiff1,
         updatedAt: new Date(),
       },
     );
@@ -53,6 +62,13 @@ export class ClientStatisticsService {
                 time,
                 shares,
                 acceptedCount,
+                rejectedCount,
+                rejectedJobNotFoundCount,
+                rejectedJobNotFoundDiff1,
+                rejectedDuplicateShareCount,
+                rejectedDuplicateShareDiff1,
+                rejectedLowDifficultyShareCount,
+                rejectedLowDifficultyShareDiff1,
                 "createdAt",
                 "updatedAt"
             )
@@ -63,6 +79,13 @@ export class ClientStatisticsService {
                 time,
                 SUM(shares),
                 SUM(acceptedCount),
+                SUM(rejectedCount),
+                SUM(rejectedJobNotFoundCount),
+                SUM(rejectedJobNotFoundDiff1),
+                SUM(rejectedDuplicateShareCount),
+                SUM(rejectedDuplicateShareDiff1),
+                SUM(rejectedLowDifficultyShareCount),
+                SUM(rejectedLowDifficultyShareDiff1),
                 datetime('now'),
                 datetime('now')
             FROM client_statistics_entity
@@ -78,6 +101,13 @@ export class ClientStatisticsService {
                 time,
                 shares,
                 acceptedCount,
+                rejectedCount,
+                rejectedJobNotFoundCount,
+                rejectedJobNotFoundDiff1,
+                rejectedDuplicateShareCount,
+                rejectedDuplicateShareDiff1,
+                rejectedLowDifficultyShareCount,
+                rejectedLowDifficultyShareDiff1,
                 "createdAt",
                 "updatedAt"
             )
@@ -88,6 +118,13 @@ export class ClientStatisticsService {
                 ${detailCutoff.getTime()},
                 SUM(shares),
                 SUM(acceptedCount),
+                SUM(rejectedCount),
+                SUM(rejectedJobNotFoundCount),
+                SUM(rejectedJobNotFoundDiff1),
+                SUM(rejectedDuplicateShareCount),
+                SUM(rejectedDuplicateShareDiff1),
+                SUM(rejectedLowDifficultyShareCount),
+                SUM(rejectedLowDifficultyShareDiff1),
                 datetime('now'),
                 datetime('now')
             FROM client_statistics_entity
@@ -248,22 +285,47 @@ export class ClientStatisticsService {
     return this.calcHashRate(shares);
   }
 
-  public async getChartDataForGroup(address: string, clientName: string) {
-    const yesterday = new Date(new Date().getTime() - 24 * 60 * 60 * 1000);
+  public async getChartDataForGroup(
+    address: string,
+    clientName: string,
+    range: '1d' | '3d' | '7d' = '1d',
+  ) {
+    let diffDays = 1;
+
+    switch (range) {
+      case '3d':
+        diffDays = 3;
+        break;
+      case '7d':
+        diffDays = 7;
+        break;
+      default:
+        diffDays = 1;
+    }
+
+    const since = new Date(Date.now() - diffDays * 24 * 60 * 60 * 1000);
+    const limit = diffDays * 144;
 
     const query = `
             SELECT
                 time label,
-                (SUM(shares) * ${DIFFICULTY_1}) / 600 AS data
+                (SUM(shares) * ${DIFFICULTY_1}) / 600 AS data,
+                SUM(entry.acceptedCount) AS accepted,
+                SUM(entry.rejectedJobNotFoundCount) AS rejectedJobNotFound,
+                SUM(entry.rejectedJobNotFoundDiff1) AS rejectedJobNotFoundDiff1,
+                SUM(entry.rejectedDuplicateShareCount) AS rejectedDuplicatedShare,
+                SUM(entry.rejectedDuplicateShareDiff1) AS rejectedDuplicatedShareDiff1,
+                SUM(entry.rejectedLowDifficultyShareCount) AS rejectedLowDifficultyShare,
+                SUM(entry.rejectedLowDifficultyShareDiff1) AS rejectedLowDifficultyShareDiff1
             FROM
                 client_statistics_entity AS entry
             WHERE
-                entry.address = ? AND entry.clientName = ? AND entry.time > ${yesterday.getTime()}
+                entry.address = ? AND entry.clientName = ? AND entry.time > ${since.getTime()}
             GROUP BY
                 time
             ORDER BY
                 time
-            LIMIT 144;
+            LIMIT ${limit};
         `;
 
     const result = await this.clientStatisticsRepository.query(query, [
@@ -271,12 +333,35 @@ export class ClientStatisticsService {
       clientName,
     ]);
 
-    return result
-      .map((res) => {
-        res.label = new Date(res.label).toISOString();
-        return res;
-      })
-      .slice(0, result.length - 1);
+    const parsed = result.map((res) => ({
+      label: new Date(res.label).toISOString(),
+      data: res.data == null ? 0 : Number(res.data),
+      accepted: res.accepted == null ? 0 : Number(res.accepted),
+      rejectedJobNotFound:
+        res.rejectedJobNotFound == null ? 0 : Number(res.rejectedJobNotFound),
+      rejectedJobNotFoundDiff1:
+        res.rejectedJobNotFoundDiff1 == null
+          ? 0
+          : Number(res.rejectedJobNotFoundDiff1),
+      rejectedDuplicatedShare:
+        res.rejectedDuplicatedShare == null
+          ? 0
+          : Number(res.rejectedDuplicatedShare),
+      rejectedDuplicatedShareDiff1:
+        res.rejectedDuplicatedShareDiff1 == null
+          ? 0
+          : Number(res.rejectedDuplicatedShareDiff1),
+      rejectedLowDifficultyShare:
+        res.rejectedLowDifficultyShare == null
+          ? 0
+          : Number(res.rejectedLowDifficultyShare),
+      rejectedLowDifficultyShareDiff1:
+        res.rejectedLowDifficultyShareDiff1 == null
+          ? 0
+          : Number(res.rejectedLowDifficultyShareDiff1),
+    }));
+
+    return parsed.slice(0, parsed.length - 1);
   }
 
   public async getHashRateForSession(
