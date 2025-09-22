@@ -6,7 +6,7 @@ describe('ClientStatisticsService - getChartDataForGroup', () => {
       {
         label: 1700000000000,
         data: '123.5',
-        accepted: '10',
+        accepted: '4294967296',
         rejectedJobNotFound: '1',
         rejectedJobNotFoundDiff1: '4000',
         rejectedDuplicatedShare: '2',
@@ -17,7 +17,7 @@ describe('ClientStatisticsService - getChartDataForGroup', () => {
       {
         label: 1700000600000,
         data: '456.75',
-        accepted: '20',
+        accepted: '8589934592',
         rejectedJobNotFound: '0',
         rejectedJobNotFoundDiff1: '0',
         rejectedDuplicatedShare: '1',
@@ -34,7 +34,7 @@ describe('ClientStatisticsService - getChartDataForGroup', () => {
 
       expect(queryMock).toHaveBeenCalledTimes(1);
       const queryString = queryMock.mock.calls[0][0] as string;
-      expect(queryString).toContain('SUM(entry.acceptedCount) AS accepted');
+      expect(queryString).toContain('SUM(entry.shares) AS accepted');
       expect(queryString).toContain(
         'SUM(entry.rejectedJobNotFoundCount) AS rejectedJobNotFound',
       );
@@ -59,7 +59,7 @@ describe('ClientStatisticsService - getChartDataForGroup', () => {
       expect(result[0]).toEqual({
         label: new Date(1700000000000).toISOString(),
         data: 123.5,
-        accepted: 10,
+        accepted: 4294967296,
         rejectedJobNotFound: 1,
         rejectedJobNotFoundDiff1: 4000,
         rejectedDuplicatedShare: 2,

@@ -310,7 +310,7 @@ export class ClientStatisticsService {
             SELECT
                 time label,
                 (SUM(shares) * ${DIFFICULTY_1}) / 600 AS data,
-                SUM(entry.acceptedCount) AS accepted,
+                SUM(entry.shares) AS accepted,
                 SUM(entry.rejectedJobNotFoundCount) AS rejectedJobNotFound,
                 SUM(entry.rejectedJobNotFoundDiff1) AS rejectedJobNotFoundDiff1,
                 SUM(entry.rejectedDuplicateShareCount) AS rejectedDuplicatedShare,
@@ -336,7 +336,7 @@ export class ClientStatisticsService {
     const parsed = result.map((res) => ({
       label: new Date(res.label).toISOString(),
       data: res.data == null ? 0 : Number(res.data),
-      accepted: res.accepted == null ? 0 : Number(res.accepted),
+      accepted: Number(res.accepted ?? 0),
       rejectedJobNotFound:
         res.rejectedJobNotFound == null ? 0 : Number(res.rejectedJobNotFound),
       rejectedJobNotFoundDiff1:
