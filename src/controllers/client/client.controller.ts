@@ -167,7 +167,7 @@ export class ClientController {
     async getWorkerGroupInfo(
         @Param('address') address: string,
         @Param('workerName') workerName: string,
-        @Query('range') range: '1d' | '3d' | '7d' = '7d',
+        @Query('range') range: '1d' | '3d' | '7d' = '1d',
     ) {
 
         const workers = await this.clientService.getByName(address, workerName);
