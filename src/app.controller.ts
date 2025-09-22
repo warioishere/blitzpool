@@ -95,7 +95,7 @@ export class AppController {
     };
 
     //1 min
-    await this.cacheManager.set(CACHE_KEY, data, 1 * 60 * 1000);
+    await this.cacheManager.set(CACHE_KEY, data, 1 * 60);
 
     return data;
 
@@ -115,7 +115,7 @@ export class AppController {
       return cached;
     }
     const data = await this.bitcoinRpcService.getNetworkInfo();
-    await this.cacheManager.set(CACHE_KEY, data, 60 * 1000);
+    await this.cacheManager.set(CACHE_KEY, data, 60);
     return data;
   }
 
@@ -204,7 +204,7 @@ export class AppController {
     }
 
     //5 min
-    await this.cacheManager.set(CACHE_KEY, data, 5 * 60 * 1000);
+    await this.cacheManager.set(CACHE_KEY, data, 5 * 60);
 
     return data;
   }
@@ -250,7 +250,7 @@ export class AppController {
       })
     );
 
-    await this.cacheManager.set(CACHE_KEY, result, 1 * 60 * 1000);
+    await this.cacheManager.set(CACHE_KEY, result, 1 * 60);
     return result;
   }
 
@@ -273,7 +273,7 @@ export class AppController {
     const chartData = await this.clientStatisticsService.getChartDataForSite(range);
 
     //10 min
-    await this.cacheManager.set(CACHE_KEY, chartData, 10 * 60 * 1000);
+    await this.cacheManager.set(CACHE_KEY, chartData, 10 * 60);
 
     return chartData;
 
@@ -311,7 +311,7 @@ export class AppController {
       rejectedSinceBlock: totalsSinceBlock.rejected,
     };
 
-    await this.cacheManager.set(CACHE_KEY, data, 10 * 60 * 1000);
+    await this.cacheManager.set(CACHE_KEY, data, 10 * 60);
 
     return data;
 
@@ -350,7 +350,7 @@ export class AppController {
       });
     }
 
-    await this.cacheManager.set(CACHE_KEY, { slotData }, 10 * 60 * 1000);
+    await this.cacheManager.set(CACHE_KEY, { slotData }, 10 * 60);
 
     return { slotData };
   }
@@ -405,7 +405,13 @@ export class AppController {
       });
     }
 
-    await this.cacheManager.set(CACHE_KEY, { slotData }, 10 * 60 * 1000);
+    const currentSlot = Math.floor(now / coeff) * coeff;
+    if (endSlot === currentSlot && slotData.length > 0) {
+      const liveCounts = await this.clientService.getActiveWorkerCounts();
+      slotData[slotData.length - 1].counts = liveCounts;
+    }
+
+    await this.cacheManager.set(CACHE_KEY, { slotData }, 10 * 60);
 
     return { slotData };
   }
@@ -450,7 +456,7 @@ export class AppController {
       slotData.push({ time: new Date(t).toISOString(), counts });
     }
 
-    await this.cacheManager.set(CACHE_KEY, { slotData }, 10 * 60 * 1000);
+    await this.cacheManager.set(CACHE_KEY, { slotData }, 10 * 60);
 
     return { slotData };
   }
