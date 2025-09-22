@@ -16,12 +16,13 @@ export class NtfyService implements OnModuleInit {
   private readonly accessToken?: string;
   private readonly topicPrefix?: string;
   private readonly numberSuffix = new NumberSuffix();
-  private readonly diffNotifications: boolean;
+  private diffNotifications = false;
   private bestDiffCache: Map<string, number> = new Map();
   private bestDiffOptIn: Map<string, boolean> = new Map();
   private subscribed: Set<string> = new Set();
   private eventSource?: EventSource;
   private retryTimer?: NodeJS.Timeout;
+  private readonly shouldInitialize: boolean;
 
   constructor(
     private readonly configService: ConfigService,
@@ -30,6 +31,25 @@ export class NtfyService implements OnModuleInit {
     private readonly addressSettingsService: AddressSettingsService,
     private readonly clientStatisticsService: ClientStatisticsService,
   ) {
+    const pm2InstanceId =
+      process.env.NODE_APP_INSTANCE ??
+      process.env.pm_id ??
+      process.env.PM2_INSTANCE_ID;
+    const normalizedInstanceId =
+      typeof pm2InstanceId === 'string' ? pm2InstanceId.trim() : undefined;
+    const isPm2Worker =
+      typeof normalizedInstanceId === 'string' &&
+      normalizedInstanceId.length > 0;
+
+    if (isPm2Worker && normalizedInstanceId !== '0') {
+      this.shouldInitialize = false;
+      console.log(
+        `Skipping NTFY init for PM2 instance ${normalizedInstanceId}`,
+      );
+      return;
+    }
+
+    this.shouldInitialize = true;
     this.serverUrl = this.configService.get<string>('NTFY_SERVER_URL');
     this.accessToken = this.configService.get<string>('NTFY_ACCESS_TOKEN');
     this.topicPrefix = this.configService.get<string>('NTFY_TOPIC_PREFIX');
@@ -40,7 +60,7 @@ export class NtfyService implements OnModuleInit {
   }
 
   async onModuleInit(): Promise<void> {
-    if (!this.serverUrl) {
+    if (!this.shouldInitialize || !this.serverUrl) {
       return;
     }
     const [telegramAddresses, clientAddresses] = await Promise.all([
@@ -66,6 +86,9 @@ export class NtfyService implements OnModuleInit {
   }
 
   private reconnect() {
+    if (!this.shouldInitialize) {
+      return;
+    }
     if (this.retryTimer) {
       clearTimeout(this.retryTimer);
       this.retryTimer = undefined;
@@ -128,7 +151,7 @@ export class NtfyService implements OnModuleInit {
   }
 
   private subscribe(address: string, reconnect = true) {
-    if (!this.serverUrl || this.subscribed.has(address)) {
+    if (!this.shouldInitialize || !this.serverUrl || this.subscribed.has(address)) {
       return;
     }
     this.subscribed.add(address);
@@ -269,7 +292,7 @@ export class NtfyService implements OnModuleInit {
   }
 
   private async publish(address: string, message: string) {
-    if (!this.serverUrl) {
+    if (!this.shouldInitialize || !this.serverUrl) {
       return;
     }
     const topic = this.topicFor(address);
