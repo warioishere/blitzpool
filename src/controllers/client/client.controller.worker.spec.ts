@@ -21,7 +21,7 @@ describe('ClientController worker chart data', () => {
         {
           label: '2023-11-14T00:00:00.000Z',
           data: 100,
-          accepted: 5,
+          accepted: 4294967296,
           rejectedJobNotFound: 1,
           rejectedJobNotFoundDiff1: 2000,
           rejectedDuplicatedShare: 0,
@@ -69,7 +69,7 @@ describe('ClientController worker chart data', () => {
       {
         label: '2023-11-14T00:00:00.000Z',
         data: 100,
-        accepted: 5,
+        accepted: 4294967296,
         rejectedJobNotFound: 1,
         rejectedJobNotFoundDiff1: 2000,
         rejectedDuplicatedShare: 0,
@@ -85,7 +85,7 @@ describe('ClientController worker chart data', () => {
     );
   });
 
-  it('defaults to returning seven days of chart data when no range is specified', async () => {
+  it('defaults to returning one day of chart data when no range is specified', async () => {
     const res = await app.inject({
       method: 'GET',
       url: '/api/client/addr123/workerA',
@@ -97,7 +97,7 @@ describe('ClientController worker chart data', () => {
       {
         label: '2023-11-14T00:00:00.000Z',
         data: 100,
-        accepted: 5,
+        accepted: 4294967296,
         rejectedJobNotFound: 1,
         rejectedJobNotFoundDiff1: 2000,
         rejectedDuplicatedShare: 0,
@@ -110,6 +110,6 @@ describe('ClientController worker chart data', () => {
       clientStatisticsService.getChartDataForGroup.mock.calls[
         clientStatisticsService.getChartDataForGroup.mock.calls.length - 1
       ];
-    expect(lastCall).toEqual(['addr123', 'workerA', '7d']);
+    expect(lastCall).toEqual(['addr123', 'workerA', '1d']);
   });
 });
