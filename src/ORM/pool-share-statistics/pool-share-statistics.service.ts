@@ -64,20 +64,26 @@ export class PoolShareStatisticsService {
 
       const updatedAt = new Date();
 
-      await this.poolShareStatisticsRepository
-        .createQueryBuilder()
-        .insert()
-        .into(PoolShareStatisticsEntity)
-        .values({
-          time: timeSlot,
-          accepted,
-          rejected,
-        })
-        .onConflict(
-          '("time") DO UPDATE SET "accepted" = "accepted" + EXCLUDED."accepted", "rejected" = "rejected" + EXCLUDED."rejected", "updatedAt" = :updatedAt',
-        )
-        .setParameters({ updatedAt })
-        .execute();
+      try {
+        await this.poolShareStatisticsRepository
+          .createQueryBuilder()
+          .insert()
+          .into(PoolShareStatisticsEntity)
+          .values({
+            time: timeSlot,
+            accepted,
+            rejected,
+          })
+          .onConflict(
+            '("time") DO UPDATE SET "accepted" = "accepted" + EXCLUDED."accepted", "rejected" = "rejected" + EXCLUDED."rejected", "updatedAt" = :updatedAt',
+          )
+          .setParameters({ updatedAt })
+          .execute();
+      } catch (error) {
+        this.accepted += accepted;
+        this.rejected += rejected;
+        throw error;
+      }
     });
   }
 
