@@ -86,22 +86,14 @@ export class PoolRejectedStatisticsService {
 
       if (this.currentTimeSlot == null) {
         this.currentTimeSlot = timeSlot;
-        const existing = await this.poolRejectedStatisticsRepository.findBy({ time: timeSlot });
         this.counts.clear();
-        for (const rec of existing) {
-          this.counts.set(rec.reason, rec.count);
-        }
         this.lastSave = now;
       }
 
       if (this.currentTimeSlot !== timeSlot) {
         await this.saveCurrent();
         this.currentTimeSlot = timeSlot;
-        const existing = await this.poolRejectedStatisticsRepository.findBy({ time: timeSlot });
         this.counts.clear();
-        for (const rec of existing) {
-          this.counts.set(rec.reason, rec.count);
-        }
         this.lastSave = now;
       }
 
@@ -140,17 +132,35 @@ export class PoolRejectedStatisticsService {
   }
 
   private async saveCurrent() {
-    for (const [reason, count] of this.counts) {
-      const existing = await this.poolRejectedStatisticsRepository.findOneBy({ time: this.currentTimeSlot, reason });
-      if (existing) {
-        await this.poolRejectedStatisticsRepository.update(
-          { time: this.currentTimeSlot, reason },
-          { count, updatedAt: new Date() },
-        );
-      } else {
-        await this.poolRejectedStatisticsRepository.insert({ time: this.currentTimeSlot, reason, count });
-      }
+    if (this.counts.size === 0) {
+      return;
     }
+
+    const values = Array.from(this.counts.entries())
+      .filter(([, delta]) => delta !== 0)
+      .map(([reason, delta]) => ({
+        time: this.currentTimeSlot,
+        reason,
+        count: delta,
+      }));
+
+    if (values.length === 0) {
+      this.counts.clear();
+      return;
+    }
+
+    await this.poolRejectedStatisticsRepository
+      .createQueryBuilder()
+      .insert()
+      .into(PoolRejectedStatisticsEntity)
+      .values(values)
+      .onConflict(
+        '("time", "reason") DO UPDATE SET "count" = "count" + EXCLUDED."count", "updatedAt" = :updatedAt',
+      )
+      .setParameters({ updatedAt: new Date() })
+      .execute();
+
+    this.counts.clear();
   }
 
   public async getTotalsSince(time: number): Promise<Record<string, number>> {

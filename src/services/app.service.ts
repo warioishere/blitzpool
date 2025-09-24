@@ -30,7 +30,9 @@ export class AppService implements OnModuleInit {
         // //6Gb
         // await this.dataSource.query(`PRAGMA mmap_size = 6000000000;`);
 
-        await this.clientService.deleteAll();
+        if (process.env.NODE_APP_INSTANCE === undefined) {
+            await this.clientService.deleteAll();
+        }
 
         if (process.env.NODE_APP_INSTANCE == null || process.env.NODE_APP_INSTANCE == '0') {
 
