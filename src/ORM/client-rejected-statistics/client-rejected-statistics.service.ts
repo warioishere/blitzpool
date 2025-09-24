@@ -36,32 +36,14 @@ export class ClientRejectedStatisticsService {
 
       if (this.currentTimeSlot == null) {
         this.currentTimeSlot = timeSlot;
-        const existing = await this.clientRejectedStatisticsRepository.findBy({ time: timeSlot });
         this.counts.clear();
-        for (const rec of existing) {
-          if (!this.counts.has(rec.address)) {
-            this.counts.set(rec.address, new Map());
-          }
-          this.counts
-            .get(rec.address)
-            .set(rec.reason, { count: rec.count, shares: rec.shares ?? 0 });
-        }
         this.lastSave = now;
       }
 
       if (this.currentTimeSlot !== timeSlot) {
         await this.saveCurrent();
         this.currentTimeSlot = timeSlot;
-        const existing = await this.clientRejectedStatisticsRepository.findBy({ time: timeSlot });
         this.counts.clear();
-        for (const rec of existing) {
-          if (!this.counts.has(rec.address)) {
-            this.counts.set(rec.address, new Map());
-          }
-          this.counts
-            .get(rec.address)
-            .set(rec.reason, { count: rec.count, shares: rec.shares ?? 0 });
-        }
         this.lastSave = now;
       }
 
@@ -83,29 +65,51 @@ export class ClientRejectedStatisticsService {
   }
 
   private async saveCurrent() {
-    for (const [address, reasons] of this.counts) {
-      for (const [reason, stats] of reasons) {
-        const existing = await this.clientRejectedStatisticsRepository.findOneBy({
+    if (this.counts.size === 0) {
+      return;
+    }
+
+    const values: Array<{
+      time: number;
+      address: string;
+      reason: string;
+      count: number;
+      shares: number;
+    }> = [];
+
+    for (const [address, reasons] of this.counts.entries()) {
+      for (const [reason, stats] of reasons.entries()) {
+        if (stats.count === 0 && stats.shares === 0) {
+          continue;
+        }
+
+        values.push({
           time: this.currentTimeSlot,
           address,
           reason,
+          count: stats.count,
+          shares: stats.shares,
         });
-        if (existing) {
-          await this.clientRejectedStatisticsRepository.update(
-            { time: this.currentTimeSlot, address, reason },
-            { count: stats.count, shares: stats.shares, updatedAt: new Date() },
-          );
-        } else {
-          await this.clientRejectedStatisticsRepository.insert({
-            time: this.currentTimeSlot,
-            address,
-            reason,
-            count: stats.count,
-            shares: stats.shares,
-          });
-        }
       }
     }
+
+    if (values.length === 0) {
+      this.counts.clear();
+      return;
+    }
+
+    await this.clientRejectedStatisticsRepository
+      .createQueryBuilder()
+      .insert()
+      .into(ClientRejectedStatisticsEntity)
+      .values(values)
+      .onConflict(
+        '("time", "address", "reason") DO UPDATE SET "count" = "count" + EXCLUDED."count", "shares" = COALESCE("shares", 0) + EXCLUDED."shares", "updatedAt" = :updatedAt',
+      )
+      .setParameters({ updatedAt: new Date() })
+      .execute();
+
+    this.counts.clear();
   }
 
   public async getTotalsSince(
