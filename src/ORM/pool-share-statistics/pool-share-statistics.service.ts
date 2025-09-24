@@ -55,6 +55,13 @@ export class PoolShareStatisticsService {
     await this.mutex.runExclusive(async () => {
       if (this.accepted === 0 && this.rejected === 0) return;
 
+      const accepted = this.accepted;
+      const rejected = this.rejected;
+      const timeSlot = this.currentTimeSlot;
+
+      this.accepted = 0;
+      this.rejected = 0;
+
       const updatedAt = new Date();
 
       await this.poolShareStatisticsRepository
@@ -62,18 +69,15 @@ export class PoolShareStatisticsService {
         .insert()
         .into(PoolShareStatisticsEntity)
         .values({
-          time: this.currentTimeSlot,
-          accepted: this.accepted,
-          rejected: this.rejected,
+          time: timeSlot,
+          accepted,
+          rejected,
         })
         .onConflict(
           '("time") DO UPDATE SET "accepted" = "accepted" + EXCLUDED."accepted", "rejected" = "rejected" + EXCLUDED."rejected", "updatedAt" = :updatedAt',
         )
         .setParameters({ updatedAt })
         .execute();
-
-      this.accepted = 0;
-      this.rejected = 0;
     });
   }
 

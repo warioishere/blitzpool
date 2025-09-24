@@ -58,4 +58,103 @@ describe('PoolShareStatisticsService', () => {
       nowSpy.mockRestore();
     }
   });
+
+  it('retains shares added while a flush is executing', async () => {
+    const tenMinutes = 1000 * 60 * 10;
+    const baseTimestamp = 1800000000000;
+    const timeSlot = Math.floor(baseTimestamp / tenMinutes) * tenMinutes;
+
+    const nowSpy = jest
+      .spyOn(Date, 'now')
+      .mockReturnValue(baseTimestamp + 30_000);
+
+    const rows = new Map<
+      number,
+      { accepted: number; rejected: number }
+    >();
+
+    let resolveExecute: () => void = () => {};
+    const executeBlocker = new Promise<void>((resolve) => {
+      resolveExecute = resolve;
+    });
+    let notifyStarted: () => void = () => {};
+    const executeStarted = new Promise<void>((resolve) => {
+      notifyStarted = resolve;
+    });
+    let firstExecute = true;
+
+    const repository = {
+      createQueryBuilder: () => {
+        const builder: any = {
+          payload: {
+            time: timeSlot,
+            accepted: 0,
+            rejected: 0,
+          },
+          insert() {
+            return this;
+          },
+          into() {
+            return this;
+          },
+          values(value: Partial<PoolShareStatisticsEntity>) {
+            this.payload = value;
+            return this;
+          },
+          onConflict() {
+            return this;
+          },
+          setParameters() {
+            return this;
+          },
+          async execute() {
+            if (firstExecute) {
+              firstExecute = false;
+              notifyStarted();
+              await executeBlocker;
+            }
+            const { time, accepted = 0, rejected = 0 } = this.payload;
+            const current = rows.get(time) ?? { accepted: 0, rejected: 0 };
+            rows.set(time, {
+              accepted: current.accepted + accepted,
+              rejected: current.rejected + rejected,
+            });
+          },
+        };
+        return builder;
+      },
+      findOneBy({ time }: { time: number }) {
+        const row = rows.get(time);
+        return row ? { time, ...row } : null;
+      },
+    };
+
+    const service = new PoolShareStatisticsService(repository as any);
+
+    try {
+      await service.addAcceptedShare(2);
+      await service.addRejectedShare(1);
+
+      const flushPromise = (service as any).flush();
+
+      await executeStarted;
+
+      await service.addAcceptedShare(5);
+      await service.addRejectedShare(4);
+
+      resolveExecute();
+
+      await flushPromise;
+
+      let row = await repository.findOneBy({ time: timeSlot });
+      expect(row).toMatchObject({ accepted: 2, rejected: 1 });
+
+      await (service as any).flush();
+
+      row = await repository.findOneBy({ time: timeSlot });
+      expect(row).toMatchObject({ accepted: 7, rejected: 5 });
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
 });
