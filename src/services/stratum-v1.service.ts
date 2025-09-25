@@ -15,9 +15,9 @@ import { PoolShareStatisticsService } from '../ORM/pool-share-statistics/pool-sh
 import { PoolRejectedStatisticsService } from '../ORM/pool-rejected-statistics/pool-rejected-statistics.service';
 import { ClientRejectedStatisticsService } from '../ORM/client-rejected-statistics/client-rejected-statistics.service';
 
-
 @Injectable()
 export class StratumV1Service implements OnModuleInit {
+  private readonly clientsByAddress = new Map<string, Set<StratumV1Client>>();
 
   constructor(
     private readonly bitcoinRpcService: BitcoinRpcService,
@@ -31,25 +31,20 @@ export class StratumV1Service implements OnModuleInit {
     private readonly poolShareStatisticsService: PoolShareStatisticsService,
     private readonly poolRejectedStatisticsService: PoolRejectedStatisticsService,
     private readonly clientRejectedStatisticsService: ClientRejectedStatisticsService,
-    private readonly externalSharesService: ExternalSharesService
-  ) {
-
-  }
+    private readonly externalSharesService: ExternalSharesService,
+  ) {}
 
   async onModuleInit(): Promise<void> {
-
-      if (process.env.NODE_APP_INSTANCE == '0') {
-        await this.clientService.deleteAll();
-      }
-      setTimeout(() => {
-        this.startSocketServer();
-      }, 1000 * 10)
-
+    if (process.env.NODE_APP_INSTANCE === undefined) {
+      await this.clientService.deleteAll();
+    }
+    setTimeout(() => {
+      this.startSocketServer();
+    }, 1000 * 10);
   }
 
   private startSocketServer() {
     const server = new Server(async (socket: Socket) => {
-
       // Disable Nagle's algorithm and use UTF-8 encoding for better latency
       socket.setNoDelay(true);
       socket.setEncoding('utf8');
@@ -70,15 +65,18 @@ export class StratumV1Service implements OnModuleInit {
         this.poolShareStatisticsService,
         this.poolRejectedStatisticsService,
         this.clientRejectedStatisticsService,
-        this.externalSharesService
+        this.externalSharesService,
+        this,
       );
 
-
       socket.on('close', async (hadError: boolean) => {
-        if (client.extraNonceAndSessionId != null) {
-          // Handle socket disconnection
+        // Handle socket disconnection for initialized clients only
+        if (client.sessionId != null) {
           await client.destroy();
-          console.log(`Client ${client.extraNonceAndSessionId} disconnected, hadError?:${hadError}`);
+          this.unregisterClient(client.address, client);
+          console.log(
+            `Client ${client.sessionId} disconnected, hadError?:${hadError}`,
+          );
         }
       });
 
@@ -88,20 +86,60 @@ export class StratumV1Service implements OnModuleInit {
         socket.destroy();
       });
 
-      socket.on('error', async (error: Error) => {
-        console.error('Socket error', error);
+      socket.on('error', async (error: NodeJS.ErrnoException) => {
+        if (error.code !== 'ECONNRESET') {
+          console.error('Socket error', error);
+        }
         socket.destroy();
       });
 
-      //   //console.log(`Client disconnected, socket error,  ${client.extraNonceAndSessionId}`);
-
-
+      //   //console.log(`Client disconnected, socket error,  ${client.sessionId}`);
     });
 
     server.listen(process.env.STRATUM_PORT, () => {
-      console.log(`Stratum server is listening on port ${process.env.STRATUM_PORT}`);
+      console.log(
+        `Stratum server is listening on port ${process.env.STRATUM_PORT}`,
+      );
     });
-
   }
 
+  registerClient(address: string, client: StratumV1Client) {
+    if (!address) {
+      return;
+    }
+    if (!this.clientsByAddress.has(address)) {
+      this.clientsByAddress.set(address, new Set());
+    }
+    this.clientsByAddress.get(address).add(client);
+  }
+
+  unregisterClient(address: string | undefined, client: StratumV1Client) {
+    if (!address) {
+      return;
+    }
+    const clients = this.clientsByAddress.get(address);
+    if (!clients) {
+      return;
+    }
+    clients.delete(client);
+    if (clients.size === 0) {
+      this.clientsByAddress.delete(address);
+    }
+  }
+
+  resetClientsForAddress(address: string) {
+    const clients = this.clientsByAddress.get(address);
+    if (!clients) {
+      return;
+    }
+    for (const client of clients) {
+      try {
+        client.socket.end();
+        client.socket.destroy();
+      } catch {
+        // ignore errors while closing sockets
+      }
+    }
+    this.clientsByAddress.delete(address);
+  }
 }

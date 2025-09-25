@@ -1,5 +1,5 @@
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import { Controller, Get, Inject, Query } from '@nestjs/common';
+import { Controller, Get, Inject, Query, Param } from '@nestjs/common';
 import { Cache } from 'cache-manager';
 import { firstValueFrom } from 'rxjs';
 import { readFileSync } from 'fs';
@@ -12,7 +12,41 @@ import { PoolRejectedStatisticsService } from './ORM/pool-rejected-statistics/po
 import { ClientStatisticsService } from './ORM/client-statistics/client-statistics.service';
 import { ClientService } from './ORM/client/client.service';
 import { BitcoinRpcService } from './services/bitcoin-rpc.service';
+import { GeoIpService } from './services/geoip.service';
 import { eStratumErrorCode } from './models/enums/eStratumErrorCode';
+import { isIP } from 'net';
+import { ConfigService } from '@nestjs/config';
+import { StratumV1JobsService } from './services/stratum-v1-jobs.service';
+import { MiningJob } from './models/MiningJob';
+import * as bitcoinjs from 'bitcoinjs-lib';
+
+function extractHost(addr: string): string {
+  if (!addr) return '';
+  if (addr.startsWith('[')) {
+    const end = addr.indexOf(']');
+    return addr.substring(1, end);
+  }
+  return addr.split(':')[0];
+}
+
+function isPublicIp(ip: string): boolean {
+  const version = isIP(ip);
+  if (version === 4) {
+    const [a, b] = ip.split('.').map(Number);
+    if (a === 10) return false;
+    if (a === 172 && b >= 16 && b <= 31) return false;
+    if (a === 192 && b === 168) return false;
+    if (a === 127) return false;
+    return true;
+  } else if (version === 6) {
+    const normalized = ip.toLowerCase();
+    if (normalized === '::1') return false;
+    if (normalized.startsWith('fc') || normalized.startsWith('fd')) return false;
+    if (normalized.startsWith('fe8') || normalized.startsWith('fe9') || normalized.startsWith('fea') || normalized.startsWith('feb')) return false;
+    return true;
+  }
+  return false;
+}
 
 @Controller()
 export class AppController {
@@ -29,6 +63,9 @@ export class AppController {
     private readonly poolRejectedStatisticsService: PoolRejectedStatisticsService,
     private readonly bitcoinRpcService: BitcoinRpcService,
     private readonly addressSettingsService: AddressSettingsService,
+    private readonly geoIpService: GeoIpService,
+    private readonly configService: ConfigService,
+    private readonly stratumV1JobsService: StratumV1JobsService,
   ) {
     const packagePath = join(__dirname, '..', 'package.json');
     this.version = JSON.parse(readFileSync(packagePath, 'utf8')).version;
@@ -58,10 +95,87 @@ export class AppController {
     };
 
     //1 min
-    await this.cacheManager.set(CACHE_KEY, data, 1 * 60 * 1000);
+    await this.cacheManager.set(CACHE_KEY, data, 1 * 60);
 
     return data;
 
+  }
+
+  @Get('info/block-template')
+  public async blockTemplate() {
+    const height = (await firstValueFrom(this.bitcoinRpcService.newBlock$)).blocks;
+    return this.bitcoinRpcService.getBlockTemplate(height);
+  }
+
+  @Get('info/core')
+  public async infoCore() {
+    const CACHE_KEY = 'CORE_INFO';
+    const cached = await this.cacheManager.get(CACHE_KEY);
+    if (cached != null) {
+      return cached;
+    }
+    const data = await this.bitcoinRpcService.getNetworkInfo();
+    await this.cacheManager.set(CACHE_KEY, data, 60);
+    return data;
+  }
+
+  @Get('client/:address/block-template')
+  public async clientBlockTemplate(@Param('address') address: string) {
+    const tpl = await firstValueFrom(this.stratumV1JobsService.newMiningJob$);
+
+    const devFeeAddress = this.configService.get('DEV_FEE_ADDRESS');
+    const devFeePercent = parseFloat(
+      this.configService.get('DEV_FEE_PERCENT') ?? '1.5',
+    );
+
+    let payoutInformation;
+    if (devFeeAddress == null || devFeeAddress.length < 1) {
+      payoutInformation = [{ address, percent: 100 }];
+    } else {
+      payoutInformation = [
+        { address: devFeeAddress, percent: devFeePercent },
+        { address, percent: 100 - devFeePercent },
+      ];
+    }
+
+    const networkConfig = this.configService.get('NETWORK');
+    let network: bitcoinjs.networks.Network;
+    if (networkConfig === 'mainnet') {
+      network = bitcoinjs.networks.bitcoin;
+    } else if (networkConfig === 'testnet') {
+      network = bitcoinjs.networks.testnet;
+    } else if (networkConfig === 'regtest') {
+      network = bitcoinjs.networks.regtest;
+    } else {
+      throw new Error('Invalid network configuration');
+    }
+
+    const job = new MiningJob(
+      this.configService,
+      network,
+      this.stratumV1JobsService.getNextId(),
+      payoutInformation,
+      tpl,
+    );
+
+    const block = job.copyAndUpdateBlock(
+      tpl,
+      0,
+      0,
+      '00000000',
+      '0000000000000000',
+      tpl.block.timestamp,
+    );
+
+    const blockTemplate = await this.bitcoinRpcService.getBlockTemplate(
+      tpl.blockData.height,
+    );
+
+    return {
+      blockTemplate,
+      blockHex: block.toHex(),
+      coinbaseTxHex: job.getCoinbaseTxHex(),
+    };
   }
 
   @Get('pool')
@@ -90,7 +204,7 @@ export class AppController {
     }
 
     //5 min
-    await this.cacheManager.set(CACHE_KEY, data, 5 * 60 * 1000);
+    await this.cacheManager.set(CACHE_KEY, data, 5 * 60);
 
     return data;
   }
@@ -99,6 +213,45 @@ export class AppController {
   public async network() {
     const miningInfo = await firstValueFrom(this.bitcoinRpcService.newBlock$);
     return miningInfo;
+  }
+
+  @Get('info/peers')
+  public async infoPeers() {
+    const CACHE_KEY = 'PEER_INFO';
+    const cachedResult = await this.cacheManager.get(CACHE_KEY);
+    if (cachedResult != null) {
+      return cachedResult;
+    }
+
+    const peers = await this.bitcoinRpcService.getPeerInfo() || [];
+    const result = await Promise.all(
+      peers.map(async p => {
+        const host = extractHost(p.addr);
+        let location: string;
+        if (host.includes('.onion')) {
+          location = 'hidden through tor';
+        } else if (host.includes('.i2p')) {
+          location = 'hidden through i2p';
+        } else if (!isPublicIp(host)) {
+          location = 'hidden through tor';
+        } else {
+          const geo = await this.geoIpService.getLocation(host);
+          location = geo ? `${geo.city}, ${geo.country}` : null;
+        }
+        return {
+          version: p.subver,
+          direction: p.inbound ? 'inbound' : 'outbound',
+          location,
+          bytesrecv: p.bytesrecv,
+          bytessent: p.bytessent,
+          network: p.network,
+          pingtime: p.pingtime,
+        };
+      })
+    );
+
+    await this.cacheManager.set(CACHE_KEY, result, 1 * 60);
+    return result;
   }
 
   @Get('info/version')
@@ -120,7 +273,7 @@ export class AppController {
     const chartData = await this.clientStatisticsService.getChartDataForSite(range);
 
     //10 min
-    await this.cacheManager.set(CACHE_KEY, chartData, 10 * 60 * 1000);
+    await this.cacheManager.set(CACHE_KEY, chartData, 10 * 60);
 
     return chartData;
 
@@ -158,10 +311,109 @@ export class AppController {
       rejectedSinceBlock: totalsSinceBlock.rejected,
     };
 
-    await this.cacheManager.set(CACHE_KEY, data, 10 * 60 * 1000);
+    await this.cacheManager.set(CACHE_KEY, data, 10 * 60);
 
     return data;
 
+  }
+
+  @Get('info/accepted')
+  public async infoAccepted(
+    @Query('range') range: '1d' | '3d' | '7d' = '1d',
+  ) {
+    const CACHE_KEY = `POOL_ACCEPTED_STATS_${range}`;
+    const cachedResult = await this.cacheManager.get(CACHE_KEY);
+
+    if (cachedResult != null) {
+      return cachedResult;
+    }
+
+    const now = Date.now();
+    const oneDay = 24 * 60 * 60 * 1000;
+    const days = range === '7d' ? 7 : range === '3d' ? 3 : 1;
+    const sinceTime = now - days * oneDay;
+
+    const entries = await this.poolShareStatisticsService.getEntriesSince(sinceTime);
+    const slotMap = new Map<number, number>();
+    for (const entry of entries) {
+      slotMap.set(entry.time, entry.accepted);
+    }
+
+    const coeff = 1000 * 60 * 10;
+    const startSlot = Math.floor(sinceTime / coeff) * coeff;
+    const endSlot = Math.floor(now / coeff) * coeff;
+    const slotData: { time: string; counts: { accepted: number } }[] = [];
+    for (let t = startSlot; t <= endSlot; t += coeff) {
+      slotData.push({
+        time: new Date(t).toISOString(),
+        counts: { accepted: slotMap.get(t) || 0 },
+      });
+    }
+
+    await this.cacheManager.set(CACHE_KEY, { slotData }, 10 * 60);
+
+    return { slotData };
+  }
+
+  @Get('info/workers')
+  public async infoWorkers(
+    @Query('range') range: '1d' | '3d' | '7d' = '1d',
+  ) {
+    const CACHE_KEY = `POOL_WORKER_STATS_${range}`;
+    const cachedResult = await this.cacheManager.get(CACHE_KEY);
+
+    if (cachedResult != null) {
+      return cachedResult;
+    }
+
+    const now = Date.now();
+    const oneDay = 24 * 60 * 60 * 1000;
+    const days = range === '7d' ? 7 : range === '3d' ? 3 : 1;
+    const sinceTime = now - days * oneDay;
+
+    const entries = await this.clientStatisticsService.getActiveCountsSince(
+      sinceTime,
+    );
+    const slotMap = new Map<
+      number,
+      { addresses: number; workers: number; sessions: number }
+    >();
+    for (const entry of entries) {
+      slotMap.set(entry.time, {
+        addresses: entry.addresses,
+        workers: entry.workers,
+        sessions: entry.sessions,
+      });
+    }
+
+    const coeff = 1000 * 60 * 10;
+    const startSlot = Math.floor(sinceTime / coeff) * coeff;
+    const endSlot = Math.floor(now / coeff) * coeff;
+    const slotData: {
+      time: string;
+      counts: { addresses: number; workers: number; sessions: number };
+    }[] = [];
+    for (let t = startSlot; t <= endSlot; t += coeff) {
+      const counts = slotMap.get(t) || {
+        addresses: 0,
+        workers: 0,
+        sessions: 0,
+      };
+      slotData.push({
+        time: new Date(t).toISOString(),
+        counts,
+      });
+    }
+
+    const currentSlot = Math.floor(now / coeff) * coeff;
+    if (endSlot === currentSlot && slotData.length > 0) {
+      const liveCounts = await this.clientService.getActiveWorkerCounts();
+      slotData[slotData.length - 1].counts = liveCounts;
+    }
+
+    await this.cacheManager.set(CACHE_KEY, { slotData }, 10 * 60);
+
+    return { slotData };
   }
 
   @Get('info/rejected')
@@ -204,7 +456,7 @@ export class AppController {
       slotData.push({ time: new Date(t).toISOString(), counts });
     }
 
-    await this.cacheManager.set(CACHE_KEY, { slotData }, 10 * 60 * 1000);
+    await this.cacheManager.set(CACHE_KEY, { slotData }, 10 * 60);
 
     return { slotData };
   }

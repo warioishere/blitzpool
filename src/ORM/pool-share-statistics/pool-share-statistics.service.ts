@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Interval } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, MoreThan } from 'typeorm';
 import { Mutex } from 'async-mutex';
 
 import { PoolShareStatisticsEntity } from './pool-share-statistics.entity';
@@ -55,26 +55,35 @@ export class PoolShareStatisticsService {
     await this.mutex.runExclusive(async () => {
       if (this.accepted === 0 && this.rejected === 0) return;
 
-      const existing = await this.poolShareStatisticsRepository.findOneBy({ time: this.currentTimeSlot });
-      if (existing) {
-        await this.poolShareStatisticsRepository.update(
-          { time: this.currentTimeSlot },
-          {
-            accepted: existing.accepted + this.accepted,
-            rejected: existing.rejected + this.rejected,
-            updatedAt: new Date(),
-          },
-        );
-      } else {
-        await this.poolShareStatisticsRepository.insert({
-          time: this.currentTimeSlot,
-          accepted: this.accepted,
-          rejected: this.rejected,
-        });
-      }
+      const accepted = this.accepted;
+      const rejected = this.rejected;
+      const timeSlot = this.currentTimeSlot;
 
       this.accepted = 0;
       this.rejected = 0;
+
+      const updatedAt = new Date();
+
+      try {
+        await this.poolShareStatisticsRepository
+          .createQueryBuilder()
+          .insert()
+          .into(PoolShareStatisticsEntity)
+          .values({
+            time: timeSlot,
+            accepted,
+            rejected,
+          })
+          .onConflict(
+            '("time") DO UPDATE SET "accepted" = "accepted" + EXCLUDED."accepted", "rejected" = "rejected" + EXCLUDED."rejected", "updatedAt" = :updatedAt',
+          )
+          .setParameters({ updatedAt })
+          .execute();
+      } catch (error) {
+        this.accepted += accepted;
+        this.rejected += rejected;
+        throw error;
+      }
     });
   }
 
@@ -118,5 +127,14 @@ export class PoolShareStatisticsService {
       accepted: result?.accepted ? parseFloat(result.accepted) : 0,
       rejected: result?.rejected ? parseFloat(result.rejected) : 0,
     };
+  }
+
+  public async getEntriesSince(
+    time: number,
+  ): Promise<PoolShareStatisticsEntity[]> {
+    return this.poolShareStatisticsRepository.find({
+      where: { time: MoreThan(time) },
+      order: { time: 'ASC' },
+    });
   }
 }

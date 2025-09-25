@@ -109,6 +109,22 @@ export class ClientService {
         return await this.clientRepository.count();
     }
 
+    public async getActiveWorkerCounts(): Promise<{ addresses: number; workers: number; sessions: number }> {
+        const result = await this.clientRepository
+            .createQueryBuilder('client')
+            .select('COUNT(DISTINCT client.address)', 'addresses')
+            .addSelect("COUNT(DISTINCT client.address || '-' || client.clientName)", 'workers')
+            .addSelect('COUNT(*)', 'sessions')
+            .where('client.deletedAt IS NULL')
+            .getRawOne<{ addresses: string; workers: string; sessions: string }>();
+
+        return {
+            addresses: Number(result?.addresses ?? 0),
+            workers: Number(result?.workers ?? 0),
+            sessions: Number(result?.sessions ?? 0),
+        };
+    }
+
     public async getByAddress(address: string): Promise<ClientEntity[]> {
         return await this.clientRepository.find({
             where: {
@@ -180,6 +196,14 @@ export class ClientService {
             .orderBy('count', 'DESC')
             .getRawMany();
         return result;
+    }
+
+    public async getAllAddresses(): Promise<string[]> {
+        const rows = await this.clientRepository
+            .createQueryBuilder('client')
+            .select('DISTINCT client.address', 'address')
+            .getRawMany();
+        return rows.map(r => r.address);
     }
 
 }

@@ -2,7 +2,7 @@
 
 Welcome to **BlitzPool**, a lightweight and open-source Bitcoin mining pool based on the [public-pool](https://github.com/benjamin-wilson/public-pool) project – extended with powerful new features and real-world integrations.
 
-Current Version: **v1.2.3**
+Current Version: **v1.3.3**
 
 🌐 **Live Pool:** [https://blitzpool.yourdevice.ch/#/](https://blitzpool.yourdevice.ch/#/)
 
@@ -47,6 +47,31 @@ Use our Encryption tool for btc worker addresses here:
 
 https://github.com/warioishere/blitzpool-message-encryptor-for-TG
 
+### 📢 NTFY Notifications
+
+BlitzPool can mirror its Telegram bot interactions over [ntfy](https://ntfy.sh/) topics.
+Enable the service by setting the following optional environment variables:
+
+```
+NTFY_SERVER_URL=<https://your-ntfy-server>
+NTFY_ACCESS_TOKEN=<token if required>
+NTFY_TOPIC_PREFIX=<optional prefix>
+NTFY_DIFF_NOTIFICATIONS=true   # publish best-diff alerts
+```
+
+On startup the pool subscribes to topics for all known BTC addresses using the
+`<prefix><address>` convention. Post commands like `/subscribe` or `/stats` to the
+topic of your address and the service will reply on the same channel:
+
+```
+curl -d /stats $NTFY_SERVER_URL/myPrefix1ABC...
+curl -d "/subscribe 1DEF..." $NTFY_SERVER_URL/myPrefix1ABC...
+```
+
+### 🌍 GeoIP service
+
+BlitzPool enriches peer information using the free [ip-api.com](https://ip-api.com) geolocation service to resolve city and country details. Lookups are cached for ten minutes and automatically refreshed to keep data current. No configuration is required.
+
 #### 🛠️ Extra Services
 - Integrated `blockTemplateInterval` configuration
 - Hashrate corrections and updated statistics endpoints
@@ -57,7 +82,9 @@ https://github.com/warioishere/blitzpool-message-encryptor-for-TG
 - Telegram bot subscriptions managed via a custom ORM
 - New `/api/info/shares` endpoint provides pool-wide accepted and rejected share totals
 - New `/api/info/rejected` endpoint lists rejected share reasons pool-wide (supports `range=1d|3d|7d`)
-- New `/api/client/<btc_address>/rejected` shows rejected reasons for a specific address (supports `range=1d|3d|7d`)
+- New `/api/client/<btc_address>/rejected` shows rejected reasons for a specific address with per-reason share counts and diff-1 weighted totals (supports `range=1d|3d|7d`)
+- New `/api/info/accepted` endpoint lists pool-wide accepted share counts per 10-minute slot (supports `range=1d|3d|7d`)
+- New `/api/client/<btc_address>/accepted` shows diff-1 weighted accepted share counts for a specific address per 10-minute slot
 - Old jobs are cleaned after 90 seconds by default (`JOB_RETENTION_MS` can adjust this)
 - Desired share rate per worker can be tuned with `TARGET_SHARES_PER_MINUTE` (default `6`)
 - How often miners are checked for new difficulty can be set via `DIFFICULTY_CHECK_INTERVAL_MS` (default `60000` ms)
@@ -97,8 +124,13 @@ Alternatively, set `SQLITE_DB_PATH` to the location of your SQLite file before i
 - `GET /api/info/chart?range=1d|1m` – Returns pool hashrate statistics.
 - `GET /api/info/shares` – Provides pool-wide accepted and rejected share totals.
 - `GET /api/info/rejected?range=1d|3d|7d` – Lists rejected share reasons pool-wide (difficulty weighted).
+- `GET /api/info/accepted?range=1d|3d|7d` – Lists accepted share counts pool-wide per 10-minute slot.
+- `GET /api/info/block-template` – Returns the current block template used for mining.
+- `GET /api/info/core` – returns Bitcoin Core’s getnetworkinfo output (version, connections, warnings, etc.).
 - `GET /api/info/version` – Returns the BlitzPool version.
-- `GET /api/client/<btc_address>/rejected?range=1d|3d|7d` – Shows rejected reasons for a specific address (counts per share).
+- `GET /api/client/<btc_address>/rejected?range=1d|3d|7d` – Returns per 10-minute slot each rejected reason with its share count and diff-1 weighted total (`diffMinusOne`).
+- `GET /api/client/<btc_address>/accepted?range=1d|3d|7d` – Shows diff-1 weighted accepted share counts for a specific address per 10-minute slot.
+- `GET /api/client/<btc_address>/block-template` – Returns the block template a miner would use, including the coinbase transaction paying to the specified address. The response provides a human‑readable `blockTemplate` and the raw serialized `blockHex`.
 
 #### Blitzpool-UI
 

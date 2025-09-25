@@ -24,7 +24,9 @@ import { NotificationService } from './services/notification.service';
 import { StratumV1JobsService } from './services/stratum-v1-jobs.service';
 import { StratumV1Service } from './services/stratum-v1.service';
 import { TelegramService } from './services/telegram.service';
+import { NtfyService } from './services/ntfy.service';
 import { ExternalSharesService } from './services/external-shares.service';
+import { GeoIpService } from './services/geoip.service';
 import { ExternalShareController } from './controllers/external-share/external-share.controller';
 import { ExternalSharesModule } from './ORM/external-shares/external-shares.module';
 import { PoolShareStatisticsModule } from './ORM/pool-share-statistics/pool-share-statistics.module';
@@ -92,6 +94,7 @@ const ORMModules = [
         AppService,
         StratumV1Service,
         TelegramService,
+        NtfyService,
         BitcoinRpcService,
         NotificationService,
         BitcoinAddressValidator,
@@ -99,6 +102,7 @@ const ORMModules = [
         BTCPayService,
         BraiinsService,
         ExternalSharesService,
+        GeoIpService,
     ],
 })
 export class AppModule {
