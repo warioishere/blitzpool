@@ -1,7 +1,7 @@
 import { HttpModule } from '@nestjs/axios';
 import { CacheModule } from '@nestjs/cache-manager';
 import { Module } from '@nestjs/common';
-import { ConfigModule } from '@nestjs/config';
+import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
 import { TypeOrmModule } from '@nestjs/typeorm';
 
@@ -32,6 +32,7 @@ import { ExternalSharesModule } from './ORM/external-shares/external-shares.modu
 import { PoolShareStatisticsModule } from './ORM/pool-share-statistics/pool-share-statistics.module';
 import { PoolRejectedStatisticsModule } from './ORM/pool-rejected-statistics/pool-rejected-statistics.module';
 import { ClientRejectedStatisticsModule } from './ORM/client-rejected-statistics/client-rejected-statistics.module';
+import { buildDatabaseConfig } from './config/database.config';
 
 const ORMModules = [
     ClientStatisticsModule,
@@ -49,15 +50,9 @@ const ORMModules = [
 @Module({
     imports: [
         ConfigModule.forRoot(),
-        TypeOrmModule.forRoot({
-            type: 'sqlite',
-            database: './DB/public-pool.sqlite',
-            synchronize: true,
-            autoLoadEntities: true,
-            logging: false,
-            enableWAL: true,
-            busyTimeout: 30 * 1000,
-
+        TypeOrmModule.forRootAsync({
+            inject: [ConfigService],
+            useFactory: (configService: ConfigService) => buildDatabaseConfig(configService),
         }),
         CacheModule.register(),
         ScheduleModule.forRoot(),
