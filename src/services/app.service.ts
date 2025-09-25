@@ -26,7 +26,10 @@ export class AppService implements OnModuleInit {
         // //500 MB DB cache
         // await this.dataSource.query(`PRAGMA cache_size = -500000;`);
         //Normal is still completely corruption safe in WAL mode, and means only WAL checkpoints have to wait for FSYNC.
-        await this.dataSource.query(`PRAGMA synchronous = off;`);
+        const dataSourceType = (this.dataSource.options as { type?: string } | undefined)?.type;
+        if (dataSourceType === 'sqlite') {
+            await this.dataSource.query(`PRAGMA synchronous = off;`);
+        }
         // //6Gb
         // await this.dataSource.query(`PRAGMA mmap_size = 6000000000;`);
 

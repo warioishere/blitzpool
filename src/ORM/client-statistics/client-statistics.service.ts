@@ -48,107 +48,144 @@ export class ClientStatisticsService {
 
   public async deleteOldStatistics() {
     const now = Date.now();
-    // Keep detailed records for one week before aggregation
-    const detailCutoff = new Date(now - 7 * 24 * 60 * 60 * 1000);
-    const halfYearCutoff = new Date(now - 180 * 24 * 60 * 60 * 1000);
-    const monthCutoff = new Date(now - 30 * 24 * 60 * 60 * 1000);
+    const detailCutoffTimestamp = new Date(now - 7 * 24 * 60 * 60 * 1000).getTime();
+    const halfYearCutoffTimestamp = new Date(now - 180 * 24 * 60 * 60 * 1000).getTime();
+    const monthCutoffTimestamp = new Date(now - 30 * 24 * 60 * 60 * 1000).getTime();
 
-    // Aggregate old statistics so that only pool hashrate and worker totals are retained
-    await this.clientStatisticsRepository.query(`
-            INSERT INTO client_statistics_entity (
-                address,
-                clientName,
-                sessionId,
-                time,
-                shares,
-                acceptedCount,
-                rejectedCount,
-                rejectedJobNotFoundCount,
-                rejectedJobNotFoundDiff1,
-                rejectedDuplicateShareCount,
-                rejectedDuplicateShareDiff1,
-                rejectedLowDifficultyShareCount,
-                rejectedLowDifficultyShareDiff1,
-                "createdAt",
-                "updatedAt"
-            )
-            SELECT
-                'POOL',
-                'POOL',
-                'POOL',
-                time,
-                SUM(shares),
-                SUM(acceptedCount),
-                SUM(rejectedCount),
-                SUM(rejectedJobNotFoundCount),
-                SUM(rejectedJobNotFoundDiff1),
-                SUM(rejectedDuplicateShareCount),
-                SUM(rejectedDuplicateShareDiff1),
-                SUM(rejectedLowDifficultyShareCount),
-                SUM(rejectedLowDifficultyShareDiff1),
-                datetime('now'),
-                datetime('now')
-            FROM client_statistics_entity
-            WHERE time < ${detailCutoff.getTime()} AND NOT (address = 'POOL' AND clientName = 'POOL' AND sessionId = 'POOL') AND sessionId != 'AGG'
-            GROUP BY time;
-        `);
+    const baseFilters = {
+      detailCutoff: detailCutoffTimestamp,
+      pool: 'POOL',
+      agg: 'AGG',
+    } as const;
 
-    await this.clientStatisticsRepository.query(`
-            INSERT INTO client_statistics_entity (
-                address,
-                clientName,
-                sessionId,
-                time,
-                shares,
-                acceptedCount,
-                rejectedCount,
-                rejectedJobNotFoundCount,
-                rejectedJobNotFoundDiff1,
-                rejectedDuplicateShareCount,
-                rejectedDuplicateShareDiff1,
-                rejectedLowDifficultyShareCount,
-                rejectedLowDifficultyShareDiff1,
-                "createdAt",
-                "updatedAt"
-            )
-            SELECT
-                address,
-                clientName,
-                'AGG',
-                ${detailCutoff.getTime()},
-                SUM(shares),
-                SUM(acceptedCount),
-                SUM(rejectedCount),
-                SUM(rejectedJobNotFoundCount),
-                SUM(rejectedJobNotFoundDiff1),
-                SUM(rejectedDuplicateShareCount),
-                SUM(rejectedDuplicateShareDiff1),
-                SUM(rejectedLowDifficultyShareCount),
-                SUM(rejectedLowDifficultyShareDiff1),
-                datetime('now'),
-                datetime('now')
-            FROM client_statistics_entity
-            WHERE time < ${detailCutoff.getTime()} AND NOT (sessionId = 'AGG' OR (address = 'POOL' AND clientName = 'POOL' AND sessionId = 'POOL'))
-            GROUP BY address, clientName;
-        `);
+    const poolAggregates = await this.clientStatisticsRepository
+      .createQueryBuilder('stat')
+      .select('stat.time', 'time')
+      .addSelect('SUM(stat.shares)', 'shares')
+      .addSelect('SUM(stat.acceptedCount)', 'acceptedCount')
+      .addSelect('SUM(stat.rejectedCount)', 'rejectedCount')
+      .addSelect('SUM(stat.rejectedJobNotFoundCount)', 'rejectedJobNotFoundCount')
+      .addSelect('SUM(stat.rejectedJobNotFoundDiff1)', 'rejectedJobNotFoundDiff1')
+      .addSelect('SUM(stat.rejectedDuplicateShareCount)', 'rejectedDuplicateShareCount')
+      .addSelect('SUM(stat.rejectedDuplicateShareDiff1)', 'rejectedDuplicateShareDiff1')
+      .addSelect('SUM(stat.rejectedLowDifficultyShareCount)', 'rejectedLowDifficultyShareCount')
+      .addSelect('SUM(stat.rejectedLowDifficultyShareDiff1)', 'rejectedLowDifficultyShareDiff1')
+      .where('stat.time < :detailCutoff', baseFilters)
+      .andWhere(
+        'NOT (stat.address = :pool AND stat.clientName = :pool AND stat.sessionId = :pool)',
+        baseFilters,
+      )
+      .andWhere('stat.sessionId != :agg', baseFilters)
+      .groupBy('stat.time')
+      .getRawMany();
 
-    // Delete detailed records older than one day
-    await this.clientStatisticsRepository.query(`
-            DELETE FROM client_statistics_entity
-            WHERE time < ${detailCutoff.getTime()} AND NOT (sessionId = 'AGG' OR (address = 'POOL' AND clientName = 'POOL' AND sessionId = 'POOL'));
-        `);
+    if (poolAggregates.length > 0) {
+      const insertedAt = new Date();
+      await this.clientStatisticsRepository
+        .createQueryBuilder()
+        .insert()
+        .into(ClientStatisticsEntity)
+        .values(
+          poolAggregates.map((row) => ({
+            address: 'POOL',
+            clientName: 'POOL',
+            sessionId: 'POOL',
+            time: Number(row.time),
+            shares: Number(row.shares ?? 0),
+            acceptedCount: Number(row.acceptedCount ?? 0),
+            rejectedCount: Number(row.rejectedCount ?? 0),
+            rejectedJobNotFoundCount: Number(row.rejectedJobNotFoundCount ?? 0),
+            rejectedJobNotFoundDiff1: Number(row.rejectedJobNotFoundDiff1 ?? 0),
+            rejectedDuplicateShareCount: Number(row.rejectedDuplicateShareCount ?? 0),
+            rejectedDuplicateShareDiff1: Number(row.rejectedDuplicateShareDiff1 ?? 0),
+            rejectedLowDifficultyShareCount: Number(row.rejectedLowDifficultyShareCount ?? 0),
+            rejectedLowDifficultyShareDiff1: Number(row.rejectedLowDifficultyShareDiff1 ?? 0),
+            createdAt: insertedAt,
+            updatedAt: insertedAt,
+          })),
+        )
+        .execute();
+    }
 
-    // Remove worker aggregates older than six months
-    await this.clientStatisticsRepository.query(`
-            DELETE FROM client_statistics_entity
-            WHERE time < ${halfYearCutoff.getTime()} AND sessionId = 'AGG';
-        `);
+    const workerAggregates = await this.clientStatisticsRepository
+      .createQueryBuilder('stat')
+      .select('stat.address', 'address')
+      .addSelect('stat.clientName', 'clientName')
+      .addSelect('SUM(stat.shares)', 'shares')
+      .addSelect('SUM(stat.acceptedCount)', 'acceptedCount')
+      .addSelect('SUM(stat.rejectedCount)', 'rejectedCount')
+      .addSelect('SUM(stat.rejectedJobNotFoundCount)', 'rejectedJobNotFoundCount')
+      .addSelect('SUM(stat.rejectedJobNotFoundDiff1)', 'rejectedJobNotFoundDiff1')
+      .addSelect('SUM(stat.rejectedDuplicateShareCount)', 'rejectedDuplicateShareCount')
+      .addSelect('SUM(stat.rejectedDuplicateShareDiff1)', 'rejectedDuplicateShareDiff1')
+      .addSelect('SUM(stat.rejectedLowDifficultyShareCount)', 'rejectedLowDifficultyShareCount')
+      .addSelect('SUM(stat.rejectedLowDifficultyShareDiff1)', 'rejectedLowDifficultyShareDiff1')
+      .where('stat.time < :detailCutoff', baseFilters)
+      .andWhere('stat.sessionId != :agg', baseFilters)
+      .andWhere(
+        'NOT (stat.address = :pool AND stat.clientName = :pool AND stat.sessionId = :pool)',
+        baseFilters,
+      )
+      .groupBy('stat.address')
+      .addGroupBy('stat.clientName')
+      .getRawMany();
 
-    // Remove pool aggregates older than one month
-    await this.clientStatisticsRepository.query(`
-            DELETE FROM client_statistics_entity
-            WHERE time < ${monthCutoff.getTime()} AND address = 'POOL' AND clientName = 'POOL' AND sessionId = 'POOL';
-        `);
+    if (workerAggregates.length > 0) {
+      const insertedAt = new Date();
+      await this.clientStatisticsRepository
+        .createQueryBuilder()
+        .insert()
+        .into(ClientStatisticsEntity)
+        .values(
+          workerAggregates.map((row) => ({
+            address: row.address,
+            clientName: row.clientName,
+            sessionId: 'AGG',
+            time: detailCutoffTimestamp,
+            shares: Number(row.shares ?? 0),
+            acceptedCount: Number(row.acceptedCount ?? 0),
+            rejectedCount: Number(row.rejectedCount ?? 0),
+            rejectedJobNotFoundCount: Number(row.rejectedJobNotFoundCount ?? 0),
+            rejectedJobNotFoundDiff1: Number(row.rejectedJobNotFoundDiff1 ?? 0),
+            rejectedDuplicateShareCount: Number(row.rejectedDuplicateShareCount ?? 0),
+            rejectedDuplicateShareDiff1: Number(row.rejectedDuplicateShareDiff1 ?? 0),
+            rejectedLowDifficultyShareCount: Number(row.rejectedLowDifficultyShareCount ?? 0),
+            rejectedLowDifficultyShareDiff1: Number(row.rejectedLowDifficultyShareDiff1 ?? 0),
+            createdAt: insertedAt,
+            updatedAt: insertedAt,
+          })),
+        )
+        .execute();
+    }
+
+    await this.clientStatisticsRepository
+      .createQueryBuilder()
+      .delete()
+      .from(ClientStatisticsEntity)
+      .where('time < :detailCutoff', { detailCutoff: detailCutoffTimestamp })
+      .andWhere(
+        'NOT (sessionId = :agg OR (address = :pool AND clientName = :pool AND sessionId = :pool))',
+        { agg: 'AGG', pool: 'POOL' },
+      )
+      .execute();
+
+    await this.clientStatisticsRepository
+      .createQueryBuilder()
+      .delete()
+      .from(ClientStatisticsEntity)
+      .where('time < :halfYearCutoff', { halfYearCutoff: halfYearCutoffTimestamp })
+      .andWhere('sessionId = :agg', { agg: 'AGG' })
+      .execute();
+
+    await this.clientStatisticsRepository
+      .createQueryBuilder()
+      .delete()
+      .from(ClientStatisticsEntity)
+      .where('time < :monthCutoff', { monthCutoff: monthCutoffTimestamp })
+      .andWhere('address = :pool', { pool: 'POOL' })
+      .andWhere('clientName = :pool', { pool: 'POOL' })
+      .andWhere('sessionId = :pool', { pool: 'POOL' })
+      .execute();
   }
 
   public async getChartDataForSite(range: '1d' | '1m' = '1d') {
@@ -164,30 +201,22 @@ export class ClientStatisticsService {
 
     const since = new Date(Date.now() - diffDays * 24 * 60 * 60 * 1000);
     const limit = diffDays * 144;
-
-    const query = `
-            SELECT
-                time AS label,
-                ROUND((SUM(shares) * ${DIFFICULTY_1}) / 600) AS data
-            FROM
-                client_statistics_entity AS entry
-            WHERE
-                entry.time > ${since.getTime()} AND entry.sessionId != 'AGG'
-            GROUP BY
-                time
-            ORDER BY
-                time
-            LIMIT ${limit};
-
-    `;
-
-    const result: any[] = await this.clientStatisticsRepository.query(query);
+    const result = await this.clientStatisticsRepository
+      .createQueryBuilder('entry')
+      .select('entry.time', 'label')
+      .addSelect(`ROUND((SUM(entry.shares) * ${DIFFICULTY_1}) / 600)`, 'data')
+      .where('entry.time > :since', { since: since.getTime() })
+      .andWhere('entry.sessionId != :agg', { agg: 'AGG' })
+      .groupBy('entry.time')
+      .orderBy('entry.time', 'ASC')
+      .limit(limit)
+      .getRawMany();
 
     return result
-      .map((res) => {
-        res.label = new Date(res.label).toISOString();
-        return res;
-      })
+      .map((res) => ({
+        label: new Date(Number(res.label)).toISOString(),
+        data: res.data == null ? 0 : Number(res.data),
+      }))
       .slice(0, result.length - 1);
   }
 
@@ -231,56 +260,41 @@ export class ClientStatisticsService {
 
     const since = new Date(Date.now() - diffDays * 24 * 60 * 60 * 1000);
     const limit = diffDays * 144;
-
-    const query = `
-                SELECT
-                    time label,
-                    (SUM(shares) * ${DIFFICULTY_1}) / 600 AS data
-                FROM
-                    client_statistics_entity AS entry
-                WHERE
-                    entry.address = ? AND entry.time > ${since.getTime()}
-                GROUP BY
-                    time
-                ORDER BY
-                    time
-                LIMIT ${limit};
-
-        `;
-
-    const result = await this.clientStatisticsRepository.query(query, [
-      address,
-    ]);
+    const result = await this.clientStatisticsRepository
+      .createQueryBuilder('entry')
+      .select('entry.time', 'label')
+      .addSelect(`(SUM(entry.shares) * ${DIFFICULTY_1}) / 600`, 'data')
+      .where('entry.address = :address', { address })
+      .andWhere('entry.time > :since', { since: since.getTime() })
+      .groupBy('entry.time')
+      .orderBy('entry.time', 'ASC')
+      .limit(limit)
+      .getRawMany();
 
     return result
-      .map((res) => {
-        res.label = new Date(res.label).toISOString();
-        return res;
-      })
+      .map((res) => ({
+        label: new Date(Number(res.label)).toISOString(),
+        data: res.data == null ? 0 : Number(res.data),
+      }))
       .slice(0, result.length - 1);
   }
 
   public async getHashRateForGroup(address: string, clientName: string) {
-    const query = `
-            SELECT
-                SUM(shares) as shares
-            FROM client_statistics_entity
-            WHERE address = ? AND clientName = ?
-            GROUP BY time
-            ORDER BY time DESC
-            LIMIT 2;
-        `;
-
-    const result = await this.clientStatisticsRepository.query(query, [
-      address,
-      clientName,
-    ]);
+    const result = await this.clientStatisticsRepository
+      .createQueryBuilder('entry')
+      .select('SUM(entry.shares)', 'shares')
+      .where('entry.address = :address', { address })
+      .andWhere('entry.clientName = :clientName', { clientName })
+      .groupBy('entry.time')
+      .orderBy('entry.time', 'DESC')
+      .limit(2)
+      .getRawMany();
 
     if (result.length < 1) {
       return 0;
     }
 
-    const shares = result.reduce((sum, row) => sum + Number(row.shares), 0);
+    const shares = result.reduce((sum, row) => sum + Number(row.shares ?? 0), 0);
 
     return this.calcHashRate(shares);
   }
@@ -305,56 +319,45 @@ export class ClientStatisticsService {
 
     const since = new Date(Date.now() - diffDays * 24 * 60 * 60 * 1000);
     const limit = diffDays * 144;
-
-    const query = `
-            SELECT
-                time label,
-                (SUM(shares) * ${DIFFICULTY_1}) / 600 AS data,
-                SUM(entry.shares) AS accepted,
-                SUM(entry.rejectedJobNotFoundCount) AS rejectedJobNotFound,
-                SUM(entry.rejectedJobNotFoundDiff1) AS rejectedJobNotFoundDiff1,
-                SUM(entry.rejectedDuplicateShareCount) AS rejectedDuplicatedShare,
-                SUM(entry.rejectedDuplicateShareDiff1) AS rejectedDuplicatedShareDiff1,
-                SUM(entry.rejectedLowDifficultyShareCount) AS rejectedLowDifficultyShare,
-                SUM(entry.rejectedLowDifficultyShareDiff1) AS rejectedLowDifficultyShareDiff1
-            FROM
-                client_statistics_entity AS entry
-            WHERE
-                entry.address = ? AND entry.clientName = ? AND entry.time > ${since.getTime()}
-            GROUP BY
-                time
-            ORDER BY
-                time
-            LIMIT ${limit};
-        `;
-
-    const result = await this.clientStatisticsRepository.query(query, [
-      address,
-      clientName,
-    ]);
+    const result = await this.clientStatisticsRepository
+      .createQueryBuilder('entry')
+      .select('entry.time', 'label')
+      .addSelect(`(SUM(entry.shares) * ${DIFFICULTY_1}) / 600`, 'data')
+      .addSelect('SUM(entry.shares)', 'accepted')
+      .addSelect('SUM(entry.rejectedJobNotFoundCount)', 'rejectedJobNotFound')
+      .addSelect('SUM(entry.rejectedJobNotFoundDiff1)', 'rejectedJobNotFoundDiff1')
+      .addSelect('SUM(entry.rejectedDuplicateShareCount)', 'rejectedDuplicatedShare')
+      .addSelect('SUM(entry.rejectedDuplicateShareDiff1)', 'rejectedDuplicatedShareDiff1')
+      .addSelect('SUM(entry.rejectedLowDifficultyShareCount)', 'rejectedLowDifficultyShare')
+      .addSelect('SUM(entry.rejectedLowDifficultyShareDiff1)', 'rejectedLowDifficultyShareDiff1')
+      .where('entry.address = :address', { address })
+      .andWhere('entry.clientName = :clientName', { clientName })
+      .andWhere('entry.time > :since', { since: since.getTime() })
+      .groupBy('entry.time')
+      .orderBy('entry.time', 'ASC')
+      .limit(limit)
+      .getRawMany();
 
     const parsed = result.map((res) => ({
-      label: new Date(res.label).toISOString(),
+      label: new Date(Number(res.label)).toISOString(),
       data: res.data == null ? 0 : Number(res.data),
       accepted: Number(res.accepted ?? 0),
-      rejectedJobNotFound:
-        res.rejectedJobNotFound == null ? 0 : Number(res.rejectedJobNotFound),
-      rejectedJobNotFoundDiff1:
-        res.rejectedJobNotFoundDiff1 == null
-          ? 0
-          : Number(res.rejectedJobNotFoundDiff1),
-      rejectedDuplicatedShare:
-        res.rejectedDuplicatedShare == null
-          ? 0
-          : Number(res.rejectedDuplicatedShare),
+      rejectedJobNotFound: res.rejectedJobNotFound == null
+        ? 0
+        : Number(res.rejectedJobNotFound),
+      rejectedJobNotFoundDiff1: res.rejectedJobNotFoundDiff1 == null
+        ? 0
+        : Number(res.rejectedJobNotFoundDiff1),
+      rejectedDuplicatedShare: res.rejectedDuplicatedShare == null
+        ? 0
+        : Number(res.rejectedDuplicatedShare),
       rejectedDuplicatedShareDiff1:
         res.rejectedDuplicatedShareDiff1 == null
           ? 0
           : Number(res.rejectedDuplicatedShareDiff1),
-      rejectedLowDifficultyShare:
-        res.rejectedLowDifficultyShare == null
-          ? 0
-          : Number(res.rejectedLowDifficultyShare),
+      rejectedLowDifficultyShare: res.rejectedLowDifficultyShare == null
+        ? 0
+        : Number(res.rejectedLowDifficultyShare),
       rejectedLowDifficultyShareDiff1:
         res.rejectedLowDifficultyShareDiff1 == null
           ? 0
@@ -369,29 +372,22 @@ export class ClientStatisticsService {
     clientName: string,
     sessionId: string,
   ) {
-    const query = `
-            SELECT
-                SUM(shares) as shares
-            FROM
-                client_statistics_entity AS entry
-            WHERE
-                entry.address = ? AND entry.clientName = ? AND entry.sessionId = ?
-            GROUP BY time
-            ORDER BY time DESC
-            LIMIT 2;
-        `;
-
-    const result = await this.clientStatisticsRepository.query(query, [
-      address,
-      clientName,
-      sessionId,
-    ]);
+    const result = await this.clientStatisticsRepository
+      .createQueryBuilder('entry')
+      .select('SUM(entry.shares)', 'shares')
+      .where('entry.address = :address', { address })
+      .andWhere('entry.clientName = :clientName', { clientName })
+      .andWhere('entry.sessionId = :sessionId', { sessionId })
+      .groupBy('entry.time')
+      .orderBy('entry.time', 'DESC')
+      .limit(2)
+      .getRawMany();
 
     if (result.length < 1) {
       return 0;
     }
 
-    const shares = result.reduce((sum, row) => sum + Number(row.shares), 0);
+    const shares = result.reduce((sum, row) => sum + Number(row.shares ?? 0), 0);
 
     return this.calcHashRate(shares);
   }
@@ -403,32 +399,24 @@ export class ClientStatisticsService {
   ) {
     const yesterday = new Date(new Date().getTime() - 24 * 60 * 60 * 1000);
 
-    const query = `
-            SELECT
-                time label,
-                (SUM(shares) * ${DIFFICULTY_1}) / 600 AS data
-            FROM
-                client_statistics_entity AS entry
-            WHERE
-                entry.address = ? AND entry.clientName = ? AND entry.sessionId = ? AND entry.time > ${yesterday.getTime()}
-            GROUP BY
-                time
-            ORDER BY
-                time
-            LIMIT 144;
-        `;
-
-    const result = await this.clientStatisticsRepository.query(query, [
-      address,
-      clientName,
-      sessionId,
-    ]);
+    const result = await this.clientStatisticsRepository
+      .createQueryBuilder('entry')
+      .select('entry.time', 'label')
+      .addSelect(`(SUM(entry.shares) * ${DIFFICULTY_1}) / 600`, 'data')
+      .where('entry.address = :address', { address })
+      .andWhere('entry.clientName = :clientName', { clientName })
+      .andWhere('entry.sessionId = :sessionId', { sessionId })
+      .andWhere('entry.time > :since', { since: yesterday.getTime() })
+      .groupBy('entry.time')
+      .orderBy('entry.time', 'ASC')
+      .limit(144)
+      .getRawMany();
 
     return result
-      .map((res) => {
-        res.label = new Date(res.label).toISOString();
-        return res;
-      })
+      .map((res) => ({
+        label: new Date(Number(res.label)).toISOString(),
+        data: res.data == null ? 0 : Number(res.data),
+      }))
       .slice(0, result.length - 1);
   }
 

@@ -35,13 +35,14 @@ export class ClientService {
     }
 
     public async killDeadClients() {
-        var fiveMinutes = new Date(new Date().getTime() - (5 * 60 * 1000)).toISOString();
+        const cutoff = new Date(Date.now() - 5 * 60 * 1000);
 
         return await this.clientRepository
             .createQueryBuilder()
             .update(ClientEntity)
-            .set({ deletedAt: () => "DATETIME('now')" })
-            .where("deletedAt IS NULL AND updatedAt < DATETIME(:fiveMinutes)", { fiveMinutes })
+            .set({ deletedAt: () => 'CURRENT_TIMESTAMP' })
+            .where('deletedAt IS NULL')
+            .andWhere('updatedAt < :cutoff', { cutoff })
             .execute();
     }
 

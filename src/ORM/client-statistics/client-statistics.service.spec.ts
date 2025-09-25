@@ -1,74 +1,249 @@
+import { DataSource } from 'typeorm';
+import { DataType, newDb } from 'pg-mem';
+
+jest.setTimeout(60000);
+
+import { ClientStatisticsEntity } from './client-statistics.entity';
 import { ClientStatisticsService } from './client-statistics.service';
 
-describe('ClientStatisticsService - getChartDataForGroup', () => {
-  it('returns chart data including accepted shares aggregated over the requested range', async () => {
-    const queryMock = jest.fn().mockResolvedValue([
-      {
-        label: 1700000000000,
-        data: '123.5',
-        accepted: '4294967296',
-        rejectedJobNotFound: '1',
-        rejectedJobNotFoundDiff1: '4000',
-        rejectedDuplicatedShare: '2',
-        rejectedDuplicatedShareDiff1: '8000',
-        rejectedLowDifficultyShare: '3',
-        rejectedLowDifficultyShareDiff1: '12000',
-      },
-      {
-        label: 1700000600000,
-        data: '456.75',
-        accepted: '8589934592',
-        rejectedJobNotFound: '0',
-        rejectedJobNotFoundDiff1: '0',
-        rejectedDuplicatedShare: '1',
-        rejectedDuplicatedShareDiff1: '2000',
-        rejectedLowDifficultyShare: '4',
-        rejectedLowDifficultyShareDiff1: '16000',
-      },
-    ]);
-    const service = new ClientStatisticsService({ query: queryMock } as any);
-    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(1700003600000);
+const FIXED_NOW = new Date('2024-01-08T00:00:00Z');
 
-    try {
-      const result = await service.getChartDataForGroup('address', 'worker', '3d');
+async function createDataSource(driver: 'sqlite' | 'postgres'): Promise<DataSource> {
+  if (driver === 'sqlite') {
+    const dataSource = new DataSource({
+      type: 'sqlite',
+      database: ':memory:',
+      dropSchema: true,
+      synchronize: true,
+      entities: [ClientStatisticsEntity],
+    });
 
-      expect(queryMock).toHaveBeenCalledTimes(1);
-      const queryString = queryMock.mock.calls[0][0] as string;
-      expect(queryString).toContain('SUM(entry.shares) AS accepted');
-      expect(queryString).toContain(
-        'SUM(entry.rejectedJobNotFoundCount) AS rejectedJobNotFound',
-      );
-      expect(queryString).toContain(
-        'SUM(entry.rejectedJobNotFoundDiff1) AS rejectedJobNotFoundDiff1',
-      );
-      expect(queryString).toContain(
-        'SUM(entry.rejectedDuplicateShareCount) AS rejectedDuplicatedShare',
-      );
-      expect(queryString).toContain(
-        'SUM(entry.rejectedDuplicateShareDiff1) AS rejectedDuplicatedShareDiff1',
-      );
-      expect(queryString).toContain(
-        'SUM(entry.rejectedLowDifficultyShareCount) AS rejectedLowDifficultyShare',
-      );
-      expect(queryString).toContain(
-        'SUM(entry.rejectedLowDifficultyShareDiff1) AS rejectedLowDifficultyShareDiff1',
-      );
-      expect(queryString).toContain('LIMIT 432;');
+    await dataSource.initialize();
+    return dataSource;
+  }
 
-      expect(result).toHaveLength(1);
-      expect(result[0]).toEqual({
-        label: new Date(1700000000000).toISOString(),
-        data: 123.5,
-        accepted: 4294967296,
-        rejectedJobNotFound: 1,
-        rejectedJobNotFoundDiff1: 4000,
-        rejectedDuplicatedShare: 2,
-        rejectedDuplicatedShareDiff1: 8000,
-        rejectedLowDifficultyShare: 3,
-        rejectedLowDifficultyShareDiff1: 12000,
-      });
-    } finally {
-      nowSpy.mockRestore();
-    }
+  const db = newDb({ autoCreateForeignKeyIndices: true });
+  db.public.registerFunction({
+    name: 'current_database',
+    returns: DataType.text,
+    implementation: () => 'pg_mem',
   });
-});
+  db.public.registerFunction({
+    name: 'version',
+    returns: DataType.text,
+    implementation: () => 'pg-mem',
+  });
+
+  const dataSource = db.adapters.createTypeormDataSource({
+    type: 'postgres',
+    database: 'pg-mem',
+    synchronize: true,
+    entities: [ClientStatisticsEntity],
+  });
+
+  await dataSource.initialize();
+  return dataSource;
+}
+
+describe.each(['sqlite', 'postgres'] as const)(
+  'ClientStatisticsService portability (%s)',
+  (driver) => {
+    let dataSource: DataSource;
+    let service: ClientStatisticsService;
+    let dateNowSpy: jest.SpyInstance<number, []>;
+
+    beforeAll(async () => {
+      dataSource = await createDataSource(driver);
+      service = new ClientStatisticsService(
+        dataSource.getRepository(ClientStatisticsEntity),
+      );
+    });
+
+    afterAll(async () => {
+      await dataSource.destroy();
+    });
+
+    beforeEach(async () => {
+      dateNowSpy = jest.spyOn(Date, 'now').mockReturnValue(FIXED_NOW.getTime());
+      await dataSource.getRepository(ClientStatisticsEntity).clear();
+    });
+
+    afterEach(() => {
+      dateNowSpy.mockRestore();
+    });
+
+    it('aggregates and prunes old statistics while keeping recent data', async () => {
+      const repository = dataSource.getRepository(ClientStatisticsEntity);
+      const now = Date.now();
+      const detailCutoff = new Date(now - 7 * 24 * 60 * 60 * 1000).getTime();
+      const oldTime = detailCutoff - 60_000;
+      const recentTime = detailCutoff + 60_000;
+
+      await repository
+        .createQueryBuilder()
+        .insert()
+        .values([
+          {
+            address: 'addr1',
+            clientName: 'workerA',
+            sessionId: 'sess0001',
+            time: oldTime,
+            shares: 10,
+            acceptedCount: 1,
+            rejectedCount: 0,
+            rejectedJobNotFoundCount: 0,
+            rejectedJobNotFoundDiff1: 0,
+            rejectedDuplicateShareCount: 0,
+            rejectedDuplicateShareDiff1: 0,
+            rejectedLowDifficultyShareCount: 0,
+            rejectedLowDifficultyShareDiff1: 0,
+            createdAt: new Date(oldTime),
+            updatedAt: new Date(oldTime),
+          },
+          {
+            address: 'addr1',
+            clientName: 'workerA',
+            sessionId: 'sess0002',
+            time: oldTime,
+            shares: 20,
+            acceptedCount: 2,
+            rejectedCount: 1,
+            rejectedJobNotFoundCount: 1,
+            rejectedJobNotFoundDiff1: 1,
+            rejectedDuplicateShareCount: 2,
+            rejectedDuplicateShareDiff1: 2,
+            rejectedLowDifficultyShareCount: 3,
+            rejectedLowDifficultyShareDiff1: 3,
+            createdAt: new Date(oldTime),
+            updatedAt: new Date(oldTime),
+          },
+          {
+            address: 'addr2',
+            clientName: 'workerB',
+            sessionId: 'sess0003',
+            time: oldTime,
+            shares: 5,
+            acceptedCount: 1,
+            rejectedCount: 1,
+            rejectedJobNotFoundCount: 0,
+            rejectedJobNotFoundDiff1: 0,
+            rejectedDuplicateShareCount: 0,
+            rejectedDuplicateShareDiff1: 0,
+            rejectedLowDifficultyShareCount: 0,
+            rejectedLowDifficultyShareDiff1: 0,
+            createdAt: new Date(oldTime),
+            updatedAt: new Date(oldTime),
+          },
+          {
+            address: 'addr1',
+            clientName: 'workerA',
+            sessionId: 'sessR001',
+            time: recentTime,
+            shares: 7,
+            acceptedCount: 1,
+            rejectedCount: 0,
+            rejectedJobNotFoundCount: 0,
+            rejectedJobNotFoundDiff1: 0,
+            rejectedDuplicateShareCount: 0,
+            rejectedDuplicateShareDiff1: 0,
+            rejectedLowDifficultyShareCount: 0,
+            rejectedLowDifficultyShareDiff1: 0,
+            createdAt: new Date(recentTime),
+            updatedAt: new Date(recentTime),
+          },
+        ])
+        .execute();
+
+      await service.deleteOldStatistics();
+
+      const remaining = await repository.find({
+        order: { address: 'ASC', sessionId: 'ASC', time: 'ASC' },
+        withDeleted: true,
+      });
+
+      const poolAggregate = remaining.find(
+        (row) =>
+          row.address === 'POOL' &&
+          row.clientName === 'POOL' &&
+          row.sessionId === 'POOL',
+      );
+      const workerAggregate = remaining.filter(
+        (row) => row.sessionId === 'AGG',
+      );
+      const recentRow = remaining.find(
+        (row) => row.sessionId === 'sessR001',
+      );
+      const staleSessions = remaining.filter((row) =>
+        ['sess0001', 'sess0002', 'sess0003'].includes(row.sessionId),
+      );
+
+      expect(poolAggregate).toBeDefined();
+      expect(poolAggregate?.time).toBe(oldTime);
+      expect(poolAggregate?.shares).toBe(35);
+      expect(workerAggregate).toHaveLength(2);
+      expect(workerAggregate.map((row) => row.address).sort()).toEqual([
+        'addr1',
+        'addr2',
+      ]);
+      const addr1Aggregate = workerAggregate.find(
+        (row) => row.address === 'addr1',
+      );
+      expect(addr1Aggregate?.shares).toBe(30);
+      expect(addr1Aggregate?.acceptedCount).toBe(3);
+      expect(recentRow).toBeDefined();
+      expect(staleSessions).toHaveLength(0);
+    });
+
+    it('provides chart data without relying on sqlite syntax', async () => {
+      const repository = dataSource.getRepository(ClientStatisticsEntity);
+      const now = Date.now();
+      const timestamps = [
+        now - 3 * 60 * 1000,
+        now - 2 * 60 * 1000,
+        now - 60 * 1000,
+      ];
+
+      await repository
+        .createQueryBuilder()
+        .insert()
+        .values(
+          timestamps.map((time) => ({
+            address: 'chart-addr',
+            clientName: 'chart-worker',
+            sessionId: 'chart001',
+            time,
+            shares: 1,
+            acceptedCount: 1,
+            rejectedCount: 0,
+            rejectedJobNotFoundCount: 0,
+            rejectedJobNotFoundDiff1: 0,
+            rejectedDuplicateShareCount: 0,
+            rejectedDuplicateShareDiff1: 0,
+            rejectedLowDifficultyShareCount: 0,
+            rejectedLowDifficultyShareDiff1: 0,
+            createdAt: new Date(time),
+            updatedAt: new Date(time),
+          })),
+        )
+        .execute();
+
+      const chartData = await service.getChartDataForGroup(
+        'chart-addr',
+        'chart-worker',
+        '1d',
+      );
+      const hashRate = await service.getHashRateForSession(
+        'chart-addr',
+        'chart-worker',
+        'chart001',
+      );
+
+      expect(chartData.length).toBeGreaterThan(0);
+      chartData.forEach((point) => {
+        expect(typeof point.label).toBe('string');
+        expect(typeof point.data).toBe('number');
+      });
+      expect(hashRate).toBeGreaterThan(0);
+    });
+  },
+);
