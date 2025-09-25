@@ -1,14 +1,31 @@
 import { ValueTransformer } from 'typeorm';
 
-export class DateTimeTransformer implements ValueTransformer {
-    to(value: Date): any {
-        // Convert the local time to UTC before saving to the database
-        const utcTime = value?.toLocaleString();
-        return utcTime;
+function normalizeDate(value: Date | string): Date {
+    if (value instanceof Date) {
+        return value;
     }
 
-    from(value: any): Date {
-        // Convert the UTC time from the database to the local time zone
-        return value;
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+        throw new Error(`Invalid date value received: ${value}`);
+    }
+    return date;
+}
+
+export class DateTimeTransformer implements ValueTransformer {
+    to(value: Date | string | null | undefined): Date | null | undefined {
+        if (value === null || value === undefined) {
+            return value === undefined ? undefined : null;
+        }
+
+        return normalizeDate(value);
+    }
+
+    from(value: Date | string | null | undefined): Date | null | undefined {
+        if (value === null || value === undefined) {
+            return value === undefined ? undefined : null;
+        }
+
+        return normalizeDate(value);
     }
 }

@@ -149,7 +149,16 @@ export class ClientService {
             .where('client.address = :address AND client.clientName = :clientName', { address, clientName })
             .orderBy('client.firstSeen', 'ASC')
             .getOne();
-        return result?.firstSeen || result?.startTime || null;
+        if (!result) {
+            return null;
+        }
+
+        const firstSeen = result.firstSeen ?? result.startTime;
+        if (!firstSeen) {
+            return null;
+        }
+
+        return firstSeen instanceof Date ? firstSeen : new Date(firstSeen);
     }
 
     public async getFirstSeenIfRecent(address: string, clientName: string, minutes = 30): Promise<Date | null> {
@@ -164,10 +173,15 @@ export class ClientService {
             return null;
         }
 
-        const lastActiveStr: any = result.deletedAt ?? result.updatedAt;
-        const lastActive = lastActiveStr instanceof Date ? lastActiveStr : new Date(lastActiveStr);
+        const lastActiveRaw: any = result.deletedAt ?? result.updatedAt;
+        const lastActive = lastActiveRaw instanceof Date ? lastActiveRaw : new Date(lastActiveRaw);
         if (lastActive >= cutoff) {
-            return result.firstSeen || result.startTime;
+            const seen = result.firstSeen ?? result.startTime;
+            if (!seen) {
+                return null;
+            }
+
+            return seen instanceof Date ? seen : new Date(seen);
         }
         return null;
     }
