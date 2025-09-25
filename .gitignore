@@ -41,6 +41,8 @@ full-setup/public-pool-*.env
 #DB
 **.sqlite**
 ./full-setup/data/*
+db/pg/*
+!db/pg/.gitkeep
 
 #https
 **.pem

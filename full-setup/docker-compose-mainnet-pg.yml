@@ -1,0 +1,69 @@
+version: '3.8'
+
+services:
+  bitcoin:
+    container_name: bitcoin
+    image: my-bitcoin-image:latest
+    restart: unless-stopped
+    stop_grace_period: 30s
+    networks:
+      - bitcoin
+    ports:
+      - "127.0.0.1:8332:8332/tcp"
+      - "0.0.0.0:8333:8333/tcp"
+    command: >
+      -printtoconsole
+      -datadir=/app/data
+    volumes:
+      - "./data/mainnet/bitcoin:/app/data"
+      - "./bitcoin-mainnet.conf:/app/data/bitcoin.conf:ro"
+
+  postgres:
+    container_name: public-pool-postgres
+    image: postgres:15-alpine
+    restart: unless-stopped
+    stop_grace_period: 30s
+    networks:
+      - bitcoin
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-postgres} -d ${PG_DATABASE:-public_pool}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    environment:
+      POSTGRES_DB: ${PG_DATABASE:-public_pool}
+      POSTGRES_USER: ${PG_USER:-postgres}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-postgres}
+    volumes:
+      - "../db/pg/mainnet:/var/lib/postgresql/data"
+
+  public-pool:
+    container_name: public-pool
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    stop_grace_period: 30s
+    networks:
+      - bitcoin
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "0.0.0.0:3333:3333/tcp"
+      - "0.0.0.0:3334:3334/tcp"
+    volumes:
+      - "./blitzpool.env:/public-pool/.env:ro"
+      - "/home/blitzpool/public-pool-keys:/app/keys"
+    environment:
+      - NODE_ENV=production
+      - DB_TYPE=postgres
+      - PG_HOST=postgres
+      - PG_PORT=5432
+      - PG_USER=${PG_USER:-postgres}
+      - PG_PASSWORD=${PG_PASSWORD:-postgres}
+      - PG_DATABASE=${PG_DATABASE:-public_pool}
+      - PG_SSL=${PG_SSL:-false}
+
+networks:
+  bitcoin:
