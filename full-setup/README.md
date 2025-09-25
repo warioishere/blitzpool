@@ -65,6 +65,20 @@ To stop the setup use:
 docker compose -f docker-compose-mainnet.yml down
 ```
 
+## Migrating existing SQLite data to Postgres
+
+If you are upgrading an existing BlitzPool deployment from SQLite to Postgres, stop the stack, back up `DB/public-pool.sqlite`,
+and restore your Postgres database from a snapshot if one exists. Run the schema migrations (the full-setup compose files enable
+`DB_RUN_MIGRATIONS=true` automatically) and then execute the migration script from the repository root:
+
+```bash
+PG_HOST=localhost PG_PORT=5432 PG_USER=pool PG_PASSWORD=secret PG_DATABASE=public_pool \
+npm run migrate:sqlite-to-pg
+```
+
+Add `--dry-run` first if you want to verify the connection without writing data. Should the migration encounter an error, drop
+the Postgres database and restore from the backup you created before rerunning the script.
+
 # Regtest
 
 After running the `regtest` setup a couple of blocks need to be generated:
