@@ -89,24 +89,47 @@ BlitzPool enriches peer information using the free [ip-api.com](https://ip-api.c
 - Desired share rate per worker can be tuned with `TARGET_SHARES_PER_MINUTE` (default `6`)
 - How often miners are checked for new difficulty can be set via `DIFFICULTY_CHECK_INTERVAL_MS` (default `60000` ms)
 
-## 🗃️ Database migration to Postgres
+## 🗃️ Running BlitzPool with Postgres
 
-SQLite remains a supported backend for local development, but production deployments can now run on Postgres for improved concurrency and durability. Existing pools can migrate their on-disk SQLite database by following these steps:
+SQLite continues to be the default for development and lightweight installs. To stay on SQLite, keep `DB_TYPE` unset (or explicitly set it to `sqlite`) and continue mounting `./DB/public-pool.sqlite` inside your containers. No schema changes are required for this path.
 
-1. **Back up your data** – copy `DB/public-pool.sqlite` and take a Postgres snapshot (if it already contains data) so you can roll back if anything goes wrong.
-2. **Provision Postgres and run the schema migrations** – the Docker Compose stacks set `DB_RUN_MIGRATIONS=true`, or you can run the Nest app once with that environment variable enabled to bootstrap the schema before copying any rows.
+For production we recommend switching to Postgres for better concurrency, durability, and operational tooling. Two ready-made Docker Compose stacks are provided:
+
+- `docker-compose-mainnet-pg.yml`
+- `docker-compose-mainnet-pg_pm2.yml`
+
+Each stack provisions a managed `postgres` service, waits for it to become healthy, and mounts persistent data under `./db/pg/mainnet`. The Postgres credentials are injected via environment variables (`PG_HOST`, `PG_PORT`, `PG_USER`, `PG_PASSWORD`, `PG_DATABASE`, `PG_SSL`).
+
+### Prerequisites
+
+1. Ensure Docker volumes under `db/pg/<network>` exist (`./full-setup/prepare.sh` will create them automatically).
+2. Provide Postgres credentials via `.env`, `docker compose --env-file`, or Docker secrets.
+3. Run the Nest migrations at least once (the compose stacks set `DB_RUN_MIGRATIONS=true` to run them automatically on boot).
+
+### Selecting the database driver
+
+- **Production Postgres:** set `DB_TYPE=postgres` and populate the `PG_*` variables. The app disables `synchronize`, applies migrations from `dist/migrations`, and skips SQLite-specific PRAGMAs.
+- **Local development/tests:** keep `DB_TYPE` empty or `sqlite` to continue using the bundled SQLite database at `./DB/public-pool.sqlite`. Jest tests automatically exercise both drivers where applicable.
+- You can switch between drivers by updating the env file and restarting the service. Existing SQLite installs can remain on SQLite indefinitely; no forced migration is required.
+
+## 🔄 Migrating existing SQLite data to Postgres
+
+Existing pools can migrate their on-disk SQLite database by following these steps:
+
+1. **Plan downtime and back up data.** Stop the pool to prevent concurrent writes, copy `DB/public-pool.sqlite`, and (if Postgres already contains data) take a database snapshot so you can roll back cleanly.
+2. **Provision Postgres and run the schema migrations.** The Docker Compose stacks set `DB_RUN_MIGRATIONS=true`, or you can run the Nest app once with that environment variable enabled to bootstrap the schema before copying any rows.
 3. **Execute a dry run** to confirm connectivity and row counts without writing data:
    ```bash
    PG_HOST=localhost PG_PORT=5432 PG_USER=pool PG_PASSWORD=secret PG_DATABASE=public_pool \
    npm run migrate:sqlite-to-pg -- --dry-run
    ```
-4. **Run the live migration** after stopping the pool (to avoid concurrent writes). The script copies each table in batches, preserves timestamps, and resets Postgres sequences so new rows continue incrementing correctly:
+4. **Run the live migration** after confirming the dry run. The script copies each table in dependency order, preserves timestamps, and resets Postgres sequences so new rows continue incrementing correctly:
    ```bash
    npm run migrate:sqlite-to-pg -- --batch-size 1000
    ```
    Use `--sqlite <path>` if your SQLite file lives somewhere other than the default `./DB/public-pool.sqlite`.
 
-If the migration fails midway, drop/restore the Postgres database from the backup taken in step 1 and re-run the script. The SQLite source is never modified, so replays are safe once the target has been reset. After a successful run, point your deployment at the new Postgres credentials (`DB_TYPE=postgres`, `PG_*` variables) and start the services.
+If the migration fails midway, drop/restore the Postgres database from the backups taken in step 1 and re-run the script. The SQLite source is never modified, so replays are safe once the target has been reset. After a successful run, point your deployment at the new Postgres credentials (`DB_TYPE=postgres`, `PG_*` variables) and start the services. The resulting Postgres data will live under `db/pg/<network>` when using the provided compose stacks.
 
 ## API
 
