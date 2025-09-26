@@ -72,7 +72,7 @@ or
 docker compose -f docker-compose-mainnet-pg.yml down
 ```
 
-Postgres data persists under `../db/pg/<network>`; SQLite remains stored at `../DB/public-pool.sqlite` if you stay on the legacy backend.
+Postgres data persists under `./data/<network>/public-pool/pg`; SQLite remains stored at `../DB/public-pool.sqlite` if you stay on the legacy backend.
 
 ## Choosing your database backend
 
@@ -90,6 +90,8 @@ npm run migrate:sqlite-to-pg -- --batch-size 1000
 ```
 
 Add `--dry-run` first if you want to verify the connection without writing data. Should the migration encounter an error, drop the Postgres database and restore from the backups you created before rerunning the script.
+
+Deployments that were already using a Postgres container under `../db/pg/<network>` should relocate or bind-mount their existing data into `./data/<network>/public-pool/pg` before bringing the stack back online.
 
 # Regtest
 

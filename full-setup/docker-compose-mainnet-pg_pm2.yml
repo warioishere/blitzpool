@@ -35,7 +35,7 @@ services:
       POSTGRES_USER: ${PG_USER:-postgres}
       POSTGRES_PASSWORD: ${PG_PASSWORD:-postgres}
     volumes:
-      - "../db/pg/mainnet:/var/lib/postgresql/data"
+      - "./data/mainnet/public-pool/pg:/var/lib/postgresql/data"
 
   public-pool:
     container_name: public-pool

@@ -98,11 +98,11 @@ For production we recommend switching to Postgres for better concurrency, durabi
 - `docker-compose-mainnet-pg.yml`
 - `docker-compose-mainnet-pg_pm2.yml`
 
-Each stack provisions a managed `postgres` service, waits for it to become healthy, and mounts persistent data under `./db/pg/mainnet`. The Postgres credentials are injected via environment variables (`PG_HOST`, `PG_PORT`, `PG_USER`, `PG_PASSWORD`, `PG_DATABASE`, `PG_SSL`).
+Each stack provisions a managed `postgres` service, waits for it to become healthy, and mounts persistent data under `./full-setup/data/mainnet/public-pool/pg`. The Postgres credentials are injected via environment variables (`PG_HOST`, `PG_PORT`, `PG_USER`, `PG_PASSWORD`, `PG_DATABASE`, `PG_SSL`).
 
 ### Prerequisites
 
-1. Ensure Docker volumes under `db/pg/<network>` exist (`./full-setup/prepare.sh` will create them automatically).
+1. Ensure Docker volumes under `full-setup/data/<network>/public-pool/pg` exist (`./full-setup/prepare.sh` will create them automatically).
 2. Provide Postgres credentials via `.env`, `docker compose --env-file`, or Docker secrets.
 3. Run the Nest migrations at least once (the compose stacks set `DB_RUN_MIGRATIONS=true` to run them automatically on boot).
 
@@ -129,7 +129,7 @@ Existing pools can migrate their on-disk SQLite database by following these step
    ```
    Use `--sqlite <path>` if your SQLite file lives somewhere other than the default `./DB/public-pool.sqlite`.
 
-If the migration fails midway, drop/restore the Postgres database from the backups taken in step 1 and re-run the script. The SQLite source is never modified, so replays are safe once the target has been reset. After a successful run, point your deployment at the new Postgres credentials (`DB_TYPE=postgres`, `PG_*` variables) and start the services. The resulting Postgres data will live under `db/pg/<network>` when using the provided compose stacks.
+If the migration fails midway, drop/restore the Postgres database from the backups taken in step 1 and re-run the script. The SQLite source is never modified, so replays are safe once the target has been reset. After a successful run, point your deployment at the new Postgres credentials (`DB_TYPE=postgres`, `PG_*` variables) and start the services. The resulting Postgres data will live under `full-setup/data/<network>/public-pool/pg` when using the provided compose stacks. Operators who previously mounted `db/pg/<network>` should move or copy their existing data into the new `full-setup/data/<network>/public-pool/pg` path before restarting.
 
 ## API
 

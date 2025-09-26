@@ -2,5 +2,5 @@
 
 mkdir -p data/{mainnet,testnet}/bitcoin
 mkdir -p data/{mainnet,testnet}/public-pool
-mkdir -p ../db/pg/{mainnet,testnet}
+mkdir -p data/{mainnet,testnet}/public-pool/pg
 
