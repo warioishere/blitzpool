@@ -44,6 +44,27 @@ export interface MigrationOptions {
     batchSize?: number;
     dryRun?: boolean;
     skipSequenceReset?: boolean;
+    skipIfTargetHasData?: boolean;
+}
+
+export type MigrationSkipReason = 'target-not-empty';
+
+export interface MigrationSummary {
+    didRun: boolean;
+    migratedRows: number;
+    skipReason?: MigrationSkipReason;
+}
+
+export interface AutomaticMigrationOptions extends MigrationOptions {
+    sqlitePath?: string;
+    logger?: MigrationLogger;
+}
+
+export type AutomaticMigrationSkipReason = MigrationSkipReason | 'sqlite-not-found';
+
+export interface AutomaticMigrationSummary extends Omit<MigrationSummary, 'skipReason'> {
+    sqlitePath: string;
+    skipReason?: AutomaticMigrationSkipReason;
 }
 
 interface PostgresConnectionOptions {
@@ -117,7 +138,7 @@ async function migrateEntity(
     batchSize: number,
     dryRun: boolean,
     logger: MigrationLogger,
-): Promise<void> {
+): Promise<number> {
     const sqliteMetadata = sqliteDataSource.getMetadata(entity);
     const postgresMetadata = postgresDataSource.getMetadata(entity);
     const tableLabel = postgresMetadata.tableName;
@@ -133,7 +154,7 @@ async function migrateEntity(
 
     if (total === 0) {
         logger.info(`[${tableLabel}] No rows found, skipping.`);
-        return;
+        return 0;
     }
 
     logger.info(`[${tableLabel}] Migrating ${total} rows${dryRun ? ' (dry-run)' : ''}...`);
@@ -168,6 +189,8 @@ async function migrateEntity(
 
         logger.info(`[${tableLabel}] Processed ${migrated}/${total} rows.`);
     }
+
+    return migrated;
 }
 
 async function resetSequences(
@@ -256,15 +279,37 @@ async function resetSequences(
     }
 }
 
+async function targetHasExistingData(
+    postgresDataSource: DataSource,
+): Promise<boolean> {
+    for (const entity of MIGRATION_ENTITIES) {
+        const metadata = postgresDataSource.getMetadata(entity);
+        const repository = postgresDataSource.getRepository(entity);
+        const query = repository.createQueryBuilder('row');
+        if (metadata.deleteDateColumn) {
+            query.withDeleted();
+        }
+
+        const count = await query.clone().limit(1).getCount();
+
+        if (count > 0) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 export async function migrateSqliteToPostgres(
     sqliteDataSource: DataSource,
     postgresDataSource: DataSource,
     options: MigrationOptions = {},
     logger: MigrationLogger = defaultLogger,
-): Promise<void> {
+): Promise<MigrationSummary> {
     const batchSize = normalizeBatchSize(options.batchSize);
     const dryRun = options.dryRun ?? false;
     const skipSequenceReset = options.skipSequenceReset ?? false;
+    const skipIfTargetHasData = options.skipIfTargetHasData ?? false;
 
     if (!sqliteDataSource.isInitialized) {
         await sqliteDataSource.initialize();
@@ -274,12 +319,29 @@ export async function migrateSqliteToPostgres(
         await postgresDataSource.initialize();
     }
 
+    if (!dryRun && skipIfTargetHasData) {
+        const alreadyHasData = await targetHasExistingData(postgresDataSource);
+        if (alreadyHasData) {
+            logger.info('Target Postgres database already contains data. Skipping migration.');
+            return { didRun: false, migratedRows: 0, skipReason: 'target-not-empty' };
+        }
+    }
+
     logger.info(
         `Starting migration from SQLite to Postgres using batch size ${batchSize}${dryRun ? ' (dry-run mode)' : ''}.`,
     );
 
+    let totalMigrated = 0;
+
     for (const entity of MIGRATION_ENTITIES) {
-        await migrateEntity(sqliteDataSource, postgresDataSource, entity, batchSize, dryRun, logger);
+        totalMigrated += await migrateEntity(
+            sqliteDataSource,
+            postgresDataSource,
+            entity,
+            batchSize,
+            dryRun,
+            logger,
+        );
     }
 
     if (!dryRun && !skipSequenceReset) {
@@ -291,6 +353,8 @@ export async function migrateSqliteToPostgres(
     }
 
     logger.info('Migration finished.');
+
+    return { didRun: true, migratedRows: totalMigrated };
 }
 
 function parseArgs(argv: string[]): ArgMap {
@@ -399,13 +463,50 @@ function printUsage(): void {
         '  --batch-size <number>  Number of rows per batch when copying data (default: 500).\n' +
         '  --dry-run              Read from SQLite but skip writes to Postgres.\n' +
         '  --skip-sequence-reset  Migrate data but do not adjust Postgres sequences afterwards.\n' +
+        '  --skip-if-target-has-data  Skip migrating when the Postgres database already contains rows.\n' +
         '  --help                 Show this message.\n\n' +
         'Environment variables:\n' +
         '  PG_HOST, PG_PORT, PG_USER, PG_PASSWORD, PG_DATABASE, PG_SSL (optional).\n');
 }
 
-async function runCli(): Promise<void> {
-    const args = parseArgs(process.argv.slice(2));
+export async function runAutomaticSqliteToPostgresMigration(
+    postgresDataSource: DataSource,
+    options: AutomaticMigrationOptions = {},
+): Promise<AutomaticMigrationSummary> {
+    const logger = options.logger ?? defaultLogger;
+    const sqlitePath = options.sqlitePath ?? resolveSqlitePath({});
+    const { logger: _ignoredLogger, sqlitePath: _ignoredPath, ...migrationOptions } = options;
+
+    if (!existsSync(sqlitePath)) {
+        logger.info(`SQLite database not found at path ${sqlitePath}. Skipping automatic migration.`);
+        return { didRun: false, migratedRows: 0, skipReason: 'sqlite-not-found', sqlitePath };
+    }
+
+    const sqliteDataSource = new DataSource({
+        type: 'sqlite',
+        database: sqlitePath,
+        entities: [...MIGRATION_ENTITIES],
+        logging: false,
+    });
+
+    try {
+        const summary = await migrateSqliteToPostgres(
+            sqliteDataSource,
+            postgresDataSource,
+            { ...migrationOptions, skipIfTargetHasData: options.skipIfTargetHasData ?? true },
+            logger,
+        );
+
+        return { ...summary, sqlitePath };
+    } finally {
+        if (sqliteDataSource.isInitialized) {
+            await sqliteDataSource.destroy();
+        }
+    }
+}
+
+export async function runMigrationCli(argv: string[] = process.argv.slice(2)): Promise<void> {
+    const args = parseArgs(argv);
 
     if (shouldShowHelp(args)) {
         printUsage();
@@ -417,6 +518,9 @@ async function runCli(): Promise<void> {
     const batchSizeArg = args['batch-size'] ?? args.batchsize;
     const batchSize = normalizeBatchSize(
         typeof batchSizeArg === 'string' ? Number.parseInt(batchSizeArg, 10) : undefined,
+    );
+    const skipIfTargetHasData = Boolean(
+        args['skip-if-target-has-data'] ?? args.skipiftargethasdata,
     );
 
     const sqlitePath = resolveSqlitePath(args);
@@ -447,7 +551,16 @@ async function runCli(): Promise<void> {
     });
 
     try {
-        await migrateSqliteToPostgres(sqliteDataSource, postgresDataSource, { batchSize, dryRun, skipSequenceReset });
+        const summary = await migrateSqliteToPostgres(
+            sqliteDataSource,
+            postgresDataSource,
+            { batchSize, dryRun, skipSequenceReset, skipIfTargetHasData },
+        );
+
+        if (!summary.didRun && summary.skipReason === 'target-not-empty') {
+            console.log('Skipped migration because the Postgres database already contains data.');
+        }
+        console.log(`Processed ${summary.migratedRows} rows${dryRun ? ' (dry-run)' : ''}.`);
     } finally {
         if (sqliteDataSource.isInitialized) {
             await sqliteDataSource.destroy();
@@ -460,7 +573,7 @@ async function runCli(): Promise<void> {
 }
 
 if (require.main === module) {
-    runCli().catch((error) => {
+    runMigrationCli().catch((error) => {
         console.error('Migration failed:', error);
         process.exitCode = 1;
     });

@@ -82,7 +82,7 @@ Postgres data persists under `./data/<network>/public-pool/pg`; SQLite remains s
 
 ## Migrating existing SQLite data to Postgres
 
-If you are upgrading an existing BlitzPool deployment from SQLite to Postgres, stop the stack, back up `DB/public-pool.sqlite`, and take a Postgres snapshot. Run the schema migrations (the Postgres compose files enable `DB_RUN_MIGRATIONS=true` automatically) and then execute the migration script from the repository root:
+If you are upgrading an existing BlitzPool deployment from SQLite to Postgres, stop the stack, back up `DB/public-pool.sqlite`, and take a Postgres snapshot. With `DB_RUN_MIGRATIONS=true` the Postgres compose files now run both the TypeORM schema migrations and the SQLite→Postgres data copy automatically at startup, skipping themselves if the database already contains rows. Set `DB_MIGRATE_SQLITE_ON_BOOT=false` if you prefer to run the migration script manually:
 
 ```bash
 PG_HOST=localhost PG_PORT=5432 PG_USER=pool PG_PASSWORD=secret PG_DATABASE=public_pool \

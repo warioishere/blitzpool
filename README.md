@@ -106,6 +106,8 @@ Each stack provisions a managed `postgres` service, waits for it to become healt
 2. Provide Postgres credentials via `.env`, `docker compose --env-file`, or Docker secrets.
 3. Run the Nest migrations at least once (the compose stacks set `DB_RUN_MIGRATIONS=true` to run them automatically on boot).
 
+When `DB_TYPE=postgres` and `DB_RUN_MIGRATIONS=true`, BlitzPool now runs both the TypeORM schema migrations and the SQLite→Postgres data copy on startup. The automatic copy skips itself if the Postgres tables already contain rows or the SQLite file is missing. Set `DB_MIGRATE_SQLITE_ON_BOOT=false` if you prefer to invoke `npm run migrate:sqlite-to-pg` manually.
+
 ### Selecting the database driver
 
 - **Production Postgres:** set `DB_TYPE=postgres` and populate the `PG_*` variables. The app disables `synchronize`, applies migrations from `dist/migrations`, and skips SQLite-specific PRAGMAs.

@@ -18,7 +18,11 @@ import {
     MIGRATION_ENTITIES,
     MigrationLogger,
     migrateSqliteToPostgres,
+    runAutomaticSqliteToPostgresMigration,
 } from '../../scripts/migrate-sqlite-to-pg';
+import { promises as fs } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 
 describe('migrateSqliteToPostgres', () => {
     let sqliteDataSource: DataSource;
@@ -183,6 +187,47 @@ describe('migrateSqliteToPostgres', () => {
         await telegramRepo.softDelete(telegram.id);
     }
 
+    async function computeEntityCounts(dataSource: DataSource): Promise<Map<string, number>> {
+        const counts = new Map<string, number>();
+
+        for (const entity of MIGRATION_ENTITIES) {
+            const metadata = dataSource.getMetadata(entity);
+            const query = dataSource.getRepository(entity).createQueryBuilder('row');
+            if (metadata.deleteDateColumn) {
+                query.withDeleted();
+            }
+
+            const count = await query.getCount();
+            counts.set(metadata.tableName, count);
+        }
+
+        return counts;
+    }
+
+    async function createFileBackedSqliteDatabase(): Promise<{ path: string; cleanup: () => Promise<void>; counts: Map<string, number> }> {
+        const directory = await fs.mkdtemp(join(tmpdir(), 'blitzpool-sqlite-'));
+        const databasePath = join(directory, 'public-pool.sqlite');
+        const fileDataSource = new DataSource({
+            type: 'sqlite',
+            database: databasePath,
+            entities: [...MIGRATION_ENTITIES],
+            synchronize: true,
+        });
+
+        await fileDataSource.initialize();
+        await seedSqliteDatabase(fileDataSource);
+        const counts = await computeEntityCounts(fileDataSource);
+        await fileDataSource.destroy();
+
+        return {
+            path: databasePath,
+            counts,
+            cleanup: async () => {
+                await fs.rm(directory, { recursive: true, force: true });
+            },
+        };
+    }
+
     beforeEach(async () => {
         sqliteDataSource = await createSqliteDataSource();
         postgresDataSource = await createPostgresDataSource();
@@ -201,7 +246,12 @@ describe('migrateSqliteToPostgres', () => {
     it('copies all rows to Postgres and maintains generated sequences', async () => {
         const logger = new MemoryLogger();
 
-        await migrateSqliteToPostgres(sqliteDataSource, postgresDataSource, { batchSize: 2, skipSequenceReset: true }, logger);
+        const summary = await migrateSqliteToPostgres(
+            sqliteDataSource,
+            postgresDataSource,
+            { batchSize: 2, skipSequenceReset: true },
+            logger,
+        );
 
         for (const entity of MIGRATION_ENTITIES) {
             const sqliteMetadata = sqliteDataSource.getMetadata(entity);
@@ -249,12 +299,19 @@ describe('migrateSqliteToPostgres', () => {
 
         expect(logger.errors).toHaveLength(0);
         expect(logger.warnings).toHaveLength(0);
+        expect(summary.didRun).toBe(true);
+        expect(summary.migratedRows).toBeGreaterThan(0);
     });
 
     it('supports dry-run mode without modifying Postgres', async () => {
         const logger = new MemoryLogger();
 
-        await migrateSqliteToPostgres(sqliteDataSource, postgresDataSource, { dryRun: true, skipSequenceReset: true }, logger);
+        const summary = await migrateSqliteToPostgres(
+            sqliteDataSource,
+            postgresDataSource,
+            { dryRun: true, skipSequenceReset: true },
+            logger,
+        );
 
         for (const entity of MIGRATION_ENTITIES) {
             const count = await postgresDataSource.getRepository(entity).count();
@@ -262,5 +319,73 @@ describe('migrateSqliteToPostgres', () => {
         }
 
         expect(logger.errors).toHaveLength(0);
+        expect(summary.didRun).toBe(true);
+        expect(summary.migratedRows).toBeGreaterThan(0);
+        expect(summary.skipReason).toBeUndefined();
+    });
+
+    describe('runAutomaticSqliteToPostgresMigration', () => {
+        it('copies rows when the target is empty and skips once populated', async () => {
+            const logger = new MemoryLogger();
+            const { path, cleanup, counts: sqliteCounts } = await createFileBackedSqliteDatabase();
+
+            try {
+                const firstRun = await runAutomaticSqliteToPostgresMigration(postgresDataSource, {
+                    sqlitePath: path,
+                    logger,
+                });
+
+                expect(firstRun.didRun).toBe(true);
+                expect(firstRun.skipReason).toBeUndefined();
+                expect(firstRun.migratedRows).toBeGreaterThan(0);
+
+                const postgresCounts = await computeEntityCounts(postgresDataSource);
+                for (const [tableName, expectedCount] of sqliteCounts.entries()) {
+                    expect(postgresCounts.get(tableName)).toBe(expectedCount);
+                }
+
+                const secondRun = await runAutomaticSqliteToPostgresMigration(postgresDataSource, {
+                    sqlitePath: path,
+                    logger,
+                });
+
+                expect(secondRun.didRun).toBe(false);
+                expect(secondRun.skipReason).toBe('target-not-empty');
+                expect(secondRun.migratedRows).toBe(0);
+
+                const postSecondCounts = await computeEntityCounts(postgresDataSource);
+                for (const [tableName, expectedCount] of sqliteCounts.entries()) {
+                    expect(postSecondCounts.get(tableName)).toBe(expectedCount);
+                }
+
+                const clientTable = postgresDataSource.getMetadata(ClientEntity).tableName;
+                expect(postSecondCounts.get(clientTable)).toBe(sqliteCounts.get(clientTable));
+
+                expect(logger.errors).toHaveLength(0);
+            } finally {
+                await cleanup();
+            }
+        });
+
+        it('skips automatically when the SQLite file is missing', async () => {
+            const logger = new MemoryLogger();
+            const missingPath = join(tmpdir(), 'non-existent', 'public-pool.sqlite');
+
+            const summary = await runAutomaticSqliteToPostgresMigration(postgresDataSource, {
+                sqlitePath: missingPath,
+                logger,
+            });
+
+            expect(summary.didRun).toBe(false);
+            expect(summary.skipReason).toBe('sqlite-not-found');
+            expect(summary.migratedRows).toBe(0);
+
+            for (const entity of MIGRATION_ENTITIES) {
+                const count = await postgresDataSource.getRepository(entity).count();
+                expect(count).toBe(0);
+            }
+
+            expect(logger.errors).toHaveLength(0);
+        });
     });
 });
