@@ -12,6 +12,8 @@ import { ExternalSharesEntity } from '../ORM/external-shares/external-shares.ent
 import { PoolRejectedStatisticsEntity } from '../ORM/pool-rejected-statistics/pool-rejected-statistics.entity';
 import { PoolShareStatisticsEntity } from '../ORM/pool-share-statistics/pool-share-statistics.entity';
 import { TelegramSubscriptionsEntity } from '../ORM/telegram-subscriptions/telegram-subscriptions.entity';
+import { InitialSchema1700000000000 } from '../migrations/1700000000000-InitialSchema';
+import { UseTimestamptzForDates1707352800000 } from '../migrations/1707352800000-UseTimestamptzForDates';
 import {
     MIGRATION_ENTITIES,
     MigrationLogger,
@@ -82,11 +84,14 @@ describe('migrateSqliteToPostgres', () => {
 
         const dataSource = db.adapters.createTypeormDataSource({
             type: 'postgres',
+            database: 'pg-mem',
             entities: [...MIGRATION_ENTITIES],
-            synchronize: true,
+            migrations: [InitialSchema1700000000000, UseTimestamptzForDates1707352800000],
+            synchronize: false,
         });
 
         await dataSource.initialize();
+        await dataSource.runMigrations();
         return dataSource;
     }
 

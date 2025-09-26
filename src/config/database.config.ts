@@ -61,6 +61,8 @@ export function buildDatabaseConfig(config: ConfigService): TypeOrmModuleOptions
 
         const runMigrations = parseOptionalBoolean(config.get('DB_RUN_MIGRATIONS'));
 
+        const sourceMigrations = join(__dirname, '..', 'migrations', '[0-9]*.{js,ts}');
+        const compiledMigrations = join(__dirname, '..', 'src', 'migrations', '[0-9]*.{js,ts}');
         const options: TypeOrmModuleOptions = {
             type: 'postgres',
             host: config.get<string>('PG_HOST', 'localhost'),
@@ -71,7 +73,7 @@ export function buildDatabaseConfig(config: ConfigService): TypeOrmModuleOptions
             synchronize: synchronizeOverride ?? false,
             autoLoadEntities: true,
             logging: loggingEnabled,
-            migrations: [join(__dirname, '..', 'migrations', '*.js')],
+            migrations: [sourceMigrations, compiledMigrations],
             ...(ssl !== undefined ? { ssl } : {}),
             ...(runMigrations !== undefined ? { migrationsRun: runMigrations } : {}),
         };

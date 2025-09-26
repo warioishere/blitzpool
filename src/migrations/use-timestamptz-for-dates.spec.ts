@@ -10,6 +10,7 @@ import { ExternalSharesEntity } from '../ORM/external-shares/external-shares.ent
 import { PoolRejectedStatisticsEntity } from '../ORM/pool-rejected-statistics/pool-rejected-statistics.entity';
 import { PoolShareStatisticsEntity } from '../ORM/pool-share-statistics/pool-share-statistics.entity';
 import { TelegramSubscriptionsEntity } from '../ORM/telegram-subscriptions/telegram-subscriptions.entity';
+import { InitialSchema1700000000000 } from './1700000000000-InitialSchema';
 import { UseTimestamptzForDates1707352800000 } from './1707352800000-UseTimestamptzForDates';
 
 const ENTITIES = [
@@ -68,8 +69,8 @@ describe('UseTimestamptzForDates1707352800000', () => {
             type: 'postgres',
             database: 'pg-mem',
             entities: ENTITIES,
-            migrations: [UseTimestamptzForDates1707352800000],
-            synchronize: true,
+            migrations: [InitialSchema1700000000000, UseTimestamptzForDates1707352800000],
+            synchronize: false,
         });
 
         await dataSource.initialize();

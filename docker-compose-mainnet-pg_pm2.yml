@@ -42,4 +42,5 @@ services:
       - PG_PASSWORD=${PG_PASSWORD:-postgres}
       - PG_DATABASE=${PG_DATABASE:-public_pool}
       - PG_SSL=${PG_SSL:-false}
+      - DB_RUN_MIGRATIONS=true
     command: pm2-runtime dist/main.js -i ${PM2_INSTANCES:-6}
