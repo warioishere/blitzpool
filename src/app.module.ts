@@ -49,8 +49,11 @@ const ORMModules = [
 
 @Module({
     imports: [
-        ConfigModule.forRoot(),
+        ConfigModule.forRoot({
+            isGlobal: true,
+        }),
         TypeOrmModule.forRootAsync({
+            imports: [ConfigModule],
             inject: [ConfigService],
             useFactory: (configService: ConfigService) => buildDatabaseConfig(configService),
         }),
