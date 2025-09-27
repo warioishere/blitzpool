@@ -5,11 +5,10 @@ import { ClientStatisticsService } from '../ORM/client-statistics/client-statist
 import { ClientService } from '../ORM/client/client.service';
 import { RpcBlockService } from '../ORM/rpc-block/rpc-block.service';
 import {
+    DEFAULT_SQLITE_PATH,
     MigrationLogger,
     runAutomaticSqliteToPostgresMigration,
-} from '../../scripts/migrate-sqlite-to-pg';
-
-const DEFAULT_SQLITE_PATH = './DB/public-pool.sqlite';
+} from '../migration/sqlite-to-postgres';
 
 function parseOptionalBoolean(value: string | undefined): boolean | undefined {
     if (value === undefined) {

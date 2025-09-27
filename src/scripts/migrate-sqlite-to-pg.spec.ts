@@ -19,7 +19,7 @@ import {
     MigrationLogger,
     migrateSqliteToPostgres,
     runAutomaticSqliteToPostgresMigration,
-} from '../../scripts/migrate-sqlite-to-pg';
+} from '../migration/sqlite-to-postgres';
 import { promises as fs } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
