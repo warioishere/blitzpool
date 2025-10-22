@@ -32,6 +32,7 @@ import { ExternalSharesModule } from './ORM/external-shares/external-shares.modu
 import { PoolShareStatisticsModule } from './ORM/pool-share-statistics/pool-share-statistics.module';
 import { PoolRejectedStatisticsModule } from './ORM/pool-rejected-statistics/pool-rejected-statistics.module';
 import { ClientRejectedStatisticsModule } from './ORM/client-rejected-statistics/client-rejected-statistics.module';
+import { ClientDifficultyStatisticsModule } from './ORM/client-difficulty-statistics/client-difficulty-statistics.module';
 import { buildDatabaseConfig } from './config/database.config';
 
 const ORMModules = [
@@ -44,7 +45,8 @@ const ORMModules = [
     ExternalSharesModule,
     PoolShareStatisticsModule,
     PoolRejectedStatisticsModule,
-    ClientRejectedStatisticsModule
+    ClientRejectedStatisticsModule,
+    ClientDifficultyStatisticsModule,
 ]
 
 @Module({

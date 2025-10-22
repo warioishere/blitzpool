@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 
+import { ClientDifficultyStatisticsService } from '../ORM/client-difficulty-statistics/client-difficulty-statistics.service';
 import { ClientStatisticsService } from '../ORM/client-statistics/client-statistics.service';
 import { ClientService } from '../ORM/client/client.service';
 import { RpcBlockService } from '../ORM/rpc-block/rpc-block.service';
@@ -57,6 +58,7 @@ export class AppService implements OnModuleInit {
 
     constructor(
         private readonly clientStatisticsService: ClientStatisticsService,
+        private readonly clientDifficultyStatisticsService: ClientDifficultyStatisticsService,
         private readonly clientService: ClientService,
         private readonly dataSource: DataSource,
         private readonly rpcBlockService: RpcBlockService,
@@ -113,6 +115,10 @@ export class AppService implements OnModuleInit {
         console.log('Deleting statistics');
 
         await this.clientStatisticsService.deleteOldStatistics();
+        const cutoff = Math.floor(
+            (Date.now() - 30 * 24 * 60 * 60 * 1000) / (60 * 60 * 1000),
+        ) * (60 * 60 * 1000);
+        await this.clientDifficultyStatisticsService.deleteOlderThan(cutoff);
         console.log('Deleted old statistics');
         const deletedClients = await this.clientService.deleteOldClients();
         console.log(`Deleted ${deletedClients.affected} old clients`);

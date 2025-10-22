@@ -33,6 +33,7 @@ describe('StratumV1Service.onModuleInit', () => {
       {} as any,
       {} as any,
       {} as any,
+      {} as any,
     );
   }
 
