@@ -2,7 +2,7 @@
 
 Welcome to **BlitzPool**, a lightweight and open-source Bitcoin mining pool based on the [public-pool](https://github.com/benjamin-wilson/public-pool) project – extended with powerful new features and real-world integrations.
 
-Current Version: **v1.3.3**
+Current Version: **v1.3.4**
 
 🌐 **Live Pool:** [https://blitzpool.yourdevice.ch/#/](https://blitzpool.yourdevice.ch/#/)
 
