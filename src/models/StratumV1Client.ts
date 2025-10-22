@@ -33,6 +33,7 @@ import { PoolShareStatisticsService } from '../ORM/pool-share-statistics/pool-sh
 import { PoolRejectedStatisticsService } from '../ORM/pool-rejected-statistics/pool-rejected-statistics.service';
 import { ClientRejectedStatisticsService } from '../ORM/client-rejected-statistics/client-rejected-statistics.service';
 import { StratumV1Service } from '../services/stratum-v1.service';
+import { ClientDifficultyStatisticsService } from '../ORM/client-difficulty-statistics/client-difficulty-statistics.service';
 
 
 export class StratumV1Client {
@@ -87,6 +88,7 @@ export class StratumV1Client {
         private readonly poolRejectedStatisticsService: PoolRejectedStatisticsService,
         private readonly clientRejectedStatisticsService: ClientRejectedStatisticsService,
         private readonly externalSharesService: ExternalSharesService,
+        private readonly clientDifficultyStatisticsService: ClientDifficultyStatisticsService,
         private readonly stratumV1Service: StratumV1Service,
     ) {
 
@@ -760,6 +762,13 @@ export class StratumV1Client {
                     await this.clientService.heartbeat(this.entity.address, this.entity.clientName, this.entity.sessionId, this.hashRate, now);
                     this.entity.updatedAt = now;
                 }
+
+                await this.clientDifficultyStatisticsService.recordShareDifficulty({
+                    address: this.clientAuthorization.address,
+                    clientName: this.clientAuthorization.worker,
+                    timestamp: now.getTime(),
+                    difficulty: submissionDifficulty,
+                });
 
                 if (now.getTime() - this.lastDifficultyCheck >= this.difficultyCheckIntervalMs) {
                     await this.checkDifficulty();

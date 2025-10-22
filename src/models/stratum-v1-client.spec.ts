@@ -26,6 +26,7 @@ function createClient(overrides: Record<string, any> = {}) {
     dummy,
     dummy,
     dummy,
+    dummy,
     stratumV1Service as any,
   );
 

@@ -8,6 +8,7 @@ import { buildDatabaseConfig } from './src/config/database.config';
 import { AddressSettingsEntity } from './src/ORM/address-settings/address-settings.entity';
 import { BlocksEntity } from './src/ORM/blocks/blocks.entity';
 import { ClientEntity } from './src/ORM/client/client.entity';
+import { ClientDifficultyStatisticsEntity } from './src/ORM/client-difficulty-statistics/client-difficulty-statistics.entity';
 import { ClientRejectedStatisticsEntity } from './src/ORM/client-rejected-statistics/client-rejected-statistics.entity';
 import { ClientStatisticsEntity } from './src/ORM/client-statistics/client-statistics.entity';
 import { ExternalSharesEntity } from './src/ORM/external-shares/external-shares.entity';
@@ -27,6 +28,7 @@ const entities = [
     ClientEntity,
     ClientRejectedStatisticsEntity,
     ClientStatisticsEntity,
+    ClientDifficultyStatisticsEntity,
     ExternalSharesEntity,
     PoolRejectedStatisticsEntity,
     PoolShareStatisticsEntity,

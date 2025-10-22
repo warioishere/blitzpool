@@ -31,6 +31,12 @@ function parseOptionalBoolean(value: unknown): boolean | undefined {
     }
 }
 
+export function isAutoSynchronizeEnabled(config: ConfigService): boolean {
+    const flag = parseOptionalBoolean(config.get('DB_AUTO_SYNCHRONIZE'));
+
+    return flag ?? false;
+}
+
 function resolveDriver(config: ConfigService): SupportedDriver {
     const driver = config.get<string>('DB_TYPE');
 
@@ -54,6 +60,7 @@ export function buildDatabaseConfig(config: ConfigService): TypeOrmModuleOptions
     const logging = config.get('DB_LOGGING');
     const loggingEnabled = parseOptionalBoolean(logging) ?? false;
     const synchronizeOverride = parseOptionalBoolean(config.get('DB_SYNCHRONIZE'));
+    const autoSynchronize = isAutoSynchronizeEnabled(config);
 
     if (driver === 'postgres') {
         const ssl = parseOptionalBoolean(config.get('PG_SSL'));
@@ -78,7 +85,12 @@ export function buildDatabaseConfig(config: ConfigService): TypeOrmModuleOptions
             ...(runMigrations !== undefined ? { migrationsRun: runMigrations } : {}),
         };
 
-        return options;
+        return {
+            ...options,
+            extra: {
+                autoSynchronize,
+            },
+        };
     }
 
     const sqliteOptions: TypeOrmModuleOptions = {

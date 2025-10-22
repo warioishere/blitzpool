@@ -12,6 +12,7 @@ import { AddressSettingsEntity } from '../ORM/address-settings/address-settings.
 import { BlocksEntity } from '../ORM/blocks/blocks.entity';
 import { ClientRejectedStatisticsEntity } from '../ORM/client-rejected-statistics/client-rejected-statistics.entity';
 import { ClientStatisticsEntity } from '../ORM/client-statistics/client-statistics.entity';
+import { ClientDifficultyStatisticsEntity } from '../ORM/client-difficulty-statistics/client-difficulty-statistics.entity';
 import { ClientEntity } from '../ORM/client/client.entity';
 import { ExternalSharesEntity } from '../ORM/external-shares/external-shares.entity';
 import { PoolRejectedStatisticsEntity } from '../ORM/pool-rejected-statistics/pool-rejected-statistics.entity';
@@ -27,6 +28,7 @@ export const MIGRATION_ENTITIES = [
     ClientEntity,
     ClientRejectedStatisticsEntity,
     ClientStatisticsEntity,
+    ClientDifficultyStatisticsEntity,
     ExternalSharesEntity,
     PoolRejectedStatisticsEntity,
     PoolShareStatisticsEntity,

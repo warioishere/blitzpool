@@ -4,6 +4,7 @@ import { AddressSettingsService } from '../../ORM/address-settings/address-setti
 import { ClientStatisticsService } from '../../ORM/client-statistics/client-statistics.service';
 import { ClientService } from '../../ORM/client/client.service';
 import { ClientRejectedStatisticsService } from '../../ORM/client-rejected-statistics/client-rejected-statistics.service';
+import { ClientDifficultyStatisticsService } from '../../ORM/client-difficulty-statistics/client-difficulty-statistics.service';
 import { eStratumErrorCode } from '../../models/enums/eStratumErrorCode';
 import { StratumV1Service } from '../../services/stratum-v1.service';
 
@@ -16,6 +17,7 @@ export class ClientController {
         private readonly clientStatisticsService: ClientStatisticsService,
         private readonly addressSettingsService: AddressSettingsService,
         private readonly clientRejectedStatisticsService: ClientRejectedStatisticsService,
+        private readonly clientDifficultyStatisticsService: ClientDifficultyStatisticsService,
         private readonly stratumV1Service: StratumV1Service,
     ) { }
 
@@ -158,6 +160,43 @@ export class ClientController {
                 counts[reason] = current;
             }
             slotData.push({ time: new Date(t).toISOString(), counts });
+        }
+
+        return { slotData };
+    }
+
+    @Get(':address/diff-scores')
+    async getAddressDifficultyScores(
+        @Param('address') address: string,
+        @Query('range') range: '1d' | '7d' | '30d' = '1d'
+    ) {
+        const now = Date.now();
+        const oneHour = 60 * 60 * 1000;
+        let hours = 24;
+        switch (range) {
+            case '30d':
+                hours = 24 * 30;
+                break;
+            case '7d':
+                hours = 24 * 7;
+                break;
+            default:
+                hours = 24;
+        }
+
+        const since = now - hours * oneHour;
+        const startSlot = Math.floor(since / oneHour) * oneHour;
+        const endSlot = Math.floor(now / oneHour) * oneHour;
+
+        const rawEntries = await this.clientDifficultyStatisticsService.getMaximaForAddress(address, startSlot, endSlot);
+        const bySlot = new Map<number, number>();
+        for (const entry of rawEntries) {
+            bySlot.set(entry.slotTime, Number(entry.maxDifficulty) || 0);
+        }
+
+        const slotData: { time: string; difficulty: number }[] = [];
+        for (let t = startSlot; t <= endSlot; t += oneHour) {
+            slotData.push({ time: new Date(t).toISOString(), difficulty: bySlot.get(t) ?? 0 });
         }
 
         return { slotData };

@@ -2,7 +2,7 @@
 
 Welcome to **BlitzPool**, a lightweight and open-source Bitcoin mining pool based on the [public-pool](https://github.com/benjamin-wilson/public-pool) project – extended with powerful new features and real-world integrations.
 
-Current Version: **v1.3.3**
+Current Version: **v1.3.4**
 
 🌐 **Live Pool:** [https://blitzpool.yourdevice.ch/#/](https://blitzpool.yourdevice.ch/#/)
 
@@ -113,6 +113,8 @@ When `DB_TYPE=postgres` and `DB_RUN_MIGRATIONS=true`, BlitzPool now runs both th
 - **Production Postgres:** set `DB_TYPE=postgres` and populate the `PG_*` variables. The app disables `synchronize`, applies migrations from `dist/migrations`, and skips SQLite-specific PRAGMAs.
 - **Local development/tests:** keep `DB_TYPE` empty or `sqlite` to continue using the bundled SQLite database at `./DB/public-pool.sqlite`. Jest tests automatically exercise both drivers where applicable.
 - You can switch between drivers by updating the env file and restarting the service. Existing SQLite installs can remain on SQLite indefinitely; no forced migration is required.
+
+If you would like the Postgres deployment to mirror SQLite's automatic schema management, set `DB_AUTO_SYNCHRONIZE=true`. The primary instance (`NODE_APP_INSTANCE=0` or unset) will invoke `dataSource.synchronize()` once at boot after migrations run. Leave the flag unset to continue relying solely on migrations.
 
 ## 🔄 Migrating existing SQLite data to Postgres
 
