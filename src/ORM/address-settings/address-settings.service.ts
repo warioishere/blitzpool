@@ -32,11 +32,16 @@ export class AddressSettingsService {
     }
 
     public async getHighScores() {
-        return await this.addressSettingsRepository.createQueryBuilder()
-            .select('"updatedAt", "bestDifficulty", "bestDifficultyUserAgent"')
-            .orderBy('"bestDifficulty"', 'DESC')
+        return await this.addressSettingsRepository
+            .createQueryBuilder('settings')
+            .select([
+                'settings.updatedAt AS "updatedAt"',
+                'settings.bestDifficulty AS "bestDifficulty"',
+                'settings.bestDifficultyUserAgent AS "bestDifficultyUserAgent"',
+            ])
+            .orderBy('settings.bestDifficulty', 'DESC')
             .limit(10)
-            .execute();
+            .getRawMany();
     }
 
     public async createNew(address: string) {
@@ -44,12 +49,14 @@ export class AddressSettingsService {
     }
 
     public async addShares(address: string, shares: number) {
-        return await this.addressSettingsRepository.createQueryBuilder()
+        return await this.addressSettingsRepository
+            .createQueryBuilder()
             .update(AddressSettingsEntity)
             .set({
-                shares: () => `"shares" + ${shares}` // Use the actual value of shares here
+                shares: () => 'shares + :increment',
             })
             .where('address = :address', { address })
+            .setParameters({ increment: shares })
             .execute();
     }
 

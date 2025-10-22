@@ -44,26 +44,54 @@ There are 4 config files for Mainnet and Testnet
 **note: pruning (`prune=550`) is enabled by default in the config**
 # Running the setup
 
-To start the setup in foreground mode:
+To start the setup in foreground mode with the legacy SQLite backend:
 
 ```
 docker compose -f docker-compose-mainnet.yml up
 ```
 
-To run the setup in detached / background mode use `up -d`.
+To run the Postgres variant (recommended for production) use the matching compose file:
 
-In detached mode logs can be watched with:
 ```
-docker compose -f docker-compose-mainnet.yml logs --tail 100 -f
+docker compose -f docker-compose-mainnet-pg.yml up
 ```
+
+Both versions accept `up -d` for detached mode. Tail logs with the corresponding file, e.g. `docker compose -f docker-compose-mainnet-pg.yml logs --tail 100 -f`.
 
 # Stopping the setup
 
-To stop the setup use:
+Stop the stack with the same compose file you used for `up`:
 
 ```
 docker compose -f docker-compose-mainnet.yml down
 ```
+
+or
+
+```
+docker compose -f docker-compose-mainnet-pg.yml down
+```
+
+Postgres data persists under `./data/<network>/public-pool/pg`; SQLite remains stored at `../DB/public-pool.sqlite` if you stay on the legacy backend.
+
+## Choosing your database backend
+
+- Keep `DB_TYPE` unset or `sqlite` to continue using the bundled SQLite database. This is convenient for tests and low-resource deployments.
+- Set `DB_TYPE=postgres` and provide the `PG_*` environment variables (see `blitzpool-postgres.env`) to switch to Postgres. The Postgres compose files set these defaults and wait for the database to become healthy before starting BlitzPool.
+- You can switch between drivers by editing the env file and restarting the services. No migration is required unless you want to move existing data.
+
+## Migrating existing SQLite data to Postgres
+
+If you are upgrading an existing BlitzPool deployment from SQLite to Postgres, stop the stack, back up `DB/public-pool.sqlite`, and take a Postgres snapshot. With `DB_RUN_MIGRATIONS=true` the Postgres compose files now run both the TypeORM schema migrations and the SQLite→Postgres data copy automatically at startup, skipping themselves if the database already contains rows. Set `DB_MIGRATE_SQLITE_ON_BOOT=false` if you prefer to run the migration script manually:
+
+```bash
+PG_HOST=localhost PG_PORT=5432 PG_USER=pool PG_PASSWORD=secret PG_DATABASE=public_pool \
+npm run migrate:sqlite-to-pg -- --batch-size 1000
+```
+
+Add `--dry-run` first if you want to verify the connection without writing data. Should the migration encounter an error, drop the Postgres database and restore from the backups you created before rerunning the script.
+
+Deployments that were already using a Postgres container under `../db/pg/<network>` should relocate or bind-mount their existing data into `./data/<network>/public-pool/pg` before bringing the stack back online.
 
 # Regtest
 
