@@ -7,6 +7,7 @@ import { AddressSettingsEntity } from '../ORM/address-settings/address-settings.
 import { BlocksEntity } from '../ORM/blocks/blocks.entity';
 import { ClientRejectedStatisticsEntity } from '../ORM/client-rejected-statistics/client-rejected-statistics.entity';
 import { ClientStatisticsEntity } from '../ORM/client-statistics/client-statistics.entity';
+import { ClientDifficultyStatisticsEntity } from '../ORM/client-difficulty-statistics/client-difficulty-statistics.entity';
 import { ClientEntity } from '../ORM/client/client.entity';
 import { ExternalSharesEntity } from '../ORM/external-shares/external-shares.entity';
 import { PoolRejectedStatisticsEntity } from '../ORM/pool-rejected-statistics/pool-rejected-statistics.entity';
@@ -14,6 +15,7 @@ import { PoolShareStatisticsEntity } from '../ORM/pool-share-statistics/pool-sha
 import { TelegramSubscriptionsEntity } from '../ORM/telegram-subscriptions/telegram-subscriptions.entity';
 import { InitialSchema1700000000000 } from '../migrations/1700000000000-InitialSchema';
 import { UseTimestamptzForDates1707352800000 } from '../migrations/1707352800000-UseTimestamptzForDates';
+import { AddClientDifficultyStatistics1717430400000 } from '../migrations/1717430400000-AddClientDifficultyStatistics';
 import {
     MIGRATION_ENTITIES,
     MigrationLogger,
@@ -90,7 +92,11 @@ describe('migrateSqliteToPostgres', () => {
             type: 'postgres',
             database: 'pg-mem',
             entities: [...MIGRATION_ENTITIES],
-            migrations: [InitialSchema1700000000000, UseTimestamptzForDates1707352800000],
+            migrations: [
+                InitialSchema1700000000000,
+                UseTimestamptzForDates1707352800000,
+                AddClientDifficultyStatistics1717430400000,
+            ],
             synchronize: false,
         });
 
@@ -137,6 +143,13 @@ describe('migrateSqliteToPostgres', () => {
             rejectedDuplicateShareDiff1: 0,
             rejectedLowDifficultyShareCount: 0,
             rejectedLowDifficultyShareDiff1: 0,
+        });
+
+        await dataSource.getRepository(ClientDifficultyStatisticsEntity).save({
+            address: client.address,
+            clientName: client.clientName,
+            slotTime: 1700000000,
+            maxDifficulty: 321.123,
         });
 
         await dataSource.getRepository(ClientRejectedStatisticsEntity).save({
