@@ -114,6 +114,8 @@ When `DB_TYPE=postgres` and `DB_RUN_MIGRATIONS=true`, BlitzPool now runs both th
 - **Local development/tests:** keep `DB_TYPE` empty or `sqlite` to continue using the bundled SQLite database at `./DB/public-pool.sqlite`. Jest tests automatically exercise both drivers where applicable.
 - You can switch between drivers by updating the env file and restarting the service. Existing SQLite installs can remain on SQLite indefinitely; no forced migration is required.
 
+If you would like the Postgres deployment to mirror SQLite's automatic schema management, set `DB_AUTO_SYNCHRONIZE=true`. The primary instance (`NODE_APP_INSTANCE=0` or unset) will invoke `dataSource.synchronize()` once at boot after migrations run. Leave the flag unset to continue relying solely on migrations.
+
 ## 🔄 Migrating existing SQLite data to Postgres
 
 Existing pools can migrate their on-disk SQLite database by following these steps:

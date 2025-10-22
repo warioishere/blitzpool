@@ -42,5 +42,17 @@ describe('buildDatabaseConfig', () => {
         });
 
         expect(config.migrations).toBeDefined();
+        expect((config as any).extra).toMatchObject({ autoSynchronize: false });
+    });
+
+    it('enables auto synchronize when DB_AUTO_SYNCHRONIZE=true', () => {
+        const configService = new ConfigService({
+            DB_TYPE: 'postgres',
+            DB_AUTO_SYNCHRONIZE: 'true',
+        });
+
+        const config = buildDatabaseConfig(configService);
+
+        expect((config as any).extra).toMatchObject({ autoSynchronize: true });
     });
 });

@@ -1,4 +1,5 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { DataSource } from 'typeorm';
 
 import { ClientDifficultyStatisticsService } from '../ORM/client-difficulty-statistics/client-difficulty-statistics.service';
@@ -10,6 +11,7 @@ import {
     MigrationLogger,
     runAutomaticSqliteToPostgresMigration,
 } from '../migration/sqlite-to-postgres';
+import { isAutoSynchronizeEnabled } from '../config/database.config';
 
 function parseOptionalBoolean(value: string | undefined): boolean | undefined {
     if (value === undefined) {
@@ -56,14 +58,18 @@ export class AppService implements OnModuleInit {
 
     private readonly migrationLogger = new NestMigrationLogger(this.logger);
 
+    private readonly autoSynchronize: boolean;
+
     constructor(
         private readonly clientStatisticsService: ClientStatisticsService,
         private readonly clientDifficultyStatisticsService: ClientDifficultyStatisticsService,
         private readonly clientService: ClientService,
         private readonly dataSource: DataSource,
         private readonly rpcBlockService: RpcBlockService,
+        configService: ConfigService,
     ) {
 
+        this.autoSynchronize = isAutoSynchronizeEnabled(configService);
     }
 
     async onModuleInit() {
@@ -82,14 +88,21 @@ export class AppService implements OnModuleInit {
 
         await this.runAutomaticSqliteMigrationIfNeeded();
 
+        const nodeInstance = process.env.NODE_APP_INSTANCE;
+        const isPrimaryInstance = nodeInstance == null || nodeInstance === '0';
+
+        if (isPrimaryInstance && dataSourceType === 'postgres' && this.autoSynchronize) {
+            await this.dataSource.synchronize();
+        }
+
         // //6Gb
         // await this.dataSource.query(`PRAGMA mmap_size = 6000000000;`);
 
-        if (process.env.NODE_APP_INSTANCE === undefined) {
+        if (nodeInstance === undefined) {
             await this.clientService.deleteAll();
         }
 
-        if (process.env.NODE_APP_INSTANCE == null || process.env.NODE_APP_INSTANCE == '0') {
+        if (isPrimaryInstance) {
 
             setInterval(async () => {
                 await this.deleteOldStatistics();
