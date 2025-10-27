@@ -133,7 +133,7 @@ export class StratumV1Service implements OnModuleInit {
 
     server.listen(port, () => {
       console.log(
-        `Stratum server is listening on port ${port} (difficulty ${initialDifficulty})`,
+        `Stratum server is listening on port ${port} (initial difficulty ${initialDifficulty})`,
       );
     });
   }

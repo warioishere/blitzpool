@@ -496,21 +496,36 @@ export class StratumV1Client {
     private async initStratum() {
         this.stratumInitialized = true;
 
+        const fallbackDifficulty = 0.1;
+        let postInitializationDifficulty: number | null = null;
+
         switch (this.clientSubscription.userAgent) {
             case 'cpuminer': {
                 if (this.initialDifficulty < 100000) {
-                    this.sessionDifficulty = 0.1;
+                    this.sessionDifficulty = fallbackDifficulty;
+                } else {
+                    postInitializationDifficulty = fallbackDifficulty;
                 }
                 break;
             }
         }
 
         if (this.clientSuggestedDifficulty == null) {
-            //console.log(`Setting difficulty to ${this.sessionDifficulty}`)
-            const setDifficulty = JSON.stringify(new SuggestDifficulty().response(this.sessionDifficulty));
-            const success = await this.write(setDifficulty + '\n');
+            const startDifficulty = this.sessionDifficulty;
+            const success = await this.pushDifficultyUpdate(startDifficulty);
             if (!success) {
                 return;
+            }
+
+            if (
+                postInitializationDifficulty != null &&
+                postInitializationDifficulty !== startDifficulty
+            ) {
+                this.sessionDifficulty = postInitializationDifficulty;
+                const fallbackSuccess = await this.pushDifficultyUpdate(this.sessionDifficulty);
+                if (!fallbackSuccess) {
+                    return;
+                }
             }
         }
 
@@ -890,6 +905,11 @@ export class StratumV1Client {
         }) + '\n';
         await this.write(data);
         this.sentExtraNonce = true;
+    }
+
+    private async pushDifficultyUpdate(difficulty: number): Promise<boolean> {
+        const setDifficulty = JSON.stringify(new SuggestDifficulty().response(difficulty));
+        return this.write(setDifficulty + '\n');
     }
 
     private async write(message: string): Promise<boolean> {
