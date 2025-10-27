@@ -48,7 +48,8 @@ export class StratumV1Client {
     private statistics: StratumV1ClientStatistics;
     private stratumInitialized = false;
     private usedSuggestedDifficulty = false;
-    private sessionDifficulty: number = 16384;
+    private readonly initialDifficulty: number;
+    private sessionDifficulty: number;
 
     private entity: ClientEntity;
     private creatingEntity: Promise<void>;
@@ -90,7 +91,12 @@ export class StratumV1Client {
         private readonly externalSharesService: ExternalSharesService,
         private readonly clientDifficultyStatisticsService: ClientDifficultyStatisticsService,
         private readonly stratumV1Service: StratumV1Service,
+        initialDifficulty: number,
     ) {
+        this.initialDifficulty = Number.isFinite(initialDifficulty)
+            ? initialDifficulty
+            : 16384;
+        this.sessionDifficulty = this.initialDifficulty;
 
         const networkConfig = this.configService.get('NETWORK');
         if (networkConfig === 'mainnet') {
@@ -492,7 +498,10 @@ export class StratumV1Client {
 
         switch (this.clientSubscription.userAgent) {
             case 'cpuminer': {
-                this.sessionDifficulty = 0.1;
+                if (this.initialDifficulty < 100000) {
+                    this.sessionDifficulty = 0.1;
+                }
+                break;
             }
         }
 

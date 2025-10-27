@@ -32,6 +32,7 @@ services:
       - bitcoin-testnet
     ports:
       - "0.0.0.0:13333:13333/tcp"
+      - "0.0.0.0:13339:13339/tcp"
       - "127.0.0.1:13334:13334/tcp"
     volumes:
       - "./data/testnet/public-pool:/public-pool/DB"

@@ -33,6 +33,7 @@ services:
       - bitcoin-regtest
     ports:
       - "0.0.0.0:23333:23333/tcp"
+      - "0.0.0.0:23339:23339/tcp"
       - "127.0.0.1:23334:23334/tcp"
     volumes:
       - "./data/regtest/public-pool:/public-pool/DB"

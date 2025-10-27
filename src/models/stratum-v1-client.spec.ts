@@ -28,6 +28,7 @@ function createClient(overrides: Record<string, any> = {}) {
     dummy,
     dummy,
     stratumV1Service as any,
+    16384,
   );
 
   Object.assign(client as any, overrides);

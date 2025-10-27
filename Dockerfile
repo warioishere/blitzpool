@@ -28,8 +28,8 @@ RUN npm i && npm run build
 
 FROM node:22.11.0-bookworm-slim
 
-# Expose ports for Stratum and Bitcoin RPC
-EXPOSE 3333 3334 8332
+# Expose ports for Stratum (standard + high-diff) and Bitcoin RPC
+EXPOSE 3333 3334 3339 8332
 
 WORKDIR /public-pool
 
