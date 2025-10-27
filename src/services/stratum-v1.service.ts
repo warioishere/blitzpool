@@ -41,11 +41,42 @@ export class StratumV1Service implements OnModuleInit {
       await this.clientService.deleteAll();
     }
     setTimeout(() => {
-      this.startSocketServer();
+      const defaultPort = parseInt(
+        this.configService.get<string>('STRATUM_PORT') ?? '3333',
+        10,
+      );
+      const defaultDifficulty = parseFloat(
+        this.configService.get<string>('STRATUM_START_DIFFICULTY') ?? '16384',
+      );
+      const highDiffPort = parseInt(
+        this.configService.get<string>('STRATUM_HIGH_DIFF_PORT') ?? '3339',
+        10,
+      );
+      const highDiffDifficulty = parseFloat(
+        this.configService.get<string>(
+          'STRATUM_HIGH_DIFF_START_DIFFICULTY',
+        ) ?? '128000',
+      );
+
+      const normalizedDefaultPort = Number.isNaN(defaultPort) ? 3333 : defaultPort;
+      const normalizedDefaultDifficulty = Number.isNaN(defaultDifficulty)
+        ? 16384
+        : defaultDifficulty;
+      this.startSocketServer(
+        normalizedDefaultPort,
+        normalizedDefaultDifficulty,
+      );
+
+      if (!Number.isNaN(highDiffPort) && highDiffPort !== normalizedDefaultPort) {
+        const normalizedHighDiffDifficulty = Number.isNaN(highDiffDifficulty)
+          ? 128000
+          : highDiffDifficulty;
+        this.startSocketServer(highDiffPort, normalizedHighDiffDifficulty);
+      }
     }, 1000 * 10);
   }
 
-  private startSocketServer() {
+  private startSocketServer(port: number, initialDifficulty: number) {
     const server = new Server(async (socket: Socket) => {
       // Disable Nagle's algorithm and use UTF-8 encoding for better latency
       socket.setNoDelay(true);
@@ -70,6 +101,7 @@ export class StratumV1Service implements OnModuleInit {
         this.externalSharesService,
         this.clientDifficultyStatisticsService,
         this,
+        initialDifficulty,
       );
 
       socket.on('close', async (hadError: boolean) => {
@@ -99,10 +131,8 @@ export class StratumV1Service implements OnModuleInit {
       //   //console.log(`Client disconnected, socket error,  ${client.sessionId}`);
     });
 
-    server.listen(process.env.STRATUM_PORT, () => {
-      console.log(
-        `Stratum server is listening on port ${process.env.STRATUM_PORT}`,
-      );
+    server.listen(port, () => {
+      console.log(`Stratum server is listening on port ${port}`);
     });
   }
 

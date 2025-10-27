@@ -7,6 +7,7 @@ It exposes following ports:
 - `8332/18332` Bitcoin RPC on `localhost`
 - `8333/18333` Bitcoin peering on `0.0.0.0`
 - `3333/13333` Public-Pool Stratum port on `0.0.0.0`
+- `3339/13339` Public-Pool high-difficulty Stratum port on `0.0.0.0` (starts at difficulty 128000 and then follows the standard auto-retargeting logic)
 - `3334/13334` Public-Pool API port on `localhost`
 
 The docker-compose setups for Mainnet and Testnet can be run in parallel without any problems.

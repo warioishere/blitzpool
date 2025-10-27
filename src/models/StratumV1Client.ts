@@ -48,7 +48,8 @@ export class StratumV1Client {
     private statistics: StratumV1ClientStatistics;
     private stratumInitialized = false;
     private usedSuggestedDifficulty = false;
-    private sessionDifficulty: number = 16384;
+    private readonly initialDifficulty: number;
+    private sessionDifficulty: number;
 
     private entity: ClientEntity;
     private creatingEntity: Promise<void>;
@@ -90,7 +91,12 @@ export class StratumV1Client {
         private readonly externalSharesService: ExternalSharesService,
         private readonly clientDifficultyStatisticsService: ClientDifficultyStatisticsService,
         private readonly stratumV1Service: StratumV1Service,
+        initialDifficulty: number,
     ) {
+        this.initialDifficulty = Number.isFinite(initialDifficulty)
+            ? initialDifficulty
+            : 16384;
+        this.sessionDifficulty = this.initialDifficulty;
 
         const networkConfig = this.configService.get('NETWORK');
         if (networkConfig === 'mainnet') {
@@ -490,19 +496,34 @@ export class StratumV1Client {
     private async initStratum() {
         this.stratumInitialized = true;
 
+        const fallbackDifficulty = 0.1;
+        let startDifficulty = this.sessionDifficulty;
+        const configuredHighDiffStart = parseFloat(
+            this.configService.get('STRATUM_HIGH_DIFF_START_DIFFICULTY') ?? '',
+        );
+        const highDiffStart = Number.isFinite(configuredHighDiffStart)
+            ? configuredHighDiffStart
+            : 128000;
+
         switch (this.clientSubscription.userAgent) {
             case 'cpuminer': {
-                this.sessionDifficulty = 0.1;
+                if (this.initialDifficulty < highDiffStart) {
+                    this.sessionDifficulty = fallbackDifficulty;
+                    startDifficulty = this.sessionDifficulty;
+                }
+                break;
             }
         }
 
         if (this.clientSuggestedDifficulty == null) {
-            //console.log(`Setting difficulty to ${this.sessionDifficulty}`)
-            const setDifficulty = JSON.stringify(new SuggestDifficulty().response(this.sessionDifficulty));
+            const setDifficulty = JSON.stringify(
+                new SuggestDifficulty().response(startDifficulty),
+            );
             const success = await this.write(setDifficulty + '\n');
             if (!success) {
                 return;
             }
+
         }
 
         this.stratumSubscription = this.stratumV1JobsService.newMiningJob$.subscribe(async (jobTemplate) => {
