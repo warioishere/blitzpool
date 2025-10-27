@@ -498,15 +498,18 @@ export class StratumV1Client {
 
         const fallbackDifficulty = 0.1;
         let startDifficulty = this.sessionDifficulty;
-        let applyFallbackAfterInit = false;
+        const configuredHighDiffStart = parseFloat(
+            this.configService.get('STRATUM_HIGH_DIFF_START_DIFFICULTY') ?? '',
+        );
+        const highDiffStart = Number.isFinite(configuredHighDiffStart)
+            ? configuredHighDiffStart
+            : 100000;
 
         switch (this.clientSubscription.userAgent) {
             case 'cpuminer': {
-                if (this.initialDifficulty < 100000) {
+                if (this.initialDifficulty < highDiffStart) {
                     this.sessionDifficulty = fallbackDifficulty;
                     startDifficulty = this.sessionDifficulty;
-                } else {
-                    applyFallbackAfterInit = true;
                 }
                 break;
             }
@@ -521,16 +524,6 @@ export class StratumV1Client {
                 return;
             }
 
-            if (applyFallbackAfterInit) {
-                this.sessionDifficulty = fallbackDifficulty;
-                const fallbackSetDifficulty = JSON.stringify(
-                    new SuggestDifficulty().response(this.sessionDifficulty),
-                );
-                const fallbackSuccess = await this.write(fallbackSetDifficulty + '\n');
-                if (!fallbackSuccess) {
-                    return;
-                }
-            }
         }
 
         this.stratumSubscription = this.stratumV1JobsService.newMiningJob$.subscribe(async (jobTemplate) => {
