@@ -15,15 +15,23 @@ export class AddressSettingsService {
     }
 
     public async getSettings(address: string, createIfNotFound: boolean) {
-        const settings = await this.addressSettingsRepository.findOne({ where: { address } });
-        if (createIfNotFound == true && settings == null) {
+        let settings = await this.addressSettingsRepository
+            .createQueryBuilder('settings')
+            .where('settings.address = :address', { address })
+            .getOne();
+
+        if (createIfNotFound === true && settings == null) {
             // It's possible to have a race condition here so if we get a PK violation, fetch it
             try {
-                return await this.createNew(address);
+                settings = await this.createNew(address);
             } catch (e) {
-                return await this.addressSettingsRepository.findOne({ where: { address } });
+                settings = await this.addressSettingsRepository
+                    .createQueryBuilder('settings')
+                    .where('settings.address = :address', { address })
+                    .getOne();
             }
         }
+
         return settings;
     }
 
