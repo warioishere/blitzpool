@@ -55,7 +55,7 @@ export class StratumV1Service implements OnModuleInit {
       const highDiffDifficulty = parseFloat(
         this.configService.get<string>(
           'STRATUM_HIGH_DIFF_START_DIFFICULTY',
-        ) ?? '100000',
+        ) ?? '128000',
       );
 
       const normalizedDefaultPort = Number.isNaN(defaultPort) ? 3333 : defaultPort;
@@ -69,7 +69,7 @@ export class StratumV1Service implements OnModuleInit {
 
       if (!Number.isNaN(highDiffPort) && highDiffPort !== normalizedDefaultPort) {
         const normalizedHighDiffDifficulty = Number.isNaN(highDiffDifficulty)
-          ? 100000
+          ? 128000
           : highDiffDifficulty;
         this.startSocketServer(highDiffPort, normalizedHighDiffDifficulty);
       }

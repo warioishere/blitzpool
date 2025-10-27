@@ -16,7 +16,7 @@ BlitzPool extends the original `public-pool` implementation in multiple ways to 
 - Lightweight, performant Node.js mining pool
 - Full support for Bitcoin mainnet
 - Stratum V1 protocol support
-- Optional dedicated high-difficulty Stratum listener (port 3339 by default) that starts at difficulty 100000 but still participates in the usual automatic difficulty retargeting.
+- Optional dedicated high-difficulty Stratum listener (port 3339 by default) that starts at difficulty 128000 but still participates in the usual automatic difficulty retargeting.
 - Optimized for low-latency share submission with Nagle’s algorithm disabled by default.
 - Includes further performance improvements like UTF-8 socket encoding, cached network selection, and efficient big number handling.
 - Supports Extranonce Subscribe (XNSub) for dynamic extranonce updates

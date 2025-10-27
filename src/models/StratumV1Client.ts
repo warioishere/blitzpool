@@ -503,7 +503,7 @@ export class StratumV1Client {
         );
         const highDiffStart = Number.isFinite(configuredHighDiffStart)
             ? configuredHighDiffStart
-            : 100000;
+            : 128000;
 
         switch (this.clientSubscription.userAgent) {
             case 'cpuminer': {

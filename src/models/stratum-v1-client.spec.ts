@@ -109,7 +109,7 @@ describe('StratumV1Client cpuminer fallback', () => {
         write,
       },
       configValues: {
-        STRATUM_HIGH_DIFF_START_DIFFICULTY: '100000',
+        STRATUM_HIGH_DIFF_START_DIFFICULTY: '128000',
       },
     });
 
@@ -122,7 +122,7 @@ describe('StratumV1Client cpuminer fallback', () => {
     socket.destroy();
   });
 
-  it('keeps the high-difficulty handshake when starting at 100000', async () => {
+  it('keeps the high-difficulty handshake when starting at 128000', async () => {
     jest.useFakeTimers();
     const write = jest.fn().mockResolvedValue(true);
     const { client, socket } = createClient({
@@ -130,9 +130,9 @@ describe('StratumV1Client cpuminer fallback', () => {
         clientSubscription: { userAgent: 'cpuminer' },
         write,
       },
-      initialDifficulty: 100000,
+      initialDifficulty: 128000,
       configValues: {
-        STRATUM_HIGH_DIFF_START_DIFFICULTY: '100000',
+        STRATUM_HIGH_DIFF_START_DIFFICULTY: '128000',
       },
     });
 
@@ -140,8 +140,8 @@ describe('StratumV1Client cpuminer fallback', () => {
 
     expect(write).toHaveBeenCalledTimes(1);
     const payload = JSON.parse(write.mock.calls[0][0]);
-    expect(payload.params[0]).toBe(100000);
-    expect((client as any).sessionDifficulty).toBe(100000);
+    expect(payload.params[0]).toBe(128000);
+    expect((client as any).sessionDifficulty).toBe(128000);
     socket.destroy();
   });
 });
