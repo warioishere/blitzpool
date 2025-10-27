@@ -497,32 +497,36 @@ export class StratumV1Client {
         this.stratumInitialized = true;
 
         const fallbackDifficulty = 0.1;
-        let postInitializationDifficulty: number | null = null;
+        let startDifficulty = this.sessionDifficulty;
+        let applyFallbackAfterInit = false;
 
         switch (this.clientSubscription.userAgent) {
             case 'cpuminer': {
                 if (this.initialDifficulty < 100000) {
                     this.sessionDifficulty = fallbackDifficulty;
+                    startDifficulty = this.sessionDifficulty;
                 } else {
-                    postInitializationDifficulty = fallbackDifficulty;
+                    applyFallbackAfterInit = true;
                 }
                 break;
             }
         }
 
         if (this.clientSuggestedDifficulty == null) {
-            const startDifficulty = this.sessionDifficulty;
-            const success = await this.pushDifficultyUpdate(startDifficulty);
+            const setDifficulty = JSON.stringify(
+                new SuggestDifficulty().response(startDifficulty),
+            );
+            const success = await this.write(setDifficulty + '\n');
             if (!success) {
                 return;
             }
 
-            if (
-                postInitializationDifficulty != null &&
-                postInitializationDifficulty !== startDifficulty
-            ) {
-                this.sessionDifficulty = postInitializationDifficulty;
-                const fallbackSuccess = await this.pushDifficultyUpdate(this.sessionDifficulty);
+            if (applyFallbackAfterInit) {
+                this.sessionDifficulty = fallbackDifficulty;
+                const fallbackSetDifficulty = JSON.stringify(
+                    new SuggestDifficulty().response(this.sessionDifficulty),
+                );
+                const fallbackSuccess = await this.write(fallbackSetDifficulty + '\n');
                 if (!fallbackSuccess) {
                     return;
                 }
@@ -905,11 +909,6 @@ export class StratumV1Client {
         }) + '\n';
         await this.write(data);
         this.sentExtraNonce = true;
-    }
-
-    private async pushDifficultyUpdate(difficulty: number): Promise<boolean> {
-        const setDifficulty = JSON.stringify(new SuggestDifficulty().response(difficulty));
-        return this.write(setDifficulty + '\n');
     }
 
     private async write(message: string): Promise<boolean> {
