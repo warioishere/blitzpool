@@ -33,6 +33,7 @@ Command	Description
 - /start	            Displays a welcome message and usage instructions
 - /subscribe	        Subscribe to receive block found notifications for your mining address
 - /subscribe_bestdiff	Toggle Best-Diff notifications on or off (default: on)
+- /bestdiff_reset	Reset the stored Best-Diff value for your miners
 - /difficulty	        Shows the current Bitcoin network difficulty
 - /next_difficulty	    Estimates the next network difficulty adjustment
 - /stats	            Displays detailed mining stats for your subscribed Bitcoin address
