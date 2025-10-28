@@ -96,10 +96,10 @@ export class TelegramService implements OnModuleInit {
         this.diffNotifications = (this.configService.get('TELEGRAM_DIFF_NOTIFICATIONS')?.toLowerCase() === 'true') || false;
 
         const timezonePreference = this.configService.get<string>('TELEGRAM_TIMEZONE')?.trim();
-        const fallbackTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        const fallbackTimeZone = 'Europe/Zurich';
         let effectiveTimeZone = timezonePreference && timezonePreference.length > 0
             ? timezonePreference
-            : fallbackTimeZone ?? 'UTC';
+            : fallbackTimeZone;
 
         const createFormatter = (locale: string, timeZone: string) =>
             new Intl.DateTimeFormat(locale, { dateStyle: 'short', timeStyle: 'short', timeZone });
