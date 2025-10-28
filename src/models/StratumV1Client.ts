@@ -136,6 +136,14 @@ export class StratumV1Client {
         return this.clientAuthorization?.address;
     }
 
+    public getCurrentDifficulty(): number | undefined {
+        if (!this.sessionId) {
+            return undefined;
+        }
+
+        return this.sessionDifficulty;
+    }
+
     public async destroy() {
 
         const sid = this.entity?.sessionId || this.sessionId;

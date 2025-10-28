@@ -160,6 +160,28 @@ export class StratumV1Service implements OnModuleInit {
     }
   }
 
+  getCurrentDifficulties(address: string): Map<string, number> {
+    const clients = this.clientsByAddress.get(address);
+    if (!clients) {
+      return new Map();
+    }
+
+    const difficulties = new Map<string, number>();
+    for (const client of clients) {
+      const sessionId = client.sessionId;
+      if (!sessionId) {
+        continue;
+      }
+
+      const currentDifficulty = client.getCurrentDifficulty();
+      if (currentDifficulty != null) {
+        difficulties.set(sessionId, currentDifficulty);
+      }
+    }
+
+    return difficulties;
+  }
+
   resetClientsForAddress(address: string) {
     const clients = this.clientsByAddress.get(address);
     if (!clients) {
