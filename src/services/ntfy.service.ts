@@ -168,6 +168,10 @@ export class NtfyService implements OnModuleInit {
     if (removed) {
       this.reconnect();
     }
+    this.resetBestDiffCache(address);
+  }
+
+  public resetBestDiffCache(address: string) {
     this.bestDiffCache.delete(address);
     this.bestDiffOptIn.delete(address);
   }
@@ -329,17 +333,15 @@ export class NtfyService implements OnModuleInit {
   ) {
     if (!this.diffNotifications) return;
 
-    let currentBest = this.bestDiffCache.get(address);
-    if (currentBest === undefined) {
-      const settings = await this.addressSettingsService.getSettings(
-        address,
-        false,
-      );
-      currentBest = settings?.bestDifficulty ?? 0;
-      this.bestDiffCache.set(address, currentBest);
-    }
+    const settings = await this.addressSettingsService.getSettings(
+      address,
+      false,
+    );
+    const persistedBest = settings?.bestDifficulty ?? 0;
 
-    if (submissionDifficulty > currentBest) {
+    this.bestDiffCache.set(address, persistedBest);
+
+    if (submissionDifficulty > persistedBest) {
       this.bestDiffCache.set(address, submissionDifficulty);
       if (this.bestDiffOptIn.get(address) !== false) {
         await this.publish(

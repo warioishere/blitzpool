@@ -28,6 +28,7 @@ describe('ClientController getClientInfo', () => {
           hashRate: 100,
           startTime: new Date('2023-01-01T00:00:00.000Z'),
           updatedAt: new Date('2023-01-01T01:00:00.000Z'),
+          currentDifficulty: null,
         },
         {
           sessionId: null,
@@ -36,6 +37,7 @@ describe('ClientController getClientInfo', () => {
           hashRate: null,
           startTime: new Date('2023-01-02T00:00:00.000Z'),
           updatedAt: new Date('2023-01-02T01:00:00.000Z'),
+          currentDifficulty: 4096,
         },
       ]),
     };
@@ -101,7 +103,7 @@ describe('ClientController getClientInfo', () => {
           name: 'worker-2',
           bestDifficulty: '1.00',
           hashRate: null,
-          currentDifficulty: null,
+          currentDifficulty: 4096,
           startTime: '2023-01-02T00:00:00.000Z',
           lastSeen: '2023-01-02T01:00:00.000Z',
         },

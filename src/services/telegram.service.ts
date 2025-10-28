@@ -10,6 +10,7 @@ import { ClientService } from '../ORM/client/client.service';
 import { AddressSettingsService } from '../ORM/address-settings/address-settings.service';
 import { ClientStatisticsService } from '../ORM/client-statistics/client-statistics.service';
 import { StratumV1Service } from './stratum-v1.service';
+import { NtfyService } from './ntfy.service';
 import { buildStatsMessage, buildWorkersOverviewMessage } from './common-command-handlers';
 
 @Injectable()
@@ -19,6 +20,8 @@ export class TelegramService implements OnModuleInit {
     private numberSuffix: NumberSuffix;
     private bestDiffCache: Map<string, number> = new Map();
     private chatLanguages: Map<number, 'de' | 'en'> = new Map();
+    private shouldRegisterHandlers = false;
+    private readonly deviceNotificationFormatters: Record<'de' | 'en', Intl.DateTimeFormat>;
 
     private formatAddress(address: string): string {
         return `${address.slice(0, 4)}...${address.slice(-5)}`;
@@ -33,6 +36,52 @@ export class TelegramService implements OnModuleInit {
         return this.bot.sendMessage(chatId, messages[lang]);
     }
 
+    private async resolveAddressForChat(chatId: number, addressParam?: string): Promise<string | null> {
+        let raw = addressParam?.trim();
+
+        if (raw) {
+            const decrypted = decryptMessageIfNeeded(raw);
+            if (decrypted) {
+                raw = decrypted.trim();
+            }
+
+            if (!validate(raw)) {
+                await this.reply(chatId, {
+                    de: 'Ungültige Adresse.',
+                    en: 'Invalid address.'
+                });
+                return null;
+            }
+
+            return raw;
+        }
+
+        const defaultSub = await this.telegramSubscriptionsService.getDefault(chatId);
+        if (defaultSub) {
+            return defaultSub.address;
+        }
+
+        const subs = await this.telegramSubscriptionsService.getChatSubscriptions(chatId);
+        if (subs.length === 0) {
+            await this.reply(chatId, {
+                de: 'Keine Adresse gespeichert. Nutze /subscribe, um eine hinzuzufügen.',
+                en: 'No address stored. Use /subscribe to add one.'
+            });
+            return null;
+        }
+
+        if (subs.length === 1) {
+            return subs[0].address;
+        }
+
+        const list = subs.map(s => `${s.isDefault ? '*' : ''}${this.formatAddress(s.address)}`).join('\n');
+        await this.reply(chatId, {
+            de: `Mehrere Adressen gespeichert:\n${list}\nBitte Adresse angeben.`,
+            en: `Multiple addresses stored:\n${list}\nPlease specify an address.`
+        });
+        return null;
+    }
+
     constructor(
         private readonly configService: ConfigService,
         private readonly telegramSubscriptionsService: TelegramSubscriptionsService,
@@ -40,8 +89,34 @@ export class TelegramService implements OnModuleInit {
         private readonly addressSettingsService: AddressSettingsService,
         private readonly clientStatisticsService: ClientStatisticsService,
         @Inject(forwardRef(() => StratumV1Service))
-        private readonly stratumV1Service: StratumV1Service
+        private readonly stratumV1Service: StratumV1Service,
+        private readonly ntfyService: NtfyService
     ) {
+        this.numberSuffix = new NumberSuffix();
+        this.diffNotifications = (this.configService.get('TELEGRAM_DIFF_NOTIFICATIONS')?.toLowerCase() === 'true') || false;
+
+        const timezonePreference = this.configService.get<string>('TELEGRAM_TIMEZONE')?.trim();
+        const fallbackTimeZone = 'Europe/Zurich';
+        let effectiveTimeZone = timezonePreference && timezonePreference.length > 0
+            ? timezonePreference
+            : fallbackTimeZone;
+
+        const createFormatter = (locale: string, timeZone: string) =>
+            new Intl.DateTimeFormat(locale, { dateStyle: 'short', timeStyle: 'short', timeZone });
+
+        try {
+            this.deviceNotificationFormatters = {
+                de: createFormatter('de-DE', effectiveTimeZone),
+                en: createFormatter('en-US', effectiveTimeZone),
+            };
+        } catch {
+            effectiveTimeZone = 'UTC';
+            this.deviceNotificationFormatters = {
+                de: createFormatter('de-DE', effectiveTimeZone),
+                en: createFormatter('en-US', effectiveTimeZone),
+            };
+        }
+
         const token: string | null = this.configService.get('TELEGRAM_BOT_TOKEN');
         const pm2InstanceId = process.env.NODE_APP_INSTANCE ?? process.env.pm_id ?? process.env.PM2_INSTANCE_ID;
         const normalizedInstanceId = typeof pm2InstanceId === 'string' ? pm2InstanceId.trim() : undefined;
@@ -51,17 +126,17 @@ export class TelegramService implements OnModuleInit {
             return;
         }
 
-        if (isPm2Worker && normalizedInstanceId !== '0') {
-            console.log(`Skipping Telegram bot init for PM2 instance ${normalizedInstanceId}`);
-            return;
+        this.shouldRegisterHandlers = !isPm2Worker || normalizedInstanceId === '0';
+        const polling = this.shouldRegisterHandlers;
+
+        this.bot = new TelegramBot(token, { polling });
+
+        if (this.shouldRegisterHandlers) {
+            console.log('Telegram bot init');
+        } else {
+            console.log(`Telegram bot init (polling disabled) for PM2 instance ${normalizedInstanceId}`);
         }
 
-        this.bot = new TelegramBot(token, { polling: true });
-
-        console.log('Telegram bot init');
-
-        this.numberSuffix = new NumberSuffix();
-        this.diffNotifications = (this.configService.get('TELEGRAM_DIFF_NOTIFICATIONS')?.toLowerCase() === 'true') || false;
     }
 
     async onModuleInit(): Promise<void> {
@@ -76,11 +151,16 @@ export class TelegramService implements OnModuleInit {
             });
         }
 
+        if (!this.shouldRegisterHandlers) {
+            return;
+        }
+
         // Telegram Menübefehle registrieren
         const commandsDe: TelegramBot.BotCommand[] = [
             { command: '/start', description: 'Zeigt Willkommensnachricht' },
             { command: '/subscribe', description: 'Benachrichtigung bei Blockhit aktivieren' },
-            { command: '/subscribe_bestdiff', description: 'Best-Diff Benachrichtigungen (on/off/reset, Standard: on)' },
+            { command: '/subscribe_bestdiff', description: 'Best-Diff Benachrichtigungen (on/off, Standard: on)' },
+            { command: '/bestdiff_reset', description: 'Best-Diff zurücksetzen' },
             { command: '/device_notifications', description: 'Geräte-Benachrichtigungen (on/off)' },
             { command: '/difficulty', description: 'Zeigt aktuelle Netzwerk-Difficulty' },
             { command: '/next_difficulty', description: 'Zeigt erwartete Änderung der Netzwerk-Difficulty' },
@@ -97,7 +177,8 @@ export class TelegramService implements OnModuleInit {
         const commandsEn: TelegramBot.BotCommand[] = [
             { command: '/start', description: 'Show welcome message' },
             { command: '/subscribe', description: 'Enable block hit notifications' },
-            { command: '/subscribe_bestdiff', description: 'Best-diff notifications (on/off/reset, default: on)' },
+            { command: '/subscribe_bestdiff', description: 'Best-diff notifications (on/off, default: on)' },
+            { command: '/bestdiff_reset', description: 'Reset best-diff counter' },
             { command: '/device_notifications', description: 'Device notifications (on/off)' },
             { command: '/difficulty', description: 'Show current network difficulty' },
             { command: '/next_difficulty', description: 'Show expected network difficulty change' },
@@ -188,75 +269,15 @@ export class TelegramService implements OnModuleInit {
             }
         });
 
-        this.bot.onText(/\/subscribe_bestdiff(?:\s+(\S+))?(?:\s+(.+))?/i, async (msg, match) => {
+        this.bot.onText(/\/subscribe_bestdiff(?:\s+(on|off))?/i, async (msg, match) => {
             const chatId = msg.chat.id;
             const action = match?.[1]?.toLowerCase();
-            const addressParam = match?.[2]?.trim();
 
-            if (!action || !['on', 'off', 'reset'].includes(action)) {
+            if (!action || !['on', 'off'].includes(action)) {
                 this.reply(chatId, {
-                    de: "Bitte gib 'on', 'off' oder 'reset' an.",
-                    en: "Please provide 'on', 'off' or 'reset'.",
+                    de: "Bitte gib 'on' oder 'off' an.",
+                    en: "Please provide 'on' or 'off'.",
                 });
-                return;
-            }
-
-            if (action === 'reset') {
-                let address = addressParam;
-
-                if (!address) {
-                    const defaultSub = await this.telegramSubscriptionsService.getDefault(chatId);
-                    if (defaultSub) {
-                        address = defaultSub.address;
-                    }
-                }
-
-                if (!address) {
-                    const subs = await this.telegramSubscriptionsService.getChatSubscriptions(chatId);
-                    if (subs.length === 0) {
-                        this.reply(chatId, {
-                            de: 'Keine Adresse gespeichert. Nutze /subscribe, um eine hinzuzufügen.',
-                            en: 'No address stored. Use /subscribe to add one.'
-                        });
-                        return;
-                    }
-                    if (subs.length === 1) {
-                        address = subs[0].address;
-                    } else {
-                        const list = subs.map(s => `${s.isDefault ? '*' : ''}${this.formatAddress(s.address)}`).join('\n');
-                        this.reply(chatId, {
-                            de: `Mehrere Adressen gespeichert:\n${list}\nBitte Adresse angeben.`,
-                            en: `Multiple addresses stored:\n${list}\nPlease specify an address.`
-                        });
-                        return;
-                    }
-                } else {
-                    const decrypted = decryptMessageIfNeeded(address);
-                    if (decrypted) address = decrypted.trim();
-                    if (!validate(address)) {
-                        this.reply(chatId, {
-                            de: 'Ungültige Adresse.',
-                            en: 'Invalid address.'
-                        });
-                        return;
-                    }
-                }
-
-                try {
-                    await this.addressSettingsService.updateBestDifficulty(address, 0, null);
-                    this.bestDiffCache.delete(address);
-                    this.stratumV1Service.resetClientsForAddress(address);
-                    this.reply(chatId, {
-                        de: `Best Difficulty für ${this.formatAddress(address)} zurückgesetzt.`,
-                        en: `Best difficulty for ${this.formatAddress(address)} reset.`
-                    });
-                } catch (error) {
-                    console.error("Fehler bei /subscribe_bestdiff reset:", error);
-                    this.reply(chatId, {
-                        de: 'Fehler beim Zurücksetzen der Best Difficulty. Bitte später erneut versuchen.',
-                        en: 'Failed to reset best difficulty. Please try again later.'
-                    });
-                }
                 return;
             }
 
@@ -273,6 +294,33 @@ export class TelegramService implements OnModuleInit {
                 this.reply(chatId, {
                     de: 'Fehler beim Setzen der Einstellung. Bitte später erneut versuchen.',
                     en: 'Failed to update setting. Please try again later.'
+                });
+            }
+        });
+
+        this.bot.onText(/\/bestdiff_reset(?:\s+(.+))?/i, async (msg, match) => {
+            const chatId = msg.chat.id;
+            const addressParam = match?.[1];
+
+            const address = await this.resolveAddressForChat(chatId, addressParam);
+            if (!address) {
+                return;
+            }
+
+            try {
+                await this.addressSettingsService.updateBestDifficulty(address, 0, null);
+                this.bestDiffCache.delete(address);
+                this.ntfyService.resetBestDiffCache(address);
+                await this.stratumV1Service.resetBestDifficultyForAddress(address);
+                this.reply(chatId, {
+                    de: `Best Difficulty für ${this.formatAddress(address)} zurückgesetzt.`,
+                    en: `Best difficulty for ${this.formatAddress(address)} reset.`
+                });
+            } catch (error) {
+                console.error('Fehler bei /bestdiff_reset:', error);
+                this.reply(chatId, {
+                    de: 'Fehler beim Zurücksetzen der Best Difficulty. Bitte später erneut versuchen.',
+                    en: 'Failed to reset best difficulty. Please try again later.'
                 });
             }
         });
@@ -627,6 +675,7 @@ I will decrypt it and respond just like with plain text. 🔒`
                 text.startsWith('/subscribe ') ||
                 text.startsWith('/subscribe_bestdiff') ||
                 text.startsWith('/device_notifications') ||
+                text.startsWith('/bestdiff_reset') ||
                 text === '/subscribe' ||
                 text === '/start' ||
                 text === '/difficulty' ||
@@ -658,14 +707,12 @@ I will decrypt it and respond just like with plain text. 🔒`
     public async notifySubscribersBestDiff(address: string, submissionDifficulty: number) {
         if (!this.bot || !this.diffNotifications) return;
 
-        let currentBest = this.bestDiffCache.get(address);
-        if (currentBest === undefined) {
-            const settings = await this.addressSettingsService.getSettings(address, false);
-            currentBest = settings?.bestDifficulty ?? 0;
-            this.bestDiffCache.set(address, currentBest);
-        }
+        const settings = await this.addressSettingsService.getSettings(address, false);
+        const persistedBest = settings?.bestDifficulty ?? 0;
 
-        if (submissionDifficulty > currentBest) {
+        this.bestDiffCache.set(address, persistedBest);
+
+        if (submissionDifficulty > persistedBest) {
             this.bestDiffCache.set(address, submissionDifficulty);
 
             const subscribers = await this.telegramSubscriptionsService.getSubscriptions(address);
@@ -707,8 +754,8 @@ I will decrypt it and respond just like with plain text. 🔒`
         }
 
         const eventTime = timestamp instanceof Date ? timestamp : new Date(timestamp);
-        const timeDe = eventTime.toLocaleString('de-DE');
-        const timeEn = eventTime.toLocaleString('en-US');
+        const timeDe = this.deviceNotificationFormatters.de.format(eventTime);
+        const timeEn = this.deviceNotificationFormatters.en.format(eventTime);
         const trimmedAgent = userAgent?.trim();
         const trimmedWorker = workerName?.trim();
         const formattedAddress = this.formatAddress(address);

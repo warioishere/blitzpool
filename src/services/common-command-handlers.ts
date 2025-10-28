@@ -65,6 +65,11 @@ function parseNumeric(value: number | string | null | undefined): number | null 
     return Number.isFinite(parsed) ? parsed : null;
 }
 
+function formatHashrateWithUnit(value: number, numberSuffix: NumberSuffix): string {
+    const formatted = numberSuffix.to(value);
+    return `${formatted}H/s`;
+}
+
 export function buildWorkersOverviewMessage(
     data: WorkerOverviewData,
     numberSuffix: NumberSuffix
@@ -81,7 +86,7 @@ export function buildWorkersOverviewMessage(
     (data.workers ?? []).forEach((worker, idx) => {
         const name = worker?.name?.trim() || `Worker ${idx + 1}`;
         const hashRateValue = parseNumeric(worker?.hashRate) ?? 0;
-        const hashRateFormatted = numberSuffix.to(hashRateValue);
+        const hashRateFormatted = formatHashrateWithUnit(hashRateValue, numberSuffix);
         const currentDifficultyValue = parseNumeric(worker?.currentDifficulty);
         const currentDifficultyFormatted =
             currentDifficultyValue !== null ? `${currentDifficultyValue}` : '–';
@@ -90,17 +95,27 @@ export function buildWorkersOverviewMessage(
             bestDifficultyValue !== null ? numberSuffix.to(bestDifficultyValue) : '–';
 
         workerLinesDe.push(
-            `• ${name} – Hashrate: ${hashRateFormatted}, Aktuelle Difficulty: ${currentDifficultyFormatted}, Beste Difficulty: ${bestDifficultyFormatted}`
+            [
+                `• ${name}`,
+                `Hashrate: ${hashRateFormatted}`,
+                `Aktuelle Difficulty: ${currentDifficultyFormatted}`,
+                `Beste Difficulty: ${bestDifficultyFormatted}`,
+            ].join('\n')
         );
         workerLinesEn.push(
-            `• ${name} – Hashrate: ${hashRateFormatted}, Current difficulty: ${currentDifficultyFormatted}, Best difficulty: ${bestDifficultyFormatted}`
+            [
+                `• ${name}`,
+                `Hashrate: ${hashRateFormatted}`,
+                `Current difficulty: ${currentDifficultyFormatted}`,
+                `Best difficulty: ${bestDifficultyFormatted}`,
+            ].join('\n')
         );
     });
 
     const summaryDe = [
         '👷 Worker-Übersicht',
         `Gesamtanzahl: ${data.workersCount}`,
-        `Gesamt-Hashrate: ${numberSuffix.to(totalHashrate)}`,
+        `Gesamt-Hashrate: ${formatHashrateWithUnit(totalHashrate, numberSuffix)}`,
         `Gesamt-Shares: ${numberSuffix.to(totalShares)}`,
         `Beste Difficulty: ${bestDifficultyTotalFormatted}`,
     ].join('\n');
@@ -108,7 +123,7 @@ export function buildWorkersOverviewMessage(
     const summaryEn = [
         '👷 Workers overview',
         `Total workers: ${data.workersCount}`,
-        `Total hashrate: ${numberSuffix.to(totalHashrate)}`,
+        `Total hashrate: ${formatHashrateWithUnit(totalHashrate, numberSuffix)}`,
         `Total shares: ${numberSuffix.to(totalShares)}`,
         `Best difficulty: ${bestDifficultyTotalFormatted}`,
     ].join('\n');

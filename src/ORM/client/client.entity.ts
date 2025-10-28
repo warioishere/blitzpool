@@ -40,5 +40,8 @@ export class ClientEntity extends TrackedEntity {
     @Column({ default: 0 })
     hashRate: number;
 
+    @Column({ type: 'real', nullable: true })
+    currentDifficulty: number | null;
+
 }
 

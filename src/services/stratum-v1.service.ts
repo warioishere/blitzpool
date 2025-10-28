@@ -182,6 +182,17 @@ export class StratumV1Service implements OnModuleInit {
     return difficulties;
   }
 
+  async resetBestDifficultyForAddress(address: string): Promise<void> {
+    const clients = this.clientsByAddress.get(address);
+    if (clients) {
+      for (const client of clients) {
+        client.resetBestDifficulty();
+      }
+    }
+
+    await this.clientService.resetBestDifficultyForAddress(address);
+  }
+
   resetClientsForAddress(address: string) {
     const clients = this.clientsByAddress.get(address);
     if (!clients) {

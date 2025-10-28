@@ -3,6 +3,7 @@ import { Interval } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import { BehaviorSubject, firstValueFrom } from 'rxjs';
 import { ObjectLiteral, Repository } from 'typeorm';
+import { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 
 import { ClientEntity } from './client.entity';
 
@@ -46,8 +47,25 @@ export class ClientService {
             .execute();
     }
 
-    public async heartbeat(address: string, clientName: string, sessionId: string, hashRate: number, updatedAt: Date) {
-        return await this.clientRepository.update({ address, clientName, sessionId }, { hashRate, deletedAt: null, updatedAt });
+    public async heartbeat(
+        address: string,
+        clientName: string,
+        sessionId: string,
+        hashRate: number,
+        updatedAt: Date,
+        currentDifficulty?: number | null,
+    ) {
+        const update: QueryDeepPartialEntity<ClientEntity> = {
+            hashRate,
+            deletedAt: null,
+            updatedAt,
+        };
+
+        if (currentDifficulty !== undefined) {
+            update.currentDifficulty = currentDifficulty;
+        }
+
+        return await this.clientRepository.update({ address, clientName, sessionId }, update);
     }
 
     // public async save(client: Partial<ClientEntity>) {
@@ -93,6 +111,19 @@ export class ClientService {
 
     public async updateBestDifficulty(sessionId: string, bestDifficulty: number) {
         return await this.clientRepository.update({ sessionId }, { bestDifficulty });
+    }
+
+    public async updateCurrentDifficulty(sessionId: string, currentDifficulty: number | null) {
+        return await this.clientRepository.update({ sessionId }, { currentDifficulty });
+    }
+
+    public async resetBestDifficultyForAddress(address: string): Promise<void> {
+        await this.clientRepository
+            .createQueryBuilder()
+            .update(ClientEntity)
+            .set({ bestDifficulty: 0 })
+            .where('address = :address', { address })
+            .execute();
     }
 
     public async updateSessionId(address: string, clientName: string, oldSessionId: string, newSessionId: string) {
