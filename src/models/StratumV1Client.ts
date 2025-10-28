@@ -50,6 +50,7 @@ export class StratumV1Client {
     private usedSuggestedDifficulty = false;
     private readonly initialDifficulty: number;
     private sessionDifficulty: number;
+    private pendingSessionDifficulty: number | null = null;
     private deviceOnlineNotified = false;
     private deviceOfflineNotified = false;
 
@@ -99,6 +100,7 @@ export class StratumV1Client {
             ? initialDifficulty
             : 16384;
         this.sessionDifficulty = this.initialDifficulty;
+        this.pendingSessionDifficulty = this.sessionDifficulty;
 
         const networkConfig = this.configService.get('NETWORK');
         if (networkConfig === 'mainnet') {
@@ -191,6 +193,35 @@ export class StratumV1Client {
         const randomNumber = randomBytes.readUInt32BE(0); // Convert bytes to a 32-bit unsigned integer
         const hexString = randomNumber.toString(16).padStart(8, '0'); // Convert to hex and pad with zeros
         return hexString;
+    }
+
+    private trackSessionDifficultyChange() {
+        if (!Number.isFinite(this.sessionDifficulty)) {
+            this.pendingSessionDifficulty = null;
+            return;
+        }
+
+        this.pendingSessionDifficulty = this.sessionDifficulty;
+    }
+
+    private async persistSessionDifficultyIfPossible() {
+        if (!this.entity || this.pendingSessionDifficulty == null) {
+            return;
+        }
+
+        const difficulty = this.pendingSessionDifficulty;
+        try {
+            await this.clientService.updateCurrentDifficulty(this.entity.sessionId, difficulty);
+            this.pendingSessionDifficulty = null;
+            this.entity.currentDifficulty = difficulty;
+        } catch (error) {
+            console.error('Failed to persist current difficulty', error);
+        }
+    }
+
+    private async recordSessionDifficulty(): Promise<void> {
+        this.trackSessionDifficultyChange();
+        await this.persistSessionDifficultyIfPossible();
     }
 
 
@@ -392,6 +423,7 @@ export class StratumV1Client {
 
                     this.clientSuggestedDifficulty = suggestDifficultyMessage;
                     this.sessionDifficulty = suggestDifficultyMessage.suggestedDifficulty;
+                    await this.recordSessionDifficulty();
                     const success = await this.write(JSON.stringify(this.clientSuggestedDifficulty.response(this.sessionDifficulty)) + '\n');
                     if (!success) {
                         return;
@@ -536,10 +568,13 @@ export class StratumV1Client {
                 if (this.initialDifficulty < highDiffStart) {
                     this.sessionDifficulty = fallbackDifficulty;
                     startDifficulty = this.sessionDifficulty;
+                    await this.recordSessionDifficulty();
                 }
                 break;
             }
         }
+
+        await this.recordSessionDifficulty();
 
         if (this.clientSuggestedDifficulty == null) {
             const setDifficulty = JSON.stringify(
@@ -657,8 +692,10 @@ export class StratumV1Client {
                             userAgent: this.clientSubscription.userAgent,
                             startTime,
                             firstSeen: firstSeenValue,
-                            bestDifficulty: 0
+                            bestDifficulty: 0,
+                            currentDifficulty: this.sessionDifficulty,
                         });
+                        await this.persistSessionDifficultyIfPossible();
                         this.deviceOfflineNotified = false;
                         if (this.clientAuthorization && !this.deviceOnlineNotified) {
                             this.deviceOnlineNotified = true;
@@ -824,7 +861,14 @@ export class StratumV1Client {
                 const now = new Date();
                 // only update every minute
                 if (this.entity.updatedAt == null || now.getTime() - this.entity.updatedAt.getTime() > 1000 * 60) {
-                    await this.clientService.heartbeat(this.entity.address, this.entity.clientName, this.entity.sessionId, this.hashRate, now);
+                    await this.clientService.heartbeat(
+                        this.entity.address,
+                        this.entity.clientName,
+                        this.entity.sessionId,
+                        this.hashRate,
+                        now,
+                        this.sessionDifficulty,
+                    );
                     this.entity.updatedAt = now;
                 }
 
@@ -917,6 +961,7 @@ export class StratumV1Client {
             //console.log(`Adjusting ${this.sessionId} difficulty from ${this.sessionDifficulty} to ${targetDiff}`);
             if (!Number.isFinite(targetDiff)) return;
             this.sessionDifficulty = targetDiff;
+            await this.recordSessionDifficulty();
 
             const data = JSON.stringify({
                 id: null,

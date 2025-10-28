@@ -16,6 +16,7 @@ import { TelegramSubscriptionsEntity } from '../ORM/telegram-subscriptions/teleg
 import { InitialSchema1700000000000 } from '../migrations/1700000000000-InitialSchema';
 import { UseTimestamptzForDates1707352800000 } from '../migrations/1707352800000-UseTimestamptzForDates';
 import { AddClientDifficultyStatistics1717430400000 } from '../migrations/1717430400000-AddClientDifficultyStatistics';
+import { AddCurrentDifficultyToClients1719000000000 } from '../migrations/1719000000000-AddCurrentDifficultyToClients';
 import {
     MIGRATION_ENTITIES,
     MigrationLogger,
@@ -96,6 +97,7 @@ describe('migrateSqliteToPostgres', () => {
                 InitialSchema1700000000000,
                 UseTimestamptzForDates1707352800000,
                 AddClientDifficultyStatistics1717430400000,
+                AddCurrentDifficultyToClients1719000000000,
             ],
             synchronize: false,
         });
@@ -127,6 +129,7 @@ describe('migrateSqliteToPostgres', () => {
             firstSeen: now,
             bestDifficulty: 10.5,
             hashRate: 123,
+            currentDifficulty: 512,
         });
 
         await dataSource.getRepository(ClientStatisticsEntity).save({
@@ -291,6 +294,7 @@ describe('migrateSqliteToPostgres', () => {
         });
         expect(migratedClient.firstSeen?.toISOString()).toBe('2024-01-01T00:00:00.000Z');
         expect(migratedClient.hashRate).toBe(123);
+        expect(migratedClient.currentDifficulty).toBe(512);
 
         const telegramSubscription = await postgresDataSource
             .getRepository(TelegramSubscriptionsEntity)

@@ -59,12 +59,13 @@ describe('TelegramService /show_workers handler', () => {
         const handler = showWorkersCall?.[1] as (msg: any, match: RegExpExecArray | null) => Promise<void>;
 
         const apiData = {
-            workersCount: 1,
-            totalHashrate: 1000,
+            workersCount: 2,
+            totalHashrate: 1500,
             totalShares: 50,
             bestDifficulty: 5000,
             workers: [
                 { name: 'Alpha', hashRate: 1000, currentDifficulty: 2, bestDifficulty: '1000' },
+                { name: 'Bravo', hashRate: 500, currentDifficulty: 4096, bestDifficulty: '2000' },
             ],
         };
 
@@ -90,6 +91,7 @@ describe('TelegramService /show_workers handler', () => {
             `http://localhost:5555/api/client/${encodeURIComponent(address)}`
         );
         expect(helperSpy).toHaveBeenCalledWith(apiData, (service as any).numberSuffix);
+        expect(helperSpy.mock.calls[0][0].workers?.[1].currentDifficulty).toBe(4096);
         expect(sendMessageMock).toHaveBeenCalledWith(42, 'DE message');
 
         delete process.env.API_PORT;

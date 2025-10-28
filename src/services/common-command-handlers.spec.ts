@@ -35,6 +35,7 @@ describe('buildWorkersOverviewMessage', () => {
         expect(result.de).toContain('Hashrate: 1.00GH/s');
         expect(result.en).toContain('Hashrate: 1.00GH/s');
         expect(result.de).toContain('Aktuelle Difficulty: 123');
+        expect(result.en).toContain('Current difficulty: 123');
         expect(result.de).toContain('Beste Difficulty: 456.78');
         expect(result.de).toContain('Worker 2');
         expect(result.de).toContain('Aktuelle Difficulty: –');

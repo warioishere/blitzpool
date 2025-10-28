@@ -40,12 +40,24 @@ export class ClientController {
             totalHashrate,
             workers: await Promise.all(
                 workers.map(async (worker) => {
+                    const liveDifficulty = worker.sessionId ? currentDifficulties.get(worker.sessionId) : undefined;
+                    const persistedDifficultyRaw = worker.currentDifficulty;
+                    const persistedDifficulty =
+                        persistedDifficultyRaw == null ? null : Number(persistedDifficultyRaw);
+                    const fallbackDifficulty =
+                        persistedDifficulty != null && Number.isFinite(persistedDifficulty)
+                            ? persistedDifficulty
+                            : null;
+                    const currentDifficulty =
+                        liveDifficulty != null
+                            ? liveDifficulty
+                            : fallbackDifficulty;
                     return {
                         sessionId: worker.sessionId,
                         name: worker.clientName,
                         bestDifficulty: worker.bestDifficulty.toFixed(2),
                         hashRate: worker.hashRate,
-                        currentDifficulty: worker.sessionId ? currentDifficulties.get(worker.sessionId) ?? null : null,
+                        currentDifficulty,
                         startTime: worker.startTime,
                         lastSeen: worker.updatedAt
                     };
