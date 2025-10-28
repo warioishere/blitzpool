@@ -50,6 +50,8 @@ export class StratumV1Client {
     private usedSuggestedDifficulty = false;
     private readonly initialDifficulty: number;
     private sessionDifficulty: number;
+    private deviceOnlineNotified = false;
+    private deviceOfflineNotified = false;
 
     private entity: ClientEntity;
     private creatingEntity: Promise<void>;
@@ -145,6 +147,22 @@ export class StratumV1Client {
     }
 
     public async destroy() {
+
+        if (this.clientAuthorization && this.deviceOnlineNotified && !this.deviceOfflineNotified) {
+            this.deviceOfflineNotified = true;
+            try {
+                await this.notificationService.notifyDeviceStatusChange({
+                    address: this.clientAuthorization.address,
+                    workerName: this.clientAuthorization.worker,
+                    userAgent: this.entity?.userAgent ?? this.clientSubscription?.userAgent,
+                    sessionId: this.entity?.sessionId ?? this.sessionId,
+                    isOnline: false,
+                    timestamp: new Date(),
+                });
+            } catch (err) {
+                console.error('Failed to notify device offline status', err);
+            }
+        }
 
         const sid = this.entity?.sessionId || this.sessionId;
         if (sid) {
@@ -630,15 +648,33 @@ export class StratumV1Client {
                             this.clientAuthorization.address,
                             this.clientAuthorization.worker
                         );
+                        const startTime = new Date();
+                        const firstSeenValue = firstSeen ?? startTime;
                         this.entity = await this.clientService.insert({
                             sessionId: this.sessionId,
                             address: this.clientAuthorization.address,
                             clientName: this.clientAuthorization.worker,
                             userAgent: this.clientSubscription.userAgent,
-                            startTime: new Date(),
-                            firstSeen: firstSeen || new Date(),
+                            startTime,
+                            firstSeen: firstSeenValue,
                             bestDifficulty: 0
                         });
+                        this.deviceOfflineNotified = false;
+                        if (this.clientAuthorization && !this.deviceOnlineNotified) {
+                            this.deviceOnlineNotified = true;
+                            try {
+                                await this.notificationService.notifyDeviceStatusChange({
+                                    address: this.clientAuthorization.address,
+                                    workerName: this.clientAuthorization.worker,
+                                    userAgent: this.clientSubscription?.userAgent,
+                                    sessionId: this.entity.sessionId,
+                                    isOnline: true,
+                                    timestamp: startTime,
+                                });
+                            } catch (err) {
+                                console.error('Failed to notify device online status', err);
+                            }
+                        }
                     } catch (e) {
                         reject(e);
                     }

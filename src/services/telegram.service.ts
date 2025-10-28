@@ -77,21 +77,43 @@ export class TelegramService implements OnModuleInit {
         }
 
         // Telegram Menübefehle registrieren
-        await this.bot.setMyCommands([
+        const commandsDe: TelegramBot.BotCommand[] = [
             { command: '/start', description: 'Zeigt Willkommensnachricht' },
             { command: '/subscribe', description: 'Benachrichtigung bei Blockhit aktivieren' },
             { command: '/subscribe_bestdiff', description: 'Best-Diff Benachrichtigungen (on/off/reset, Standard: on)' },
+            { command: '/device_notifications', description: 'Geräte-Benachrichtigungen (on/off)' },
             { command: '/difficulty', description: 'Zeigt aktuelle Netzwerk-Difficulty' },
             { command: '/next_difficulty', description: 'Zeigt erwartete Änderung der Netzwerk-Difficulty' },
             { command: '/stats', description: 'Zeigt die Stats für deine Miner Adresse an' },
-            { command: '/show_workers', description: 'Zeigt Worker-Übersicht / Shows worker overview' },
+            { command: '/show_workers', description: 'Zeigt Worker-Übersicht' },
             { command: '/poolhashrate', description: 'Zeigt die aktuelle Pool-Hashrate' },
             { command: '/remove', description: 'Adresse entfernen' },
             { command: '/show_addresses', description: 'Zeigt gespeicherte Adressen' },
             { command: '/deutsch', description: 'Bot-Antworten auf Deutsch' },
             { command: '/english', description: 'Bot replies in English' },
             { command: '/encryption_help', description: 'Anleitung zum Verschlüsseln' }
-        ]);
+        ];
+
+        const commandsEn: TelegramBot.BotCommand[] = [
+            { command: '/start', description: 'Show welcome message' },
+            { command: '/subscribe', description: 'Enable block hit notifications' },
+            { command: '/subscribe_bestdiff', description: 'Best-diff notifications (on/off/reset, default: on)' },
+            { command: '/device_notifications', description: 'Device notifications (on/off)' },
+            { command: '/difficulty', description: 'Show current network difficulty' },
+            { command: '/next_difficulty', description: 'Show expected network difficulty change' },
+            { command: '/stats', description: 'Show stats for your miner address' },
+            { command: '/show_workers', description: 'Show worker overview' },
+            { command: '/poolhashrate', description: 'Show current pool hashrate' },
+            { command: '/remove', description: 'Remove address' },
+            { command: '/show_addresses', description: 'Show stored addresses' },
+            { command: '/deutsch', description: 'Bot replies in German' },
+            { command: '/english', description: 'Bot replies in English' },
+            { command: '/encryption_help', description: 'How to encrypt your address' }
+        ];
+
+        await this.bot.setMyCommands(commandsDe);
+        await this.bot.setMyCommands(commandsDe, { language_code: 'de' });
+        await this.bot.setMyCommands(commandsEn, { language_code: 'en' });
 
         this.bot.onText(/\/deutsch/, (msg) => {
             this.chatLanguages.set(msg.chat.id, 'de');
@@ -248,6 +270,44 @@ export class TelegramService implements OnModuleInit {
                 });
             } catch (error) {
                 console.error("Fehler bei /subscribe_bestdiff:", error);
+                this.reply(chatId, {
+                    de: 'Fehler beim Setzen der Einstellung. Bitte später erneut versuchen.',
+                    en: 'Failed to update setting. Please try again later.'
+                });
+            }
+        });
+
+        this.bot.onText(/\/device_notifications(?:\s+(\S+))?/, async (msg, match) => {
+            const chatId = msg.chat.id;
+            const action = match?.[1]?.toLowerCase();
+
+            if (!action || !['on', 'off'].includes(action)) {
+                this.reply(chatId, {
+                    de: "Bitte gib 'on' oder 'off' an.",
+                    en: "Please provide 'on' or 'off'.",
+                });
+                return;
+            }
+
+            const subs = await this.telegramSubscriptionsService.getChatSubscriptions(chatId);
+            if (subs.length === 0) {
+                this.reply(chatId, {
+                    de: 'Keine Adresse gespeichert. Nutze /subscribe, um eine hinzuzufügen.',
+                    en: 'No address stored. Use /subscribe to add one.'
+                });
+                return;
+            }
+
+            const enabled = action === 'on';
+
+            try {
+                await this.telegramSubscriptionsService.updateDeviceNotifications(chatId, enabled);
+                this.reply(chatId, {
+                    de: `Geräte-Benachrichtigungen ${enabled ? 'aktiviert' : 'deaktiviert'}.`,
+                    en: `Device notifications ${enabled ? 'enabled' : 'disabled'}.`
+                });
+            } catch (error) {
+                console.error('Fehler bei /device_notifications:', error);
                 this.reply(chatId, {
                     de: 'Fehler beim Setzen der Einstellung. Bitte später erneut versuchen.',
                     en: 'Failed to update setting. Please try again later.'
@@ -566,6 +626,7 @@ I will decrypt it and respond just like with plain text. 🔒`
             if (
                 text.startsWith('/subscribe ') ||
                 text.startsWith('/subscribe_bestdiff') ||
+                text.startsWith('/device_notifications') ||
                 text === '/subscribe' ||
                 text === '/start' ||
                 text === '/difficulty' ||
@@ -626,5 +687,60 @@ I will decrypt it and respond just like with plain text. 🔒`
 
             Promise.all(subscriberMessages).then();
         }
+    }
+
+    public async notifyDeviceStatusChange(params: {
+        address: string;
+        workerName?: string;
+        userAgent?: string;
+        sessionId: string;
+        isOnline: boolean;
+        timestamp: Date;
+    }): Promise<void> {
+        if (!this.bot) return;
+
+        const { address, workerName, userAgent, isOnline, timestamp } = params;
+        const subscribers = await this.telegramSubscriptionsService.getSubscriptions(address);
+        const interestedSubscribers = subscribers.filter(sub => sub.deviceNotificationsEnabled);
+        if (interestedSubscribers.length === 0) {
+            return;
+        }
+
+        const eventTime = timestamp instanceof Date ? timestamp : new Date(timestamp);
+        const timeDe = eventTime.toLocaleString('de-DE');
+        const timeEn = eventTime.toLocaleString('en-US');
+        const trimmedAgent = userAgent?.trim();
+        const trimmedWorker = workerName?.trim();
+        const formattedAddress = this.formatAddress(address);
+        const chatIncludeCache = new Map<number, boolean>();
+
+        const notifications = interestedSubscribers.map(async sub => {
+            let includeAddress = chatIncludeCache.get(sub.telegramChatId);
+            if (includeAddress === undefined) {
+                const chatSubscriptions = await this.telegramSubscriptionsService.getChatSubscriptions(sub.telegramChatId);
+                includeAddress = chatSubscriptions.length > 1;
+                chatIncludeCache.set(sub.telegramChatId, includeAddress);
+            }
+
+            const suffixDe = includeAddress ? ` – Adresse ${formattedAddress}` : '';
+            const suffixEn = includeAddress ? ` – address ${formattedAddress}` : '';
+            const lang = this.getLanguage(sub.telegramChatId);
+
+            const userAgentDe = trimmedAgent && trimmedAgent.length > 0 ? trimmedAgent : 'unbekannt';
+            const userAgentEn = trimmedAgent && trimmedAgent.length > 0 ? trimmedAgent : 'unknown';
+            const workerDe = trimmedWorker && trimmedWorker.length > 0 ? trimmedWorker : 'unbekannt';
+            const workerEn = trimmedWorker && trimmedWorker.length > 0 ? trimmedWorker : 'unknown';
+
+            const messageDe = isOnline
+                ? `📶 Gerät ${userAgentDe} (Worker ${workerDe}) ist seit ${timeDe} wieder online${suffixDe}.`
+                : `📴 Gerät ${userAgentDe} (Worker ${workerDe}) ist seit ${timeDe} offline${suffixDe}.`;
+            const messageEn = isOnline
+                ? `📶 Device with ${userAgentEn} (worker ${workerEn}) back online at ${timeEn}${suffixEn}.`
+                : `📴 Device with ${userAgentEn} (worker ${workerEn}) went offline at ${timeEn}${suffixEn}.`;
+
+            return this.bot.sendMessage(sub.telegramChatId, lang === 'de' ? messageDe : messageEn);
+        });
+
+        await Promise.all(notifications);
     }
 }

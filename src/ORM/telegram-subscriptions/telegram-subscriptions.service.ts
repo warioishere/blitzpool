@@ -30,10 +30,13 @@ export class TelegramSubscriptionsService {
         if (existing) {
             return await this.telegramSubscriptions.update({ telegramChatId: chatId, address }, { isDefault: true });
         }
+        const previous = await this.telegramSubscriptions.findOne({ where: { telegramChatId: chatId } });
         return await this.telegramSubscriptions.save({
             telegramChatId: chatId,
             address,
-            isDefault: true
+            isDefault: true,
+            bestDiffNotificationsEnabled: previous?.bestDiffNotificationsEnabled ?? true,
+            deviceNotificationsEnabled: previous?.deviceNotificationsEnabled ?? false
         });
     }
 
@@ -49,6 +52,13 @@ export class TelegramSubscriptionsService {
         await this.telegramSubscriptions.update(
             { telegramChatId: chatId },
             { bestDiffNotificationsEnabled: enabled }
+        );
+    }
+
+    public async updateDeviceNotifications(chatId: number, enabled: boolean): Promise<void> {
+        await this.telegramSubscriptions.update(
+            { telegramChatId: chatId },
+            { deviceNotificationsEnabled: enabled }
         );
     }
 
