@@ -19,5 +19,8 @@ export class TelegramSubscriptionsEntity extends TrackedEntity {
     bestDiffNotificationsEnabled: boolean;
 
     @Column({ default: false })
+    deviceNotificationsEnabled: boolean;
+
+    @Column({ default: false })
     isDefault: boolean;
 }
