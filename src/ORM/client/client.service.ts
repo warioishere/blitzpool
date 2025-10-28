@@ -117,6 +117,15 @@ export class ClientService {
         return await this.clientRepository.update({ sessionId }, { currentDifficulty });
     }
 
+    public async resetBestDifficultyForAddress(address: string): Promise<void> {
+        await this.clientRepository
+            .createQueryBuilder()
+            .update(ClientEntity)
+            .set({ bestDifficulty: 0 })
+            .where('address = :address', { address })
+            .execute();
+    }
+
     public async updateSessionId(address: string, clientName: string, oldSessionId: string, newSessionId: string) {
         return await this.clientRepository.createQueryBuilder()
             .update(ClientEntity)

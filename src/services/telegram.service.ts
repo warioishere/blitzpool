@@ -311,7 +311,7 @@ export class TelegramService implements OnModuleInit {
                 await this.addressSettingsService.updateBestDifficulty(address, 0, null);
                 this.bestDiffCache.delete(address);
                 this.ntfyService.resetBestDiffCache(address);
-                this.stratumV1Service.resetClientsForAddress(address);
+                await this.stratumV1Service.resetBestDifficultyForAddress(address);
                 this.reply(chatId, {
                     de: `Best Difficulty für ${this.formatAddress(address)} zurückgesetzt.`,
                     en: `Best difficulty for ${this.formatAddress(address)} reset.`

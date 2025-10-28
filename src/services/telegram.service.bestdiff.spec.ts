@@ -40,6 +40,7 @@ describe('TelegramService best diff commands', () => {
     const clientStatisticsService = {};
     const stratumV1Service = {
         resetClientsForAddress: jest.fn(),
+        resetBestDifficultyForAddress: jest.fn(),
     };
     const ntfyService = {
         resetBestDiffCache: jest.fn(),
@@ -60,6 +61,7 @@ describe('TelegramService best diff commands', () => {
         addressSettingsService.getSettings.mockReset();
         addressSettingsService.updateBestDifficulty.mockReset().mockResolvedValue(undefined);
         stratumV1Service.resetClientsForAddress.mockReset();
+        stratumV1Service.resetBestDifficultyForAddress.mockReset().mockResolvedValue(undefined);
         ntfyService.resetBestDiffCache.mockReset();
         sendMessageMock.mockClear();
         onTextMock.mockClear();
@@ -157,7 +159,8 @@ describe('TelegramService best diff commands', () => {
 
         expect(addressSettingsService.updateBestDifficulty).toHaveBeenCalledWith(address, 0, null);
         expect(ntfyService.resetBestDiffCache).toHaveBeenCalledWith(address);
-        expect(stratumV1Service.resetClientsForAddress).toHaveBeenCalledWith(address);
+        expect(stratumV1Service.resetBestDifficultyForAddress).toHaveBeenCalledWith(address);
+        expect(stratumV1Service.resetClientsForAddress).not.toHaveBeenCalled();
         expect((service as any).bestDiffCache.has(address)).toBe(false);
         expect(sendMessageMock).toHaveBeenCalledWith(
             99,
@@ -192,6 +195,7 @@ describe('TelegramService best diff commands', () => {
         );
 
         expect(addressSettingsService.updateBestDifficulty).not.toHaveBeenCalled();
+        expect(stratumV1Service.resetBestDifficultyForAddress).not.toHaveBeenCalled();
         expect(stratumV1Service.resetClientsForAddress).not.toHaveBeenCalled();
         expect(sendMessageMock).toHaveBeenCalledWith(99, 'Ungültige Adresse.');
     });
