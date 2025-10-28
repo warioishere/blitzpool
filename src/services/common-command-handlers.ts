@@ -95,10 +95,20 @@ export function buildWorkersOverviewMessage(
             bestDifficultyValue !== null ? numberSuffix.to(bestDifficultyValue) : '–';
 
         workerLinesDe.push(
-            `• ${name} – Hashrate: ${hashRateFormatted}, Aktuelle Difficulty: ${currentDifficultyFormatted}, Beste Difficulty: ${bestDifficultyFormatted}`
+            [
+                `• ${name}`,
+                `Hashrate: ${hashRateFormatted}`,
+                `Aktuelle Difficulty: ${currentDifficultyFormatted}`,
+                `Beste Difficulty: ${bestDifficultyFormatted}`,
+            ].join('\n')
         );
         workerLinesEn.push(
-            `• ${name} – Hashrate: ${hashRateFormatted}, Current difficulty: ${currentDifficultyFormatted}, Best difficulty: ${bestDifficultyFormatted}`
+            [
+                `• ${name}`,
+                `Hashrate: ${hashRateFormatted}`,
+                `Current difficulty: ${currentDifficultyFormatted}`,
+                `Best difficulty: ${bestDifficultyFormatted}`,
+            ].join('\n')
         );
     });
 

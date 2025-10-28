@@ -32,12 +32,13 @@ describe('buildWorkersOverviewMessage', () => {
         expect(result.en).toContain('Total shares: 12.35k');
         expect(result.de).toContain('Beste Difficulty: 987.65k');
         expect(result.en).toContain('Best difficulty: 987.65k');
-        expect(result.de).toContain('Hashrate: 1.00GH/s');
-        expect(result.en).toContain('Hashrate: 1.00GH/s');
-        expect(result.de).toContain('Aktuelle Difficulty: 123');
-        expect(result.en).toContain('Current difficulty: 123');
-        expect(result.de).toContain('Beste Difficulty: 456.78');
-        expect(result.de).toContain('Worker 2');
+        expect(result.de).toContain(
+            ['• Alpha', 'Hashrate: 1.00GH/s', 'Aktuelle Difficulty: 123', 'Beste Difficulty: 456.78'].join('\n')
+        );
+        expect(result.en).toContain(
+            ['• Alpha', 'Hashrate: 1.00GH/s', 'Current difficulty: 123', 'Best difficulty: 456.78'].join('\n')
+        );
+        expect(result.de).toContain('• Worker 2');
         expect(result.de).toContain('Aktuelle Difficulty: –');
         expect(result.de).toContain('Beste Difficulty: –');
         expect(result.en).toContain('Current difficulty: –');
