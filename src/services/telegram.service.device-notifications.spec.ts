@@ -35,6 +35,9 @@ describe('TelegramService device notifications without polling', () => {
     };
     const clientStatisticsService = {};
     const stratumV1Service = {};
+    const ntfyService = {
+        resetBestDiffCache: jest.fn(),
+    };
 
     beforeEach(() => {
         jest.clearAllMocks();
@@ -60,6 +63,7 @@ describe('TelegramService device notifications without polling', () => {
             addressSettingsService as any,
             clientStatisticsService as any,
             stratumV1Service as any,
+            ntfyService as any,
         );
 
         expect(TelegramBotMock).toHaveBeenCalledWith('token', { polling: false });
@@ -94,6 +98,7 @@ describe('TelegramService device notifications without polling', () => {
             addressSettingsService as any,
             clientStatisticsService as any,
             stratumV1Service as any,
+            ntfyService as any,
         );
 
         await service.onModuleInit();

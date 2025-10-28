@@ -41,6 +41,9 @@ describe('TelegramService best diff commands', () => {
     const stratumV1Service = {
         resetClientsForAddress: jest.fn(),
     };
+    const ntfyService = {
+        resetBestDiffCache: jest.fn(),
+    };
 
     beforeEach(() => {
         jest.clearAllMocks();
@@ -57,6 +60,7 @@ describe('TelegramService best diff commands', () => {
         addressSettingsService.getSettings.mockReset();
         addressSettingsService.updateBestDifficulty.mockReset().mockResolvedValue(undefined);
         stratumV1Service.resetClientsForAddress.mockReset();
+        ntfyService.resetBestDiffCache.mockReset();
         sendMessageMock.mockClear();
         onTextMock.mockClear();
     });
@@ -69,6 +73,7 @@ describe('TelegramService best diff commands', () => {
             addressSettingsService as any,
             clientStatisticsService as any,
             stratumV1Service as any,
+            ntfyService as any,
         );
 
         await service.onModuleInit();
@@ -99,6 +104,7 @@ describe('TelegramService best diff commands', () => {
             addressSettingsService as any,
             clientStatisticsService as any,
             stratumV1Service as any,
+            ntfyService as any,
         );
 
         await service.onModuleInit();
@@ -130,6 +136,7 @@ describe('TelegramService best diff commands', () => {
             addressSettingsService as any,
             clientStatisticsService as any,
             stratumV1Service as any,
+            ntfyService as any,
         );
 
         await service.onModuleInit();
@@ -149,6 +156,7 @@ describe('TelegramService best diff commands', () => {
         );
 
         expect(addressSettingsService.updateBestDifficulty).toHaveBeenCalledWith(address, 0, null);
+        expect(ntfyService.resetBestDiffCache).toHaveBeenCalledWith(address);
         expect(stratumV1Service.resetClientsForAddress).toHaveBeenCalledWith(address);
         expect((service as any).bestDiffCache.has(address)).toBe(false);
         expect(sendMessageMock).toHaveBeenCalledWith(
@@ -168,6 +176,7 @@ describe('TelegramService best diff commands', () => {
             addressSettingsService as any,
             clientStatisticsService as any,
             stratumV1Service as any,
+            ntfyService as any,
         );
 
         await service.onModuleInit();

@@ -35,6 +35,9 @@ describe('TelegramService /show_workers handler', () => {
     };
     const clientStatisticsService = {};
     const stratumV1Service = {};
+    const ntfyService = {
+        resetBestDiffCache: jest.fn(),
+    };
 
     beforeEach(() => {
         jest.clearAllMocks();
@@ -56,6 +59,7 @@ describe('TelegramService /show_workers handler', () => {
             addressSettingsService as any,
             clientStatisticsService as any,
             stratumV1Service as any,
+            ntfyService as any,
         );
 
         expect(TelegramBotMock).toHaveBeenCalledWith('token', { polling: true });

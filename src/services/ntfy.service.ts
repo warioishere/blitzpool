@@ -168,6 +168,10 @@ export class NtfyService implements OnModuleInit {
     if (removed) {
       this.reconnect();
     }
+    this.resetBestDiffCache(address);
+  }
+
+  public resetBestDiffCache(address: string) {
     this.bestDiffCache.delete(address);
     this.bestDiffOptIn.delete(address);
   }

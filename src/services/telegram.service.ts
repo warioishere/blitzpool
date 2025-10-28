@@ -10,6 +10,7 @@ import { ClientService } from '../ORM/client/client.service';
 import { AddressSettingsService } from '../ORM/address-settings/address-settings.service';
 import { ClientStatisticsService } from '../ORM/client-statistics/client-statistics.service';
 import { StratumV1Service } from './stratum-v1.service';
+import { NtfyService } from './ntfy.service';
 import { buildStatsMessage, buildWorkersOverviewMessage } from './common-command-handlers';
 
 @Injectable()
@@ -88,7 +89,8 @@ export class TelegramService implements OnModuleInit {
         private readonly addressSettingsService: AddressSettingsService,
         private readonly clientStatisticsService: ClientStatisticsService,
         @Inject(forwardRef(() => StratumV1Service))
-        private readonly stratumV1Service: StratumV1Service
+        private readonly stratumV1Service: StratumV1Service,
+        private readonly ntfyService: NtfyService
     ) {
         this.numberSuffix = new NumberSuffix();
         this.diffNotifications = (this.configService.get('TELEGRAM_DIFF_NOTIFICATIONS')?.toLowerCase() === 'true') || false;
@@ -308,6 +310,7 @@ export class TelegramService implements OnModuleInit {
             try {
                 await this.addressSettingsService.updateBestDifficulty(address, 0, null);
                 this.bestDiffCache.delete(address);
+                this.ntfyService.resetBestDiffCache(address);
                 this.stratumV1Service.resetClientsForAddress(address);
                 this.reply(chatId, {
                     de: `Best Difficulty für ${this.formatAddress(address)} zurückgesetzt.`,
