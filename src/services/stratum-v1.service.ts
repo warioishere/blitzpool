@@ -186,9 +186,7 @@ export class StratumV1Service implements OnModuleInit {
     const clients = this.clientsByAddress.get(address);
     if (clients) {
       for (const client of clients) {
-        if (client.entity) {
-          client.entity.bestDifficulty = 0;
-        }
+        client.resetBestDifficulty();
       }
     }
 

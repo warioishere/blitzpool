@@ -148,6 +148,12 @@ export class StratumV1Client {
         return this.sessionDifficulty;
     }
 
+    public resetBestDifficulty(): void {
+        if (this.entity) {
+            this.entity.bestDifficulty = 0;
+        }
+    }
+
     public async destroy() {
 
         if (this.clientAuthorization && this.deviceOnlineNotified && !this.deviceOfflineNotified) {
