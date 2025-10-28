@@ -7,14 +7,14 @@ const onMock = jest.fn();
 const setMyCommandsMock = jest.fn().mockResolvedValue(undefined);
 const sendMessageMock = jest.fn();
 
-jest.mock('node-telegram-bot-api', () => {
-    return jest.fn().mockImplementation(() => ({
-        onText: onTextMock,
-        on: onMock,
-        setMyCommands: setMyCommandsMock,
-        sendMessage: sendMessageMock,
-    }));
-});
+const TelegramBotMock = jest.fn().mockImplementation(() => ({
+    onText: onTextMock,
+    on: onMock,
+    setMyCommands: setMyCommandsMock,
+    sendMessage: sendMessageMock,
+}));
+
+jest.mock('node-telegram-bot-api', () => TelegramBotMock);
 
 describe('TelegramService /show_workers handler', () => {
     const configService = {
@@ -37,6 +37,7 @@ describe('TelegramService /show_workers handler', () => {
 
     beforeEach(() => {
         jest.clearAllMocks();
+        TelegramBotMock.mockClear();
         (global as any).fetch = undefined;
     });
 
@@ -49,6 +50,9 @@ describe('TelegramService /show_workers handler', () => {
             clientStatisticsService as any,
             stratumV1Service as any,
         );
+
+        expect(TelegramBotMock).toHaveBeenCalledWith('token', { polling: true });
+        expect((service as any).shouldRegisterHandlers).toBe(true);
 
         await service.onModuleInit();
 

@@ -19,6 +19,7 @@ export class TelegramService implements OnModuleInit {
     private numberSuffix: NumberSuffix;
     private bestDiffCache: Map<string, number> = new Map();
     private chatLanguages: Map<number, 'de' | 'en'> = new Map();
+    private shouldRegisterHandlers = false;
 
     private formatAddress(address: string): string {
         return `${address.slice(0, 4)}...${address.slice(-5)}`;
@@ -51,14 +52,16 @@ export class TelegramService implements OnModuleInit {
             return;
         }
 
-        if (isPm2Worker && normalizedInstanceId !== '0') {
-            console.log(`Skipping Telegram bot init for PM2 instance ${normalizedInstanceId}`);
-            return;
+        this.shouldRegisterHandlers = !isPm2Worker || normalizedInstanceId === '0';
+        const polling = this.shouldRegisterHandlers;
+
+        this.bot = new TelegramBot(token, { polling });
+
+        if (this.shouldRegisterHandlers) {
+            console.log('Telegram bot init');
+        } else {
+            console.log(`Telegram bot init (polling disabled) for PM2 instance ${normalizedInstanceId}`);
         }
-
-        this.bot = new TelegramBot(token, { polling: true });
-
-        console.log('Telegram bot init');
 
         this.numberSuffix = new NumberSuffix();
         this.diffNotifications = (this.configService.get('TELEGRAM_DIFF_NOTIFICATIONS')?.toLowerCase() === 'true') || false;
@@ -74,6 +77,10 @@ export class TelegramService implements OnModuleInit {
                 const best = values[idx]?.bestDifficulty ?? 0;
                 this.bestDiffCache.set(addr, best);
             });
+        }
+
+        if (!this.shouldRegisterHandlers) {
+            return;
         }
 
         // Telegram Menübefehle registrieren
