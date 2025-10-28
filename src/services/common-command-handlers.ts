@@ -78,10 +78,12 @@ export function buildWorkersOverviewMessage(
     const workerLinesDe: string[] = [];
     const workerLinesEn: string[] = [];
 
+    const formatHashrate = (value: number): string => `${numberSuffix.to(value)}H/s`;
+
     (data.workers ?? []).forEach((worker, idx) => {
         const name = worker?.name?.trim() || `Worker ${idx + 1}`;
         const hashRateValue = parseNumeric(worker?.hashRate) ?? 0;
-        const hashRateFormatted = numberSuffix.to(hashRateValue);
+        const hashRateFormatted = formatHashrate(hashRateValue);
         const currentDifficultyValue = parseNumeric(worker?.currentDifficulty);
         const currentDifficultyFormatted =
             currentDifficultyValue !== null ? `${currentDifficultyValue}` : '–';
@@ -100,7 +102,7 @@ export function buildWorkersOverviewMessage(
     const summaryDe = [
         '👷 Worker-Übersicht',
         `Gesamtanzahl: ${data.workersCount}`,
-        `Gesamt-Hashrate: ${numberSuffix.to(totalHashrate)}`,
+        `Gesamt-Hashrate: ${formatHashrate(totalHashrate)}`,
         `Gesamt-Shares: ${numberSuffix.to(totalShares)}`,
         `Beste Difficulty: ${bestDifficultyTotalFormatted}`,
     ].join('\n');
@@ -108,7 +110,7 @@ export function buildWorkersOverviewMessage(
     const summaryEn = [
         '👷 Workers overview',
         `Total workers: ${data.workersCount}`,
-        `Total hashrate: ${numberSuffix.to(totalHashrate)}`,
+        `Total hashrate: ${formatHashrate(totalHashrate)}`,
         `Total shares: ${numberSuffix.to(totalShares)}`,
         `Best difficulty: ${bestDifficultyTotalFormatted}`,
     ].join('\n');

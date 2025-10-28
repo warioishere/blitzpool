@@ -5,13 +5,13 @@ describe('buildWorkersOverviewMessage', () => {
     it('formats worker overview with suffixes and plain current difficulty', () => {
         const data: WorkerOverviewData = {
             workersCount: 2,
-            totalHashrate: 1500,
+            totalHashrate: 1_500_000_000_000,
             totalShares: 12345,
             bestDifficulty: 987654,
             workers: [
                 {
                     name: 'Alpha',
-                    hashRate: 1000,
+                    hashRate: 3_600_000_000,
                     currentDifficulty: 123,
                     bestDifficulty: '456.78',
                 },
@@ -26,18 +26,21 @@ describe('buildWorkersOverviewMessage', () => {
 
         const result = buildWorkersOverviewMessage(data, new NumberSuffix());
 
-        expect(result.de).toContain('Gesamt-Hashrate: 1.50k');
-        expect(result.en).toContain('Total hashrate: 1.50k');
+        expect(result.de).toContain('Gesamt-Hashrate: 1.50TH/s');
+        expect(result.en).toContain('Total hashrate: 1.50TH/s');
         expect(result.de).toContain('Gesamt-Shares: 12.35k');
         expect(result.en).toContain('Total shares: 12.35k');
         expect(result.de).toContain('Beste Difficulty: 987.65k');
         expect(result.en).toContain('Best difficulty: 987.65k');
-        expect(result.de).toContain('Hashrate: 1.00k');
+        expect(result.de).toContain('Hashrate: 3.60GH/s');
+        expect(result.en).toContain('Hashrate: 3.60GH/s');
         expect(result.de).toContain('Aktuelle Difficulty: 123');
         expect(result.de).toContain('Beste Difficulty: 456.78');
         expect(result.de).toContain('Worker 2');
+        expect(result.de).toContain('Hashrate: 0.00H/s');
         expect(result.de).toContain('Aktuelle Difficulty: –');
         expect(result.de).toContain('Beste Difficulty: –');
+        expect(result.en).toContain('Hashrate: 0.00H/s');
         expect(result.en).toContain('Current difficulty: –');
     });
 });
