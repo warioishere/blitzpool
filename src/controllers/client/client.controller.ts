@@ -31,6 +31,7 @@ export class ClientController {
 
         const totalShares = await this.clientStatisticsService.getTotalSharesForAddress(address);
         const totalHashrate = workers.reduce((sum, w) => sum + (w.hashRate ?? 0), 0);
+        const currentDifficulties = this.stratumV1Service.getCurrentDifficulties(address);
 
         return {
             bestDifficulty: addressSettings?.bestDifficulty,
@@ -44,6 +45,7 @@ export class ClientController {
                         name: worker.clientName,
                         bestDifficulty: worker.bestDifficulty.toFixed(2),
                         hashRate: worker.hashRate,
+                        currentDifficulty: worker.sessionId ? currentDifficulties.get(worker.sessionId) ?? null : null,
                         startTime: worker.startTime,
                         lastSeen: worker.updatedAt
                     };
