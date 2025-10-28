@@ -31,4 +31,15 @@ export class NotificationService implements OnModuleInit {
         await this.telegramService.notifySubscribersBestDiff(address, submissionDifficulty);
         await this.ntfyService.notifySubscribersBestDiff(address, submissionDifficulty);
     }
+
+    public async notifyDeviceStatusChange(params: {
+        address: string;
+        workerName?: string;
+        userAgent?: string;
+        sessionId: string;
+        isOnline: boolean;
+        timestamp: Date;
+    }): Promise<void> {
+        await this.telegramService.notifyDeviceStatusChange(params);
+    }
 }

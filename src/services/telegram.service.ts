@@ -688,4 +688,59 @@ I will decrypt it and respond just like with plain text. 🔒`
             Promise.all(subscriberMessages).then();
         }
     }
+
+    public async notifyDeviceStatusChange(params: {
+        address: string;
+        workerName?: string;
+        userAgent?: string;
+        sessionId: string;
+        isOnline: boolean;
+        timestamp: Date;
+    }): Promise<void> {
+        if (!this.bot) return;
+
+        const { address, workerName, userAgent, isOnline, timestamp } = params;
+        const subscribers = await this.telegramSubscriptionsService.getSubscriptions(address);
+        const interestedSubscribers = subscribers.filter(sub => sub.deviceNotificationsEnabled);
+        if (interestedSubscribers.length === 0) {
+            return;
+        }
+
+        const eventTime = timestamp instanceof Date ? timestamp : new Date(timestamp);
+        const timeDe = eventTime.toLocaleString('de-DE');
+        const timeEn = eventTime.toLocaleString('en-US');
+        const trimmedAgent = userAgent?.trim();
+        const trimmedWorker = workerName?.trim();
+        const formattedAddress = this.formatAddress(address);
+        const chatIncludeCache = new Map<number, boolean>();
+
+        const notifications = interestedSubscribers.map(async sub => {
+            let includeAddress = chatIncludeCache.get(sub.telegramChatId);
+            if (includeAddress === undefined) {
+                const chatSubscriptions = await this.telegramSubscriptionsService.getChatSubscriptions(sub.telegramChatId);
+                includeAddress = chatSubscriptions.length > 1;
+                chatIncludeCache.set(sub.telegramChatId, includeAddress);
+            }
+
+            const suffixDe = includeAddress ? ` – Adresse ${formattedAddress}` : '';
+            const suffixEn = includeAddress ? ` – address ${formattedAddress}` : '';
+            const lang = this.getLanguage(sub.telegramChatId);
+
+            const userAgentDe = trimmedAgent && trimmedAgent.length > 0 ? trimmedAgent : 'unbekannt';
+            const userAgentEn = trimmedAgent && trimmedAgent.length > 0 ? trimmedAgent : 'unknown';
+            const workerDe = trimmedWorker && trimmedWorker.length > 0 ? trimmedWorker : 'unbekannt';
+            const workerEn = trimmedWorker && trimmedWorker.length > 0 ? trimmedWorker : 'unknown';
+
+            const messageDe = isOnline
+                ? `📶 Gerät ${userAgentDe} (Worker ${workerDe}) ist seit ${timeDe} wieder online${suffixDe}.`
+                : `📴 Gerät ${userAgentDe} (Worker ${workerDe}) ist seit ${timeDe} offline${suffixDe}.`;
+            const messageEn = isOnline
+                ? `📶 Device with ${userAgentEn} (worker ${workerEn}) back online at ${timeEn}${suffixEn}.`
+                : `📴 Device with ${userAgentEn} (worker ${workerEn}) went offline at ${timeEn}${suffixEn}.`;
+
+            return this.bot.sendMessage(sub.telegramChatId, lang === 'de' ? messageDe : messageEn);
+        });
+
+        await Promise.all(notifications);
+    }
 }
