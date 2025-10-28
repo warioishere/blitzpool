@@ -16,8 +16,9 @@ const TelegramBotMock = jest.fn().mockImplementation(() => ({
 jest.mock('node-telegram-bot-api', () => TelegramBotMock);
 
 describe('TelegramService device notifications without polling', () => {
+    const configServiceGetMock = jest.fn();
     const configService = {
-        get: jest.fn((key: string) => (key === 'TELEGRAM_BOT_TOKEN' ? 'token' : null)),
+        get: configServiceGetMock,
     } as unknown as ConfigService;
 
     const telegramSubscriptionsService = {
@@ -38,6 +39,12 @@ describe('TelegramService device notifications without polling', () => {
     beforeEach(() => {
         jest.clearAllMocks();
         TelegramBotMock.mockClear();
+        configServiceGetMock.mockImplementation((key: string) => {
+            if (key === 'TELEGRAM_BOT_TOKEN') return 'token';
+            if (key === 'TELEGRAM_TIMEZONE') return 'Europe/Berlin';
+            if (key === 'TELEGRAM_DIFF_NOTIFICATIONS') return null;
+            return null;
+        });
         process.env.NODE_APP_INSTANCE = '1';
     });
 
@@ -75,7 +82,36 @@ describe('TelegramService device notifications without polling', () => {
         expect(sendMessageMock).toHaveBeenCalledTimes(1);
         expect(sendMessageMock).toHaveBeenCalledWith(
             123,
-            expect.stringContaining('back online'),
+            '📶 Device with Antminer (worker Worker-1) back online at 1/1/24, 1:00 AM.',
+        );
+    });
+
+    it('formats German device notifications using the configured timezone', async () => {
+        const service = new TelegramService(
+            configService,
+            telegramSubscriptionsService as any,
+            clientService as any,
+            addressSettingsService as any,
+            clientStatisticsService as any,
+            stratumV1Service as any,
+        );
+
+        await service.onModuleInit();
+
+        (service as any).chatLanguages.set(123, 'de');
+
+        await service.notifyDeviceStatusChange({
+            address: '1BoatSLRHtKNngkdXEeobR76b53LETtpyT',
+            workerName: 'Worker-1',
+            userAgent: 'Antminer',
+            sessionId: 'session-1',
+            isOnline: false,
+            timestamp: new Date('2024-01-01T00:00:00Z'),
+        });
+
+        expect(sendMessageMock).toHaveBeenCalledWith(
+            123,
+            '📴 Gerät Antminer (Worker Worker-1) ist seit 01.01.24, 01:00 offline.',
         );
     });
 });

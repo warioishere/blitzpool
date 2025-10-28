@@ -17,8 +17,9 @@ const TelegramBotMock = jest.fn().mockImplementation(() => ({
 jest.mock('node-telegram-bot-api', () => TelegramBotMock);
 
 describe('TelegramService /show_workers handler', () => {
+    const configServiceGetMock = jest.fn();
     const configService = {
-        get: jest.fn((key: string) => (key === 'TELEGRAM_BOT_TOKEN' ? 'token' : null)),
+        get: configServiceGetMock,
     } as unknown as ConfigService;
     const telegramSubscriptionsService = {
         getAllAddresses: jest.fn().mockResolvedValue([]),
@@ -38,6 +39,12 @@ describe('TelegramService /show_workers handler', () => {
     beforeEach(() => {
         jest.clearAllMocks();
         TelegramBotMock.mockClear();
+        configServiceGetMock.mockImplementation((key: string) => {
+            if (key === 'TELEGRAM_BOT_TOKEN') return 'token';
+            if (key === 'TELEGRAM_TIMEZONE') return 'Europe/Berlin';
+            if (key === 'TELEGRAM_DIFF_NOTIFICATIONS') return null;
+            return null;
+        });
         (global as any).fetch = undefined;
     });
 

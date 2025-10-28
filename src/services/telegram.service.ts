@@ -20,6 +20,7 @@ export class TelegramService implements OnModuleInit {
     private bestDiffCache: Map<string, number> = new Map();
     private chatLanguages: Map<number, 'de' | 'en'> = new Map();
     private shouldRegisterHandlers = false;
+    private readonly deviceNotificationFormatters: Record<'de' | 'en', Intl.DateTimeFormat>;
 
     private formatAddress(address: string): string {
         return `${address.slice(0, 4)}...${address.slice(-5)}`;
@@ -43,6 +44,31 @@ export class TelegramService implements OnModuleInit {
         @Inject(forwardRef(() => StratumV1Service))
         private readonly stratumV1Service: StratumV1Service
     ) {
+        this.numberSuffix = new NumberSuffix();
+        this.diffNotifications = (this.configService.get('TELEGRAM_DIFF_NOTIFICATIONS')?.toLowerCase() === 'true') || false;
+
+        const timezonePreference = this.configService.get<string>('TELEGRAM_TIMEZONE')?.trim();
+        const fallbackTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        let effectiveTimeZone = timezonePreference && timezonePreference.length > 0
+            ? timezonePreference
+            : fallbackTimeZone ?? 'UTC';
+
+        const createFormatter = (locale: string, timeZone: string) =>
+            new Intl.DateTimeFormat(locale, { dateStyle: 'short', timeStyle: 'short', timeZone });
+
+        try {
+            this.deviceNotificationFormatters = {
+                de: createFormatter('de-DE', effectiveTimeZone),
+                en: createFormatter('en-US', effectiveTimeZone),
+            };
+        } catch {
+            effectiveTimeZone = 'UTC';
+            this.deviceNotificationFormatters = {
+                de: createFormatter('de-DE', effectiveTimeZone),
+                en: createFormatter('en-US', effectiveTimeZone),
+            };
+        }
+
         const token: string | null = this.configService.get('TELEGRAM_BOT_TOKEN');
         const pm2InstanceId = process.env.NODE_APP_INSTANCE ?? process.env.pm_id ?? process.env.PM2_INSTANCE_ID;
         const normalizedInstanceId = typeof pm2InstanceId === 'string' ? pm2InstanceId.trim() : undefined;
@@ -63,8 +89,6 @@ export class TelegramService implements OnModuleInit {
             console.log(`Telegram bot init (polling disabled) for PM2 instance ${normalizedInstanceId}`);
         }
 
-        this.numberSuffix = new NumberSuffix();
-        this.diffNotifications = (this.configService.get('TELEGRAM_DIFF_NOTIFICATIONS')?.toLowerCase() === 'true') || false;
     }
 
     async onModuleInit(): Promise<void> {
@@ -714,8 +738,8 @@ I will decrypt it and respond just like with plain text. 🔒`
         }
 
         const eventTime = timestamp instanceof Date ? timestamp : new Date(timestamp);
-        const timeDe = eventTime.toLocaleString('de-DE');
-        const timeEn = eventTime.toLocaleString('en-US');
+        const timeDe = this.deviceNotificationFormatters.de.format(eventTime);
+        const timeEn = this.deviceNotificationFormatters.en.format(eventTime);
         const trimmedAgent = userAgent?.trim();
         const trimmedWorker = workerName?.trim();
         const formattedAddress = this.formatAddress(address);
