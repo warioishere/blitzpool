@@ -8,6 +8,19 @@ export interface StatsMessages {
     en: string;
 }
 
+export interface WorkerOverviewData {
+    workersCount: number;
+    totalHashrate?: number | null;
+    totalShares?: number | null;
+    bestDifficulty?: number | string | null;
+    workers?: Array<{
+        name?: string | null;
+        hashRate?: number | null;
+        currentDifficulty?: number | null;
+        bestDifficulty?: number | string | null;
+    }> | null;
+}
+
 export async function buildStatsMessage(
     address: string,
     clientService: ClientService,
@@ -38,6 +51,74 @@ export async function buildStatsMessage(
             `- Total shares: ${numberSuffix.to(totalShares)}\n` +
             `- Last share: ${lastSeenSeconds} seconds ago\n` +
             `- Best difficulty: ${bestDifficultyG.toFixed(2)} G`,
+    };
+}
+
+function parseNumeric(value: number | string | null | undefined): number | null {
+    if (value === null || value === undefined) {
+        return null;
+    }
+    if (typeof value === 'number') {
+        return Number.isFinite(value) ? value : null;
+    }
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+}
+
+export function buildWorkersOverviewMessage(
+    data: WorkerOverviewData,
+    numberSuffix: NumberSuffix
+): StatsMessages {
+    const totalHashrate = parseNumeric(data.totalHashrate) ?? 0;
+    const totalShares = parseNumeric(data.totalShares) ?? 0;
+    const bestDifficultyTotal = parseNumeric(data.bestDifficulty);
+    const bestDifficultyTotalFormatted =
+        bestDifficultyTotal !== null ? numberSuffix.to(bestDifficultyTotal) : '–';
+
+    const workerLinesDe: string[] = [];
+    const workerLinesEn: string[] = [];
+
+    (data.workers ?? []).forEach((worker, idx) => {
+        const name = worker?.name?.trim() || `Worker ${idx + 1}`;
+        const hashRateValue = parseNumeric(worker?.hashRate) ?? 0;
+        const hashRateFormatted = numberSuffix.to(hashRateValue);
+        const currentDifficultyValue = parseNumeric(worker?.currentDifficulty);
+        const currentDifficultyFormatted =
+            currentDifficultyValue !== null ? `${currentDifficultyValue}` : '–';
+        const bestDifficultyValue = parseNumeric(worker?.bestDifficulty);
+        const bestDifficultyFormatted =
+            bestDifficultyValue !== null ? numberSuffix.to(bestDifficultyValue) : '–';
+
+        workerLinesDe.push(
+            `• ${name} – Hashrate: ${hashRateFormatted}, Aktuelle Difficulty: ${currentDifficultyFormatted}, Beste Difficulty: ${bestDifficultyFormatted}`
+        );
+        workerLinesEn.push(
+            `• ${name} – Hashrate: ${hashRateFormatted}, Current difficulty: ${currentDifficultyFormatted}, Best difficulty: ${bestDifficultyFormatted}`
+        );
+    });
+
+    const summaryDe = [
+        '👷 Worker-Übersicht',
+        `Gesamtanzahl: ${data.workersCount}`,
+        `Gesamt-Hashrate: ${numberSuffix.to(totalHashrate)}`,
+        `Gesamt-Shares: ${numberSuffix.to(totalShares)}`,
+        `Beste Difficulty: ${bestDifficultyTotalFormatted}`,
+    ].join('\n');
+
+    const summaryEn = [
+        '👷 Workers overview',
+        `Total workers: ${data.workersCount}`,
+        `Total hashrate: ${numberSuffix.to(totalHashrate)}`,
+        `Total shares: ${numberSuffix.to(totalShares)}`,
+        `Best difficulty: ${bestDifficultyTotalFormatted}`,
+    ].join('\n');
+
+    const workersDe = workerLinesDe.join('\n');
+    const workersEn = workerLinesEn.join('\n');
+
+    return {
+        de: workersDe ? `${summaryDe}\n\n${workersDe}` : summaryDe,
+        en: workersEn ? `${summaryEn}\n\n${workersEn}` : summaryEn,
     };
 }
 

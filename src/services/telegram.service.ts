@@ -10,7 +10,7 @@ import { ClientService } from '../ORM/client/client.service';
 import { AddressSettingsService } from '../ORM/address-settings/address-settings.service';
 import { ClientStatisticsService } from '../ORM/client-statistics/client-statistics.service';
 import { StratumV1Service } from './stratum-v1.service';
-import { buildStatsMessage } from './common-command-handlers';
+import { buildStatsMessage, buildWorkersOverviewMessage } from './common-command-handlers';
 
 @Injectable()
 export class TelegramService implements OnModuleInit {
@@ -84,6 +84,7 @@ export class TelegramService implements OnModuleInit {
             { command: '/difficulty', description: 'Zeigt aktuelle Netzwerk-Difficulty' },
             { command: '/next_difficulty', description: 'Zeigt erwartete Änderung der Netzwerk-Difficulty' },
             { command: '/stats', description: 'Zeigt die Stats für deine Miner Adresse an' },
+            { command: '/show_workers', description: 'Zeigt Worker-Übersicht / Shows worker overview' },
             { command: '/poolhashrate', description: 'Zeigt die aktuelle Pool-Hashrate' },
             { command: '/remove', description: 'Adresse entfernen' },
             { command: '/show_addresses', description: 'Zeigt gespeicherte Adressen' },
@@ -414,6 +415,80 @@ I will decrypt it and respond just like with plain text. 🔒`
                 de: `Gespeicherte Adressen:\n${lines}\n* = Standard`,
                 en: `Stored addresses:\n${lines}\n* = default`
             });
+        });
+
+        this.bot.onText(/\/show_workers(?:\s+(.+))?/, async (msg, match) => {
+            const chatId = msg.chat.id;
+            let raw = match?.[1]?.trim();
+
+            if (!raw) {
+                const subs = await this.telegramSubscriptionsService.getChatSubscriptions(chatId);
+                if (subs.length === 0) {
+                    this.reply(chatId, {
+                        de: 'Keine Adresse gespeichert. Nutze /subscribe, um eine hinzuzufügen.',
+                        en: 'No address stored. Use /subscribe to add one.'
+                    });
+                    return;
+                }
+
+                const defaultSub = subs.find(s => s.isDefault);
+                if (subs.length === 1 || defaultSub) {
+                    raw = (defaultSub ?? subs[0]).address;
+                } else {
+                    const list = subs.map(s => `${s.isDefault ? '*' : ''}${this.formatAddress(s.address)}`).join('\n');
+                    this.reply(chatId, {
+                        de: `Mehrere Adressen gespeichert:\n${list}\nBitte Adresse angeben.`,
+                        en: `Multiple addresses stored:\n${list}\nPlease specify an address.`
+                    });
+                    return;
+                }
+            }
+
+            let address = raw;
+            const decrypted = decryptMessageIfNeeded(raw);
+            if (decrypted) {
+                console.log('Entschlüsselt (Show Workers):', decrypted);
+                address = decrypted.trim();
+            }
+
+            if (!validate(address)) {
+                this.reply(chatId, {
+                    de: 'Ungültige Adresse.',
+                    en: 'Invalid address.'
+                });
+                return;
+            }
+
+            const apiPort = process.env.API_PORT ?? '3334';
+            const url = `http://localhost:${apiPort}/api/client/${encodeURIComponent(address)}`;
+
+            try {
+                const res = await fetch(url);
+                if (!res.ok) {
+                    this.reply(chatId, {
+                        de: 'Konnte Worker-Daten nicht abrufen.',
+                        en: 'Could not fetch worker data.'
+                    });
+                    return;
+                }
+                const payload = await res.json();
+                if (!payload || !Array.isArray(payload.workers) || payload.workers.length === 0) {
+                    this.reply(chatId, {
+                        de: 'Keine Worker für diese Adresse gefunden.',
+                        en: 'No workers found for this address.'
+                    });
+                    return;
+                }
+
+                const messages = buildWorkersOverviewMessage(payload, this.numberSuffix);
+                this.reply(chatId, messages);
+            } catch (err) {
+                console.error('Fehler bei /show_workers:', err);
+                this.reply(chatId, {
+                    de: 'Fehler beim Abrufen der Worker-Daten.',
+                    en: 'Failed to retrieve worker data.'
+                });
+            }
         });
 
         this.bot.onText(/\/stats(?:\s+(.+))?/, async (msg, match) => {
