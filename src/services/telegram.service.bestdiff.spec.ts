@@ -57,6 +57,7 @@ describe('TelegramService best diff commands', () => {
         });
         telegramSubscriptionsService.getDefault.mockReset();
         telegramSubscriptionsService.getChatSubscriptions.mockReset();
+        telegramSubscriptionsService.getSubscriptions.mockReset();
         telegramSubscriptionsService.updateBestDiffNotification.mockReset().mockResolvedValue(undefined);
         addressSettingsService.getSettings.mockReset();
         addressSettingsService.updateBestDifficulty.mockReset().mockResolvedValue(undefined);
@@ -198,5 +199,67 @@ describe('TelegramService best diff commands', () => {
         expect(stratumV1Service.resetBestDifficultyForAddress).not.toHaveBeenCalled();
         expect(stratumV1Service.resetClientsForAddress).not.toHaveBeenCalled();
         expect(sendMessageMock).toHaveBeenCalledWith(99, 'Ungültige Adresse.');
+    });
+
+    it('emits fresh best diff notifications across PM2 workers after a reset', async () => {
+        configServiceGetMock.mockImplementation((key: string) => {
+            if (key === 'TELEGRAM_BOT_TOKEN') return 'token';
+            if (key === 'TELEGRAM_TIMEZONE') return 'Europe/Berlin';
+            if (key === 'TELEGRAM_DIFF_NOTIFICATIONS') return 'true';
+            return null;
+        });
+
+        const address = '1BoatSLRHtKNngkdXEeobR76b53LETtpyT';
+        let persistedBest = 100;
+
+        addressSettingsService.getSettings.mockImplementation(async () => ({
+            bestDifficulty: persistedBest,
+        }));
+
+        telegramSubscriptionsService.getSubscriptions.mockResolvedValue([
+            { telegramChatId: 7, bestDiffNotificationsEnabled: true },
+        ]);
+
+        telegramSubscriptionsService.getChatSubscriptions.mockResolvedValue([
+            { address, isDefault: true },
+        ]);
+
+        const primaryService = new TelegramService(
+            configService,
+            telegramSubscriptionsService as any,
+            clientService as any,
+            addressSettingsService as any,
+            clientStatisticsService as any,
+            stratumV1Service as any,
+            ntfyService as any,
+        );
+
+        const secondaryService = new TelegramService(
+            configService,
+            telegramSubscriptionsService as any,
+            clientService as any,
+            addressSettingsService as any,
+            clientStatisticsService as any,
+            stratumV1Service as any,
+            ntfyService as any,
+        );
+
+        (primaryService as any).bestDiffCache.set(address, persistedBest);
+        (secondaryService as any).bestDiffCache.set(address, persistedBest);
+
+        persistedBest = 0;
+        (primaryService as any).bestDiffCache.delete(address);
+
+        sendMessageMock.mockClear();
+
+        await secondaryService.notifySubscribersBestDiff(address, 80);
+
+        expect(addressSettingsService.getSettings).toHaveBeenCalled();
+        expect(sendMessageMock).toHaveBeenCalledTimes(1);
+        const [chatId, text] = sendMessageMock.mock.calls[0] as [number, string];
+        expect(chatId).toBe(7);
+        expect(text).toContain('Neue beste Difficulty');
+        expect(text).toContain('80');
+        expect((secondaryService as any).bestDiffCache.get(address)).toBe(80);
     });
 });

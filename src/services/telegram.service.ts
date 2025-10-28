@@ -707,14 +707,12 @@ I will decrypt it and respond just like with plain text. 🔒`
     public async notifySubscribersBestDiff(address: string, submissionDifficulty: number) {
         if (!this.bot || !this.diffNotifications) return;
 
-        let currentBest = this.bestDiffCache.get(address);
-        if (currentBest === undefined) {
-            const settings = await this.addressSettingsService.getSettings(address, false);
-            currentBest = settings?.bestDifficulty ?? 0;
-            this.bestDiffCache.set(address, currentBest);
-        }
+        const settings = await this.addressSettingsService.getSettings(address, false);
+        const persistedBest = settings?.bestDifficulty ?? 0;
 
-        if (submissionDifficulty > currentBest) {
+        this.bestDiffCache.set(address, persistedBest);
+
+        if (submissionDifficulty > persistedBest) {
             this.bestDiffCache.set(address, submissionDifficulty);
 
             const subscribers = await this.telegramSubscriptionsService.getSubscriptions(address);
