@@ -55,7 +55,7 @@ export class StratumV1Service implements OnModuleInit {
       const highDiffDifficulty = parseFloat(
         this.configService.get<string>(
           'STRATUM_HIGH_DIFF_START_DIFFICULTY',
-        ) ?? '128000',
+        ) ?? '1000000',
       );
 
       const normalizedDefaultPort = Number.isNaN(defaultPort) ? 3333 : defaultPort;
@@ -69,14 +69,22 @@ export class StratumV1Service implements OnModuleInit {
 
       if (!Number.isNaN(highDiffPort) && highDiffPort !== normalizedDefaultPort) {
         const normalizedHighDiffDifficulty = Number.isNaN(highDiffDifficulty)
-          ? 128000
+          ? 1000000
           : highDiffDifficulty;
-        this.startSocketServer(highDiffPort, normalizedHighDiffDifficulty);
+        this.startSocketServer(
+          highDiffPort,
+          normalizedHighDiffDifficulty,
+          false,
+        );
       }
     }, 1000 * 10);
   }
 
-  private startSocketServer(port: number, initialDifficulty: number) {
+  private startSocketServer(
+    port: number,
+    initialDifficulty: number,
+    allowSuggestedDifficulty = true,
+  ) {
     const server = new Server(async (socket: Socket) => {
       // Disable Nagle's algorithm and use UTF-8 encoding for better latency
       socket.setNoDelay(true);
@@ -102,6 +110,7 @@ export class StratumV1Service implements OnModuleInit {
         this.clientDifficultyStatisticsService,
         this,
         initialDifficulty,
+        allowSuggestedDifficulty,
       );
 
       socket.on('close', async (hadError: boolean) => {

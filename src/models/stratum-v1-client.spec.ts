@@ -6,6 +6,7 @@ interface CreateClientOptions {
   overrides?: Record<string, any>;
   initialDifficulty?: number;
   configValues?: Record<string, string>;
+  allowSuggestedDifficulty?: boolean;
 }
 
 // Helper to create a client with mocked dependencies
@@ -14,6 +15,7 @@ function createClient(options: CreateClientOptions = {}) {
     overrides = {},
     initialDifficulty = 16384,
     configValues = {},
+    allowSuggestedDifficulty = true,
   } = options;
   const socket = new net.Socket();
   const dummy = {} as any;
@@ -56,6 +58,7 @@ function createClient(options: CreateClientOptions = {}) {
     dummy,
     stratumV1Service as any,
     initialDifficulty,
+    allowSuggestedDifficulty,
   );
 
   Object.assign(client as any, overrides);
@@ -73,9 +76,11 @@ describe('StratumV1Client.destroy', () => {
   it('handles destroy with subscription but without authorization', async () => {
     let unsubscribed = false;
     const { client, socket, stratumV1Service } = createClient({
-      stratumSubscription: new Subscription(() => {
-        unsubscribed = true;
-      }),
+      overrides: {
+        stratumSubscription: new Subscription(() => {
+          unsubscribed = true;
+        }),
+      },
     });
     await expect(client.destroy()).resolves.not.toThrow();
     expect(unsubscribed).toBe(true);
@@ -85,7 +90,9 @@ describe('StratumV1Client.destroy', () => {
 
   it('handles destroy with authorization but without subscription', async () => {
     const { client, socket, stratumV1Service } = createClient({
-      clientAuthorization: { address: 'abc' },
+      overrides: {
+        clientAuthorization: { address: 'abc' },
+      },
     });
     await expect(client.destroy()).resolves.not.toThrow();
     expect(stratumV1Service.unregisterClient).toHaveBeenCalledWith('abc', client);
@@ -109,7 +116,7 @@ describe('StratumV1Client cpuminer fallback', () => {
         write,
       },
       configValues: {
-        STRATUM_HIGH_DIFF_START_DIFFICULTY: '128000',
+        STRATUM_HIGH_DIFF_START_DIFFICULTY: '1000000',
       },
     });
 
@@ -122,7 +129,7 @@ describe('StratumV1Client cpuminer fallback', () => {
     socket.destroy();
   });
 
-  it('keeps the high-difficulty handshake when starting at 128000', async () => {
+  it('keeps the high-difficulty handshake when starting at 1,000,000', async () => {
     jest.useFakeTimers();
     const write = jest.fn().mockResolvedValue(true);
     const { client, socket } = createClient({
@@ -130,9 +137,9 @@ describe('StratumV1Client cpuminer fallback', () => {
         clientSubscription: { userAgent: 'cpuminer' },
         write,
       },
-      initialDifficulty: 128000,
+      initialDifficulty: 1000000,
       configValues: {
-        STRATUM_HIGH_DIFF_START_DIFFICULTY: '128000',
+        STRATUM_HIGH_DIFF_START_DIFFICULTY: '1000000',
       },
     });
 
@@ -140,8 +147,32 @@ describe('StratumV1Client cpuminer fallback', () => {
 
     expect(write).toHaveBeenCalledTimes(1);
     const payload = JSON.parse(write.mock.calls[0][0]);
-    expect(payload.params[0]).toBe(128000);
-    expect((client as any).sessionDifficulty).toBe(128000);
+    expect(payload.params[0]).toBe(1000000);
+    expect((client as any).sessionDifficulty).toBe(1000000);
+    socket.destroy();
+  });
+
+  it('rejects suggest_difficulty overrides when disabled', async () => {
+    const write = jest.fn().mockResolvedValue(true);
+    const { client, socket } = createClient({
+      overrides: { write },
+      initialDifficulty: 1000000,
+      allowSuggestedDifficulty: false,
+    });
+
+    await (client as any).handleMessage(
+      JSON.stringify({
+        id: 42,
+        method: 'mining.suggest_difficulty',
+        params: [500000],
+      }),
+    );
+
+    expect(write).toHaveBeenCalledTimes(1);
+    const response = JSON.parse(write.mock.calls[0][0]);
+    expect(response.error[1]).toBe('Suggest difficulty is disabled for this connection');
+    expect((client as any).sessionDifficulty).toBe(1000000);
+    expect((client as any).usedSuggestedDifficulty).toBe(false);
     socket.destroy();
   });
 });
