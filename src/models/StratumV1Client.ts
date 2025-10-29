@@ -95,6 +95,7 @@ export class StratumV1Client {
         private readonly clientDifficultyStatisticsService: ClientDifficultyStatisticsService,
         private readonly stratumV1Service: StratumV1Service,
         initialDifficulty: number,
+        private readonly allowSuggestedDifficulty: boolean = true,
     ) {
         this.initialDifficulty = Number.isFinite(initialDifficulty)
             ? initialDifficulty
@@ -409,10 +410,6 @@ export class StratumV1Client {
                 break;
             }
             case eRequestMethod.SUGGEST_DIFFICULTY: {
-                if (this.usedSuggestedDifficulty == true) {
-                    return;
-                }
-
                 const suggestDifficultyMessage = plainToInstance(
                     SuggestDifficulty,
                     parsedMessage
@@ -424,6 +421,23 @@ export class StratumV1Client {
                 };
 
                 const errors = await validate(suggestDifficultyMessage, validatorOptions);
+
+                if (!this.allowSuggestedDifficulty) {
+                    const err = new StratumErrorMessage(
+                        suggestDifficultyMessage.id,
+                        eStratumErrorCode.OtherUnknown,
+                        'Suggest difficulty is disabled for this connection',
+                    ).response();
+                    const success = await this.write(err);
+                    if (!success) {
+                        return;
+                    }
+                    return;
+                }
+
+                if (this.usedSuggestedDifficulty == true) {
+                    return;
+                }
 
                 if (errors.length === 0) {
 
@@ -567,7 +581,7 @@ export class StratumV1Client {
         );
         const highDiffStart = Number.isFinite(configuredHighDiffStart)
             ? configuredHighDiffStart
-            : 128000;
+            : 1000000;
 
         switch (this.clientSubscription.userAgent) {
             case 'cpuminer': {
