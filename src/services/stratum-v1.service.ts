@@ -16,6 +16,7 @@ import { PoolRejectedStatisticsService } from '../ORM/pool-rejected-statistics/p
 import { ClientRejectedStatisticsService } from '../ORM/client-rejected-statistics/client-rejected-statistics.service';
 import { ClientDifficultyStatisticsService } from '../ORM/client-difficulty-statistics/client-difficulty-statistics.service';
 import { ShareTotalsCacheService } from './share-totals-cache.service';
+import { AddressSettingsCacheService } from './address-settings-cache.service';
 
 @Injectable()
 export class StratumV1Service implements OnModuleInit {
@@ -30,6 +31,7 @@ export class StratumV1Service implements OnModuleInit {
     private readonly configService: ConfigService,
     private readonly stratumV1JobsService: StratumV1JobsService,
     private readonly addressSettingsService: AddressSettingsService,
+    private readonly addressSettingsCacheService: AddressSettingsCacheService,
     private readonly poolShareStatisticsService: PoolShareStatisticsService,
     private readonly poolRejectedStatisticsService: PoolRejectedStatisticsService,
     private readonly clientRejectedStatisticsService: ClientRejectedStatisticsService,
@@ -105,6 +107,7 @@ export class StratumV1Service implements OnModuleInit {
         this.blocksService,
         this.configService,
         this.addressSettingsService,
+        this.addressSettingsCacheService,
         this.poolShareStatisticsService,
         this.poolRejectedStatisticsService,
         this.clientRejectedStatisticsService,

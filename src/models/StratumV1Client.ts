@@ -35,6 +35,7 @@ import { ClientRejectedStatisticsService } from '../ORM/client-rejected-statisti
 import { StratumV1Service } from '../services/stratum-v1.service';
 import { ClientDifficultyStatisticsService } from '../ORM/client-difficulty-statistics/client-difficulty-statistics.service';
 import { ShareTotalsCacheService } from '../services/share-totals-cache.service';
+import { AddressSettingsCacheService } from '../services/address-settings-cache.service';
 
 
 export class StratumV1Client {
@@ -89,6 +90,7 @@ export class StratumV1Client {
         private readonly blocksService: BlocksService,
         private readonly configService: ConfigService,
         private readonly addressSettingsService: AddressSettingsService,
+        private readonly addressSettingsCacheService: AddressSettingsCacheService,
         private readonly poolShareStatisticsService: PoolShareStatisticsService,
         private readonly poolRejectedStatisticsService: PoolRejectedStatisticsService,
         private readonly clientRejectedStatisticsService: ClientRejectedStatisticsService,
@@ -872,10 +874,16 @@ export class StratumV1Client {
                     blockData: blockHex
                 });
 
-                await this.notificationService.notifySubscribersBlockFound(this.clientAuthorization.address, jobTemplate.blockData.height, updatedJobBlock, result);
+                await this.notificationService.notifySubscribersBlockFound(
+                    this.clientAuthorization.address,
+                    jobTemplate.blockData.height,
+                    updatedJobBlock,
+                    result,
+                );
                 //success
                 if (result == null) {
                     await this.addressSettingsService.resetBestDifficultyAndShares();
+                    this.addressSettingsCacheService.clear();
                 }
             }
             try {
@@ -919,12 +927,19 @@ export class StratumV1Client {
                 this.entity.bestDifficulty = submissionDifficulty;
             }
 
-            const addressSettings = await this.addressSettingsService.getSettings(this.clientAuthorization.address, true);
-            const storedBestDifficulty = addressSettings?.bestDifficulty ?? 0;
+            const shouldUpdateBestDifficulty = await this.addressSettingsCacheService.shouldUpdateBestDifficulty(
+                this.clientAuthorization.address,
+                submissionDifficulty,
+            );
 
-            if (submissionDifficulty > storedBestDifficulty) {
+            if (shouldUpdateBestDifficulty) {
                 await this.notificationService.notifySubscribersBestDiff(this.clientAuthorization.address, submissionDifficulty);
                 await this.addressSettingsService.updateBestDifficulty(this.clientAuthorization.address, submissionDifficulty, this.entity.userAgent);
+                this.addressSettingsCacheService.updateBestDifficulty(
+                    this.clientAuthorization.address,
+                    submissionDifficulty,
+                    this.entity.userAgent ?? null,
+                );
             }
 
 
