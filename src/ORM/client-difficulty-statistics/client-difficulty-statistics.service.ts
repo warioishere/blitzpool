@@ -40,32 +40,29 @@ export class ClientDifficultyStatisticsService {
     const slotTime = ClientDifficultyStatisticsService.normalizeSlot(timestamp);
     const clientName = params.clientName ?? null;
 
+    const updatedAt = new Date();
+
     try {
-      await this.repository.insert({
-        address: params.address,
-        clientName,
-        slotTime,
-        maxDifficulty: params.difficulty,
-      });
-      return;
+      await this.repository
+        .createQueryBuilder()
+        .insert()
+        .into(ClientDifficultyStatisticsEntity)
+        .values({
+          address: params.address,
+          clientName,
+          slotTime,
+          maxDifficulty: params.difficulty,
+        })
+        .onConflict(
+          '("address", "clientName", "slotTime") DO UPDATE SET "maxDifficulty" = CASE WHEN EXCLUDED."maxDifficulty" > "maxDifficulty" THEN EXCLUDED."maxDifficulty" ELSE "maxDifficulty" END, "updatedAt" = :updatedAt',
+        )
+        .setParameter('updatedAt', updatedAt)
+        .execute();
     } catch (error) {
       if (!ClientDifficultyStatisticsService.isUniqueConstraintError(error)) {
         throw error;
       }
     }
-
-    const existing = await this.repository.findOne({
-      where: { address: params.address, clientName, slotTime },
-    });
-
-    if (!existing || params.difficulty <= existing.maxDifficulty) {
-      return;
-    }
-
-    await this.repository.update(
-      { address: params.address, clientName, slotTime },
-      { maxDifficulty: params.difficulty, updatedAt: new Date() },
-    );
   }
 
   async getMaximaForAddress(address: string, from: number, to: number) {
