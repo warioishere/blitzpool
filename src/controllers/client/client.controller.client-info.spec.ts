@@ -10,6 +10,7 @@ import { AddressSettingsService } from '../../ORM/address-settings/address-setti
 import { ClientRejectedStatisticsService } from '../../ORM/client-rejected-statistics/client-rejected-statistics.service';
 import { ClientDifficultyStatisticsService } from '../../ORM/client-difficulty-statistics/client-difficulty-statistics.service';
 import { StratumV1Service } from '../../services/stratum-v1.service';
+import { ShareTotalsCacheService } from '../../services/share-totals-cache.service';
 
 describe('ClientController getClientInfo', () => {
   let app: NestFastifyApplication;
@@ -17,6 +18,7 @@ describe('ClientController getClientInfo', () => {
   let clientStatisticsService: { getTotalSharesForAddress: jest.Mock };
   let addressSettingsService: { getSettings: jest.Mock };
   let stratumV1Service: { getCurrentDifficulties: jest.Mock };
+  let shareTotalsCacheService: { getAddressTotal: jest.Mock };
 
   beforeEach(async () => {
     clientService = {
@@ -52,6 +54,9 @@ describe('ClientController getClientInfo', () => {
         .fn()
         .mockReturnValue(new Map([['session-1', 2048]])),
     };
+    shareTotalsCacheService = {
+      getAddressTotal: jest.fn().mockResolvedValue(12345),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       controllers: [ClientController],
@@ -62,6 +67,7 @@ describe('ClientController getClientInfo', () => {
         { provide: ClientRejectedStatisticsService, useValue: {} },
         { provide: ClientDifficultyStatisticsService, useValue: {} },
         { provide: StratumV1Service, useValue: stratumV1Service },
+        { provide: ShareTotalsCacheService, useValue: shareTotalsCacheService },
       ],
     }).compile();
 
@@ -113,5 +119,6 @@ describe('ClientController getClientInfo', () => {
     expect(stratumV1Service.getCurrentDifficulties).toHaveBeenCalledWith(
       'btc123',
     );
+    expect(shareTotalsCacheService.getAddressTotal).toHaveBeenCalledWith('btc123');
   });
 });

@@ -7,6 +7,7 @@ import { ClientRejectedStatisticsService } from '../../ORM/client-rejected-stati
 import { ClientDifficultyStatisticsService } from '../../ORM/client-difficulty-statistics/client-difficulty-statistics.service';
 import { eStratumErrorCode } from '../../models/enums/eStratumErrorCode';
 import { StratumV1Service } from '../../services/stratum-v1.service';
+import { ShareTotalsCacheService } from '../../services/share-totals-cache.service';
 
 
 @Controller('client')
@@ -19,6 +20,7 @@ export class ClientController {
         private readonly clientRejectedStatisticsService: ClientRejectedStatisticsService,
         private readonly clientDifficultyStatisticsService: ClientDifficultyStatisticsService,
         private readonly stratumV1Service: StratumV1Service,
+        private readonly shareTotalsCacheService: ShareTotalsCacheService,
     ) { }
 
 
@@ -29,7 +31,7 @@ export class ClientController {
 
         const addressSettings = await this.addressSettingsService.getSettings(address, false);
 
-        const totalShares = await this.clientStatisticsService.getTotalSharesForAddress(address);
+        const totalShares = await this.shareTotalsCacheService.getAddressTotal(address);
         const totalHashrate = workers.reduce((sum, w) => sum + (w.hashRate ?? 0), 0);
         const currentDifficulties = this.stratumV1Service.getCurrentDifficulties(address);
 
@@ -83,8 +85,8 @@ export class ClientController {
 
     @Get(':address/worker-shares')
     async getWorkerShares(@Param('address') address: string) {
-        const workerShares = await this.clientStatisticsService.getTotalSharesForWorkers(address);
-        return workerShares.map(ws => ({ workerName: ws.clientName, totalShares: ws.total }));
+        const workerShares = await this.shareTotalsCacheService.getWorkerTotals(address);
+        return workerShares.map(ws => ({ workerName: ws.workerName, totalShares: ws.total }));
     }
 
     @Get(':address/workers')

@@ -15,6 +15,7 @@ import { PoolShareStatisticsService } from '../ORM/pool-share-statistics/pool-sh
 import { PoolRejectedStatisticsService } from '../ORM/pool-rejected-statistics/pool-rejected-statistics.service';
 import { ClientRejectedStatisticsService } from '../ORM/client-rejected-statistics/client-rejected-statistics.service';
 import { ClientDifficultyStatisticsService } from '../ORM/client-difficulty-statistics/client-difficulty-statistics.service';
+import { ShareTotalsCacheService } from './share-totals-cache.service';
 
 @Injectable()
 export class StratumV1Service implements OnModuleInit {
@@ -34,6 +35,7 @@ export class StratumV1Service implements OnModuleInit {
     private readonly clientRejectedStatisticsService: ClientRejectedStatisticsService,
     private readonly externalSharesService: ExternalSharesService,
     private readonly clientDifficultyStatisticsService: ClientDifficultyStatisticsService,
+    private readonly shareTotalsCacheService: ShareTotalsCacheService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -108,6 +110,7 @@ export class StratumV1Service implements OnModuleInit {
         this.clientRejectedStatisticsService,
         this.externalSharesService,
         this.clientDifficultyStatisticsService,
+        this.shareTotalsCacheService,
         this,
         initialDifficulty,
         allowSuggestedDifficulty,

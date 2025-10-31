@@ -10,6 +10,7 @@ import { AddressSettingsService } from '../../ORM/address-settings/address-setti
 import { ClientRejectedStatisticsService } from '../../ORM/client-rejected-statistics/client-rejected-statistics.service';
 import { StratumV1Service } from '../../services/stratum-v1.service';
 import { ClientDifficultyStatisticsService } from '../../ORM/client-difficulty-statistics/client-difficulty-statistics.service';
+import { ShareTotalsCacheService } from '../../services/share-totals-cache.service';
 
 describe('ClientController worker chart data', () => {
   let app: NestFastifyApplication;
@@ -47,6 +48,7 @@ describe('ClientController worker chart data', () => {
         { provide: ClientRejectedStatisticsService, useValue: {} },
         { provide: ClientDifficultyStatisticsService, useValue: {} },
         { provide: StratumV1Service, useValue: {} },
+        { provide: ShareTotalsCacheService, useValue: {} },
       ],
     }).compile();
 

@@ -34,6 +34,7 @@ import { PoolRejectedStatisticsService } from '../ORM/pool-rejected-statistics/p
 import { ClientRejectedStatisticsService } from '../ORM/client-rejected-statistics/client-rejected-statistics.service';
 import { StratumV1Service } from '../services/stratum-v1.service';
 import { ClientDifficultyStatisticsService } from '../ORM/client-difficulty-statistics/client-difficulty-statistics.service';
+import { ShareTotalsCacheService } from '../services/share-totals-cache.service';
 
 
 export class StratumV1Client {
@@ -93,6 +94,7 @@ export class StratumV1Client {
         private readonly clientRejectedStatisticsService: ClientRejectedStatisticsService,
         private readonly externalSharesService: ExternalSharesService,
         private readonly clientDifficultyStatisticsService: ClientDifficultyStatisticsService,
+        private readonly shareTotalsCacheService: ShareTotalsCacheService,
         private readonly stratumV1Service: StratumV1Service,
         initialDifficulty: number,
         private readonly allowSuggestedDifficulty: boolean = true,
@@ -878,6 +880,11 @@ export class StratumV1Client {
             }
             try {
                 await this.statistics.addShares(this.entity, this.sessionDifficulty);
+                await this.shareTotalsCacheService.increment(
+                    this.clientAuthorization.address,
+                    this.clientAuthorization.worker,
+                    this.sessionDifficulty,
+                );
                 const now = new Date();
                 // only update every minute
                 if (this.entity.updatedAt == null || now.getTime() - this.entity.updatedAt.getTime() > 1000 * 60) {
