@@ -374,15 +374,11 @@ export class AppController {
     const entries = await this.clientStatisticsService.getActiveCountsSince(
       sinceTime,
     );
-    const slotMap = new Map<
-      number,
-      { addresses: number; workers: number; sessions: number }
-    >();
+    const slotMap = new Map<number, { addresses: number; workers: number }>();
     for (const entry of entries) {
       slotMap.set(entry.time, {
         addresses: entry.addresses,
         workers: entry.workers,
-        sessions: entry.sessions,
       });
     }
 
@@ -391,13 +387,12 @@ export class AppController {
     const endSlot = Math.floor(now / coeff) * coeff;
     const slotData: {
       time: string;
-      counts: { addresses: number; workers: number; sessions: number };
+      counts: { addresses: number; workers: number };
     }[] = [];
     for (let t = startSlot; t <= endSlot; t += coeff) {
       const counts = slotMap.get(t) || {
         addresses: 0,
         workers: 0,
-        sessions: 0,
       };
       slotData.push({
         time: new Date(t).toISOString(),
