@@ -425,7 +425,6 @@ export class ClientStatisticsService {
       time: number;
       addresses: number;
       workers: number;
-      sessions: number;
     }>
   > {
     const query = this.clientStatisticsRepository
@@ -435,10 +434,6 @@ export class ClientStatisticsService {
       .addSelect(
         "COUNT(DISTINCT stat.address || '-' || stat.clientName)",
         'workers',
-      )
-      .addSelect(
-        "COUNT(DISTINCT stat.address || '-' || stat.clientName || '-' || stat.sessionId)",
-        'sessions',
       )
       .where('stat.time > :since', { since: time })
       .andWhere("stat.sessionId != 'AGG'")
@@ -451,7 +446,6 @@ export class ClientStatisticsService {
       time: Number(r.time),
       addresses: Number(r.addresses),
       workers: Number(r.workers),
-      sessions: Number(r.sessions),
     }));
   }
 

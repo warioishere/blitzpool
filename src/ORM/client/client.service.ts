@@ -141,19 +141,17 @@ export class ClientService {
         return await this.clientRepository.count();
     }
 
-    public async getActiveWorkerCounts(): Promise<{ addresses: number; workers: number; sessions: number }> {
+    public async getActiveWorkerCounts(): Promise<{ addresses: number; workers: number }> {
         const result = await this.clientRepository
             .createQueryBuilder('client')
             .select('COUNT(DISTINCT client.address)', 'addresses')
             .addSelect("COUNT(DISTINCT client.address || '-' || client.clientName)", 'workers')
-            .addSelect('COUNT(*)', 'sessions')
             .where('client.deletedAt IS NULL')
-            .getRawOne<{ addresses: string; workers: string; sessions: string }>();
+            .getRawOne<{ addresses: string; workers: string }>();
 
         return {
             addresses: Number(result?.addresses ?? 0),
             workers: Number(result?.workers ?? 0),
-            sessions: Number(result?.sessions ?? 0),
         };
     }
 
