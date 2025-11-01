@@ -532,6 +532,20 @@ export class ClientStatisticsService {
     }));
   }
 
+  public async getTotalSharesForWorker(
+    address: string,
+    workerName: string,
+  ): Promise<number> {
+    const result = await this.clientStatisticsRepository
+      .createQueryBuilder('entry')
+      .select('SUM(entry.shares)', 'total')
+      .where('entry.address = :address', { address })
+      .andWhere('entry.clientName = :workerName', { workerName })
+      .getRawOne();
+
+    return result?.total ? parseFloat(result.total) : 0;
+  }
+
   public async deleteAll() {
     return await this.clientStatisticsRepository.delete({});
   }

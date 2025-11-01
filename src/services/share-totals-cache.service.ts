@@ -24,6 +24,11 @@ export class ShareTotalsCacheService implements OnModuleDestroy {
   private readonly workerTotals = new Map<string, Map<string, TotalsEntry>>();
   private readonly addressHydrations = new Map<string, Promise<void>>();
   private readonly workerHydrations = new Map<string, Promise<void>>();
+  private readonly workerPartialHydrations = new Map<
+    string,
+    Map<string, Promise<void>>
+  >();
+  private readonly fullyHydratedAddresses = new Set<string>();
   private readonly flushIntervalMs: number;
   private flushTimer?: NodeJS.Timeout;
 
@@ -78,7 +83,7 @@ export class ShareTotalsCacheService implements OnModuleDestroy {
     }
 
     if (workerName) {
-      await this.ensureWorkerBaseline(address);
+      await this.ensureWorkerBaseline(address, workerName);
       let workerMap = this.workerTotals.get(address);
       if (!workerMap) {
         workerMap = new Map();
@@ -173,24 +178,98 @@ export class ShareTotalsCacheService implements OnModuleDestroy {
     await hydration;
   }
 
-  private async ensureWorkerBaseline(address: string): Promise<void> {
-    if (this.workerTotals.has(address)) {
+  private async ensureWorkerBaseline(
+    address: string,
+    workerName?: string,
+  ): Promise<void> {
+    if (workerName) {
+      const workerMap = this.workerTotals.get(address);
+      if (workerMap?.has(workerName)) {
+        return;
+      }
+
+      let partialHydrations = this.workerPartialHydrations.get(address);
+      if (!partialHydrations) {
+        partialHydrations = new Map();
+        this.workerPartialHydrations.set(address, partialHydrations);
+      }
+
+      let hydration = partialHydrations.get(workerName);
+      if (!hydration) {
+        hydration = (async () => {
+          const total =
+            await this.clientStatisticsService.getTotalSharesForWorker(
+              address,
+              workerName,
+            );
+          let map = this.workerTotals.get(address);
+          if (!map) {
+            map = new Map();
+            this.workerTotals.set(address, map);
+          }
+          const entry = map.get(workerName);
+          if (entry) {
+            entry.baseline = total;
+          } else {
+            map.set(workerName, { baseline: total, delta: 0 });
+          }
+        })();
+        partialHydrations.set(workerName, hydration);
+      }
+
+      try {
+        await hydration;
+      } finally {
+        partialHydrations.delete(workerName);
+        if (partialHydrations.size === 0) {
+          this.workerPartialHydrations.delete(address);
+        }
+      }
+
       return;
     }
+
+    if (this.fullyHydratedAddresses.has(address) && this.workerTotals.has(address)) {
+      return;
+    }
+
+    const pendingPartials = this.workerPartialHydrations.get(address);
+    if (pendingPartials && pendingPartials.size > 0) {
+      await Promise.all(pendingPartials.values());
+    }
+
     let hydration = this.workerHydrations.get(address);
     if (!hydration) {
       hydration = (async () => {
         const totals = await this.clientStatisticsService.getTotalSharesForWorkers(
           address,
         );
-        const entries = new Map<string, TotalsEntry>();
-        for (const total of totals) {
-          entries.set(total.clientName, { baseline: total.total, delta: 0 });
+        let map = this.workerTotals.get(address);
+        if (!map) {
+          map = new Map();
+          this.workerTotals.set(address, map);
         }
-        this.workerTotals.set(address, entries);
+        for (const total of totals) {
+          const entry = map.get(total.clientName);
+          if (entry) {
+            entry.baseline = Math.max(entry.baseline, total.total);
+          } else {
+            map.set(total.clientName, { baseline: total.total, delta: 0 });
+          }
+        }
+        this.fullyHydratedAddresses.add(address);
       })();
       this.workerHydrations.set(address, hydration);
     }
-    await hydration;
+
+    try {
+      await hydration;
+    } finally {
+      this.workerHydrations.delete(address);
+    }
+
+    if (!this.workerTotals.has(address)) {
+      this.workerTotals.set(address, new Map());
+    }
   }
 }
