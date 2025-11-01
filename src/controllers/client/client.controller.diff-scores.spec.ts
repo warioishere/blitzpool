@@ -9,6 +9,7 @@ import { ClientStatisticsService } from '../../ORM/client-statistics/client-stat
 import { AddressSettingsService } from '../../ORM/address-settings/address-settings.service';
 import { ClientRejectedStatisticsService } from '../../ORM/client-rejected-statistics/client-rejected-statistics.service';
 import { StratumV1Service } from '../../services/stratum-v1.service';
+import { ShareTotalsCacheService } from '../../services/share-totals-cache.service';
 import { ClientDifficultyStatisticsService } from '../../ORM/client-difficulty-statistics/client-difficulty-statistics.service';
 
 describe('ClientController difficulty scores', () => {
@@ -32,6 +33,7 @@ describe('ClientController difficulty scores', () => {
         { provide: ClientRejectedStatisticsService, useValue: {} },
         { provide: ClientDifficultyStatisticsService, useValue: clientDifficultyStatisticsService },
         { provide: StratumV1Service, useValue: {} },
+        { provide: ShareTotalsCacheService, useValue: {} },
       ],
     }).compile();
 

@@ -1,6 +1,7 @@
 jest.mock('node-telegram-bot-api', () => jest.fn());
 
 import { StratumV1Service } from './stratum-v1.service';
+import { ShareTotalsCacheService } from './share-totals-cache.service';
 
 describe('StratumV1Service.onModuleInit', () => {
   let clientService: { deleteAll: jest.Mock };
@@ -34,6 +35,8 @@ describe('StratumV1Service.onModuleInit', () => {
       {} as any,
       {} as any,
       {} as any,
+      {} as any,
+      {} as unknown as ShareTotalsCacheService,
     );
   }
 

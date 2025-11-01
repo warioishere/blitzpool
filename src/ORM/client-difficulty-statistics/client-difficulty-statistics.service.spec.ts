@@ -26,6 +26,62 @@ describe('ClientDifficultyStatisticsService', () => {
     }
   });
 
+  it('upserts the maximum difficulty per unique key', async () => {
+    const timestamp = Date.UTC(2023, 0, 1, 12, 0, 0, 0);
+    const slotTime = Math.floor(timestamp / (60 * 60 * 1000)) * 60 * 60 * 1000;
+    const repository = dataSource.getRepository(ClientDifficultyStatisticsEntity);
+
+    await service.recordShareDifficulty({
+      address: 'addr1',
+      clientName: 'workerA',
+      timestamp,
+      difficulty: 50,
+    });
+
+    let record = await repository.findOneByOrFail({
+      address: 'addr1',
+      clientName: 'workerA',
+      slotTime,
+    });
+
+    expect(record.maxDifficulty).toBe(50);
+    const firstUpdatedAt = record.updatedAt?.getTime() ?? 0;
+
+    await service.recordShareDifficulty({
+      address: 'addr1',
+      clientName: 'workerA',
+      timestamp: timestamp + 5_000,
+      difficulty: 40,
+    });
+
+    record = await repository.findOneByOrFail({
+      address: 'addr1',
+      clientName: 'workerA',
+      slotTime,
+    });
+
+    expect(record.maxDifficulty).toBe(50);
+    const secondUpdatedAt = record.updatedAt?.getTime() ?? 0;
+    expect(secondUpdatedAt).toBeGreaterThanOrEqual(firstUpdatedAt);
+
+    await service.recordShareDifficulty({
+      address: 'addr1',
+      clientName: 'workerA',
+      timestamp: timestamp + 10_000,
+      difficulty: 90,
+    });
+
+    record = await repository.findOneByOrFail({
+      address: 'addr1',
+      clientName: 'workerA',
+      slotTime,
+    });
+
+    expect(record.maxDifficulty).toBe(90);
+    const thirdUpdatedAt = record.updatedAt?.getTime() ?? 0;
+    expect(thirdUpdatedAt).toBeGreaterThanOrEqual(secondUpdatedAt);
+  });
+
   it('stores the highest difficulty per slot and aggregates by address', async () => {
     const base = Date.UTC(2023, 0, 1, 12, 15, 0, 0);
 

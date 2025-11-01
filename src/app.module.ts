@@ -27,6 +27,8 @@ import { TelegramService } from './services/telegram.service';
 import { NtfyService } from './services/ntfy.service';
 import { ExternalSharesService } from './services/external-shares.service';
 import { GeoIpService } from './services/geoip.service';
+import { ShareTotalsCacheService } from './services/share-totals-cache.service';
+import { AddressSettingsCacheService } from './services/address-settings-cache.service';
 import { ExternalShareController } from './controllers/external-share/external-share.controller';
 import { ExternalSharesModule } from './ORM/external-shares/external-shares.module';
 import { PoolShareStatisticsModule } from './ORM/pool-share-statistics/pool-share-statistics.module';
@@ -84,6 +86,8 @@ const ORMModules = [
         BraiinsService,
         ExternalSharesService,
         GeoIpService,
+        ShareTotalsCacheService,
+        AddressSettingsCacheService,
     ],
 })
 export class AppModule {

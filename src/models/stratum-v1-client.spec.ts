@@ -19,6 +19,13 @@ function createClient(options: CreateClientOptions = {}) {
   } = options;
   const socket = new net.Socket();
   const dummy = {} as any;
+  const shareTotalsCacheService = { increment: jest.fn().mockResolvedValue(undefined) };
+  const addressSettingsCacheService = {
+    shouldUpdateBestDifficulty: jest.fn().mockResolvedValue(false),
+    updateBestDifficulty: jest.fn(),
+    clear: jest.fn(),
+    getBestDifficulty: jest.fn(),
+  };
   const stratumV1JobsService = {
     newMiningJob$: {
       subscribe: jest.fn().mockReturnValue({ unsubscribe: jest.fn() }),
@@ -51,11 +58,13 @@ function createClient(options: CreateClientOptions = {}) {
     dummy,
     configService as any,
     dummy,
+    addressSettingsCacheService as any,
     dummy,
     dummy,
     dummy,
     dummy,
     dummy,
+    shareTotalsCacheService as any,
     stratumV1Service as any,
     initialDifficulty,
     allowSuggestedDifficulty,
