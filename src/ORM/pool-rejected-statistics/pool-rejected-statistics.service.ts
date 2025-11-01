@@ -3,6 +3,7 @@ import { Interval } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, MoreThan } from 'typeorm';
 import { Mutex } from 'async-mutex';
+import { ConfigService } from '@nestjs/config';
 
 import { PoolRejectedStatisticsEntity } from './pool-rejected-statistics.entity';
 
@@ -11,13 +12,23 @@ export class PoolRejectedStatisticsService {
   constructor(
     @InjectRepository(PoolRejectedStatisticsEntity)
     private poolRejectedStatisticsRepository: Repository<PoolRejectedStatisticsEntity>,
-  ) {}
+    private readonly configService: ConfigService,
+  ) {
+    const configValue = this.configService.get<string>(
+      'ANOMALOUS_DIFF_DETECTION_ENABLED',
+      'true',
+    );
+    this.anomalousDiffDetectionEnabled = !['false', '0', 'off', 'no'].includes(
+      configValue?.toString().toLowerCase() ?? 'true',
+    );
+  }
 
   private mutex = new Mutex();
   private currentTimeSlot: number = null;
   private lastSave: number = null;
   private counts: Map<string, number> = new Map();
   private recentDiffs: Map<string, number[]> = new Map();
+  private readonly anomalousDiffDetectionEnabled: boolean;
   private static readonly buckets = [
     { label: '<10', lower: 0, upper: 10 },
     { label: '10-1k', lower: 10, upper: 1000 },
@@ -97,6 +108,7 @@ export class PoolRejectedStatisticsService {
         this.lastSave = now;
       }
 
+      if (this.anomalousDiffDetectionEnabled) {
         const bucket = this.getBucket(diff, reason);
         const key = `${reason}:${bucket}`;
         let history = this.recentDiffs.get(key) || [];
@@ -108,7 +120,9 @@ export class PoolRejectedStatisticsService {
               history.shift();
             }
             this.recentDiffs.set(key, history);
-            console.warn(`Anomalous diff ${diff} for reason ${reason} (avg ${avg})`);
+            console.warn(
+              `Anomalous diff ${diff} for reason ${reason} (avg ${avg})`,
+            );
             return false;
           }
         }
@@ -118,6 +132,7 @@ export class PoolRejectedStatisticsService {
           history.shift();
         }
         this.recentDiffs.set(key, history);
+      }
 
       const current = this.counts.get(reason) || 0;
       this.counts.set(reason, current + diff);
