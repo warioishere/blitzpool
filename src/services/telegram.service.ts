@@ -1,4 +1,5 @@
 import { Injectable, OnModuleInit, Inject, forwardRef } from '@nestjs/common';
+import { Interval } from '@nestjs/schedule';
 import { ConfigService } from '@nestjs/config';
 import { validate } from 'bitcoin-address-validation';
 import { Block } from 'bitcoinjs-lib';
@@ -166,6 +167,7 @@ export class TelegramService implements OnModuleInit {
             { command: '/next_difficulty', description: 'Zeigt erwartete Änderung der Netzwerk-Difficulty' },
             { command: '/stats', description: 'Zeigt die Stats für deine Miner Adresse an' },
             { command: '/show_workers', description: 'Zeigt Worker-Übersicht' },
+            { command: '/send_hourly', description: 'Stündliche Stats/Worker (on/off show_workers show_stats)' },
             { command: '/poolhashrate', description: 'Zeigt die aktuelle Pool-Hashrate' },
             { command: '/remove', description: 'Adresse entfernen' },
             { command: '/show_addresses', description: 'Zeigt gespeicherte Adressen' },
@@ -184,6 +186,7 @@ export class TelegramService implements OnModuleInit {
             { command: '/next_difficulty', description: 'Show expected network difficulty change' },
             { command: '/stats', description: 'Show stats for your miner address' },
             { command: '/show_workers', description: 'Show worker overview' },
+            { command: '/send_hourly', description: 'Hourly stats/workers (on/off show_workers show_stats)' },
             { command: '/poolhashrate', description: 'Show current pool hashrate' },
             { command: '/remove', description: 'Remove address' },
             { command: '/show_addresses', description: 'Show stored addresses' },
@@ -666,6 +669,72 @@ I will decrypt it and respond just like with plain text. 🔒`
             }
         });
 
+        this.bot.onText(/^\/send_hourly(?:\s+(\S+)(?:\s+(\S+))?(?:\s+(\S+))?)?$/, async (msg, match) => {
+            const chatId = msg.chat.id;
+            const action = match?.[1]?.toLowerCase();
+            const arg1 = match?.[2]?.toLowerCase();
+            const arg2 = match?.[3]?.toLowerCase();
+
+            // Validate action (on/off)
+            if (!action || !['on', 'off'].includes(action)) {
+                this.reply(chatId, {
+                    de: "Bitte gib 'on' oder 'off' an.\nVerwendung: /send_hourly on show_workers show_stats",
+                    en: "Please provide 'on' or 'off'.\nUsage: /send_hourly on show_workers show_stats"
+                });
+                return;
+            }
+
+            const enabled = action === 'on';
+
+            if (enabled) {
+                // When turning on, need at least one feature
+                const features = [arg1, arg2].filter(f => f);
+                const validFeatures = new Set(['show_workers', 'show_stats']);
+                const hasValidFeature = features.some(f => validFeatures.has(f));
+
+                if (features.length === 0 || !hasValidFeature) {
+                    this.reply(chatId, {
+                        de: "Bitte gib mindestens 'show_workers' oder 'show_stats' an.\nVerwendung: /send_hourly on show_workers show_stats",
+                        en: "Please provide at least 'show_workers' or 'show_stats'.\nUsage: /send_hourly on show_workers show_stats"
+                    });
+                    return;
+                }
+
+                const showWorkers = features.includes('show_workers');
+                const showStats = features.includes('show_stats');
+
+                try {
+                    await this.telegramSubscriptionsService.updateHourlyNotifications(chatId, true, showStats, showWorkers);
+                    const featureList = [showWorkers ? 'show_workers' : null, showStats ? 'show_stats' : null].filter(Boolean).join(' + ');
+                    this.reply(chatId, {
+                        de: `Stündliche Benachrichtigungen aktiviert für: ${featureList}`,
+                        en: `Hourly notifications enabled for: ${featureList}`
+                    });
+                } catch (error) {
+                    console.error('Fehler bei /send_hourly:', error);
+                    this.reply(chatId, {
+                        de: 'Fehler beim Aktivieren der stündlichen Benachrichtigungen. Bitte später erneut versuchen.',
+                        en: 'Failed to enable hourly notifications. Please try again later.'
+                    });
+                }
+            } else {
+                // When turning off, disable all
+                try {
+                    await this.telegramSubscriptionsService.updateHourlyNotifications(chatId, false, false, false);
+                    this.reply(chatId, {
+                        de: 'Stündliche Benachrichtigungen deaktiviert.',
+                        en: 'Hourly notifications disabled.'
+                    });
+                } catch (error) {
+                    console.error('Fehler bei /send_hourly:', error);
+                    this.reply(chatId, {
+                        de: 'Fehler beim Deaktivieren der stündlichen Benachrichtigungen. Bitte später erneut versuchen.',
+                        en: 'Failed to disable hourly notifications. Please try again later.'
+                    });
+                }
+            }
+        });
+
         this.bot.on('message', async (msg) => {
             if (!msg.text) return;
 
@@ -789,5 +858,59 @@ I will decrypt it and respond just like with plain text. 🔒`
         });
 
         await Promise.all(notifications);
+    }
+
+    @Interval(60 * 60 * 1000) // Run every hour
+    private async sendHourlyUpdates(): Promise<void> {
+        if (!this.bot || !this.shouldRegisterHandlers) return;
+
+        try {
+            const enabledChats = await this.telegramSubscriptionsService.getHourlyEnabledChats();
+
+            for (const chat of enabledChats) {
+                try {
+                    // Send stats if enabled
+                    if (chat.hourlyStatsEnabled) {
+                        try {
+                            const messages = await buildStatsMessage(
+                                chat.address,
+                                this.clientService,
+                                this.addressSettingsService,
+                                this.clientStatisticsService,
+                                this.numberSuffix
+                            );
+                            if (messages) {
+                                this.bot.sendMessage(chat.telegramChatId, messages[this.getLanguage(chat.telegramChatId)]);
+                            }
+                        } catch (err) {
+                            console.error(`Fehler beim Senden von Stats für ${chat.address} an Chat ${chat.telegramChatId}:`, err);
+                        }
+                    }
+
+                    // Send workers overview if enabled
+                    if (chat.hourlyWorkersEnabled) {
+                        try {
+                            const apiPort = process.env.API_PORT ?? '3334';
+                            const url = `http://localhost:${apiPort}/api/client/${encodeURIComponent(chat.address)}`;
+                            const res = await fetch(url);
+
+                            if (res.ok) {
+                                const payload = await res.json();
+                                if (payload && Array.isArray(payload.workers) && payload.workers.length > 0) {
+                                    const messages = buildWorkersOverviewMessage(payload, this.numberSuffix);
+                                    this.bot.sendMessage(chat.telegramChatId, messages[this.getLanguage(chat.telegramChatId)]);
+                                }
+                            }
+                        } catch (err) {
+                            console.error(`Fehler beim Senden von Workers für ${chat.address} an Chat ${chat.telegramChatId}:`, err);
+                        }
+                    }
+                } catch (err) {
+                    console.error(`Fehler beim Verarbeiten von Stundlich-Updates für Chat ${chat.telegramChatId}:`, err);
+                }
+            }
+        } catch (err) {
+            console.error('Fehler beim Ausführen der Stundlich-Benachrichtigungen:', err);
+        }
     }
 }
