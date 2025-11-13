@@ -97,7 +97,7 @@ services:
       - REDIS_DB=0
       - REDIS_TTL=600
       # PM2 configuration
-      - PM2_INSTANCES=${PM2_INSTANCES:-6}
+      - PM2_INSTANCES=${PM2_INSTANCES:-4}
 
 networks:
   bitcoin:
