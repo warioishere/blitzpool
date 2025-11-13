@@ -23,4 +23,10 @@ export class TelegramSubscriptionsEntity extends TrackedEntity {
 
     @Column({ default: false })
     isDefault: boolean;
+
+    @Column({ default: false })
+    hourlyStatsEnabled: boolean;
+
+    @Column({ default: false })
+    hourlyWorkersEnabled: boolean;
 }
