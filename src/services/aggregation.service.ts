@@ -1,0 +1,245 @@
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import { Inject, Injectable, OnModuleInit } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { Cron, CronExpression } from '@nestjs/schedule';
+import { Cache } from 'cache-manager';
+import { firstValueFrom } from 'rxjs';
+
+import { AddressSettingsService } from '../ORM/address-settings/address-settings.service';
+import { BlocksService } from '../ORM/blocks/blocks.service';
+import { ClientService } from '../ORM/client/client.service';
+import { ClientStatisticsService } from '../ORM/client-statistics/client-statistics.service';
+import { PoolShareStatisticsService } from '../ORM/pool-share-statistics/pool-share-statistics.service';
+import { BitcoinRpcService } from './bitcoin-rpc.service';
+
+/**
+ * Aggregation Service - Phase 2 Performance Optimization
+ *
+ * Pre-computes expensive aggregation queries and stores them in cache (Redis).
+ * This reduces CPU load by computing statistics in background jobs instead of on-demand.
+ *
+ * Benefits:
+ * - Reduced API response time (serve from cache)
+ * - Lower database query load
+ * - Better scalability with PM2 cluster mode
+ * - Shared cache across all instances (when using Redis)
+ */
+@Injectable()
+export class AggregationService implements OnModuleInit {
+  private enabled: boolean;
+  private poolStatsInterval: number;
+  private chartDataInterval: number;
+
+  constructor(
+    @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
+    private readonly clientService: ClientService,
+    private readonly clientStatisticsService: ClientStatisticsService,
+    private readonly blocksService: BlocksService,
+    private readonly poolShareStatisticsService: PoolShareStatisticsService,
+    private readonly bitcoinRpcService: BitcoinRpcService,
+    private readonly addressSettingsService: AddressSettingsService,
+    private readonly configService: ConfigService,
+  ) {
+    this.enabled = this.configService.get<string>('ENABLE_AGGREGATION_SERVICE')?.toLowerCase() !== 'false';
+
+    // Pool stats: every 10 minutes (default)
+    this.poolStatsInterval = parseInt(
+      this.configService.get<string>('AGGREGATION_INTERVAL_POOL_STATS') ?? '600000',
+      10,
+    );
+
+    // Chart data: every 30 minutes (default)
+    this.chartDataInterval = parseInt(
+      this.configService.get<string>('AGGREGATION_INTERVAL_CHART_DATA') ?? '1800000',
+      10,
+    );
+  }
+
+  async onModuleInit(): Promise<void> {
+    if (this.enabled) {
+      console.log('[Aggregation] Service enabled - pre-computing statistics in background');
+      console.log(`[Aggregation] Pool stats: every ${this.poolStatsInterval / 1000}s`);
+      console.log(`[Aggregation] Chart data: every ${this.chartDataInterval / 1000}s`);
+
+      // Run initial aggregations after a short delay
+      setTimeout(() => {
+        this.aggregatePoolStatistics().catch(err =>
+          console.error('[Aggregation] Initial pool stats failed:', err)
+        );
+        this.aggregateChartData().catch(err =>
+          console.error('[Aggregation] Initial chart data failed:', err)
+        );
+        this.aggregateSiteInfo().catch(err =>
+          console.error('[Aggregation] Initial site info failed:', err)
+        );
+      }, 5000);
+    } else {
+      console.log('[Aggregation] Service disabled');
+    }
+  }
+
+  /**
+   * Pre-compute pool statistics (every 10 minutes)
+   */
+  @Cron(CronExpression.EVERY_10_MINUTES)
+  async aggregatePoolStatistics(): Promise<void> {
+    if (!this.enabled) return;
+
+    try {
+      const startTime = Date.now();
+
+      const userAgents = await this.clientService.getUserAgents();
+      const totalHashRate = userAgents.reduce(
+        (acc, userAgent) => acc + parseFloat(userAgent.totalHashRate),
+        0,
+      );
+      const totalMiners = userAgents.reduce(
+        (acc, userAgent) => acc + parseInt(userAgent.count),
+        0,
+      );
+      const blockHeight = (await firstValueFrom(this.bitcoinRpcService.newBlock$)).blocks;
+      const blocksFound = await this.blocksService.getFoundBlocks();
+
+      const data = {
+        totalHashRate,
+        blockHeight,
+        totalMiners,
+        blocksFound,
+        fee: 0,
+        _cachedAt: Date.now(),
+      };
+
+      await this.cacheManager.set('POOL_INFO', data, this.poolStatsInterval);
+
+      const elapsed = Date.now() - startTime;
+      console.log(`[Aggregation] Pool stats computed in ${elapsed}ms`);
+    } catch (error) {
+      console.error('[Aggregation] Failed to aggregate pool statistics:', error);
+    }
+  }
+
+  /**
+   * Pre-compute chart data for various ranges (every 30 minutes)
+   */
+  @Cron(CronExpression.EVERY_30_MINUTES)
+  async aggregateChartData(): Promise<void> {
+    if (!this.enabled) return;
+
+    try {
+      const startTime = Date.now();
+      const ranges: ('1d' | '1m')[] = ['1d', '1m'];
+
+      for (const range of ranges) {
+        const chartData = await this.clientStatisticsService.getChartDataForSite(range);
+        await this.cacheManager.set(
+          `SITE_HASHRATE_GRAPH_${range}`,
+          chartData,
+          this.chartDataInterval,
+        );
+      }
+
+      const elapsed = Date.now() - startTime;
+      console.log(`[Aggregation] Chart data computed in ${elapsed}ms`);
+    } catch (error) {
+      console.error('[Aggregation] Failed to aggregate chart data:', error);
+    }
+  }
+
+  /**
+   * Pre-compute site info (every 5 minutes)
+   */
+  @Cron(CronExpression.EVERY_5_MINUTES)
+  async aggregateSiteInfo(): Promise<void> {
+    if (!this.enabled) return;
+
+    try {
+      const startTime = Date.now();
+
+      const blockData = await this.blocksService.getFoundBlocks();
+      const userAgents = await this.clientService.getUserAgents();
+      const highScores = await this.addressSettingsService.getHighScores();
+
+      const data = {
+        blockData,
+        userAgents,
+        highScores,
+        uptime: new Date(), // This will be overridden by AppController
+        _cachedAt: Date.now(),
+      };
+
+      await this.cacheManager.set('SITE_INFO', data, 300); // 5 minute TTL
+
+      const elapsed = Date.now() - startTime;
+      console.log(`[Aggregation] Site info computed in ${elapsed}ms`);
+    } catch (error) {
+      console.error('[Aggregation] Failed to aggregate site info:', error);
+    }
+  }
+
+  /**
+   * Pre-compute share totals (every 10 minutes)
+   */
+  @Cron(CronExpression.EVERY_10_MINUTES)
+  async aggregateShareTotals(): Promise<void> {
+    if (!this.enabled) return;
+
+    try {
+      const startTime = Date.now();
+
+      const now = Date.now();
+      const oneDay = 24 * 60 * 60 * 1000;
+      const latestBlock = await this.blocksService.getLatestBlock();
+      const sinceBlock = latestBlock?.createdAt ? latestBlock.createdAt.getTime() : 0;
+
+      const [totals1d, totals14d, totals30d, totalsSinceBlock] = await Promise.all([
+        this.poolShareStatisticsService.getTotalsSince(now - oneDay),
+        this.poolShareStatisticsService.getTotalsSince(now - oneDay * 14),
+        this.poolShareStatisticsService.getTotalsSince(now - oneDay * 30),
+        this.poolShareStatisticsService.getTotalsSince(sinceBlock),
+      ]);
+
+      const data = {
+        accepted1d: totals1d.accepted,
+        rejected1d: totals1d.rejected,
+        accepted14d: totals14d.accepted,
+        rejected14d: totals14d.rejected,
+        accepted30d: totals30d.accepted,
+        rejected30d: totals30d.rejected,
+        acceptedSinceBlock: totalsSinceBlock.accepted,
+        rejectedSinceBlock: totalsSinceBlock.rejected,
+        _cachedAt: Date.now(),
+      };
+
+      await this.cacheManager.set('POOL_SHARE_TOTALS', data, 600); // 10 minute TTL
+
+      const elapsed = Date.now() - startTime;
+      console.log(`[Aggregation] Share totals computed in ${elapsed}ms`);
+    } catch (error) {
+      console.error('[Aggregation] Failed to aggregate share totals:', error);
+    }
+  }
+
+  /**
+   * Get cache statistics (for monitoring)
+   */
+  public async getCacheStats(): Promise<{
+    enabled: boolean;
+    poolStatsInterval: number;
+    chartDataInterval: number;
+    cachedKeys: string[];
+  }> {
+    // Note: This requires Redis client access, simplified version here
+    return {
+      enabled: this.enabled,
+      poolStatsInterval: this.poolStatsInterval,
+      chartDataInterval: this.chartDataInterval,
+      cachedKeys: [
+        'POOL_INFO',
+        'SITE_INFO',
+        'POOL_SHARE_TOTALS',
+        'SITE_HASHRATE_GRAPH_1d',
+        'SITE_HASHRATE_GRAPH_1m',
+      ],
+    };
+  }
+}

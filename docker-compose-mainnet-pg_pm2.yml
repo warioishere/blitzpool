@@ -17,6 +17,19 @@ services:
     volumes:
       - ./full-setup/data/mainnet/public-pool/pg:/var/lib/postgresql/data
 
+  redis:
+    container_name: public-pool-redis
+    image: redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command: redis-server --appendonly yes --maxmemory ${REDIS_MAX_MEMORY:-256mb} --maxmemory-policy allkeys-lru
+    volumes:
+      - ./full-setup/data/mainnet/public-pool/redis:/data
+
   public-pool:
     container_name: public-pool
     build:
@@ -26,6 +39,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
@@ -34,6 +49,7 @@ services:
       - "127.0.0.1:${API_PORT}:${API_PORT}/tcp"
     volumes:
       - "./.env:/public-pool/.env:ro"
+      - "./logs:/public-pool/logs"
     environment:
       - NODE_ENV=production
       - DB_TYPE=postgres
@@ -44,4 +60,11 @@ services:
       - PG_DATABASE=${PG_DATABASE:-public_pool}
       - PG_SSL=${PG_SSL:-false}
       - DB_RUN_MIGRATIONS=true
-    command: pm2-runtime dist/main.js -i ${PM2_INSTANCES:-6}
+      # Redis configuration (Phase 2)
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=${REDIS_DB:-0}
+      - REDIS_TTL=${REDIS_TTL:-600}
+      # PM2 configuration
+      - PM2_INSTANCES=${PM2_INSTANCES:-4}
+    command: pm2-runtime start ecosystem.config.js
