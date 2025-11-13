@@ -1,6 +1,7 @@
 import { ClientStatisticsService } from '../ORM/client-statistics/client-statistics.service';
 import { ClientEntity } from '../ORM/client/client.entity';
 import { ConfigService } from '@nestjs/config';
+import { StatisticsBatchService } from '../services/statistics-batch.service';
 
 const CACHE_SIZE = 30;
 const CACHE_WINDOW_SECONDS = 300;
@@ -35,6 +36,7 @@ export class StratumV1ClientStatistics {
     constructor(
         private readonly clientStatisticsService: ClientStatisticsService,
         private readonly configService: ConfigService,
+        private readonly statisticsBatchService?: StatisticsBatchService,
     ) {
         this.submissionCacheStart = new Date();
         const tpm = parseFloat(this.configService.get('TARGET_SHARES_PER_MINUTE') ?? '6');
@@ -121,19 +123,30 @@ export class StratumV1ClientStatistics {
 
         if (this.currentTimeSlot == null) {
             // First record, insert it
-                        this.previousTimeSlotTime = new Date();
+            this.previousTimeSlotTime = new Date();
             this.currentTimeSlotTime = new Date();
             this.currentTimeSlot = timeSlot;
             this.shares += targetDifficulty;
             this.acceptedCount++;
             this.resetRejectedStats();
-            await this.clientStatisticsService.insert(this.buildPersistencePayload(client));
+
+            // Use batch service if available, otherwise direct insert
+            if (this.statisticsBatchService) {
+                this.statisticsBatchService.queueInsert(this.buildPersistencePayload(client));
+            } else {
+                await this.clientStatisticsService.insert(this.buildPersistencePayload(client));
+            }
             this.lastSave = new Date().getTime();
         } else if (this.currentTimeSlot != timeSlot) {
             // Transitioning to a new time slot,
             // First update the old time slot with the latest data
-            await this.clientStatisticsService.update(this.buildPersistencePayload(client));
-                         this.previousShares = this.shares;
+            if (this.statisticsBatchService) {
+                this.statisticsBatchService.queueUpdate(this.buildPersistencePayload(client));
+            } else {
+                await this.clientStatisticsService.update(this.buildPersistencePayload(client));
+            }
+
+            this.previousShares = this.shares;
             this.previousTimeSlotTime = this.currentTimeSlotTime;
             this.currentTimeSlotTime = new Date();
             // Set the new time slot and add incoming shares then insert it
@@ -141,13 +154,23 @@ export class StratumV1ClientStatistics {
             this.shares = targetDifficulty;
             this.acceptedCount = 1;
             this.resetRejectedStats();
-            await this.clientStatisticsService.insert(this.buildPersistencePayload(client));
+
+            if (this.statisticsBatchService) {
+                this.statisticsBatchService.queueInsert(this.buildPersistencePayload(client));
+            } else {
+                await this.clientStatisticsService.insert(this.buildPersistencePayload(client));
+            }
             this.lastSave = new Date().getTime();
         } else if ((date.getTime() - 60 * 1000) > this.lastSave) {
-            // If we haven't saved for a minute, update the table
+            // If we haven't saved for a minute, queue update (batch service will flush periodically)
             this.shares += targetDifficulty;
             this.acceptedCount++;
-            await this.clientStatisticsService.update(this.buildPersistencePayload(client));
+
+            if (this.statisticsBatchService) {
+                this.statisticsBatchService.queueUpdate(this.buildPersistencePayload(client));
+            } else {
+                await this.clientStatisticsService.update(this.buildPersistencePayload(client));
+            }
             this.lastSave = new Date().getTime();
         } else {
             // Accept the shares if none of the prior conditions are met,
@@ -176,13 +199,23 @@ export class StratumV1ClientStatistics {
             this.acceptedCount = this.acceptedCount ?? 0;
             this.resetRejectedStats();
             this.incrementRejectedStats(reason, difficulty);
-            await this.clientStatisticsService.insert(this.buildPersistencePayload(client));
+
+            if (this.statisticsBatchService) {
+                this.statisticsBatchService.queueInsert(this.buildPersistencePayload(client));
+            } else {
+                await this.clientStatisticsService.insert(this.buildPersistencePayload(client));
+            }
             this.lastSave = null;
             return;
         }
 
         if (this.currentTimeSlot != timeSlot) {
-            await this.clientStatisticsService.update(this.buildPersistencePayload(client));
+            if (this.statisticsBatchService) {
+                this.statisticsBatchService.queueUpdate(this.buildPersistencePayload(client));
+            } else {
+                await this.clientStatisticsService.update(this.buildPersistencePayload(client));
+            }
+
             this.previousShares = this.shares;
             this.previousTimeSlotTime = this.currentTimeSlotTime;
             this.currentTimeSlotTime = new Date();
@@ -191,13 +224,22 @@ export class StratumV1ClientStatistics {
             this.acceptedCount = 0;
             this.resetRejectedStats();
             this.incrementRejectedStats(reason, difficulty);
-            await this.clientStatisticsService.insert(this.buildPersistencePayload(client));
+
+            if (this.statisticsBatchService) {
+                this.statisticsBatchService.queueInsert(this.buildPersistencePayload(client));
+            } else {
+                await this.clientStatisticsService.insert(this.buildPersistencePayload(client));
+            }
             this.lastSave = null;
             return;
         }
 
         this.incrementRejectedStats(reason, difficulty);
-        await this.clientStatisticsService.update(this.buildPersistencePayload(client));
+        if (this.statisticsBatchService) {
+            this.statisticsBatchService.queueUpdate(this.buildPersistencePayload(client));
+        } else {
+            await this.clientStatisticsService.update(this.buildPersistencePayload(client));
+        }
         this.lastSave = null;
     }
 

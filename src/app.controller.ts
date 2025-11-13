@@ -54,6 +54,19 @@ export class AppController {
   private uptime = new Date();
   private readonly version: string;
 
+  // Configurable cache TTLs (in seconds)
+  private readonly cacheTTL = {
+    siteInfo: parseInt(this.configService.get('API_CACHE_TTL_SITE_INFO') ?? '300'),
+    poolInfo: parseInt(this.configService.get('API_CACHE_TTL_POOL_INFO') ?? '600'),
+    coreInfo: parseInt(this.configService.get('API_CACHE_TTL_CORE_INFO') ?? '60'),
+    peerInfo: parseInt(this.configService.get('API_CACHE_TTL_PEER_INFO') ?? '60'),
+    chart: parseInt(this.configService.get('API_CACHE_TTL_CHART') ?? '1800'),
+    shares: parseInt(this.configService.get('API_CACHE_TTL_SHARES') ?? '600'),
+    workers: parseInt(this.configService.get('API_CACHE_TTL_WORKERS') ?? '1800'),
+    accepted: parseInt(this.configService.get('API_CACHE_TTL_ACCEPTED') ?? '600'),
+    rejected: parseInt(this.configService.get('API_CACHE_TTL_REJECTED') ?? '600'),
+  };
+
   constructor(
     @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
     private readonly clientService: ClientService,
@@ -94,8 +107,7 @@ export class AppController {
       uptime: this.uptime
     };
 
-    //1 min
-    await this.cacheManager.set(CACHE_KEY, data, 1 * 60);
+    await this.cacheManager.set(CACHE_KEY, data, this.cacheTTL.siteInfo);
 
     return data;
 
@@ -115,7 +127,7 @@ export class AppController {
       return cached;
     }
     const data = await this.bitcoinRpcService.getNetworkInfo();
-    await this.cacheManager.set(CACHE_KEY, data, 60);
+    await this.cacheManager.set(CACHE_KEY, data, this.cacheTTL.coreInfo);
     return data;
   }
 
@@ -203,8 +215,7 @@ export class AppController {
       fee: 0
     }
 
-    //5 min
-    await this.cacheManager.set(CACHE_KEY, data, 5 * 60);
+    await this.cacheManager.set(CACHE_KEY, data, this.cacheTTL.poolInfo);
 
     return data;
   }
@@ -250,7 +261,7 @@ export class AppController {
       })
     );
 
-    await this.cacheManager.set(CACHE_KEY, result, 1 * 60);
+    await this.cacheManager.set(CACHE_KEY, result, this.cacheTTL.peerInfo);
     return result;
   }
 
@@ -272,8 +283,7 @@ export class AppController {
 
     const chartData = await this.clientStatisticsService.getChartDataForSite(range);
 
-    //10 min
-    await this.cacheManager.set(CACHE_KEY, chartData, 10 * 60);
+    await this.cacheManager.set(CACHE_KEY, chartData, this.cacheTTL.chart);
 
     return chartData;
 
@@ -311,7 +321,7 @@ export class AppController {
       rejectedSinceBlock: totalsSinceBlock.rejected,
     };
 
-    await this.cacheManager.set(CACHE_KEY, data, 10 * 60);
+    await this.cacheManager.set(CACHE_KEY, data, this.cacheTTL.shares);
 
     return data;
 
@@ -350,7 +360,7 @@ export class AppController {
       });
     }
 
-    await this.cacheManager.set(CACHE_KEY, { slotData }, 10 * 60);
+    await this.cacheManager.set(CACHE_KEY, { slotData }, this.cacheTTL.accepted);
 
     return { slotData };
   }
@@ -406,7 +416,7 @@ export class AppController {
       slotData[slotData.length - 1].counts = liveCounts;
     }
 
-    await this.cacheManager.set(CACHE_KEY, { slotData }, 10 * 60);
+    await this.cacheManager.set(CACHE_KEY, { slotData }, this.cacheTTL.workers);
 
     return { slotData };
   }
@@ -451,7 +461,7 @@ export class AppController {
       slotData.push({ time: new Date(t).toISOString(), counts });
     }
 
-    await this.cacheManager.set(CACHE_KEY, { slotData }, 10 * 60);
+    await this.cacheManager.set(CACHE_KEY, { slotData }, this.cacheTTL.rejected);
 
     return { slotData };
   }

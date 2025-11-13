@@ -29,6 +29,7 @@ import { ExternalSharesService } from './services/external-shares.service';
 import { GeoIpService } from './services/geoip.service';
 import { ShareTotalsCacheService } from './services/share-totals-cache.service';
 import { AddressSettingsCacheService } from './services/address-settings-cache.service';
+import { StatisticsBatchService } from './services/statistics-batch.service';
 import { ExternalShareController } from './controllers/external-share/external-share.controller';
 import { ExternalSharesModule } from './ORM/external-shares/external-shares.module';
 import { PoolShareStatisticsModule } from './ORM/pool-share-statistics/pool-share-statistics.module';
@@ -88,6 +89,7 @@ const ORMModules = [
         GeoIpService,
         ShareTotalsCacheService,
         AddressSettingsCacheService,
+        StatisticsBatchService,
     ],
 })
 export class AppModule {

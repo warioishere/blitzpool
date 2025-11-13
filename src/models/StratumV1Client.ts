@@ -36,6 +36,7 @@ import { StratumV1Service } from '../services/stratum-v1.service';
 import { ClientDifficultyStatisticsService } from '../ORM/client-difficulty-statistics/client-difficulty-statistics.service';
 import { ShareTotalsCacheService } from '../services/share-totals-cache.service';
 import { AddressSettingsCacheService } from '../services/address-settings-cache.service';
+import { StatisticsBatchService } from '../services/statistics-batch.service';
 
 
 export class StratumV1Client {
@@ -97,6 +98,7 @@ export class StratumV1Client {
         private readonly externalSharesService: ExternalSharesService,
         private readonly clientDifficultyStatisticsService: ClientDifficultyStatisticsService,
         private readonly shareTotalsCacheService: ShareTotalsCacheService,
+        private readonly statisticsBatchService: StatisticsBatchService,
         private readonly stratumV1Service: StratumV1Service,
         initialDifficulty: number,
         private readonly allowSuggestedDifficulty: boolean = true,
@@ -236,6 +238,54 @@ export class StratumV1Client {
     }
 
 
+    // Fast validation functions (replacing class-validator for performance)
+    private isValidSubscription(msg: any): boolean {
+        return msg.id != null &&
+               msg.method === 'mining.subscribe' &&
+               Array.isArray(msg.params) &&
+               msg.params.length >= 1;
+    }
+
+    private isValidConfiguration(msg: any): boolean {
+        return msg.id != null &&
+               msg.method === 'mining.configure' &&
+               Array.isArray(msg.params);
+    }
+
+    private isValidAuthorization(msg: any): boolean {
+        return msg.id != null &&
+               msg.method === 'mining.authorize' &&
+               Array.isArray(msg.params) &&
+               msg.params.length >= 2 &&
+               typeof msg.params[0] === 'string'; // address.worker format
+    }
+
+    private isValidExtraNonceSubscribe(msg: any): boolean {
+        return msg.id != null &&
+               msg.method === 'mining.extranonce.subscribe';
+    }
+
+    private isValidSuggestDifficulty(msg: any): boolean {
+        return msg.id != null &&
+               msg.method === 'mining.suggest_difficulty' &&
+               Array.isArray(msg.params) &&
+               msg.params.length >= 1 &&
+               typeof msg.params[0] === 'number' &&
+               msg.params[0] > 0;
+    }
+
+    private isValidMiningSubmit(msg: any): boolean {
+        return msg.id != null &&
+               msg.method === 'mining.submit' &&
+               Array.isArray(msg.params) &&
+               msg.params.length >= 5 &&
+               typeof msg.params[0] === 'string' && // worker
+               typeof msg.params[1] === 'string' && // jobId
+               typeof msg.params[2] === 'string' && // extraNonce2
+               typeof msg.params[3] === 'string' && // ntime
+               typeof msg.params[4] === 'string';   // nonce
+    }
+
     private async handleMessage(message: string) {
         //console.log(`Received from ${this.sessionId}`, message);
 
@@ -253,23 +303,31 @@ export class StratumV1Client {
 
         switch (parsedMessage.method) {
             case eRequestMethod.SUBSCRIBE: {
+                // Use fast validation instead of class-validator
+                if (!this.isValidSubscription(parsedMessage)) {
+                    console.error('Subscription validation error');
+                    const err = new StratumErrorMessage(
+                        parsedMessage.id,
+                        eStratumErrorCode.OtherUnknown,
+                        'Invalid subscription message').response();
+                    await this.write(err);
+                    break;
+                }
+
                 const subscriptionMessage = plainToInstance(
                     SubscriptionMessage,
                     parsedMessage,
                 );
 
-                const validatorOptions: ValidatorOptions = {
-                    whitelist: true,
-                    //forbidNonWhitelisted: true,
-                };
-
-                const errors = await validate(subscriptionMessage, validatorOptions);
-
-                if (errors.length === 0) {
+                {
 
                     if (this.sessionStart == null) {
                         this.sessionStart = new Date();
-                        this.statistics = new StratumV1ClientStatistics(this.clientStatisticsService, this.configService);
+                        this.statistics = new StratumV1ClientStatistics(
+                            this.clientStatisticsService,
+                            this.configService,
+                            this.statisticsBatchService,
+                        );
                         this.sessionId = this.getRandomHexString();
                         this.extraNonce = this.sessionId;
                         console.log(`New client ID: : ${this.sessionId}, ${this.socket.remoteAddress}:${this.socket.remotePort}`);
@@ -278,53 +336,31 @@ export class StratumV1Client {
                     this.clientSubscription = subscriptionMessage;
                     this.subscribeResponse = JSON.stringify(this.clientSubscription.response(this.sessionId, this.extraNonce)) + '\n';
                     await this.write(this.subscribeResponse);
-                } else {
-                    console.error('Subscription validation error');
-                    const err = new StratumErrorMessage(
-                        subscriptionMessage.id,
-                        eStratumErrorCode.OtherUnknown,
-                        'Subscription validation error',
-                        errors).response();
-                    console.error(err);
-                    const success = await this.write(err);
-                    if (!success) {
-                        return;
-                    }
                 }
 
                 break;
             }
             case eRequestMethod.CONFIGURE: {
+                // Use fast validation instead of class-validator
+                if (!this.isValidConfiguration(parsedMessage)) {
+                    console.error('Configuration validation error');
+                    const err = new StratumErrorMessage(
+                        parsedMessage.id,
+                        eStratumErrorCode.OtherUnknown,
+                        'Invalid configuration message').response();
+                    await this.write(err);
+                    break;
+                }
 
                 const configurationMessage = plainToInstance(
                     ConfigurationMessage,
                     parsedMessage,
                 );
 
-                const validatorOptions: ValidatorOptions = {
-                    whitelist: true,
-                    //forbidNonWhitelisted: true,
-                };
-
-                const errors = await validate(configurationMessage, validatorOptions);
-
-                if (errors.length === 0) {
+                {
                     this.clientConfiguration = configurationMessage;
                     //const response = this.buildSubscriptionResponse(configurationMessage.id);
                     const success = await this.write(JSON.stringify(this.clientConfiguration.response()) + '\n');
-                    if (!success) {
-                        return;
-                    }
-
-                } else {
-                    console.error('Configuration validation error');
-                    const err = new StratumErrorMessage(
-                        configurationMessage.id,
-                        eStratumErrorCode.OtherUnknown,
-                        'Configuration validation error',
-                        errors).response();
-                    console.error(err);
-                    const success = await this.write(err);
                     if (!success) {
                         return;
                     }
@@ -333,20 +369,23 @@ export class StratumV1Client {
                 break;
             }
             case eRequestMethod.AUTHORIZE: {
+                // Use fast validation instead of class-validator
+                if (!this.isValidAuthorization(parsedMessage)) {
+                    console.error('Authorization validation error');
+                    const err = new StratumErrorMessage(
+                        parsedMessage.id,
+                        eStratumErrorCode.OtherUnknown,
+                        'Invalid authorization message').response();
+                    await this.write(err);
+                    break;
+                }
 
                 const authorizationMessage = plainToInstance(
                     AuthorizationMessage,
                     parsedMessage,
                 );
 
-                const validatorOptions: ValidatorOptions = {
-                    whitelist: true,
-                    //forbidNonWhitelisted: true,
-                };
-
-                const errors = await validate(authorizationMessage, validatorOptions);
-
-                if (errors.length === 0) {
+                {
                     this.clientAuthorization = authorizationMessage;
                     this.stratumV1Service.registerClient(this.clientAuthorization.address, this);
                     this.authorizeResponse = JSON.stringify(this.clientAuthorization.response()) + '\n';
@@ -358,35 +397,28 @@ export class StratumV1Client {
                         const jobTemplate = await firstValueFrom(this.stratumV1JobsService.newMiningJob$);
                         await this.sendNewMiningJob(jobTemplate);
                     }
-                } else {
-                    console.error('Authorization validation error');
-                    const err = new StratumErrorMessage(
-                        authorizationMessage.id,
-                        eStratumErrorCode.OtherUnknown,
-                        'Authorization validation error',
-                        errors).response();
-                    console.error(err);
-                    const success = await this.write(err);
-                    if (!success) {
-                        return;
-                    }
                 }
 
                 break;
             }
             case eRequestMethod.EXTRANONCE_SUBSCRIBE: {
+                // Use fast validation instead of class-validator
+                if (!this.isValidExtraNonceSubscribe(parsedMessage)) {
+                    console.error('Extranonce subscribe validation error');
+                    const err = new StratumErrorMessage(
+                        parsedMessage.id,
+                        eStratumErrorCode.OtherUnknown,
+                        'Invalid extranonce subscribe message').response();
+                    await this.write(err);
+                    break;
+                }
+
                 const extraNonceMessage = plainToInstance(
                     ExtraNonceSubscribeMessage,
                     parsedMessage,
                 );
 
-                const validatorOptions: ValidatorOptions = {
-                    whitelist: true,
-                };
-
-                const errors = await validate(extraNonceMessage, validatorOptions);
-
-                if (errors.length === 0) {
+                {
                     this.extraNonceSubscribed = true;
                     this.extranonceResponse = JSON.stringify(extraNonceMessage.response()) + '\n';
 
@@ -397,34 +429,26 @@ export class StratumV1Client {
                         jobTemplate.blockData.clearJobs = true;
                         await this.sendNewMiningJob(jobTemplate);
                     }
-                } else {
-                    console.error('Extranonce subscribe validation error');
-                    const err = new StratumErrorMessage(
-                        extraNonceMessage.id,
-                        eStratumErrorCode.OtherUnknown,
-                        'Extranonce subscribe validation error',
-                        errors).response();
-                    console.error(err);
-                    const success = await this.write(err);
-                    if (!success) {
-                        return;
-                    }
                 }
 
                 break;
             }
             case eRequestMethod.SUGGEST_DIFFICULTY: {
+                // Use fast validation instead of class-validator
+                if (!this.isValidSuggestDifficulty(parsedMessage)) {
+                    console.error('Suggest difficulty validation error');
+                    const err = new StratumErrorMessage(
+                        parsedMessage.id,
+                        eStratumErrorCode.OtherUnknown,
+                        'Invalid suggest difficulty message').response();
+                    await this.write(err);
+                    break;
+                }
+
                 const suggestDifficultyMessage = plainToInstance(
                     SuggestDifficulty,
                     parsedMessage
                 );
-
-                const validatorOptions: ValidatorOptions = {
-                    whitelist: true,
-                    //forbidNonWhitelisted: true,
-                };
-
-                const errors = await validate(suggestDifficultyMessage, validatorOptions);
 
                 if (!this.allowSuggestedDifficulty) {
                     const err = new StratumErrorMessage(
@@ -443,46 +467,34 @@ export class StratumV1Client {
                     return;
                 }
 
-                if (errors.length === 0) {
-
-                    this.clientSuggestedDifficulty = suggestDifficultyMessage;
-                    this.sessionDifficulty = suggestDifficultyMessage.suggestedDifficulty;
-                    await this.recordSessionDifficulty();
-                    const success = await this.write(JSON.stringify(this.clientSuggestedDifficulty.response(this.sessionDifficulty)) + '\n');
-                    if (!success) {
-                        return;
-                    }
-                    this.usedSuggestedDifficulty = true;
-                } else {
-                    console.error('Suggest difficulty validation error');
-                    const err = new StratumErrorMessage(
-                        suggestDifficultyMessage.id,
-                        eStratumErrorCode.OtherUnknown,
-                        'Suggest difficulty validation error',
-                        errors).response();
-                    console.error(err);
-                    const success = await this.write(err);
-                    if (!success) {
-                        return;
-                    }
+                this.clientSuggestedDifficulty = suggestDifficultyMessage;
+                this.sessionDifficulty = suggestDifficultyMessage.suggestedDifficulty;
+                await this.recordSessionDifficulty();
+                const success = await this.write(JSON.stringify(this.clientSuggestedDifficulty.response(this.sessionDifficulty)) + '\n');
+                if (!success) {
+                    return;
                 }
+                this.usedSuggestedDifficulty = true;
                 break;
             }
             case eRequestMethod.SUBMIT: {
+                // Use fast validation instead of class-validator (CRITICAL for performance)
+                if (!this.isValidMiningSubmit(parsedMessage)) {
+                    console.log('Mining Submit validation error');
+                    const err = new StratumErrorMessage(
+                        parsedMessage.id,
+                        eStratumErrorCode.OtherUnknown,
+                        'Invalid mining submit message').response();
+                    await this.write(err);
+                    break;
+                }
 
                 const miningSubmitMessage = plainToInstance(
                     MiningSubmitMessage,
                     parsedMessage,
                 );
 
-                const validatorOptions: ValidatorOptions = {
-                    whitelist: true,
-                    //forbidNonWhitelisted: true,
-                };
-
-                const errors = await validate(miningSubmitMessage, validatorOptions);
-
-                if (errors.length === 0 && this.stratumInitialized && this.clientAuthorization) {
+                if (this.stratumInitialized && this.clientAuthorization) {
                     const result = await this.handleMiningSubmission(miningSubmitMessage);
                     if (result == true) {
                         const success = await this.write(JSON.stringify(miningSubmitMessage.response()) + '\n');
@@ -490,7 +502,7 @@ export class StratumV1Client {
                             return;
                         }
                     }
-                } else if (errors.length === 0 && !this.clientAuthorization) {
+                } else if (!this.clientAuthorization) {
                     const err = new StratumErrorMessage(
                         miningSubmitMessage.id,
                         eStratumErrorCode.UnauthorizedWorker,
@@ -499,23 +511,11 @@ export class StratumV1Client {
                     if (!success) {
                         return;
                     }
-                } else if (errors.length === 0 && !this.stratumInitialized) {
+                } else if (!this.stratumInitialized) {
                     const err = new StratumErrorMessage(
                         miningSubmitMessage.id,
                         eStratumErrorCode.NotSubscribed,
                         'Not subscribed').response();
-                    const success = await this.write(err);
-                    if (!success) {
-                        return;
-                    }
-                } else {
-                    console.log('Mining Submit validation error');
-                    const err = new StratumErrorMessage(
-                        miningSubmitMessage.id,
-                        eStratumErrorCode.OtherUnknown,
-                        'Mining Submit validation error',
-                        errors).response();
-                    console.error(err);
                     const success = await this.write(err);
                     if (!success) {
                         return;
