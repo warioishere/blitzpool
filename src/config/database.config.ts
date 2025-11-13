@@ -68,6 +68,12 @@ export function buildDatabaseConfig(config: ConfigService): TypeOrmModuleOptions
 
         const runMigrations = parseOptionalBoolean(config.get('DB_RUN_MIGRATIONS'));
 
+        // Connection pooling configuration (Phase 3 optimization)
+        const poolSize = Number.parseInt(config.get<string>('PG_POOL_SIZE', '10'), 10);
+        const maxQueryExecutionTime = Number.parseInt(config.get<string>('PG_MAX_QUERY_TIME', '30000'), 10);
+        const acquireTimeout = Number.parseInt(config.get<string>('PG_ACQUIRE_TIMEOUT', '60000'), 10);
+        const idleTimeout = Number.parseInt(config.get<string>('PG_IDLE_TIMEOUT', '10000'), 10);
+
         const sourceMigrations = join(__dirname, '..', 'migrations', '[0-9]*.{js,ts}');
         const compiledMigrations = join(__dirname, '..', 'src', 'migrations', '[0-9]*.{js,ts}');
         const options: TypeOrmModuleOptions = {
@@ -81,6 +87,9 @@ export function buildDatabaseConfig(config: ConfigService): TypeOrmModuleOptions
             autoLoadEntities: true,
             logging: loggingEnabled,
             migrations: [sourceMigrations, compiledMigrations],
+            // Connection pooling (Phase 3)
+            poolSize: poolSize,
+            maxQueryExecutionTime: maxQueryExecutionTime,
             ...(ssl !== undefined ? { ssl } : {}),
             ...(runMigrations !== undefined ? { migrationsRun: runMigrations } : {}),
         };
@@ -89,9 +98,21 @@ export function buildDatabaseConfig(config: ConfigService): TypeOrmModuleOptions
             ...options,
             extra: {
                 autoSynchronize,
+                // Advanced pg driver pooling options
+                max: poolSize, // Maximum pool size
+                connectionTimeoutMillis: acquireTimeout, // Connection acquisition timeout
+                idleTimeoutMillis: idleTimeout, // Idle connection timeout
+                statement_timeout: maxQueryExecutionTime, // Query execution timeout
+                query_timeout: maxQueryExecutionTime,
+                // Performance optimizations
+                application_name: 'blitzpool',
             },
         };
     }
+
+    // SQLite performance configuration (Phase 3 optimization)
+    const sqliteBusyTimeout = Number.parseInt(config.get<string>('SQLITE_BUSY_TIMEOUT', '30000'), 10);
+    const sqliteCacheSize = Number.parseInt(config.get<string>('SQLITE_CACHE_SIZE', '-64000'), 10); // -64000 = 64MB
 
     const sqliteOptions: TypeOrmModuleOptions = {
         type: 'sqlite',
@@ -99,8 +120,17 @@ export function buildDatabaseConfig(config: ConfigService): TypeOrmModuleOptions
         synchronize: synchronizeOverride ?? true,
         autoLoadEntities: true,
         logging: loggingEnabled,
-        enableWAL: true,
-        busyTimeout: 30 * 1000,
+        enableWAL: true, // Write-Ahead Logging for better concurrency
+        busyTimeout: sqliteBusyTimeout, // Wait up to 30s for locked database
+        extra: {
+            // SQLite performance pragmas
+            synchronous: 'NORMAL', // Balance between safety and speed (WAL mode allows this)
+            cache_size: sqliteCacheSize, // Negative = KB, positive = pages (default 64MB)
+            temp_store: 'MEMORY', // Store temp tables in memory
+            mmap_size: 268435456, // Memory-mapped I/O (256MB)
+            page_size: 4096, // Standard page size
+            journal_size_limit: 67108864, // 64MB WAL limit
+        },
     };
 
     return sqliteOptions;

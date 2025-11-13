@@ -17,6 +17,7 @@ import { eStratumErrorCode } from './models/enums/eStratumErrorCode';
 import { isIP } from 'net';
 import { ConfigService } from '@nestjs/config';
 import { StratumV1JobsService } from './services/stratum-v1-jobs.service';
+import { MetricsService } from './services/metrics.service';
 import { MiningJob } from './models/MiningJob';
 import * as bitcoinjs from 'bitcoinjs-lib';
 
@@ -79,6 +80,7 @@ export class AppController {
     private readonly geoIpService: GeoIpService,
     private readonly configService: ConfigService,
     private readonly stratumV1JobsService: StratumV1JobsService,
+    private readonly metricsService: MetricsService,
   ) {
     const packagePath = join(__dirname, '..', 'package.json');
     this.version = JSON.parse(readFileSync(packagePath, 'utf8')).version;
@@ -464,5 +466,71 @@ export class AppController {
     await this.cacheManager.set(CACHE_KEY, { slotData }, this.cacheTTL.rejected);
 
     return { slotData };
+  }
+
+  /**
+   * Prometheus metrics endpoint
+   * Exposes all performance and operational metrics
+   */
+  @Get('metrics')
+  public async metrics() {
+    return await this.metricsService.getMetrics();
+  }
+
+  /**
+   * Health check endpoint with detailed status
+   */
+  @Get('health')
+  public async health() {
+    try {
+      // Check Bitcoin RPC connection
+      const miningInfo = await this.bitcoinRpcService.getMiningInfo();
+      const bitcoinStatus = miningInfo ? 'connected' : 'disconnected';
+
+      // Check database connection (via a simple query)
+      const clients = await this.clientService.getUserAgents();
+      const databaseStatus = clients ? 'connected' : 'disconnected';
+
+      // Check cache connection
+      const testKey = '__health_check__';
+      await this.cacheManager.set(testKey, 'ok', 1);
+      const cacheValue = await this.cacheManager.get(testKey);
+      const cacheStatus = cacheValue === 'ok' ? 'connected' : 'disconnected';
+
+      const uptime = Date.now() - this.uptime.getTime();
+      const healthy = bitcoinStatus === 'connected' && databaseStatus === 'connected';
+
+      return {
+        status: healthy ? 'healthy' : 'degraded',
+        version: this.version,
+        uptime: uptime,
+        uptimeReadable: this.formatDuration(uptime),
+        checks: {
+          bitcoin: bitcoinStatus,
+          database: databaseStatus,
+          cache: cacheStatus,
+        },
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        status: 'unhealthy',
+        version: this.version,
+        error: error.message,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
+
+  private formatDuration(ms: number): string {
+    const seconds = Math.floor(ms / 1000);
+    const minutes = Math.floor(seconds / 60);
+    const hours = Math.floor(minutes / 60);
+    const days = Math.floor(hours / 24);
+
+    if (days > 0) return `${days}d ${hours % 24}h`;
+    if (hours > 0) return `${hours}h ${minutes % 60}m`;
+    if (minutes > 0) return `${minutes}m ${seconds % 60}s`;
+    return `${seconds}s`;
   }
 }

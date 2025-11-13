@@ -11,6 +11,7 @@ import { ClientService } from '../ORM/client/client.service';
 import { ClientStatisticsService } from '../ORM/client-statistics/client-statistics.service';
 import { PoolShareStatisticsService } from '../ORM/pool-share-statistics/pool-share-statistics.service';
 import { BitcoinRpcService } from './bitcoin-rpc.service';
+import { MetricsService } from './metrics.service';
 
 /**
  * Aggregation Service - Phase 2 Performance Optimization
@@ -39,6 +40,7 @@ export class AggregationService implements OnModuleInit {
     private readonly bitcoinRpcService: BitcoinRpcService,
     private readonly addressSettingsService: AddressSettingsService,
     private readonly configService: ConfigService,
+    private readonly metricsService: MetricsService,
   ) {
     this.enabled = this.configService.get<string>('ENABLE_AGGREGATION_SERVICE')?.toLowerCase() !== 'false';
 
@@ -85,9 +87,8 @@ export class AggregationService implements OnModuleInit {
   async aggregatePoolStatistics(): Promise<void> {
     if (!this.enabled) return;
 
+    const startTime = Date.now();
     try {
-      const startTime = Date.now();
-
       const userAgents = await this.clientService.getUserAgents();
       const totalHashRate = userAgents.reduce(
         (acc, userAgent) => acc + parseFloat(userAgent.totalHashRate),
@@ -111,9 +112,15 @@ export class AggregationService implements OnModuleInit {
 
       await this.cacheManager.set('POOL_INFO', data, this.poolStatsInterval);
 
+      // Update pool statistics metrics
+      this.metricsService.updatePoolStats(totalHashRate, totalMiners);
+
       const elapsed = Date.now() - startTime;
+      this.metricsService.recordAggregationJob('pool_stats', 'success', elapsed);
       console.log(`[Aggregation] Pool stats computed in ${elapsed}ms`);
     } catch (error) {
+      const elapsed = Date.now() - startTime;
+      this.metricsService.recordAggregationJob('pool_stats', 'failure', elapsed);
       console.error('[Aggregation] Failed to aggregate pool statistics:', error);
     }
   }
@@ -125,8 +132,8 @@ export class AggregationService implements OnModuleInit {
   async aggregateChartData(): Promise<void> {
     if (!this.enabled) return;
 
+    const startTime = Date.now();
     try {
-      const startTime = Date.now();
       const ranges: ('1d' | '1m')[] = ['1d', '1m'];
 
       for (const range of ranges) {
@@ -139,8 +146,11 @@ export class AggregationService implements OnModuleInit {
       }
 
       const elapsed = Date.now() - startTime;
+      this.metricsService.recordAggregationJob('chart_data', 'success', elapsed);
       console.log(`[Aggregation] Chart data computed in ${elapsed}ms`);
     } catch (error) {
+      const elapsed = Date.now() - startTime;
+      this.metricsService.recordAggregationJob('chart_data', 'failure', elapsed);
       console.error('[Aggregation] Failed to aggregate chart data:', error);
     }
   }
@@ -152,9 +162,8 @@ export class AggregationService implements OnModuleInit {
   async aggregateSiteInfo(): Promise<void> {
     if (!this.enabled) return;
 
+    const startTime = Date.now();
     try {
-      const startTime = Date.now();
-
       const blockData = await this.blocksService.getFoundBlocks();
       const userAgents = await this.clientService.getUserAgents();
       const highScores = await this.addressSettingsService.getHighScores();
@@ -170,8 +179,11 @@ export class AggregationService implements OnModuleInit {
       await this.cacheManager.set('SITE_INFO', data, 300); // 5 minute TTL
 
       const elapsed = Date.now() - startTime;
+      this.metricsService.recordAggregationJob('site_info', 'success', elapsed);
       console.log(`[Aggregation] Site info computed in ${elapsed}ms`);
     } catch (error) {
+      const elapsed = Date.now() - startTime;
+      this.metricsService.recordAggregationJob('site_info', 'failure', elapsed);
       console.error('[Aggregation] Failed to aggregate site info:', error);
     }
   }
@@ -183,9 +195,8 @@ export class AggregationService implements OnModuleInit {
   async aggregateShareTotals(): Promise<void> {
     if (!this.enabled) return;
 
+    const startTime = Date.now();
     try {
-      const startTime = Date.now();
-
       const now = Date.now();
       const oneDay = 24 * 60 * 60 * 1000;
       const latestBlock = await this.blocksService.getLatestBlock();
@@ -213,8 +224,11 @@ export class AggregationService implements OnModuleInit {
       await this.cacheManager.set('POOL_SHARE_TOTALS', data, 600); // 10 minute TTL
 
       const elapsed = Date.now() - startTime;
+      this.metricsService.recordAggregationJob('share_totals', 'success', elapsed);
       console.log(`[Aggregation] Share totals computed in ${elapsed}ms`);
     } catch (error) {
+      const elapsed = Date.now() - startTime;
+      this.metricsService.recordAggregationJob('share_totals', 'failure', elapsed);
       console.error('[Aggregation] Failed to aggregate share totals:', error);
     }
   }
