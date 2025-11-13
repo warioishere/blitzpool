@@ -30,6 +30,7 @@ export class AggregationService implements OnModuleInit {
   private enabled: boolean;
   private poolStatsInterval: number;
   private chartDataInterval: number;
+  private isPrimaryInstance: boolean;
 
   constructor(
     @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
@@ -43,6 +44,10 @@ export class AggregationService implements OnModuleInit {
     private readonly metricsService: MetricsService,
   ) {
     this.enabled = this.configService.get<string>('ENABLE_AGGREGATION_SERVICE')?.toLowerCase() !== 'false';
+
+    // Only run aggregation on PM2 instance 0 (or when not in cluster mode)
+    // This prevents duplicate cron jobs across PM2 cluster instances
+    this.isPrimaryInstance = !process.env.NODE_APP_INSTANCE || process.env.NODE_APP_INSTANCE === '0';
 
     // Pool stats: every 10 minutes (default)
     this.poolStatsInterval = parseInt(
@@ -58,10 +63,16 @@ export class AggregationService implements OnModuleInit {
   }
 
   async onModuleInit(): Promise<void> {
+    if (!this.isPrimaryInstance) {
+      console.log('[Aggregation] Disabled on PM2 instance ' + process.env.NODE_APP_INSTANCE + ' (only runs on instance 0)');
+      return;
+    }
+
     if (this.enabled) {
       console.log('[Aggregation] Service enabled - pre-computing statistics in background');
       console.log(`[Aggregation] Pool stats: every ${this.poolStatsInterval / 1000}s`);
       console.log(`[Aggregation] Chart data: every ${this.chartDataInterval / 1000}s`);
+      console.log('[Aggregation] Running on PM2 primary instance (0)');
 
       // Run initial aggregations after 6 minutes to allow statistics to be flushed first
       // (Statistics batch service flushes every 5 minutes by default)
@@ -86,7 +97,7 @@ export class AggregationService implements OnModuleInit {
    */
   @Cron(CronExpression.EVERY_10_MINUTES)
   async aggregatePoolStatistics(): Promise<void> {
-    if (!this.enabled) return;
+    if (!this.enabled || !this.isPrimaryInstance) return;
 
     const startTime = Date.now();
     try {
@@ -131,7 +142,7 @@ export class AggregationService implements OnModuleInit {
    */
   @Cron(CronExpression.EVERY_30_MINUTES)
   async aggregateChartData(): Promise<void> {
-    if (!this.enabled) return;
+    if (!this.enabled || !this.isPrimaryInstance) return;
 
     const startTime = Date.now();
     try {
@@ -164,7 +175,7 @@ export class AggregationService implements OnModuleInit {
    */
   @Cron(CronExpression.EVERY_5_MINUTES)
   async aggregateSiteInfo(): Promise<void> {
-    if (!this.enabled) return;
+    if (!this.enabled || !this.isPrimaryInstance) return;
 
     const startTime = Date.now();
     try {
@@ -197,7 +208,7 @@ export class AggregationService implements OnModuleInit {
    */
   @Cron(CronExpression.EVERY_10_MINUTES)
   async aggregateShareTotals(): Promise<void> {
-    if (!this.enabled) return;
+    if (!this.enabled || !this.isPrimaryInstance) return;
 
     const startTime = Date.now();
     try {
