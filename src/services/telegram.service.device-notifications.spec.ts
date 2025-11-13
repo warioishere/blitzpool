@@ -6,14 +6,14 @@ const onMock = jest.fn();
 const setMyCommandsMock = jest.fn().mockResolvedValue(undefined);
 const sendMessageMock = jest.fn();
 
-const TelegramBotMock = jest.fn().mockImplementation(() => ({
-    onText: onTextMock,
-    on: onMock,
-    setMyCommands: setMyCommandsMock,
-    sendMessage: sendMessageMock,
-}));
-
-jest.mock('node-telegram-bot-api', () => TelegramBotMock);
+jest.mock('node-telegram-bot-api', () => {
+    return jest.fn().mockImplementation(() => ({
+        onText: onTextMock,
+        on: onMock,
+        setMyCommands: setMyCommandsMock,
+        sendMessage: sendMessageMock,
+    }));
+});
 
 describe('TelegramService device notifications without polling', () => {
     const configServiceGetMock = jest.fn();
@@ -41,7 +41,6 @@ describe('TelegramService device notifications without polling', () => {
 
     beforeEach(() => {
         jest.clearAllMocks();
-        TelegramBotMock.mockClear();
         configServiceGetMock.mockImplementation((key: string) => {
             if (key === 'TELEGRAM_BOT_TOKEN') return 'token';
             if (key === 'TELEGRAM_TIMEZONE') return 'Europe/Berlin';
@@ -56,6 +55,7 @@ describe('TelegramService device notifications without polling', () => {
     });
 
     it('instantiates the bot without polling and still delivers device notifications', async () => {
+        const TelegramBot = require('node-telegram-bot-api');
         const service = new TelegramService(
             configService,
             telegramSubscriptionsService as any,
@@ -66,7 +66,7 @@ describe('TelegramService device notifications without polling', () => {
             ntfyService as any,
         );
 
-        expect(TelegramBotMock).toHaveBeenCalledWith('token', { polling: false });
+        expect(TelegramBot).toHaveBeenCalledWith('token', { polling: false });
         expect((service as any).shouldRegisterHandlers).toBe(false);
 
         await service.onModuleInit();
@@ -86,7 +86,7 @@ describe('TelegramService device notifications without polling', () => {
         expect(sendMessageMock).toHaveBeenCalledTimes(1);
         expect(sendMessageMock).toHaveBeenCalledWith(
             123,
-            '📶 Device with Antminer (worker Worker-1) back online at 1/1/24, 1:00 AM.',
+            '📶 Device with Antminer (worker Worker-1) online at 1/1/24, 1:00 AM.',
         );
     });
 
@@ -117,6 +117,68 @@ describe('TelegramService device notifications without polling', () => {
         expect(sendMessageMock).toHaveBeenCalledWith(
             123,
             '📴 Gerät Antminer (Worker Worker-1) ist seit 01.01.24, 01:00 offline.',
+        );
+    });
+
+    it('includes "back online" when isReturning is true', async () => {
+        const service = new TelegramService(
+            configService,
+            telegramSubscriptionsService as any,
+            clientService as any,
+            addressSettingsService as any,
+            clientStatisticsService as any,
+            stratumV1Service as any,
+            ntfyService as any,
+        );
+
+        await service.onModuleInit();
+
+        (service as any).chatLanguages.set(123, 'en');
+
+        await service.notifyDeviceStatusChange({
+            address: '1BoatSLRHtKNngkdXEeobR76b53LETtpyT',
+            workerName: 'Worker-1',
+            userAgent: 'Antminer',
+            sessionId: 'session-1',
+            isOnline: true,
+            timestamp: new Date('2024-01-01T00:00:00Z'),
+            isReturning: true,
+        });
+
+        expect(sendMessageMock).toHaveBeenCalledWith(
+            123,
+            '📶 Device with Antminer (worker Worker-1) back online at 1/1/24, 1:00 AM.',
+        );
+    });
+
+    it('includes "wieder" in German when isReturning is true', async () => {
+        const service = new TelegramService(
+            configService,
+            telegramSubscriptionsService as any,
+            clientService as any,
+            addressSettingsService as any,
+            clientStatisticsService as any,
+            stratumV1Service as any,
+            ntfyService as any,
+        );
+
+        await service.onModuleInit();
+
+        (service as any).chatLanguages.set(123, 'de');
+
+        await service.notifyDeviceStatusChange({
+            address: '1BoatSLRHtKNngkdXEeobR76b53LETtpyT',
+            workerName: 'Worker-1',
+            userAgent: 'Antminer',
+            sessionId: 'session-1',
+            isOnline: true,
+            timestamp: new Date('2024-01-01T00:00:00Z'),
+            isReturning: true,
+        });
+
+        expect(sendMessageMock).toHaveBeenCalledWith(
+            123,
+            '📶 Gerät Antminer (Worker Worker-1) ist seit 01.01.24, 01:00 wieder online.',
         );
     });
 });

@@ -812,10 +812,11 @@ I will decrypt it and respond just like with plain text. 🔒`
         sessionId: string;
         isOnline: boolean;
         timestamp: Date;
+        isReturning?: boolean;
     }): Promise<void> {
         if (!this.bot) return;
 
-        const { address, workerName, userAgent, isOnline, timestamp } = params;
+        const { address, workerName, userAgent, isOnline, timestamp, isReturning } = params;
         const subscribers = await this.telegramSubscriptionsService.getSubscriptions(address);
         const interestedSubscribers = subscribers.filter(sub => sub.deviceNotificationsEnabled);
         if (interestedSubscribers.length === 0) {
@@ -848,10 +849,10 @@ I will decrypt it and respond just like with plain text. 🔒`
             const workerEn = trimmedWorker && trimmedWorker.length > 0 ? trimmedWorker : 'unknown';
 
             const messageDe = isOnline
-                ? `📶 Gerät ${userAgentDe} (Worker ${workerDe}) ist seit ${timeDe} wieder online${suffixDe}.`
+                ? `📶 Gerät ${userAgentDe} (Worker ${workerDe}) ist seit ${timeDe} ${isReturning ? 'wieder ' : ''}online${suffixDe}.`
                 : `📴 Gerät ${userAgentDe} (Worker ${workerDe}) ist seit ${timeDe} offline${suffixDe}.`;
             const messageEn = isOnline
-                ? `📶 Device with ${userAgentEn} (worker ${workerEn}) back online at ${timeEn}${suffixEn}.`
+                ? `📶 Device with ${userAgentEn} (worker ${workerEn}) ${isReturning ? 'back ' : ''}online at ${timeEn}${suffixEn}.`
                 : `📴 Device with ${userAgentEn} (worker ${workerEn}) went offline at ${timeEn}${suffixEn}.`;
 
             return this.bot.sendMessage(sub.telegramChatId, lang === 'de' ? messageDe : messageEn);

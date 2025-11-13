@@ -39,6 +39,7 @@ export class NotificationService implements OnModuleInit {
         sessionId: string;
         isOnline: boolean;
         timestamp: Date;
+        isReturning?: boolean;
     }): Promise<void> {
         await this.telegramService.notifyDeviceStatusChange(params);
     }

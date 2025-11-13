@@ -731,6 +731,7 @@ export class StratumV1Client {
                                     sessionId: this.entity.sessionId,
                                     isOnline: true,
                                     timestamp: startTime,
+                                    isReturning: firstSeen !== null,
                                 });
                             } catch (err) {
                                 console.error('Failed to notify device online status', err);
