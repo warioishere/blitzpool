@@ -2,7 +2,7 @@
 
 Welcome to **BlitzPool**, a lightweight and open-source Bitcoin mining pool based on the [public-pool](https://github.com/benjamin-wilson/public-pool) project – extended with powerful new features and real-world integrations.
 
-Current Version: **v1.3.5**
+Current Version: **v1.3.6**
 
 🌐 **Live Pool:** [https://blitzpool.yourdevice.ch/#/](https://blitzpool.yourdevice.ch/#/)
 
@@ -25,6 +25,7 @@ BlitzPool extends the original `public-pool` implementation in multiple ways to 
 ### 🚀 Extended Features by BlitzPool
 
 - Dual-port Stratum service with configurable baseline difficulties via `STRATUM_START_DIFFICULTY` and `STRATUM_HIGH_DIFF_START_DIFFICULTY`, plus an optional high-difficulty listener bound to `STRATUM_HIGH_DIFF_PORT` (default `3339`) that still uses the adaptive difficulty controls once clients start submitting shares.
+- Redis support for distributed caching across multiple instances (see `blitzpool-example.env` for configuration)
 
 ### 🤖 Telegram Bot Commands
 
