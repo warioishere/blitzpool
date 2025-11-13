@@ -279,13 +279,17 @@ export class AppController {
     const CACHE_KEY = `SITE_HASHRATE_GRAPH_${range}`;
     const cachedResult = await this.cacheManager.get(CACHE_KEY);
 
-    if (cachedResult != null) {
+    // Only use cache if it has actual data (not empty array)
+    if (cachedResult != null && Array.isArray(cachedResult) && cachedResult.length > 0) {
       return cachedResult;
     }
 
     const chartData = await this.clientStatisticsService.getChartDataForSite(range);
 
-    await this.cacheManager.set(CACHE_KEY, chartData, this.cacheTTL.chart);
+    // Only cache if we have data
+    if (chartData && chartData.length > 0) {
+      await this.cacheManager.set(CACHE_KEY, chartData, this.cacheTTL.chart);
+    }
 
     return chartData;
 

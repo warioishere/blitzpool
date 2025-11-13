@@ -63,7 +63,8 @@ export class AggregationService implements OnModuleInit {
       console.log(`[Aggregation] Pool stats: every ${this.poolStatsInterval / 1000}s`);
       console.log(`[Aggregation] Chart data: every ${this.chartDataInterval / 1000}s`);
 
-      // Run initial aggregations after a short delay
+      // Run initial aggregations after 6 minutes to allow statistics to be flushed first
+      // (Statistics batch service flushes every 5 minutes by default)
       setTimeout(() => {
         this.aggregatePoolStatistics().catch(err =>
           console.error('[Aggregation] Initial pool stats failed:', err)
@@ -74,7 +75,7 @@ export class AggregationService implements OnModuleInit {
         this.aggregateSiteInfo().catch(err =>
           console.error('[Aggregation] Initial site info failed:', err)
         );
-      }, 5000);
+      }, 360000); // 6 minutes
     } else {
       console.log('[Aggregation] Service disabled');
     }
@@ -138,11 +139,14 @@ export class AggregationService implements OnModuleInit {
 
       for (const range of ranges) {
         const chartData = await this.clientStatisticsService.getChartDataForSite(range);
-        await this.cacheManager.set(
-          `SITE_HASHRATE_GRAPH_${range}`,
-          chartData,
-          this.chartDataInterval,
-        );
+        // Only cache if we have actual data (not empty array)
+        if (chartData && chartData.length > 0) {
+          await this.cacheManager.set(
+            `SITE_HASHRATE_GRAPH_${range}`,
+            chartData,
+            this.chartDataInterval,
+          );
+        }
       }
 
       const elapsed = Date.now() - startTime;
