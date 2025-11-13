@@ -55,9 +55,9 @@ export class AggregationService implements OnModuleInit {
       10,
     );
 
-    // Chart data: every 30 minutes (default)
+    // Chart data: every 5 minutes (default) - aligns with statistics flush interval
     this.chartDataInterval = parseInt(
-      this.configService.get<string>('AGGREGATION_INTERVAL_CHART_DATA') ?? '1800000',
+      this.configService.get<string>('AGGREGATION_INTERVAL_CHART_DATA') ?? '300000',
       10,
     );
   }
@@ -138,9 +138,9 @@ export class AggregationService implements OnModuleInit {
   }
 
   /**
-   * Pre-compute chart data for various ranges (every 30 minutes)
+   * Pre-compute chart data for various ranges (every 5 minutes)
    */
-  @Cron(CronExpression.EVERY_30_MINUTES)
+  @Cron(CronExpression.EVERY_5_MINUTES)
   async aggregateChartData(): Promise<void> {
     if (!this.enabled || !this.isPrimaryInstance) return;
 
