@@ -17,6 +17,7 @@ import { ClientRejectedStatisticsService } from '../ORM/client-rejected-statisti
 import { ClientDifficultyStatisticsService } from '../ORM/client-difficulty-statistics/client-difficulty-statistics.service';
 import { ShareTotalsCacheService } from './share-totals-cache.service';
 import { AddressSettingsCacheService } from './address-settings-cache.service';
+import { StatisticsBatchService } from './statistics-batch.service';
 
 @Injectable()
 export class StratumV1Service implements OnModuleInit {
@@ -38,6 +39,7 @@ export class StratumV1Service implements OnModuleInit {
     private readonly externalSharesService: ExternalSharesService,
     private readonly clientDifficultyStatisticsService: ClientDifficultyStatisticsService,
     private readonly shareTotalsCacheService: ShareTotalsCacheService,
+    private readonly statisticsBatchService: StatisticsBatchService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -114,6 +116,7 @@ export class StratumV1Service implements OnModuleInit {
         this.externalSharesService,
         this.clientDifficultyStatisticsService,
         this.shareTotalsCacheService,
+        this.statisticsBatchService,
         this,
         initialDifficulty,
         allowSuggestedDifficulty,

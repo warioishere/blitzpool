@@ -29,4 +29,8 @@ COPY --from=build /build/dist ./dist
 COPY --from=build /build/node_modules ./node_modules
 COPY --from=build /build/package*.json ./
 
-CMD ["pm2-runtime", "dist/main.js"]
+# Create logs directory for PM2
+RUN mkdir -p logs
+
+# Use shell form to allow environment variable substitution
+CMD pm2-runtime start dist/main.js -i ${PM2_INSTANCES:-4} --name blitzpool --max-memory-restart 1G

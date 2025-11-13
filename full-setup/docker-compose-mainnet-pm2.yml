@@ -18,6 +18,26 @@ services:
       - "./data/mainnet/bitcoin:/app/data"
       - "./bitcoin-mainnet.conf:/app/data/bitcoin.conf:ro"
 
+  redis:
+    container_name: public-pool-redis
+    image: redis:7-alpine
+    restart: unless-stopped
+    networks:
+      - bitcoin
+    healthcheck:
+      test: ["CMD", "sh", "-c", "redis-cli ${REDIS_PASSWORD:+-a \"$$REDIS_PASSWORD\"} ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory ${REDIS_MAX_MEMORY:-256mb}
+      --maxmemory-policy allkeys-lru
+      ${REDIS_PASSWORD:+--requirepass ${REDIS_PASSWORD}}
+    volumes:
+      - "./data/mainnet/public-pool/redis:/data"
+
   public-pool:
     container_name: public-pool
     build:
@@ -25,6 +45,9 @@ services:
       dockerfile: Dockerfile_pm2
     restart: unless-stopped
     stop_grace_period: 30s
+    depends_on:
+      redis:
+        condition: service_healthy
     networks:
       - bitcoin
     ports:
@@ -34,10 +57,18 @@ services:
     volumes:
       - "./data/mainnet/public-pool:/public-pool/DB"
       - "./blitzpool.env:/public-pool/.env:ro"
+      - "./logs:/public-pool/logs"
       - "/home/blitzpool/public-pool-keys:/app/keys"
     environment:
       - NODE_ENV=production
-    command: pm2-runtime dist/main.js -i 6   # run one worker per CPU core
+      # Redis configuration (Phase 2)
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - REDIS_DB=0
+      - REDIS_TTL=600
+      # PM2 configuration
+      - PM2_INSTANCES=4
 
 networks:
   bitcoin:

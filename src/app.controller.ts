@@ -17,6 +17,7 @@ import { eStratumErrorCode } from './models/enums/eStratumErrorCode';
 import { isIP } from 'net';
 import { ConfigService } from '@nestjs/config';
 import { StratumV1JobsService } from './services/stratum-v1-jobs.service';
+import { MetricsService } from './services/metrics.service';
 import { MiningJob } from './models/MiningJob';
 import * as bitcoinjs from 'bitcoinjs-lib';
 
@@ -54,6 +55,19 @@ export class AppController {
   private uptime = new Date();
   private readonly version: string;
 
+  // Configurable cache TTLs (in seconds)
+  private readonly cacheTTL = {
+    siteInfo: parseInt(this.configService.get('API_CACHE_TTL_SITE_INFO') ?? '300'),
+    poolInfo: parseInt(this.configService.get('API_CACHE_TTL_POOL_INFO') ?? '600'),
+    coreInfo: parseInt(this.configService.get('API_CACHE_TTL_CORE_INFO') ?? '60'),
+    peerInfo: parseInt(this.configService.get('API_CACHE_TTL_PEER_INFO') ?? '60'),
+    chart: parseInt(this.configService.get('API_CACHE_TTL_CHART') ?? '1800'),
+    shares: parseInt(this.configService.get('API_CACHE_TTL_SHARES') ?? '600'),
+    workers: parseInt(this.configService.get('API_CACHE_TTL_WORKERS') ?? '1800'),
+    accepted: parseInt(this.configService.get('API_CACHE_TTL_ACCEPTED') ?? '600'),
+    rejected: parseInt(this.configService.get('API_CACHE_TTL_REJECTED') ?? '600'),
+  };
+
   constructor(
     @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
     private readonly clientService: ClientService,
@@ -66,6 +80,7 @@ export class AppController {
     private readonly geoIpService: GeoIpService,
     private readonly configService: ConfigService,
     private readonly stratumV1JobsService: StratumV1JobsService,
+    private readonly metricsService: MetricsService,
   ) {
     const packagePath = join(__dirname, '..', 'package.json');
     this.version = JSON.parse(readFileSync(packagePath, 'utf8')).version;
@@ -94,8 +109,7 @@ export class AppController {
       uptime: this.uptime
     };
 
-    //1 min
-    await this.cacheManager.set(CACHE_KEY, data, 1 * 60);
+    await this.cacheManager.set(CACHE_KEY, data, this.cacheTTL.siteInfo);
 
     return data;
 
@@ -115,7 +129,7 @@ export class AppController {
       return cached;
     }
     const data = await this.bitcoinRpcService.getNetworkInfo();
-    await this.cacheManager.set(CACHE_KEY, data, 60);
+    await this.cacheManager.set(CACHE_KEY, data, this.cacheTTL.coreInfo);
     return data;
   }
 
@@ -203,8 +217,7 @@ export class AppController {
       fee: 0
     }
 
-    //5 min
-    await this.cacheManager.set(CACHE_KEY, data, 5 * 60);
+    await this.cacheManager.set(CACHE_KEY, data, this.cacheTTL.poolInfo);
 
     return data;
   }
@@ -250,7 +263,7 @@ export class AppController {
       })
     );
 
-    await this.cacheManager.set(CACHE_KEY, result, 1 * 60);
+    await this.cacheManager.set(CACHE_KEY, result, this.cacheTTL.peerInfo);
     return result;
   }
 
@@ -266,14 +279,17 @@ export class AppController {
     const CACHE_KEY = `SITE_HASHRATE_GRAPH_${range}`;
     const cachedResult = await this.cacheManager.get(CACHE_KEY);
 
-    if (cachedResult != null) {
+    // Only use cache if it has actual data (not empty array)
+    if (cachedResult != null && Array.isArray(cachedResult) && cachedResult.length > 0) {
       return cachedResult;
     }
 
     const chartData = await this.clientStatisticsService.getChartDataForSite(range);
 
-    //10 min
-    await this.cacheManager.set(CACHE_KEY, chartData, 10 * 60);
+    // Only cache if we have data
+    if (chartData && chartData.length > 0) {
+      await this.cacheManager.set(CACHE_KEY, chartData, this.cacheTTL.chart);
+    }
 
     return chartData;
 
@@ -311,7 +327,7 @@ export class AppController {
       rejectedSinceBlock: totalsSinceBlock.rejected,
     };
 
-    await this.cacheManager.set(CACHE_KEY, data, 10 * 60);
+    await this.cacheManager.set(CACHE_KEY, data, this.cacheTTL.shares);
 
     return data;
 
@@ -350,7 +366,7 @@ export class AppController {
       });
     }
 
-    await this.cacheManager.set(CACHE_KEY, { slotData }, 10 * 60);
+    await this.cacheManager.set(CACHE_KEY, { slotData }, this.cacheTTL.accepted);
 
     return { slotData };
   }
@@ -406,7 +422,7 @@ export class AppController {
       slotData[slotData.length - 1].counts = liveCounts;
     }
 
-    await this.cacheManager.set(CACHE_KEY, { slotData }, 10 * 60);
+    await this.cacheManager.set(CACHE_KEY, { slotData }, this.cacheTTL.workers);
 
     return { slotData };
   }
@@ -451,8 +467,74 @@ export class AppController {
       slotData.push({ time: new Date(t).toISOString(), counts });
     }
 
-    await this.cacheManager.set(CACHE_KEY, { slotData }, 10 * 60);
+    await this.cacheManager.set(CACHE_KEY, { slotData }, this.cacheTTL.rejected);
 
     return { slotData };
+  }
+
+  /**
+   * Prometheus metrics endpoint
+   * Exposes all performance and operational metrics
+   */
+  @Get('metrics')
+  public async metrics() {
+    return await this.metricsService.getMetrics();
+  }
+
+  /**
+   * Health check endpoint with detailed status
+   */
+  @Get('health')
+  public async health() {
+    try {
+      // Check Bitcoin RPC connection
+      const miningInfo = await this.bitcoinRpcService.getMiningInfo();
+      const bitcoinStatus = miningInfo ? 'connected' : 'disconnected';
+
+      // Check database connection (via a simple query)
+      const clients = await this.clientService.getUserAgents();
+      const databaseStatus = clients ? 'connected' : 'disconnected';
+
+      // Check cache connection
+      const testKey = '__health_check__';
+      await this.cacheManager.set(testKey, 'ok', 1);
+      const cacheValue = await this.cacheManager.get(testKey);
+      const cacheStatus = cacheValue === 'ok' ? 'connected' : 'disconnected';
+
+      const uptime = Date.now() - this.uptime.getTime();
+      const healthy = bitcoinStatus === 'connected' && databaseStatus === 'connected';
+
+      return {
+        status: healthy ? 'healthy' : 'degraded',
+        version: this.version,
+        uptime: uptime,
+        uptimeReadable: this.formatDuration(uptime),
+        checks: {
+          bitcoin: bitcoinStatus,
+          database: databaseStatus,
+          cache: cacheStatus,
+        },
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        status: 'unhealthy',
+        version: this.version,
+        error: error.message,
+        timestamp: new Date().toISOString(),
+      };
+    }
+  }
+
+  private formatDuration(ms: number): string {
+    const seconds = Math.floor(ms / 1000);
+    const minutes = Math.floor(seconds / 60);
+    const hours = Math.floor(minutes / 60);
+    const days = Math.floor(hours / 24);
+
+    if (days > 0) return `${days}d ${hours % 24}h`;
+    if (hours > 0) return `${hours}h ${minutes % 60}m`;
+    if (minutes > 0) return `${minutes}m ${seconds % 60}s`;
+    return `${seconds}s`;
   }
 }

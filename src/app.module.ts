@@ -4,6 +4,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { redisStore } from 'cache-manager-redis-yet';
 
 import { AppController } from './app.controller';
 import { AddressController } from './controllers/address/address.controller';
@@ -29,6 +30,10 @@ import { ExternalSharesService } from './services/external-shares.service';
 import { GeoIpService } from './services/geoip.service';
 import { ShareTotalsCacheService } from './services/share-totals-cache.service';
 import { AddressSettingsCacheService } from './services/address-settings-cache.service';
+import { StatisticsBatchService } from './services/statistics-batch.service';
+import { AggregationService } from './services/aggregation.service';
+import { MetricsService } from './services/metrics.service';
+import { WorkerPoolService } from './services/worker-pool.service';
 import { ExternalShareController } from './controllers/external-share/external-share.controller';
 import { ExternalSharesModule } from './ORM/external-shares/external-shares.module';
 import { PoolShareStatisticsModule } from './ORM/pool-share-statistics/pool-share-statistics.module';
@@ -61,7 +66,42 @@ const ORMModules = [
             inject: [ConfigService],
             useFactory: (configService: ConfigService) => buildDatabaseConfig(configService),
         }),
-        CacheModule.register(),
+        CacheModule.registerAsync({
+            isGlobal: true,
+            imports: [ConfigModule],
+            inject: [ConfigService],
+            useFactory: async (configService: ConfigService) => {
+                const redisHost = configService.get<string>('REDIS_HOST');
+                const redisPort = parseInt(configService.get<string>('REDIS_PORT') ?? '6379', 10);
+                const redisPassword = configService.get<string>('REDIS_PASSWORD');
+                const redisDb = parseInt(configService.get<string>('REDIS_DB') ?? '0', 10);
+                const redisTtl = parseInt(configService.get<string>('REDIS_TTL') ?? '600', 10);
+
+                // Use Redis if REDIS_HOST is configured, otherwise fall back to in-memory cache
+                if (redisHost && redisHost.length > 0) {
+                    console.log(`[Cache] Using Redis cache at ${redisHost}:${redisPort} (DB: ${redisDb})`);
+                    try {
+                        return {
+                            store: await redisStore({
+                                socket: {
+                                    host: redisHost,
+                                    port: redisPort,
+                                },
+                                password: redisPassword && redisPassword.length > 0 ? redisPassword : undefined,
+                                database: redisDb,
+                                ttl: redisTtl * 1000, // Convert to milliseconds
+                            }),
+                        };
+                    } catch (error) {
+                        console.error('[Cache] Failed to connect to Redis, falling back to in-memory cache:', error);
+                        return {}; // Fall back to in-memory cache
+                    }
+                } else {
+                    console.log('[Cache] Using in-memory cache (Redis not configured)');
+                    return {}; // In-memory cache
+                }
+            },
+        }),
         ScheduleModule.forRoot(),
         HttpModule,
         ...ORMModules
@@ -88,6 +128,10 @@ const ORMModules = [
         GeoIpService,
         ShareTotalsCacheService,
         AddressSettingsCacheService,
+        StatisticsBatchService,
+        AggregationService,
+        MetricsService,
+        WorkerPoolService,
     ],
 })
 export class AppModule {

@@ -37,6 +37,27 @@ services:
     volumes:
       - "./data/mainnet/public-pool/pg:/var/lib/postgresql/data"
 
+  redis:
+    container_name: public-pool-redis
+    image: redis:7-alpine
+    restart: unless-stopped
+    stop_grace_period: 30s
+    networks:
+      - bitcoin
+    healthcheck:
+      test: ["CMD", "sh", "-c", "redis-cli ${REDIS_PASSWORD:+-a \"$$REDIS_PASSWORD\"} ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory ${REDIS_MAX_MEMORY:-256mb}
+      --maxmemory-policy allkeys-lru
+      ${REDIS_PASSWORD:+--requirepass ${REDIS_PASSWORD}}
+    volumes:
+      - "./data/mainnet/public-pool/redis:/data"
+
   public-pool:
     container_name: public-pool
     build:
@@ -49,12 +70,15 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     ports:
       - "0.0.0.0:3333:3333/tcp"
       - "0.0.0.0:3339:3339/tcp"
       - "0.0.0.0:3334:3334/tcp"
     volumes:
       - "./blitzpool.env:/public-pool/.env:ro"
+      - "./logs:/public-pool/logs"
       - "/home/blitzpool/public-pool-keys:/app/keys"
     environment:
       - NODE_ENV=production
@@ -66,7 +90,14 @@ services:
       - PG_DATABASE=${PG_DATABASE:-public_pool}
       - PG_SSL=${PG_SSL:-false}
       - DB_RUN_MIGRATIONS=true
-    command: pm2-runtime dist/main.js -i ${PM2_INSTANCES:-6}
+      # Redis configuration (Phase 2)
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - REDIS_DB=0
+      - REDIS_TTL=600
+      # PM2 configuration
+      - PM2_INSTANCES=${PM2_INSTANCES:-4}
 
 networks:
   bitcoin:
