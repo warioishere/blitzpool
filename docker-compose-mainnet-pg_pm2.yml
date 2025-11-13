@@ -22,11 +22,16 @@ services:
     image: redis:7-alpine
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", ${REDIS_PASSWORD:+"-a"}, ${REDIS_PASSWORD:-""}, "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
-    command: redis-server --appendonly yes --maxmemory ${REDIS_MAX_MEMORY:-256mb} --maxmemory-policy allkeys-lru
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory ${REDIS_MAX_MEMORY:-256mb}
+      --maxmemory-policy allkeys-lru
+      ${REDIS_PASSWORD:+--requirepass ${REDIS_PASSWORD}}
     volumes:
       - ./full-setup/data/mainnet/public-pool/redis:/data
 
@@ -63,8 +68,8 @@ services:
       # Redis configuration (Phase 2)
       - REDIS_HOST=redis
       - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
       - REDIS_DB=${REDIS_DB:-0}
       - REDIS_TTL=${REDIS_TTL:-600}
       # PM2 configuration
       - PM2_INSTANCES=${PM2_INSTANCES:-4}
-    command: pm2-runtime start ecosystem.config.js
