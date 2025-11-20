@@ -62,6 +62,13 @@ export class TelegramSubscriptionsService {
         );
     }
 
+    public async updateDeviceNotificationsByAddress(address: string, enabled: boolean): Promise<void> {
+        await this.telegramSubscriptions.update(
+            { address },
+            { deviceNotificationsEnabled: enabled }
+        );
+    }
+
     public async updateHourlyNotifications(
         chatId: number,
         enabled: boolean,
@@ -70,6 +77,21 @@ export class TelegramSubscriptionsService {
     ): Promise<void> {
         await this.telegramSubscriptions.update(
             { telegramChatId: chatId },
+            {
+                hourlyStatsEnabled: enabled && showStats,
+                hourlyWorkersEnabled: enabled && showWorkers
+            }
+        );
+    }
+
+    public async updateHourlyNotificationsByAddress(
+        address: string,
+        enabled: boolean,
+        showStats: boolean,
+        showWorkers: boolean
+    ): Promise<void> {
+        await this.telegramSubscriptions.update(
+            { address },
             {
                 hourlyStatsEnabled: enabled && showStats,
                 hourlyWorkersEnabled: enabled && showWorkers
