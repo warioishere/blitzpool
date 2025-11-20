@@ -26,7 +26,7 @@ export class AddClientDifficultyStatistics1717430400000 implements MigrationInte
             `);
         } else if (dbType === 'sqlite') {
             await queryRunner.query(`
-                CREATE TABLE "client_difficulty_statistics_entity" (
+                CREATE TABLE IF NOT EXISTS "client_difficulty_statistics_entity" (
                     "id" INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
                     "deletedAt" datetime,
                     "createdAt" datetime NOT NULL DEFAULT (datetime('now')),
@@ -38,7 +38,7 @@ export class AddClientDifficultyStatistics1717430400000 implements MigrationInte
                 )
             `);
             await queryRunner.query(`
-                CREATE UNIQUE INDEX "IDX_client_difficulty_statistics_unique"
+                CREATE UNIQUE INDEX IF NOT EXISTS "IDX_client_difficulty_statistics_unique"
                 ON "client_difficulty_statistics_entity" ("address", "clientName", "slotTime")
             `);
         }
