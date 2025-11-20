@@ -40,24 +40,42 @@ export class ClientDifficultyStatisticsService {
     const slotTime = ClientDifficultyStatisticsService.normalizeSlot(timestamp);
     const clientName = params.clientName ?? null;
 
-    const updatedAt = new Date();
+    const now = new Date();
 
     try {
-      await this.repository
-        .createQueryBuilder()
-        .insert()
-        .into(ClientDifficultyStatisticsEntity)
-        .values({
-          address: params.address,
-          clientName,
-          slotTime,
-          maxDifficulty: params.difficulty,
-        })
-        .onConflict(
-          '("address", "clientName", "slotTime") DO UPDATE SET "maxDifficulty" = CASE WHEN EXCLUDED."maxDifficulty" > "maxDifficulty" THEN EXCLUDED."maxDifficulty" ELSE "maxDifficulty" END, "updatedAt" = :updatedAt',
-        )
-        .setParameter('updatedAt', updatedAt)
-        .execute();
+      const databaseType = this.repository.manager.connection.options.type;
+
+      if (databaseType === 'sqlite') {
+        // SQLite: Use raw SQL to avoid RETURNING clause issues
+        const tableName = this.repository.metadata.tableName;
+        const nowISO = now.toISOString();
+        await this.repository.query(
+          `INSERT INTO ${tableName} (address, clientName, slotTime, maxDifficulty, createdAt, updatedAt)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT (address, clientName, slotTime)
+           DO UPDATE SET
+             maxDifficulty = CASE WHEN excluded.maxDifficulty > maxDifficulty THEN excluded.maxDifficulty ELSE maxDifficulty END,
+             updatedAt = excluded.updatedAt`,
+          [params.address, clientName, slotTime, params.difficulty, nowISO, nowISO],
+        );
+      } else {
+        // PostgreSQL: Query builder with RETURNING works fine
+        await this.repository
+          .createQueryBuilder()
+          .insert()
+          .into(ClientDifficultyStatisticsEntity)
+          .values({
+            address: params.address,
+            clientName,
+            slotTime,
+            maxDifficulty: params.difficulty,
+          })
+          .onConflict(
+            '("address", "clientName", "slotTime") DO UPDATE SET "maxDifficulty" = CASE WHEN EXCLUDED."maxDifficulty" > "maxDifficulty" THEN EXCLUDED."maxDifficulty" ELSE "maxDifficulty" END, "updatedAt" = :updatedAt',
+          )
+          .setParameter('updatedAt', now)
+          .execute();
+      }
     } catch (error) {
       if (!ClientDifficultyStatisticsService.isUniqueConstraintError(error)) {
         throw error;
