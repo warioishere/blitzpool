@@ -77,14 +77,13 @@ export class TelegramSubscriptionsService {
         );
     }
 
-    public async getHourlyEnabledChats(): Promise<Array<{ telegramChatId: number; address: string; hourlyStatsEnabled: boolean; hourlyWorkersEnabled: boolean }>> {
+    public async getHourlyEnabledChats(): Promise<TelegramSubscriptionsEntity[]> {
         return await this.telegramSubscriptions
             .createQueryBuilder('sub')
             .where('sub.hourlyStatsEnabled = :true OR sub.hourlyWorkersEnabled = :true', { true: true })
             .andWhere('sub.isDefault = :true', { true: true })
             .andWhere('sub.telegramChatId IS NOT NULL')
-            .select(['sub.telegramChatId', 'sub.address', 'sub.hourlyStatsEnabled', 'sub.hourlyWorkersEnabled'])
-            .getRawMany();
+            .getMany();
     }
 
     public async getAllAddresses(): Promise<string[]> {
