@@ -668,7 +668,7 @@ export class NtfyService implements OnModuleInit {
     const { address, workerName, userAgent, isOnline, timestamp, isReturning } = params;
 
     const eventTime = timestamp instanceof Date ? timestamp : new Date(timestamp);
-    const lang = this.getLanguage(address);
+    const lang = await this.getLanguage(address);
     const timeFormatted = this.deviceNotificationFormatters[lang].format(eventTime);
     const trimmedAgent = userAgent?.trim();
     const trimmedWorker = workerName?.trim();
