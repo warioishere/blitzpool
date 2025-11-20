@@ -37,6 +37,50 @@ export class TelegramService implements OnModuleInit {
         return this.bot.sendMessage(chatId, messages[lang]);
     }
 
+    private async sendHourlyReportsForChat(chatId: number, showStats: boolean, showWorkers: boolean): Promise<void> {
+        try {
+            const address = await this.resolveAddressForChat(chatId);
+            if (!address) return;
+
+            if (showStats) {
+                try {
+                    const messages = await buildStatsMessage(
+                        address,
+                        this.clientService,
+                        this.addressSettingsService,
+                        this.clientStatisticsService,
+                        this.numberSuffix
+                    );
+                    if (messages) {
+                        this.bot.sendMessage(chatId, messages[this.getLanguage(chatId)]);
+                    }
+                } catch (err) {
+                    console.error(`Error sending initial stats to ${chatId}:`, err);
+                }
+            }
+
+            if (showWorkers) {
+                try {
+                    const apiPort = process.env.API_PORT ?? '3334';
+                    const url = `http://localhost:${apiPort}/api/client/${encodeURIComponent(address)}`;
+                    const res = await fetch(url);
+
+                    if (res.ok) {
+                        const payload = await res.json();
+                        if (payload && Array.isArray(payload.workers) && payload.workers.length > 0) {
+                            const messages = buildWorkersOverviewMessage(payload, this.numberSuffix);
+                            this.bot.sendMessage(chatId, messages[this.getLanguage(chatId)]);
+                        }
+                    }
+                } catch (err) {
+                    console.error(`Error sending initial workers to ${chatId}:`, err);
+                }
+            }
+        } catch (err) {
+            console.error(`Error sending hourly reports for chat ${chatId}:`, err);
+        }
+    }
+
     private async resolveAddressForChat(chatId: number, addressParam?: string): Promise<string | null> {
         let raw = addressParam?.trim();
 
@@ -705,6 +749,12 @@ I will decrypt it and respond just like with plain text. 🔒`
 
                 try {
                     await this.telegramSubscriptionsService.updateHourlyNotifications(chatId, true, showStats, showWorkers);
+
+                    // Send first report immediately (after 1 minute)
+                    setTimeout(async () => {
+                        await this.sendHourlyReportsForChat(chatId, showStats, showWorkers);
+                    }, 60 * 1000);
+
                     const featureList = [showWorkers ? 'show_workers' : null, showStats ? 'show_stats' : null].filter(Boolean).join(' + ');
                     this.reply(chatId, {
                         de: `Stündliche Benachrichtigungen aktiviert für: ${featureList}`,

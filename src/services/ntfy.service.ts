@@ -101,6 +101,49 @@ export class NtfyService implements OnModuleInit {
     await this.publish(origin, messages[lang]);
   }
 
+  private async sendHourlyReportsForAddress(address: string, showStats: boolean, showWorkers: boolean): Promise<void> {
+    try {
+      if (showStats) {
+        try {
+          const messages = await buildStatsMessage(
+            address,
+            this.clientService,
+            this.addressSettingsService,
+            this.clientStatisticsService,
+            this.numberSuffix
+          );
+          if (messages) {
+            const lang = await this.getLanguage(address);
+            await this.publish(address, messages[lang]);
+          }
+        } catch (err) {
+          console.error(`NTFY: Error sending initial stats for ${address}:`, err);
+        }
+      }
+
+      if (showWorkers) {
+        try {
+          const apiPort = process.env.API_PORT ?? '3334';
+          const url = `http://localhost:${apiPort}/api/client/${encodeURIComponent(address)}`;
+          const res = await fetch(url);
+
+          if (res.ok) {
+            const payload = await res.json();
+            if (payload && Array.isArray(payload.workers) && payload.workers.length > 0) {
+              const messages = buildWorkersOverviewMessage(payload, this.numberSuffix);
+              const lang = await this.getLanguage(address);
+              await this.publish(address, messages[lang]);
+            }
+          }
+        } catch (err) {
+          console.error(`NTFY: Error sending initial workers for ${address}:`, err);
+        }
+      }
+    } catch (err) {
+      console.error(`NTFY: Error sending hourly reports for ${address}:`, err);
+    }
+  }
+
   private async resolveAddressForChat(origin: string, addressParam?: string): Promise<string | null> {
     let raw = addressParam?.trim();
 
@@ -526,6 +569,12 @@ export class NtfyService implements OnModuleInit {
 
         try {
           await this.ntfySubscriptionsService.updateHourlyNotifications(origin, true, showStats, showWorkers);
+
+          // Send first report immediately (after 1 minute)
+          setTimeout(async () => {
+            await this.sendHourlyReportsForAddress(origin, showStats, showWorkers);
+          }, 60 * 1000);
+
           const featureList = [showWorkers ? 'show_workers' : null, showStats ? 'show_stats' : null].filter(Boolean).join(' + ');
           await this.reply(origin, {
             de: `Stündliche Benachrichtigungen aktiviert für: ${featureList}`,
