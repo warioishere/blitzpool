@@ -62,13 +62,6 @@ export class TelegramSubscriptionsService {
         );
     }
 
-    public async updateDeviceNotificationsByAddress(address: string, enabled: boolean): Promise<void> {
-        await this.telegramSubscriptions.update(
-            { address },
-            { deviceNotificationsEnabled: enabled }
-        );
-    }
-
     public async updateHourlyNotifications(
         chatId: number,
         enabled: boolean,
@@ -84,26 +77,12 @@ export class TelegramSubscriptionsService {
         );
     }
 
-    public async updateHourlyNotificationsByAddress(
-        address: string,
-        enabled: boolean,
-        showStats: boolean,
-        showWorkers: boolean
-    ): Promise<void> {
-        await this.telegramSubscriptions.update(
-            { address },
-            {
-                hourlyStatsEnabled: enabled && showStats,
-                hourlyWorkersEnabled: enabled && showWorkers
-            }
-        );
-    }
-
     public async getHourlyEnabledChats(): Promise<Array<{ telegramChatId: number; address: string; hourlyStatsEnabled: boolean; hourlyWorkersEnabled: boolean }>> {
         return await this.telegramSubscriptions
             .createQueryBuilder('sub')
             .where('sub.hourlyStatsEnabled = :true OR sub.hourlyWorkersEnabled = :true', { true: true })
             .andWhere('sub.isDefault = :true', { true: true })
+            .andWhere('sub.telegramChatId IS NOT NULL')
             .select(['sub.telegramChatId', 'sub.address', 'sub.hourlyStatsEnabled', 'sub.hourlyWorkersEnabled'])
             .getRawMany();
     }
@@ -111,6 +90,7 @@ export class TelegramSubscriptionsService {
     public async getAllAddresses(): Promise<string[]> {
         const rows = await this.telegramSubscriptions
             .createQueryBuilder('sub')
+            .where('sub.telegramChatId IS NOT NULL')
             .select('DISTINCT sub.address', 'address')
             .getRawMany();
         return rows.map(r => r.address);

@@ -5,7 +5,7 @@ import axios from 'axios';
 import { EventSource } from 'eventsource';
 import { validate } from 'bitcoin-address-validation';
 import { NumberSuffix } from '../utils/NumberSuffix';
-import { TelegramSubscriptionsService } from '../ORM/telegram-subscriptions/telegram-subscriptions.service';
+import { NtfySubscriptionsService } from '../ORM/ntfy-subscriptions/ntfy-subscriptions.service';
 import { ClientService } from '../ORM/client/client.service';
 import { AddressSettingsService } from '../ORM/address-settings/address-settings.service';
 import { ClientStatisticsService } from '../ORM/client-statistics/client-statistics.service';
@@ -25,12 +25,11 @@ export class NtfyService implements OnModuleInit {
   private eventSource?: EventSource;
   private retryTimer?: NodeJS.Timeout;
   private readonly shouldInitialize: boolean;
-  private chatLanguages: Map<string, 'de' | 'en'> = new Map();
   private readonly deviceNotificationFormatters: Record<'de' | 'en', Intl.DateTimeFormat>;
 
   constructor(
     private readonly configService: ConfigService,
-    private readonly telegramSubscriptionsService: TelegramSubscriptionsService,
+    private readonly ntfySubscriptionsService: NtfySubscriptionsService,
     private readonly clientService: ClientService,
     private readonly addressSettingsService: AddressSettingsService,
     private readonly clientStatisticsService: ClientStatisticsService,
@@ -93,12 +92,12 @@ export class NtfyService implements OnModuleInit {
     return `${address.slice(0, 4)}...${address.slice(-5)}`;
   }
 
-  private getLanguage(origin: string): 'de' | 'en' {
-    return this.chatLanguages.get(origin) ?? 'de';
+  private async getLanguage(origin: string): Promise<'de' | 'en'> {
+    return await this.ntfySubscriptionsService.getLanguage(origin);
   }
 
   private async reply(origin: string, messages: { de: string; en: string }) {
-    const lang = this.getLanguage(origin);
+    const lang = await this.getLanguage(origin);
     await this.publish(origin, messages[lang]);
   }
 
@@ -133,13 +132,8 @@ export class NtfyService implements OnModuleInit {
     if (!this.shouldInitialize || !this.serverUrl) {
       return;
     }
-    const [telegramAddresses, clientAddresses] = await Promise.all([
-      this.telegramSubscriptionsService.getAllAddresses(),
-      this.clientService.getAllAddresses(),
-    ]);
-    const addresses = Array.from(
-      new Set([...telegramAddresses, ...clientAddresses]),
-    );
+    const clientAddresses = await this.clientService.getAllAddresses();
+    const addresses = Array.from(new Set(clientAddresses));
     for (const addr of addresses) {
       const settings = await this.addressSettingsService.getSettings(
         addr,
@@ -248,13 +242,13 @@ export class NtfyService implements OnModuleInit {
 
   private async handleCommand(origin: string, text: string) {
     if (text.startsWith('/deutsch')) {
-      this.chatLanguages.set(origin, 'de');
+      await this.ntfySubscriptionsService.updateLanguage(origin, 'de');
       await this.reply(origin, {
         de: 'Sprache auf Deutsch gestellt.',
         en: 'Language switched to German.'
       });
     } else if (text.startsWith('/english')) {
-      this.chatLanguages.set(origin, 'en');
+      await this.ntfySubscriptionsService.updateLanguage(origin, 'en');
       await this.reply(origin, {
         de: 'Sprache auf Englisch gestellt.',
         en: 'Language switched to English.'
@@ -486,9 +480,7 @@ export class NtfyService implements OnModuleInit {
       const enabled = action === 'on';
 
       try {
-        // For NTFY we need to update via the subscription service
-        // Note: This will update for all telegram subscriptions with this address
-        await this.telegramSubscriptionsService.updateDeviceNotificationsByAddress(origin, enabled);
+        await this.ntfySubscriptionsService.updateDeviceNotifications(origin, enabled);
         await this.reply(origin, {
           de: `Geräte-Benachrichtigungen ${enabled ? 'aktiviert' : 'deaktiviert'}.`,
           en: `Device notifications ${enabled ? 'enabled' : 'disabled'}.`
@@ -533,8 +525,7 @@ export class NtfyService implements OnModuleInit {
         const showStats = features.includes('show_stats');
 
         try {
-          // For NTFY we need to update via subscription service for this address
-          await this.telegramSubscriptionsService.updateHourlyNotificationsByAddress(origin, true, showStats, showWorkers);
+          await this.ntfySubscriptionsService.updateHourlyNotifications(origin, true, showStats, showWorkers);
           const featureList = [showWorkers ? 'show_workers' : null, showStats ? 'show_stats' : null].filter(Boolean).join(' + ');
           await this.reply(origin, {
             de: `Stündliche Benachrichtigungen aktiviert für: ${featureList}`,
@@ -549,7 +540,7 @@ export class NtfyService implements OnModuleInit {
         }
       } else {
         try {
-          await this.telegramSubscriptionsService.updateHourlyNotificationsByAddress(origin, false, false, false);
+          await this.ntfySubscriptionsService.updateHourlyNotifications(origin, false, false, false);
           await this.reply(origin, {
             de: 'Stündliche Benachrichtigungen deaktiviert.',
             en: 'Hourly notifications disabled.'
@@ -654,7 +645,7 @@ export class NtfyService implements OnModuleInit {
     if (submissionDifficulty > persistedBest) {
       this.bestDiffCache.set(address, submissionDifficulty);
       if (this.bestDiffOptIn.get(address) !== false) {
-        const lang = this.getLanguage(address);
+        const lang = await this.getLanguage(address);
         const message = lang === 'de'
           ? `🏆 Neue beste Difficulty!\nWert: ${this.numberSuffix.to(submissionDifficulty)}`
           : `🏆 New best difficulty!\nValue: ${this.numberSuffix.to(submissionDifficulty)}`;
@@ -677,7 +668,7 @@ export class NtfyService implements OnModuleInit {
     const { address, workerName, userAgent, isOnline, timestamp, isReturning } = params;
 
     const eventTime = timestamp instanceof Date ? timestamp : new Date(timestamp);
-    const lang = this.getLanguage(address);
+    const lang = await this.getLanguage(address);
     const timeFormatted = this.deviceNotificationFormatters[lang].format(eventTime);
     const trimmedAgent = userAgent?.trim();
     const trimmedWorker = workerName?.trim();
@@ -703,14 +694,14 @@ export class NtfyService implements OnModuleInit {
     if (!this.shouldInitialize || !this.serverUrl) return;
 
     try {
-      const enabledChats = await this.telegramSubscriptionsService.getHourlyEnabledChats();
+      const enabledSubscriptions = await this.ntfySubscriptionsService.getHourlyEnabledAddresses();
 
-      for (const chat of enabledChats) {
+      for (const sub of enabledSubscriptions) {
         try {
-          const address = chat.address;
+          const address = sub.address;
 
           // Send stats if enabled
-          if (chat.hourlyStatsEnabled) {
+          if (sub.hourlyStatsEnabled) {
             try {
               const messages = await buildStatsMessage(
                 address,
@@ -720,7 +711,7 @@ export class NtfyService implements OnModuleInit {
                 this.numberSuffix
               );
               if (messages) {
-                const lang = this.getLanguage(address);
+                const lang = await this.getLanguage(address);
                 await this.publish(address, messages[lang]);
               }
             } catch (err) {
@@ -729,7 +720,7 @@ export class NtfyService implements OnModuleInit {
           }
 
           // Send workers overview if enabled
-          if (chat.hourlyWorkersEnabled) {
+          if (sub.hourlyWorkersEnabled) {
             try {
               const apiPort = process.env.API_PORT ?? '3334';
               const url = `http://localhost:${apiPort}/api/client/${encodeURIComponent(address)}`;
@@ -739,7 +730,7 @@ export class NtfyService implements OnModuleInit {
                 const payload = await res.json();
                 if (payload && Array.isArray(payload.workers) && payload.workers.length > 0) {
                   const messages = buildWorkersOverviewMessage(payload, this.numberSuffix);
-                  const lang = this.getLanguage(address);
+                  const lang = await this.getLanguage(address);
                   await this.publish(address, messages[lang]);
                 }
               }
@@ -748,7 +739,7 @@ export class NtfyService implements OnModuleInit {
             }
           }
         } catch (err) {
-          console.error(`NTFY: Fehler beim Verarbeiten von Stundlich-Updates für ${chat.address}:`, err);
+          console.error(`NTFY: Fehler beim Verarbeiten von Stundlich-Updates für ${sub.address}:`, err);
         }
       }
     } catch (err) {
