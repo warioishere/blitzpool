@@ -113,23 +113,16 @@ export function buildDatabaseConfig(config: ConfigService): TypeOrmModuleOptions
     // SQLite performance configuration (Phase 3 optimization)
     const sqliteBusyTimeout = Number.parseInt(config.get<string>('SQLITE_BUSY_TIMEOUT', '30000'), 10);
     const sqliteCacheSize = Number.parseInt(config.get<string>('SQLITE_CACHE_SIZE', '-64000'), 10); // -64000 = 64MB
-    const runMigrations = parseOptionalBoolean(config.get('DB_RUN_MIGRATIONS'));
-
-    const sourceMigrations = join(__dirname, '..', 'migrations', '[0-9]*.{js,ts}');
-    const compiledMigrations = join(__dirname, '..', 'src', 'migrations', '[0-9]*.{js,ts}');
 
     const sqliteOptions: TypeOrmModuleOptions = {
         type: 'sqlite',
         database: config.get<string>('SQLITE_DATABASE', SQLITE_DEFAULT_PATH),
-        synchronize: synchronizeOverride ?? false,
+        synchronize: synchronizeOverride ?? true,
         autoLoadEntities: true,
         logging: loggingEnabled,
-        migrations: [sourceMigrations, compiledMigrations],
-        migrationsRun: runMigrations ?? true,
         enableWAL: true, // Write-Ahead Logging for better concurrency
         busyTimeout: sqliteBusyTimeout, // Wait up to 30s for locked database
         extra: {
-            autoSynchronize,
             // SQLite performance pragmas
             synchronous: 'NORMAL', // Balance between safety and speed (WAL mode allows this)
             cache_size: sqliteCacheSize, // Negative = KB, positive = pages (default 64MB)
