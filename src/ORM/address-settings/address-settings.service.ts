@@ -57,11 +57,14 @@ export class AddressSettingsService {
     }
 
     public async addShares(address: string, shares: number) {
+        // Explicitly preserve updatedAt to prevent TypeORM from automatically updating it
+        // We only want updatedAt to change when bestDifficulty changes, not when shares accumulate
         return await this.addressSettingsRepository
             .createQueryBuilder()
             .update(AddressSettingsEntity)
             .set({
                 shares: () => 'shares + :increment',
+                updatedAt: () => '"updatedAt"',  // Preserve current value
             })
             .where('address = :address', { address })
             .setParameters({ increment: shares })
