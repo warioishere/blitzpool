@@ -1,4 +1,6 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Inject, OnModuleInit } from '@nestjs/common';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import { Cache } from 'cache-manager';
 
 import { AddressSettingsService } from '../ORM/address-settings/address-settings.service';
 
@@ -8,12 +10,32 @@ export interface AddressBestDifficultySnapshot {
 }
 
 @Injectable()
-export class AddressSettingsCacheService {
+export class AddressSettingsCacheService implements OnModuleInit {
+  private redisClient: any = null;
+  private useRedis: boolean = false;
+
+  // Fallback in-memory cache
   private readonly cache = new Map<string, AddressBestDifficultySnapshot>();
 
   constructor(
     private readonly addressSettingsService: AddressSettingsService,
+    @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
   ) {}
+
+  async onModuleInit(): Promise<void> {
+    try {
+      const store: any = this.cacheManager.store;
+      if (store && store.client) {
+        this.redisClient = store.client;
+        this.useRedis = true;
+        console.log('[AddressSettingsCacheService] Using Redis for shared cache across PM2 workers');
+      } else {
+        console.log('[AddressSettingsCacheService] Redis not available, using in-memory cache');
+      }
+    } catch (error) {
+      console.warn('[AddressSettingsCacheService] Failed to access Redis client, using in-memory cache:', error);
+    }
+  }
 
   async getBestDifficulty(address: string): Promise<AddressBestDifficultySnapshot> {
     const cached = await this.ensure(address);
@@ -28,38 +50,98 @@ export class AddressSettingsCacheService {
     return candidateDifficulty > cached.bestDifficulty;
   }
 
-  updateBestDifficulty(
+  async updateBestDifficulty(
     address: string,
     bestDifficulty: number,
     bestDifficultyUserAgent: string | null,
-  ): void {
-    this.cache.set(address, {
-      bestDifficulty,
-      bestDifficultyUserAgent,
-    });
+  ): Promise<void> {
+    if (this.useRedis && this.redisClient) {
+      // Redis-backed implementation
+      const key = `address:settings:${address}`;
+      await this.redisClient.hSet(key, {
+        bestDifficulty: bestDifficulty.toString(),
+        bestDifficultyUserAgent: bestDifficultyUserAgent || '',
+      });
+      // Cache for 1 hour
+      await this.redisClient.expire(key, 3600);
+    } else {
+      // Fallback in-memory implementation
+      this.cache.set(address, {
+        bestDifficulty,
+        bestDifficultyUserAgent,
+      });
+    }
   }
 
-  clear(address?: string): void {
-    if (address) {
-      this.cache.delete(address);
-      return;
+  async clear(address?: string): Promise<void> {
+    if (this.useRedis && this.redisClient) {
+      // Redis-backed implementation
+      if (address) {
+        const key = `address:settings:${address}`;
+        await this.redisClient.del(key);
+      } else {
+        const pattern = 'address:settings:*';
+        const keys = await this.redisClient.keys(pattern);
+        if (keys && keys.length > 0) {
+          await this.redisClient.del(keys);
+        }
+      }
+    } else {
+      // Fallback in-memory implementation
+      if (address) {
+        this.cache.delete(address);
+        return;
+      }
+      this.cache.clear();
     }
-    this.cache.clear();
   }
 
   private async ensure(address: string): Promise<AddressBestDifficultySnapshot> {
-    let cached = this.cache.get(address);
-    if (!cached) {
+    if (this.useRedis && this.redisClient) {
+      // Redis-backed implementation
+      const key = `address:settings:${address}`;
+      const data = await this.redisClient.hGetAll(key);
+
+      if (data && data.bestDifficulty !== undefined) {
+        return {
+          bestDifficulty: parseFloat(data.bestDifficulty) || 0,
+          bestDifficultyUserAgent: data.bestDifficultyUserAgent || null,
+        };
+      }
+
+      // Not in cache, load from database
       const settings = await this.addressSettingsService.getSettings(
         address,
         true,
       );
-      cached = {
+      const snapshot = {
         bestDifficulty: settings?.bestDifficulty ?? 0,
         bestDifficultyUserAgent: settings?.bestDifficultyUserAgent ?? null,
       };
-      this.cache.set(address, cached);
+
+      // Store in Redis
+      await this.redisClient.hSet(key, {
+        bestDifficulty: snapshot.bestDifficulty.toString(),
+        bestDifficultyUserAgent: snapshot.bestDifficultyUserAgent || '',
+      });
+      await this.redisClient.expire(key, 3600); // 1 hour
+
+      return snapshot;
+    } else {
+      // Fallback in-memory implementation
+      let cached = this.cache.get(address);
+      if (!cached) {
+        const settings = await this.addressSettingsService.getSettings(
+          address,
+          true,
+        );
+        cached = {
+          bestDifficulty: settings?.bestDifficulty ?? 0,
+          bestDifficultyUserAgent: settings?.bestDifficultyUserAgent ?? null,
+        };
+        this.cache.set(address, cached);
+      }
+      return cached;
     }
-    return cached;
   }
 }

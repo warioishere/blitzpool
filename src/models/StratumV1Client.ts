@@ -884,7 +884,7 @@ export class StratumV1Client {
                 //success
                 if (result == null) {
                     await this.addressSettingsService.resetBestDifficultyAndShares();
-                    this.addressSettingsCacheService.clear();
+                    await this.addressSettingsCacheService.clear();
                 }
             }
             try {
@@ -936,7 +936,7 @@ export class StratumV1Client {
             if (shouldUpdateBestDifficulty) {
                 await this.notificationService.notifySubscribersBestDiff(this.clientAuthorization.address, submissionDifficulty);
                 await this.addressSettingsService.updateBestDifficulty(this.clientAuthorization.address, submissionDifficulty, this.entity.userAgent);
-                this.addressSettingsCacheService.updateBestDifficulty(
+                await this.addressSettingsCacheService.updateBestDifficulty(
                     this.clientAuthorization.address,
                     submissionDifficulty,
                     this.entity.userAgent ?? null,
