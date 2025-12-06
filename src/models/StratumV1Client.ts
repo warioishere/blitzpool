@@ -81,6 +81,13 @@ export class StratumV1Client {
     private difficultyCheckIntervalMs: number;
     private lastDifficultyCheck = 0;
 
+    // Handshake timing monitoring
+    private handshakeStartTime: number;
+    private subscribeReceivedTime: number;
+    private authorizeReceivedTime: number;
+    private initializeStartTime: number;
+    private firstJobSentTime: number;
+
     constructor(
         public readonly socket: Socket,
         private readonly stratumV1JobsService: StratumV1JobsService,
@@ -122,6 +129,9 @@ export class StratumV1Client {
 
         const parsed = parseInt(this.configService.get('DIFFICULTY_CHECK_INTERVAL_MS') ?? '60000');
         this.difficultyCheckIntervalMs = isNaN(parsed) ? 60000 : parsed;
+
+        // Initialize handshake timing
+        this.handshakeStartTime = Date.now();
 
         this.socket.on('data', (data: string) => {
             this.buffer += data;
@@ -331,6 +341,11 @@ export class StratumV1Client {
                         this.sessionId = this.getRandomHexString();
                         this.extraNonce = this.sessionId;
                         console.log(`New client ID: : ${this.sessionId}, ${this.socket.remoteAddress}:${this.socket.remotePort}`);
+
+                        // Handshake monitoring: subscribe received
+                        this.subscribeReceivedTime = Date.now();
+                        const timeSinceStart = this.subscribeReceivedTime - this.handshakeStartTime;
+                        console.log(`[HANDSHAKE] ${this.sessionId} - Subscribe received: ${timeSinceStart}ms since connection start`);
                     }
 
                     this.clientSubscription = subscriptionMessage;
@@ -387,6 +402,16 @@ export class StratumV1Client {
 
                 {
                     this.clientAuthorization = authorizationMessage;
+
+                    // Handshake monitoring: authorize received
+                    this.authorizeReceivedTime = Date.now();
+                    const timeSinceStart = this.authorizeReceivedTime - this.handshakeStartTime;
+                    const timeSinceSubscribe = this.subscribeReceivedTime ? this.authorizeReceivedTime - this.subscribeReceivedTime : null;
+                    const timingMsg = timeSinceSubscribe !== null ?
+                        `${timeSinceStart}ms since connection start, ${timeSinceSubscribe}ms since subscribe` :
+                        `${timeSinceStart}ms since connection start`;
+                    console.log(`[HANDSHAKE] ${this.sessionId} - Authorize received: ${timingMsg}`);
+
                     this.stratumV1Service.registerClient(this.clientAuthorization.address, this);
                     this.authorizeResponse = JSON.stringify(this.clientAuthorization.response()) + '\n';
                     const success = await this.write(this.authorizeResponse);
@@ -576,6 +601,11 @@ export class StratumV1Client {
     }
 
     private async initStratum() {
+        // Handshake monitoring: initialization started
+        this.initializeStartTime = Date.now();
+        const timeSinceStart = this.initializeStartTime - this.handshakeStartTime;
+        console.log(`[HANDSHAKE] ${this.sessionId} - Initialize stratum started: ${timeSinceStart}ms since connection start`);
+
         this.stratumInitialized = true;
 
         const fallbackDifficulty = 0.1;
@@ -629,6 +659,11 @@ export class StratumV1Client {
             }, this.difficultyCheckIntervalMs)
         );
 
+        // Handshake monitoring: initialization completed
+        const initCompleteTime = Date.now();
+        const totalTime = initCompleteTime - this.handshakeStartTime;
+        const initTime = initCompleteTime - this.initializeStartTime;
+        console.log(`[HANDSHAKE] ${this.sessionId} - Initialize stratum completed: ${initTime}ms for init, ${totalTime}ms total handshake time so far`);
     }
 
     private async sendNewMiningJob(jobTemplate: IJobTemplate) {
@@ -691,6 +726,13 @@ export class StratumV1Client {
             return;
         }
 
+        // Handshake monitoring: first job sent
+        if (!this.firstJobSentTime && this.stratumInitialized) {
+            this.firstJobSentTime = Date.now();
+            const totalTime = this.firstJobSentTime - this.handshakeStartTime;
+            const timeToFirstJob = this.firstJobSentTime - this.initializeStartTime;
+            console.log(`[HANDSHAKE] ${this.sessionId} - First job sent: ${timeToFirstJob}ms after init start, ${totalTime}ms total handshake time`);
+        }
 
         //console.log(`Sent new job to ${this.clientAuthorization.worker}.${this.sessionId}. (clearJobs: ${jobTemplate.blockData.clearJobs}, fee?: ${!this.noFee})`)
 
