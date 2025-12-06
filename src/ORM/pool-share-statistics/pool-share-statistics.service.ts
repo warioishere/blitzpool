@@ -32,6 +32,17 @@ export class PoolShareStatisticsService implements OnModuleInit, OnModuleDestroy
         this.redisClient = store.client;
         this.useRedis = true;
         console.log('[PoolShareStatisticsService] Using Redis for shared state across PM2 workers');
+
+        // Clear stale pool:shares:* keys on startup to prevent entity ID mapping errors
+        try {
+          const staleKeys = await this.redisClient.keys('pool:shares:*');
+          if (staleKeys && staleKeys.length > 0) {
+            console.log(`[PoolShareStatisticsService] Cleaning up ${staleKeys.length} stale Redis keys on startup`);
+            await this.redisClient.del(...staleKeys);
+          }
+        } catch (redisError) {
+          console.warn('[PoolShareStatisticsService] Failed to clean stale Redis keys on startup:', redisError);
+        }
       } else {
         console.log('[PoolShareStatisticsService] Redis not available, using in-memory state');
       }

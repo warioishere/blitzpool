@@ -56,6 +56,17 @@ export class PoolRejectedStatisticsService implements OnModuleInit, OnModuleDest
         this.redisClient = store.client;
         this.useRedis = true;
         console.log('[PoolRejectedStatisticsService] Using Redis for shared state across PM2 workers');
+
+        // Clear stale pool:rejected:* keys on startup to prevent entity ID mapping errors
+        try {
+          const staleKeys = await this.redisClient.keys('pool:rejected:*');
+          if (staleKeys && staleKeys.length > 0) {
+            console.log(`[PoolRejectedStatisticsService] Cleaning up ${staleKeys.length} stale Redis keys on startup`);
+            await this.redisClient.del(...staleKeys);
+          }
+        } catch (redisError) {
+          console.warn('[PoolRejectedStatisticsService] Failed to clean stale Redis keys on startup:', redisError);
+        }
       } else {
         console.log('[PoolRejectedStatisticsService] Redis not available, using in-memory state');
       }
