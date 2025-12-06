@@ -575,7 +575,7 @@ export class StratumV1Client {
             } else if (!this.initTimer) {
                 this.initTimer = setTimeout(() => {
                     this.flushInit(false);
-                }, 50);
+                }, 15);
             }
         }
     }
