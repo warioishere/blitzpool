@@ -645,7 +645,8 @@ export class StratumV1Client {
         // Handshake monitoring: job subscription starting
         this.jobSubscriptionTime = Date.now();
         const timeSinceInitStart = this.jobSubscriptionTime - this.initializeStartTime;
-        console.log(`[HANDSHAKE] ${this.sessionId} - Job subscription made: ${timeSinceInitStart}ms after init started`);
+        const cachedJobCount = Object.keys(this.stratumV1JobsService.blocks).length;
+        console.log(`[HANDSHAKE] ${this.sessionId} - Job subscription made: ${timeSinceInitStart}ms after init started (${cachedJobCount} jobs cached)`);
 
         this.stratumSubscription = this.stratumV1JobsService.newMiningJob$.subscribe(async (jobTemplate) => {
             try {
@@ -657,7 +658,10 @@ export class StratumV1Client {
                     const jobEmitTime = Date.now();
                     const waitForEmit = jobEmitTime - this.jobSubscriptionTime;
                     const timeSinceInitStart = jobEmitTime - this.initializeStartTime;
-                    console.log(`[HANDSHAKE] ${this.sessionId} - First job observable emitted: ${waitForEmit}ms to emit, ${timeSinceInitStart}ms after init started`);
+                    const jobAge = jobEmitTime - jobTemplate.blockData.creation;
+                    const isCached = waitForEmit < 5; // If emit happens in <5ms, likely from shareReplay cache
+                    const jobSource = isCached ? 'CACHED' : 'FRESH_BUILD';
+                    console.log(`[HANDSHAKE] ${this.sessionId} - First job observable emitted: ${waitForEmit}ms to emit, ${timeSinceInitStart}ms after init started (job age: ${jobAge}ms, source: ${jobSource})`);
                 }
                 await this.sendNewMiningJob(jobTemplate);
             } catch (e) {

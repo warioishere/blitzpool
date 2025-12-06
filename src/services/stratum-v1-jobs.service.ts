@@ -49,9 +49,10 @@ export class StratumV1JobsService {
     ) {
 
         this.newMiningJob$ = combineLatest([this.bitcoinRpcService.newBlock$, interval(this.block_template_interval).pipe(delay(this.delay), startWith(-1))]).pipe(
-            tap(() => {
+            tap(([miningInfo, interval]) => {
                 // Job observable triggered by combineLatest
-                console.log(`[JOB_TIMING] Observable triggered by combineLatest`);
+                const cachedJobCount = Object.keys(this.blocks).length;
+                console.log(`[JOB_TIMING] Observable triggered by combineLatest (block height: ${miningInfo.blocks}, cached jobs: ${cachedJobCount})`);
             }),
             switchMap(([miningInfo, interval]) => {
                 const rpcStartTime = Date.now();
@@ -151,6 +152,7 @@ export class StratumV1JobsService {
             tap((data) => {
                 this.cleanup(data.blockData.clearJobs);
                 this.blocks[data.blockData.id] = data;
+                console.log(`[JOB_TIMING] Job ${data.blockData.id} built and cached (height: ${data.blockData.height}, clearJobs: ${data.blockData.clearJobs})`);
             }),
             shareReplay({ refCount: true, bufferSize: 1 })
         )
