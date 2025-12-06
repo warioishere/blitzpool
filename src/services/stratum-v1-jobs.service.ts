@@ -49,15 +49,28 @@ export class StratumV1JobsService {
     ) {
 
         this.newMiningJob$ = combineLatest([this.bitcoinRpcService.newBlock$, interval(this.block_template_interval).pipe(delay(this.delay), startWith(-1))]).pipe(
+            tap(() => {
+                // Job observable triggered by combineLatest
+                console.log(`[JOB_TIMING] Observable triggered by combineLatest`);
+            }),
             switchMap(([miningInfo, interval]) => {
-                return from(this.bitcoinRpcService.getBlockTemplate(miningInfo.blocks)).pipe(map((blockTemplate) => {
-                    return {
-                        blockTemplate,
-                        interval
-                    }
-                }))
+                const rpcStartTime = Date.now();
+                console.log(`[JOB_TIMING] Starting getBlockTemplate RPC call`);
+                return from(this.bitcoinRpcService.getBlockTemplate(miningInfo.blocks)).pipe(
+                    tap((blockTemplate) => {
+                        const rpcEndTime = Date.now();
+                        console.log(`[JOB_TIMING] getBlockTemplate RPC completed: ${rpcEndTime - rpcStartTime}ms`);
+                    }),
+                    map((blockTemplate) => {
+                        return {
+                            blockTemplate,
+                            interval
+                        }
+                    })
+                )
             }),
             map(({ blockTemplate, interval }) => {
+                const processingStartTime = Date.now();
 
                 let clearJobs = false;
                 if (this.lastIntervalCount === interval) {
@@ -74,7 +87,7 @@ export class StratumV1JobsService {
                 this.lastIntervalCount = interval;
 
                 const currentTime = Math.floor(new Date().getTime() / 1000);
-                return {
+                const result = {
                     version: blockTemplate.version,
                     bits: parseInt(blockTemplate.bits, 16),
                     prevHash: this.convertToLittleEndian(blockTemplate.previousblockhash),
@@ -85,9 +98,12 @@ export class StratumV1JobsService {
                     clearJobs,
                     height: blockTemplate.height
                 };
+                console.log(`[JOB_TIMING] Template processing step 1 completed: ${Date.now() - processingStartTime}ms`);
+                return result;
             }),
             filter(next => next != null),
             map(({ version, bits, prevHash, transactions, timestamp, coinbasevalue, networkDifficulty, clearJobs, height }) => {
+                const blockBuildStartTime = Date.now();
                 const block = new bitcoinjs.Block();
 
                 //create an empty coinbase tx
@@ -116,6 +132,9 @@ export class StratumV1JobsService {
 
                 const id = this.getNextTemplateId();
                 this.latestJobTemplateId++;
+                const blockBuildTime = Date.now() - blockBuildStartTime;
+                console.log(`[JOB_TIMING] Block building (merkle, transactions, etc): ${blockBuildTime}ms`);
+
                 return {
                     block,
                     merkle_branch,

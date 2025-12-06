@@ -87,6 +87,7 @@ export class StratumV1Client {
     private authorizeReceivedTime: number;
     private initializeStartTime: number;
     private firstJobSentTime: number;
+    private jobSubscriptionTime: number;
 
     constructor(
         public readonly socket: Socket,
@@ -641,10 +642,22 @@ export class StratumV1Client {
 
         }
 
+        // Handshake monitoring: job subscription starting
+        this.jobSubscriptionTime = Date.now();
+        const timeSinceInitStart = this.jobSubscriptionTime - this.initializeStartTime;
+        console.log(`[HANDSHAKE] ${this.sessionId} - Job subscription made: ${timeSinceInitStart}ms after init started`);
+
         this.stratumSubscription = this.stratumV1JobsService.newMiningJob$.subscribe(async (jobTemplate) => {
             try {
                 if(jobTemplate.blockData.clearJobs){
                     this.miningSubmissionHashes.clear();
+                }
+                // Handshake monitoring: first job observable emission
+                if (!this.firstJobSentTime) {
+                    const jobEmitTime = Date.now();
+                    const waitForEmit = jobEmitTime - this.jobSubscriptionTime;
+                    const timeSinceInitStart = jobEmitTime - this.initializeStartTime;
+                    console.log(`[HANDSHAKE] ${this.sessionId} - First job observable emitted: ${waitForEmit}ms to emit, ${timeSinceInitStart}ms after init started`);
                 }
                 await this.sendNewMiningJob(jobTemplate);
             } catch (e) {
