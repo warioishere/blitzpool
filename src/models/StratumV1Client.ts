@@ -667,6 +667,7 @@ export class StratumV1Client {
     }
 
     private async sendNewMiningJob(jobTemplate: IJobTemplate) {
+        const jobStartTime = Date.now();
 
         if (jobTemplate.blockData.clearJobs && this.extraNonceSubscribed) {
             this.extraNonce = this.getRandomHexString();
@@ -709,6 +710,7 @@ export class StratumV1Client {
         }
 
         const network = this.network;
+        const beforeJobCreation = Date.now();
 
         const job = new MiningJob(
             this.configService,
@@ -718,20 +720,30 @@ export class StratumV1Client {
             jobTemplate
         );
 
+        const afterJobCreation = Date.now();
+        const jobCreationTime = afterJobCreation - beforeJobCreation;
+
         this.stratumV1JobsService.addJob(job);
+        const afterAddJob = Date.now();
+        const addJobTime = afterAddJob - afterJobCreation;
 
-
+        const beforeSocketWrite = Date.now();
         const success = await this.write(job.response(jobTemplate));
+        const afterSocketWrite = Date.now();
+        const socketWriteTime = afterSocketWrite - beforeSocketWrite;
+
         if (!success) {
             return;
         }
 
-        // Handshake monitoring: first job sent
+        // Handshake monitoring: first job sent with detailed breakdown
         if (!this.firstJobSentTime && this.stratumInitialized) {
             this.firstJobSentTime = Date.now();
             const totalTime = this.firstJobSentTime - this.handshakeStartTime;
             const timeToFirstJob = this.firstJobSentTime - this.initializeStartTime;
+            const totalJobTime = this.firstJobSentTime - jobStartTime;
             console.log(`[HANDSHAKE] ${this.sessionId} - First job sent: ${timeToFirstJob}ms after init start, ${totalTime}ms total handshake time`);
+            console.log(`[HANDSHAKE] ${this.sessionId} - Job timing breakdown: ${jobCreationTime}ms creation, ${addJobTime}ms addJob, ${socketWriteTime}ms socket write, ${totalJobTime}ms total`);
         }
 
         //console.log(`Sent new job to ${this.clientAuthorization.worker}.${this.sessionId}. (clearJobs: ${jobTemplate.blockData.clearJobs}, fee?: ${!this.noFee})`)
