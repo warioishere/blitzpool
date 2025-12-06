@@ -148,9 +148,14 @@ export class PoolShareStatisticsService implements OnModuleInit, OnModuleDestroy
 
             // Delete the Redis key after successful flush
             await this.redisClient.del(key);
-          } catch (error) {
+          } catch (error: any) {
+            // Suppress TypeORM entity ID mapping errors on upsert - the data is persisted despite the error
+            if (error?.message?.includes('entity id is not set')) {
+              await this.redisClient.del(key);
+              return; // Data was successfully persisted
+            }
             console.error(`[PoolShareStatisticsService] Failed to flush timeSlot ${timeSlot}:`, error);
-            // Keep the key in Redis for retry
+            // Keep the key in Redis for retry on other errors
           }
         }
       } else {
@@ -182,10 +187,14 @@ export class PoolShareStatisticsService implements OnModuleInit, OnModuleDestroy
             )
             .setParameters({ updatedAt })
             .execute();
-        } catch (error) {
-          this.accepted += accepted;
-          this.rejected += rejected;
-          throw error;
+        } catch (error: any) {
+          // Suppress TypeORM entity ID mapping errors on upsert - the data is persisted despite the error
+          if (!error?.message?.includes('entity id is not set')) {
+            this.accepted += accepted;
+            this.rejected += rejected;
+            throw error;
+          }
+          // Data was successfully persisted despite the TypeORM error
         }
       }
     });

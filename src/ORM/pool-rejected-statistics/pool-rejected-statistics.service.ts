@@ -250,9 +250,14 @@ export class PoolRejectedStatisticsService implements OnModuleInit, OnModuleDest
 
           // Delete the Redis key after successful flush
           await this.redisClient.del(key);
-        } catch (error) {
+        } catch (error: any) {
+          // Suppress TypeORM entity ID mapping errors on upsert - the data is persisted despite the error
+          if (error?.message?.includes('entity id is not set')) {
+            await this.redisClient.del(key);
+            return; // Data was successfully persisted
+          }
           console.error(`[PoolRejectedStatisticsService] Failed to flush timeSlot ${timeSlot}:`, error);
-          // Keep the key in Redis for retry
+          // Keep the key in Redis for retry on other errors
         }
       }
     } else {
@@ -274,16 +279,24 @@ export class PoolRejectedStatisticsService implements OnModuleInit, OnModuleDest
         return;
       }
 
-      await this.poolRejectedStatisticsRepository
-        .createQueryBuilder()
-        .insert()
-        .into(PoolRejectedStatisticsEntity)
-        .values(values)
-        .onConflict(
-          '("time", "reason") DO UPDATE SET "count" = "count" + EXCLUDED."count", "updatedAt" = :updatedAt',
-        )
-        .setParameters({ updatedAt: new Date() })
-        .execute();
+      try {
+        await this.poolRejectedStatisticsRepository
+          .createQueryBuilder()
+          .insert()
+          .into(PoolRejectedStatisticsEntity)
+          .values(values)
+          .onConflict(
+            '("time", "reason") DO UPDATE SET "count" = "count" + EXCLUDED."count", "updatedAt" = :updatedAt',
+          )
+          .setParameters({ updatedAt: new Date() })
+          .execute();
+      } catch (error: any) {
+        // Suppress TypeORM entity ID mapping errors on upsert - the data is persisted despite the error
+        if (!error?.message?.includes('entity id is not set')) {
+          throw error;
+        }
+        // Data was successfully persisted despite the TypeORM error
+      }
 
       this.counts.clear();
     }
