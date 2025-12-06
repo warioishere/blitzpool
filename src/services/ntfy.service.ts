@@ -252,7 +252,8 @@ export class NtfyService implements OnModuleInit {
         this.retryTimer = setTimeout(() => this.reconnect(), 10_000);
         return;
       }
-      console.error('NTFY connection error', err);
+      // Connection errors are expected (network interruptions), silently retry
+      // Uncomment for debugging: console.error('NTFY connection error', err);
     };
     this.eventSource = es;
   }
