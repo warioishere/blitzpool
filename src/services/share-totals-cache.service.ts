@@ -203,10 +203,24 @@ export class ShareTotalsCacheService implements OnModuleDestroy, OnModuleInit {
     if (this.useRedis && this.redisClient) {
       // Redis-backed implementation
       const pattern = `shares:worker:${address}:*`;
-      const keys = await this.redisClient.keys(pattern);
+      const allKeys = await this.redisClient.keys(pattern);
 
-      if (!keys || keys.length === 0) {
+      if (!allKeys || allKeys.length === 0) {
         // Fallback to database if not in cache
+        const totals = await this.clientStatisticsService.getTotalSharesForWorkers(
+          address,
+        );
+        return totals.map((entry) => ({
+          workerName: entry.clientName,
+          total: entry.total,
+        }));
+      }
+
+      // Filter out non-data keys (hydration markers and locks)
+      const dataKeys = allKeys.filter(key => !key.endsWith(':hydrated') && !key.endsWith(':lock'));
+
+      if (dataKeys.length === 0) {
+        // Only found hydration/lock keys, fallback to database
         const totals = await this.clientStatisticsService.getTotalSharesForWorkers(
           address,
         );
@@ -218,7 +232,7 @@ export class ShareTotalsCacheService implements OnModuleDestroy, OnModuleInit {
 
       const result: Array<{ workerName: string; total: number }> = [];
       const prefix = `shares:worker:${address}:`;
-      for (const key of keys) {
+      for (const key of dataKeys) {
         // Extract worker name by removing the prefix (more robust than split/pop)
         const workerName = key.startsWith(prefix) ? key.substring(prefix.length) : key.split(':').pop();
         const data = await this.redisClient.hGetAll(key);
@@ -299,9 +313,12 @@ export class ShareTotalsCacheService implements OnModuleDestroy, OnModuleInit {
 
       // Also flush worker totals (update baseline, reset delta)
       const workerPattern = 'shares:worker:*';
-      const workerKeys = await this.redisClient.keys(workerPattern);
+      const allWorkerKeys = await this.redisClient.keys(workerPattern);
 
-      for (const key of workerKeys) {
+      // Filter out non-data keys (hydration markers and locks)
+      const workerDataKeys = allWorkerKeys.filter(key => !key.endsWith(':hydrated') && !key.endsWith(':lock'));
+
+      for (const key of workerDataKeys) {
         const data = await this.redisClient.hGetAll(key);
         const delta = parseFloat(data.delta) || 0;
 
