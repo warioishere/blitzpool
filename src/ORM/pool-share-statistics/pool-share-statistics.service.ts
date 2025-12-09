@@ -114,11 +114,14 @@ export class PoolShareStatisticsService implements OnModuleInit, OnModuleDestroy
       if (this.useRedis && this.redisClient) {
         // Redis-backed implementation with atomic claim-and-fetch
         const pattern = 'pool:shares:*';
-        const keys = await this.redisClient.keys(pattern);
+        const allKeys = await this.redisClient.keys(pattern);
 
-        if (!keys || keys.length === 0) return;
+        if (!allKeys || allKeys.length === 0) return;
 
-        for (const key of keys) {
+        // Filter out processing locks to avoid WRONGTYPE errors
+        const dataKeys = allKeys.filter(key => !key.endsWith(':processing'));
+
+        for (const key of dataKeys) {
           // Atomically claim this key for processing using Lua script
           // This prevents multiple workers from processing the same key
           const claimScript = `
