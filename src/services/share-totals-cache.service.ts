@@ -293,8 +293,9 @@ export class ShareTotalsCacheService implements OnModuleDestroy, OnModuleInit {
 
         pending.push(
           (async () => {
+            let flushedDelta = 0;
             try {
-              const flushedDelta = await this.redisClient.eval(luaScript, {
+              flushedDelta = await this.redisClient.eval(luaScript, {
                 keys: [key],
               });
 
@@ -302,9 +303,11 @@ export class ShareTotalsCacheService implements OnModuleDestroy, OnModuleInit {
                 await this.addressSettingsService.addShares(address, flushedDelta);
               }
             } catch (error) {
-              // Rollback on error
-              await this.redisClient.hIncrByFloat(key, 'baseline', -delta);
-              await this.redisClient.hIncrByFloat(key, 'delta', delta);
+              // Rollback on error using actual flushed amount, not stale delta
+              if (flushedDelta > 0) {
+                await this.redisClient.hIncrByFloat(key, 'baseline', -flushedDelta);
+                await this.redisClient.hIncrByFloat(key, 'delta', flushedDelta);
+              }
               console.error('ShareTotalsCacheService failed to persist shares', error);
             }
           })(),
