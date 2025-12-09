@@ -33,15 +33,16 @@ export class PoolShareStatisticsService implements OnModuleInit, OnModuleDestroy
         this.useRedis = true;
         console.log('[PoolShareStatisticsService] Using Redis for shared state across PM2 workers');
 
-        // Clear stale pool:shares:* keys on startup to prevent entity ID mapping errors
+        // Flush any stale pool:shares:* keys to database on startup, then clean up
         try {
           const staleKeys = await this.redisClient.keys('pool:shares:*');
           if (staleKeys && staleKeys.length > 0) {
-            console.log(`[PoolShareStatisticsService] Cleaning up ${staleKeys.length} stale Redis keys on startup`);
-            await this.redisClient.del(...staleKeys);
+            console.log(`[PoolShareStatisticsService] Found ${staleKeys.length} stale Redis keys on startup, flushing to database first`);
+            await this.flush();
+            console.log(`[PoolShareStatisticsService] Stale keys flushed and cleaned up successfully`);
           }
         } catch (redisError) {
-          console.warn('[PoolShareStatisticsService] Failed to clean stale Redis keys on startup:', redisError);
+          console.warn('[PoolShareStatisticsService] Failed to flush stale Redis keys on startup:', redisError);
         }
       } else {
         console.log('[PoolShareStatisticsService] Redis not available, using in-memory state');
@@ -111,20 +112,59 @@ export class PoolShareStatisticsService implements OnModuleInit, OnModuleDestroy
   private async flush() {
     await this.mutex.runExclusive(async () => {
       if (this.useRedis && this.redisClient) {
-        // Redis-backed implementation
+        // Redis-backed implementation with atomic claim-and-fetch
         const pattern = 'pool:shares:*';
         const keys = await this.redisClient.keys(pattern);
 
         if (!keys || keys.length === 0) return;
 
         for (const key of keys) {
-          const data = await this.redisClient.hGetAll(key);
+          // Atomically claim this key for processing using Lua script
+          // This prevents multiple workers from processing the same key
+          const claimScript = `
+            local key = KEYS[1]
+            local lockKey = key .. ':processing'
+            local acquired = redis.call('SET', lockKey, '1', 'NX', 'EX', 10)
+            if acquired then
+              local data = redis.call('HGETALL', key)
+              redis.call('DEL', key)
+              return data
+            else
+              return nil
+            end
+          `;
+
+          let data: any;
+          try {
+            const result = await this.redisClient.eval(claimScript, {
+              keys: [key],
+            });
+
+            if (!result || result.length === 0) {
+              // Another worker is processing this key or it's already been processed
+              continue;
+            }
+
+            // Convert array result to object (Redis HGETALL returns [key1, val1, key2, val2, ...])
+            data = {};
+            for (let i = 0; i < result.length; i += 2) {
+              data[result[i]] = result[i + 1];
+            }
+          } catch (claimError) {
+            console.warn(`[PoolShareStatisticsService] Failed to claim key ${key}:`, claimError);
+            continue;
+          }
+
           if (!data || (!data.accepted && !data.rejected)) continue;
 
           const accepted = parseFloat(data.accepted) || 0;
           const rejected = parseFloat(data.rejected) || 0;
 
-          if (accepted === 0 && rejected === 0) continue;
+          if (accepted === 0 && rejected === 0) {
+            // Clean up lock
+            await this.redisClient.del(`${key}:processing`);
+            continue;
+          }
 
           // Extract timeSlot from key (pool:shares:1234567890)
           const timeSlot = parseInt(key.split(':')[2]);
@@ -146,16 +186,22 @@ export class PoolShareStatisticsService implements OnModuleInit, OnModuleDestroy
               .setParameters({ updatedAt })
               .execute();
 
-            // Delete the Redis key after successful flush
-            await this.redisClient.del(key);
+            // Delete the processing lock after successful flush
+            await this.redisClient.del(`${key}:processing`);
           } catch (error: any) {
             // Suppress TypeORM entity ID mapping errors on upsert - the data is persisted despite the error
             if (error?.message?.includes('entity id is not set')) {
-              await this.redisClient.del(key);
+              await this.redisClient.del(`${key}:processing`);
               return; // Data was successfully persisted
             }
             console.error(`[PoolShareStatisticsService] Failed to flush timeSlot ${timeSlot}:`, error);
-            // Keep the key in Redis for retry on other errors
+            // On error, restore the data to Redis and remove lock
+            try {
+              await this.redisClient.hSet(key, data);
+              await this.redisClient.del(`${key}:processing`);
+            } catch (restoreError) {
+              console.error(`[PoolShareStatisticsService] Failed to restore data to Redis:`, restoreError);
+            }
           }
         }
       } else {

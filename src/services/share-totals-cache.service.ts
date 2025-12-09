@@ -217,8 +217,10 @@ export class ShareTotalsCacheService implements OnModuleDestroy, OnModuleInit {
       }
 
       const result: Array<{ workerName: string; total: number }> = [];
+      const prefix = `shares:worker:${address}:`;
       for (const key of keys) {
-        const workerName = key.split(':').pop();
+        // Extract worker name by removing the prefix (more robust than split/pop)
+        const workerName = key.startsWith(prefix) ? key.substring(prefix.length) : key.split(':').pop();
         const data = await this.redisClient.hGetAll(key);
         const baseline = parseFloat(data.baseline) || 0;
         const delta = parseFloat(data.delta) || 0;
