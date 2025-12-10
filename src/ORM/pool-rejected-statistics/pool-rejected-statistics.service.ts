@@ -133,12 +133,10 @@ export class PoolRejectedStatisticsService implements OnModuleInit, OnModuleDest
 
   @Interval(60 * 1000)
   private async flushInterval() {
-    if (this.currentTimeSlot != null) {
-      await this.mutex.runExclusive(async () => {
-        await this.saveCurrent();
-        this.lastSave = Date.now();
-      });
-    }
+    await this.mutex.runExclusive(async () => {
+      await this.saveCurrent();
+      this.lastSave = Date.now();
+    });
   }
 
   public async addRejectedShare(reason: string, diff: number): Promise<boolean> {
