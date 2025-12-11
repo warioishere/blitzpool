@@ -102,7 +102,8 @@ export class StratumV1ClientStatistics {
         // 10 min
         var coeff = 1000 * 60 * 10;
         var date = new Date();
-        var timeSlot = new Date(Math.floor(date.getTime() / coeff) * coeff).getTime();
+        // Time slot labeled by END time (e.g., slot "20:50" contains data from 20:40-20:50)
+        var timeSlot = new Date(Math.floor(date.getTime() / coeff) * coeff + coeff).getTime();
 
         while (
             this.submissionCache.length &&
@@ -189,7 +190,8 @@ export class StratumV1ClientStatistics {
 
         var coeff = 1000 * 60 * 10;
         var date = new Date();
-        var timeSlot = new Date(Math.floor(date.getTime() / coeff) * coeff).getTime();
+        // Time slot labeled by END time (e.g., slot "20:50" contains data from 20:40-20:50)
+        var timeSlot = new Date(Math.floor(date.getTime() / coeff) * coeff + coeff).getTime();
 
         if (this.currentTimeSlot == null) {
             this.previousTimeSlotTime = new Date();

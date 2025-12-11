@@ -199,25 +199,28 @@ export class ClientStatisticsService {
         diffDays = 1;
     }
 
-    const since = new Date(Date.now() - diffDays * 24 * 60 * 60 * 1000);
+    const now = Date.now();
+    const coeff = 1000 * 60 * 10; // 10-minute slots
+    const currentSlot = Math.floor(now / coeff) * coeff + coeff; // Current incomplete slot (end-time labeled)
+
+    const since = new Date(now - diffDays * 24 * 60 * 60 * 1000);
     const limit = diffDays * 144;
     const result = await this.clientStatisticsRepository
       .createQueryBuilder('entry')
       .select('entry.time', 'label')
       .addSelect(`ROUND((SUM(entry.shares) * ${DIFFICULTY_1}) / 600)`, 'data')
-      .where('entry.time > :since', { since: since.getTime() })
+      .where('entry.time >= :since', { since: since.getTime() })
+      .andWhere('entry.time < :currentSlot', { currentSlot }) // Exclude current incomplete slot
       .andWhere('entry.sessionId != :agg', { agg: 'AGG' })
       .groupBy('entry.time')
       .orderBy('entry.time', 'ASC')
       .limit(limit)
       .getRawMany();
 
-    return result
-      .map((res) => ({
-        label: new Date(Number(res.label)).toISOString(),
-        data: res.data == null ? 0 : Number(res.data),
-      }))
-      .slice(0, result.length - 1);
+    return result.map((res) => ({
+      label: new Date(Number(res.label)).toISOString(),
+      data: res.data == null ? 0 : Number(res.data),
+    }));
   }
 
   // public async getHashRateForAddress(address: string) {
@@ -258,25 +261,28 @@ export class ClientStatisticsService {
         diffDays = 1;
     }
 
-    const since = new Date(Date.now() - diffDays * 24 * 60 * 60 * 1000);
+    const now = Date.now();
+    const coeff = 1000 * 60 * 10; // 10-minute slots
+    const currentSlot = Math.floor(now / coeff) * coeff + coeff; // Current incomplete slot (end-time labeled)
+
+    const since = new Date(now - diffDays * 24 * 60 * 60 * 1000);
     const limit = diffDays * 144;
     const result = await this.clientStatisticsRepository
       .createQueryBuilder('entry')
       .select('entry.time', 'label')
       .addSelect(`(SUM(entry.shares) * ${DIFFICULTY_1}) / 600`, 'data')
       .where('entry.address = :address', { address })
-      .andWhere('entry.time > :since', { since: since.getTime() })
+      .andWhere('entry.time >= :since', { since: since.getTime() })
+      .andWhere('entry.time < :currentSlot', { currentSlot }) // Exclude current incomplete slot
       .groupBy('entry.time')
       .orderBy('entry.time', 'ASC')
       .limit(limit)
       .getRawMany();
 
-    return result
-      .map((res) => ({
-        label: new Date(Number(res.label)).toISOString(),
-        data: res.data == null ? 0 : Number(res.data),
-      }))
-      .slice(0, result.length - 1);
+    return result.map((res) => ({
+      label: new Date(Number(res.label)).toISOString(),
+      data: res.data == null ? 0 : Number(res.data),
+    }));
   }
 
   public async getHashRateForGroup(address: string, clientName: string) {
@@ -317,7 +323,11 @@ export class ClientStatisticsService {
         diffDays = 1;
     }
 
-    const since = new Date(Date.now() - diffDays * 24 * 60 * 60 * 1000);
+    const now = Date.now();
+    const coeff = 1000 * 60 * 10; // 10-minute slots
+    const currentSlot = Math.floor(now / coeff) * coeff + coeff; // Current incomplete slot (end-time labeled)
+
+    const since = new Date(now - diffDays * 24 * 60 * 60 * 1000);
     const limit = diffDays * 144;
     const result = await this.clientStatisticsRepository
       .createQueryBuilder('entry')
@@ -332,13 +342,14 @@ export class ClientStatisticsService {
       .addSelect('SUM(entry.rejectedLowDifficultyShareDiff1)', 'rejectedLowDifficultyShareDiff1')
       .where('entry.address = :address', { address })
       .andWhere('entry.clientName = :clientName', { clientName })
-      .andWhere('entry.time > :since', { since: since.getTime() })
+      .andWhere('entry.time >= :since', { since: since.getTime() })
+      .andWhere('entry.time < :currentSlot', { currentSlot }) // Exclude current incomplete slot
       .groupBy('entry.time')
       .orderBy('entry.time', 'ASC')
       .limit(limit)
       .getRawMany();
 
-    const parsed = result.map((res) => ({
+    return result.map((res) => ({
       label: new Date(Number(res.label)).toISOString(),
       data: res.data == null ? 0 : Number(res.data),
       accepted: Number(res.accepted ?? 0),
@@ -363,8 +374,6 @@ export class ClientStatisticsService {
           ? 0
           : Number(res.rejectedLowDifficultyShareDiff1),
     }));
-
-    return parsed.slice(0, parsed.length - 1);
   }
 
   public async getHashRateForSession(
@@ -397,7 +406,10 @@ export class ClientStatisticsService {
     clientName: string,
     sessionId: string,
   ) {
-    const yesterday = new Date(new Date().getTime() - 24 * 60 * 60 * 1000);
+    const now = Date.now();
+    const coeff = 1000 * 60 * 10; // 10-minute slots
+    const currentSlot = Math.floor(now / coeff) * coeff + coeff; // Current incomplete slot (end-time labeled)
+    const yesterday = new Date(now - 24 * 60 * 60 * 1000);
 
     const result = await this.clientStatisticsRepository
       .createQueryBuilder('entry')
@@ -406,18 +418,17 @@ export class ClientStatisticsService {
       .where('entry.address = :address', { address })
       .andWhere('entry.clientName = :clientName', { clientName })
       .andWhere('entry.sessionId = :sessionId', { sessionId })
-      .andWhere('entry.time > :since', { since: yesterday.getTime() })
+      .andWhere('entry.time >= :since', { since: yesterday.getTime() })
+      .andWhere('entry.time < :currentSlot', { currentSlot }) // Exclude current incomplete slot
       .groupBy('entry.time')
       .orderBy('entry.time', 'ASC')
       .limit(144)
       .getRawMany();
 
-    return result
-      .map((res) => ({
-        label: new Date(Number(res.label)).toISOString(),
-        data: res.data == null ? 0 : Number(res.data),
-      }))
-      .slice(0, result.length - 1);
+    return result.map((res) => ({
+      label: new Date(Number(res.label)).toISOString(),
+      data: res.data == null ? 0 : Number(res.data),
+    }));
   }
 
   public async getActiveCountsSince(time: number): Promise<

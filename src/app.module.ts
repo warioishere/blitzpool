@@ -35,6 +35,7 @@ import { StatisticsBatchService } from './services/statistics-batch.service';
 import { AggregationService } from './services/aggregation.service';
 import { MetricsService } from './services/metrics.service';
 import { WorkerPoolService } from './services/worker-pool.service';
+import { TimeslotMigrationService } from './services/timeslot-migration.service';
 import { ExternalShareController } from './controllers/external-share/external-share.controller';
 import { ExternalSharesModule } from './ORM/external-shares/external-shares.module';
 import { PoolShareStatisticsModule } from './ORM/pool-share-statistics/pool-share-statistics.module';
@@ -115,6 +116,7 @@ const ORMModules = [
         ExternalShareController
     ],
     providers: [
+        TimeslotMigrationService, // Must run first on startup
         DiscordService,
         AppService,
         StratumV1Service,

@@ -61,7 +61,7 @@ export class AppController {
     poolInfo: parseInt(this.configService.get('API_CACHE_TTL_POOL_INFO') ?? '600'),
     coreInfo: parseInt(this.configService.get('API_CACHE_TTL_CORE_INFO') ?? '60'),
     peerInfo: parseInt(this.configService.get('API_CACHE_TTL_PEER_INFO') ?? '60'),
-    chart: parseInt(this.configService.get('API_CACHE_TTL_CHART') ?? '1800'),
+    chart: parseInt(this.configService.get('API_CACHE_TTL_CHART') ?? '60'), // Reduced from 1800s to 60s for more responsive charts
     shares: parseInt(this.configService.get('API_CACHE_TTL_SHARES') ?? '600'),
     workers: parseInt(this.configService.get('API_CACHE_TTL_WORKERS') ?? '1800'),
     accepted: parseInt(this.configService.get('API_CACHE_TTL_ACCEPTED') ?? '600'),
