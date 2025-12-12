@@ -8,6 +8,7 @@ import { ClientDifficultyStatisticsService } from '../../ORM/client-difficulty-s
 import { eStratumErrorCode } from '../../models/enums/eStratumErrorCode';
 import { StratumV1Service } from '../../services/stratum-v1.service';
 import { ShareTotalsCacheService } from '../../services/share-totals-cache.service';
+import { generateFormattedTimeSlots } from '../../utils/timeslot.utils';
 
 
 @Controller('client')
@@ -105,14 +106,9 @@ export class ClientController {
             slotMap.set(entry.time, { workers: entry.workers, sessions: entry.sessions });
         }
 
-        const coeff = 1000 * 60 * 10;
-        const currentSlot = Math.floor(now / coeff) * coeff + coeff; // Current incomplete slot (end-time labeled)
-        const startSlot = Math.floor(sinceTime / coeff) * coeff + coeff; // First complete slot
-        const slotData: { time: string; counts: { workers: number; sessions: number } }[] = [];
-        for (let t = startSlot; t < currentSlot; t += coeff) { // Exclude current incomplete slot
-            const counts = slotMap.get(t) || { workers: 0, sessions: 0 };
-            slotData.push({ time: new Date(t).toISOString(), counts });
-        }
+        const slotData = generateFormattedTimeSlots(sinceTime, now, (t) => ({
+            counts: slotMap.get(t) || { workers: 0, sessions: 0 },
+        }));
 
         return { slotData };
     }
@@ -133,13 +129,9 @@ export class ClientController {
             slotMap.set(entry.time, entry.shares);
         }
 
-        const coeff = 1000 * 60 * 10;
-        const currentSlot = Math.floor(now / coeff) * coeff + coeff; // Current incomplete slot (end-time labeled)
-        const startSlot = Math.floor(sinceTime / coeff) * coeff + coeff; // First complete slot
-        const slotData: { time: string; counts: { accepted: number } }[] = [];
-        for (let t = startSlot; t < currentSlot; t += coeff) { // Exclude current incomplete slot
-            slotData.push({ time: new Date(t).toISOString(), counts: { accepted: slotMap.get(t) || 0 } });
-        }
+        const slotData = generateFormattedTimeSlots(sinceTime, now, (t) => ({
+            counts: { accepted: slotMap.get(t) || 0 }
+        }));
 
         return { slotData };
     }
@@ -164,19 +156,15 @@ export class ClientController {
             r[entry.reason] = { count: entry.count, diffMinusOne: entry.shares };
         }
 
-        const coeff = 1000 * 60 * 10;
-        const currentSlot = Math.floor(now / coeff) * coeff + coeff; // Current incomplete slot (end-time labeled)
-        const startSlot = Math.floor(sinceTime / coeff) * coeff + coeff; // First complete slot
         const allReasons = Object.keys(eStratumErrorCode).filter(k => isNaN(Number(k)));
-        const slotData: { time: string; counts: Record<string, { count: number; diffMinusOne: number }> }[] = [];
-        for (let t = startSlot; t < currentSlot; t += coeff) { // Exclude current incomplete slot
+        const slotData = generateFormattedTimeSlots(sinceTime, now, (t) => {
             const counts: Record<string, { count: number; diffMinusOne: number }> = {};
             for (const reason of allReasons) {
                 const current = slotMap.get(t)?.[reason] || { count: 0, diffMinusOne: 0 };
                 counts[reason] = current;
             }
-            slotData.push({ time: new Date(t).toISOString(), counts });
-        }
+            return { counts };
+        });
 
         return { slotData };
     }
