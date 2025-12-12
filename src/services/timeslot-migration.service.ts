@@ -1,5 +1,7 @@
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import { Injectable, OnModuleInit, Inject } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import { Cache } from 'cache-manager';
 import { DataSource } from 'typeorm';
 
 /**
@@ -17,6 +19,7 @@ import { DataSource } from 'typeorm';
  *   - pool_share_statistics_entity
  *   - pool_rejected_statistics_entity
  *   - client_rejected_statistics_entity
+ * - Clears stale Redis keys (pool:rejected:*, pool:shares:*) to prevent conflicts
  * - Runs once on startup, tracks completion via migration flag file
  * - Safe to run multiple times (idempotent)
  */
@@ -28,6 +31,7 @@ export class TimeslotMigrationService implements OnModuleInit {
   constructor(
     private readonly dataSource: DataSource,
     private readonly configService: ConfigService,
+    @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -122,12 +126,60 @@ export class TimeslotMigrationService implements OnModuleInit {
       console.log(`[TimeslotMigration] ✓ Migration completed successfully in ${duration}s`);
       console.log('[TimeslotMigration] Time slots now use end-time labeling (e.g., "20:50" contains data from 20:40-20:50)');
 
+      // Clear Redis statistics keys to prevent stale old-format keys from being flushed
+      await this.clearRedisStatisticsKeys();
+
     } catch (error) {
       // Rollback on error
       await queryRunner.rollbackTransaction();
       throw error;
     } finally {
       await queryRunner.release();
+    }
+  }
+
+  /**
+   * Clear Redis keys used for pool statistics
+   *
+   * After migration, any existing Redis keys use the old time slot format.
+   * We must clear them to prevent old-format keys from being flushed to the
+   * freshly migrated database, which would create inconsistent data.
+   */
+  private async clearRedisStatisticsKeys(): Promise<void> {
+    try {
+      const store: any = this.cacheManager.store;
+      if (!store || !store.client) {
+        console.log('[TimeslotMigration] Redis not available, skipping key cleanup');
+        return;
+      }
+
+      const redisClient = store.client;
+      const patterns = ['pool:rejected:*', 'pool:shares:*'];
+      let totalKeysDeleted = 0;
+
+      for (const pattern of patterns) {
+        const keys = await redisClient.keys(pattern);
+        if (keys && keys.length > 0) {
+          console.log(`[TimeslotMigration] Found ${keys.length} stale Redis keys matching "${pattern}"`);
+          for (const key of keys) {
+            await redisClient.del(key);
+            // Also delete any processing locks
+            await redisClient.del(`${key}:processing`);
+          }
+          totalKeysDeleted += keys.length;
+        }
+      }
+
+      if (totalKeysDeleted > 0) {
+        console.log(`[TimeslotMigration] ✓ Cleared ${totalKeysDeleted} stale Redis keys`);
+        console.log('[TimeslotMigration] This prevents old time slot format from contaminating migrated data');
+      } else {
+        console.log('[TimeslotMigration] No stale Redis keys found, cleanup not needed');
+      }
+    } catch (error) {
+      // Don't fail the migration if Redis cleanup fails
+      console.warn('[TimeslotMigration] Failed to clear Redis keys (non-critical):', error);
+      console.warn('[TimeslotMigration] You may want to manually clear pool:rejected:* and pool:shares:* keys');
     }
   }
 
