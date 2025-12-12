@@ -143,7 +143,8 @@ export class PoolRejectedStatisticsService implements OnModuleInit, OnModuleDest
     return await this.mutex.runExclusive(async () => {
       const coeff = 1000 * 60 * 10;
       const now = Date.now();
-      const timeSlot = Math.floor(now / coeff) * coeff;
+      // Time slot labeled by END time (e.g., slot "20:50" contains data from 20:40-20:50)
+      const timeSlot = Math.floor(now / coeff) * coeff + coeff;
 
       // Anomaly detection (per-worker, in-memory)
       if (this.anomalousDiffDetectionEnabled) {

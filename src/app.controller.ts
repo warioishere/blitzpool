@@ -356,10 +356,10 @@ export class AppController {
     }
 
     const coeff = 1000 * 60 * 10;
-    const startSlot = Math.floor(sinceTime / coeff) * coeff;
-    const endSlot = Math.floor(now / coeff) * coeff;
+    const currentSlot = Math.floor(now / coeff) * coeff + coeff; // Current incomplete slot (end-time labeled)
+    const startSlot = Math.floor(sinceTime / coeff) * coeff + coeff; // First complete slot
     const slotData: { time: string; counts: { accepted: number } }[] = [];
-    for (let t = startSlot; t <= endSlot; t += coeff) {
+    for (let t = startSlot; t < currentSlot; t += coeff) { // Exclude current incomplete slot
       slotData.push({
         time: new Date(t).toISOString(),
         counts: { accepted: slotMap.get(t) || 0 },
@@ -399,13 +399,13 @@ export class AppController {
     }
 
     const coeff = 1000 * 60 * 10;
-    const startSlot = Math.floor(sinceTime / coeff) * coeff;
-    const endSlot = Math.floor(now / coeff) * coeff;
+    const currentSlot = Math.floor(now / coeff) * coeff + coeff; // Current incomplete slot (end-time labeled)
+    const startSlot = Math.floor(sinceTime / coeff) * coeff + coeff; // First complete slot
     const slotData: {
       time: string;
       counts: { addresses: number; workers: number };
     }[] = [];
-    for (let t = startSlot; t <= endSlot; t += coeff) {
+    for (let t = startSlot; t < currentSlot; t += coeff) { // Exclude current incomplete slot
       const counts = slotMap.get(t) || {
         addresses: 0,
         workers: 0,
@@ -414,12 +414,6 @@ export class AppController {
         time: new Date(t).toISOString(),
         counts,
       });
-    }
-
-    const currentSlot = Math.floor(now / coeff) * coeff;
-    if (endSlot === currentSlot && slotData.length > 0) {
-      const liveCounts = await this.clientService.getActiveWorkerCounts();
-      slotData[slotData.length - 1].counts = liveCounts;
     }
 
     await this.cacheManager.set(CACHE_KEY, { slotData }, this.cacheTTL.workers);
@@ -455,11 +449,11 @@ export class AppController {
     }
 
     const coeff = 1000 * 60 * 10;
-    const startSlot = Math.floor(sinceTime / coeff) * coeff;
-    const endSlot = Math.floor(now / coeff) * coeff;
+    const currentSlot = Math.floor(now / coeff) * coeff + coeff; // Current incomplete slot (end-time labeled)
+    const startSlot = Math.floor(sinceTime / coeff) * coeff + coeff; // First complete slot
     const allReasons = Object.keys(eStratumErrorCode).filter(k => isNaN(Number(k)));
     const slotData: { time: string; counts: Record<string, number> }[] = [];
-    for (let t = startSlot; t <= endSlot; t += coeff) {
+    for (let t = startSlot; t < currentSlot; t += coeff) { // Exclude current incomplete slot
       const counts: Record<string, number> = {};
       for (const reason of allReasons) {
         counts[reason] = slotMap.get(t)?.[reason] || 0;
