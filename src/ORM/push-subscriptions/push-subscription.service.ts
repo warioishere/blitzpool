@@ -77,4 +77,42 @@ export class PushSubscriptionService {
     public async updateLastNotification(id: number, timestamp: number): Promise<void> {
         await this.pushSubscriptionRepository.update({ id }, { lastNotificationAt: timestamp });
     }
+
+    /**
+     * Update notification preferences for a subscription
+     */
+    public async updateNotificationPreferences(
+        address: string,
+        endpoint: string,
+        deviceNotifications?: boolean,
+        blockNotifications?: boolean
+    ): Promise<void> {
+        const updates: any = {};
+        if (deviceNotifications !== undefined) {
+            updates.deviceNotificationsEnabled = deviceNotifications;
+        }
+        if (blockNotifications !== undefined) {
+            updates.blockNotificationsEnabled = blockNotifications;
+        }
+
+        await this.pushSubscriptionRepository.update({ address, endpoint }, updates);
+    }
+
+    /**
+     * Get subscriptions with device notifications enabled
+     */
+    public async getByAddressWithDeviceNotifications(address: string): Promise<PushSubscriptionEntity[]> {
+        return await this.pushSubscriptionRepository.find({
+            where: { address, deviceNotificationsEnabled: true }
+        });
+    }
+
+    /**
+     * Get subscriptions with block notifications enabled
+     */
+    public async getByAddressWithBlockNotifications(address: string): Promise<PushSubscriptionEntity[]> {
+        return await this.pushSubscriptionRepository.find({
+            where: { address, blockNotificationsEnabled: true }
+        });
+    }
 }

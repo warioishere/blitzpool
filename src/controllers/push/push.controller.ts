@@ -91,7 +91,9 @@ export class PushController {
                     platform: s.platform,
                     endpoint: s.endpoint,
                     createdAt: s.createdAt,
-                    lastNotificationAt: s.lastNotificationAt
+                    lastNotificationAt: s.lastNotificationAt,
+                    deviceNotificationsEnabled: s.deviceNotificationsEnabled,
+                    blockNotificationsEnabled: s.blockNotificationsEnabled
                 })),
                 tracker: tracker ? {
                     bestDifficulty: tracker.bestDifficulty,
@@ -101,6 +103,40 @@ export class PushController {
         } catch (error: any) {
             console.error('[PushController] Error getting push status:', error);
             throw new BadRequestException('Failed to get push status');
+        }
+    }
+
+    /**
+     * POST /api/push/configure
+     * Configure notification preferences for a subscription
+     */
+    @Post('configure')
+    async configure(@Body() body: {
+        address: string;
+        endpoint: string;
+        deviceNotifications?: boolean;
+        blockNotifications?: boolean;
+    }) {
+        const { address, endpoint, deviceNotifications, blockNotifications } = body;
+
+        if (!address || !endpoint) {
+            throw new BadRequestException('Missing required fields: address, endpoint');
+        }
+
+        try {
+            await this.pushSubscriptionService.updateNotificationPreferences(
+                address,
+                endpoint,
+                deviceNotifications,
+                blockNotifications
+            );
+
+            console.log(`[PushController] Updated notification preferences for ${address} -> ${endpoint}`);
+
+            return { success: true };
+        } catch (error: any) {
+            console.error('[PushController] Error configuring push notifications:', error);
+            throw new BadRequestException('Failed to configure push notifications');
         }
     }
 }

@@ -4,6 +4,7 @@ import { Block } from 'bitcoinjs-lib';
 import { DiscordService } from './discord.service';
 import { TelegramService } from './telegram.service';
 import { NtfyService } from './ntfy.service';
+import { PushNotificationService } from './push-notification.service';
 
 
 @Injectable()
@@ -14,6 +15,7 @@ export class NotificationService implements OnModuleInit {
         private readonly telegramService: TelegramService,
         private readonly discordService: DiscordService,
         private readonly ntfyService: NtfyService,
+        private readonly pushNotificationService: PushNotificationService,
     ) { }
 
     async onModuleInit(): Promise<void> {
@@ -24,6 +26,7 @@ export class NotificationService implements OnModuleInit {
         await this.discordService.notifySubscribersBlockFound(height, block, message);
         await this.telegramService.notifySubscribersBlockFound(address, height, block, message);
         await this.ntfyService.notifySubscribersBlockFound(address, height, block, message);
+        await this.pushNotificationService.notifySubscribersBlockFound(address, height, block, message);
     }
 
     public async notifySubscribersBestDiff(address: string, submissionDifficulty: number) {
@@ -42,5 +45,6 @@ export class NotificationService implements OnModuleInit {
         isReturning?: boolean;
     }): Promise<void> {
         await this.telegramService.notifyDeviceStatusChange(params);
+        await this.pushNotificationService.notifyDeviceStatusChange(params);
     }
 }

@@ -19,6 +19,8 @@ export class CreatePushNotifications1734192000000 implements MigrationInterface 
                 "endpoint" text NOT NULL,
                 "platform" character varying NOT NULL DEFAULT 'unknown',
                 "lastNotificationAt" bigint,
+                "deviceNotificationsEnabled" boolean NOT NULL DEFAULT false,
+                "blockNotificationsEnabled" boolean NOT NULL DEFAULT false,
                 CONSTRAINT "UQ_push_subscription_address_endpoint" UNIQUE ("address", "endpoint"),
                 CONSTRAINT "PK_push_subscription_entity" PRIMARY KEY ("id")
             )

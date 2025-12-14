@@ -210,4 +210,114 @@ export class PushNotificationService implements OnModuleInit {
             console.error('[PushNotification] Error in checkBestDifficulty:', error.message);
         }
     }
+
+    /**
+     * Notify subscribers when a block is found
+     * Called by NotificationService when any address finds a block
+     */
+    public async notifySubscribersBlockFound(
+        address: string,
+        height: number,
+        _block: any,
+        message: string,
+    ): Promise<void> {
+        try {
+            // Only notify subscriptions with block notifications enabled
+            const subscriptions = await this.pushSubscriptionService.getByAddressWithBlockNotifications(address);
+
+            if (subscriptions.length === 0) {
+                return;
+            }
+
+            console.log(`[PushNotification] Block found by ${address}! Sending to ${subscriptions.length} endpoint(s)`);
+
+            // Extract difficulty from message if present (e.g., "valid (158T)")
+            const difficultyMatch = message.match(/\(([0-9.]+[KMGT]?)\)/);
+            const difficulty = difficultyMatch ? difficultyMatch[1] : 'Unknown';
+
+            const title = 'New Block Found!';
+            const body = `Block height ${height}`;
+            const notificationMessage = `${title}|${body}|${difficulty}`;
+
+            for (const subscription of subscriptions) {
+                try {
+                    const success = await this.sendPlainPost(subscription.endpoint, notificationMessage);
+
+                    if (success) {
+                        console.log(`[PushNotification] Block notification sent to ${subscription.platform} endpoint for ${address}`);
+                    } else {
+                        console.error(`[PushNotification] Failed to send block notification to ${subscription.endpoint}`);
+                    }
+                } catch (error: any) {
+                    console.error(`[PushNotification] Error sending block notification:`, error.message);
+                }
+            }
+        } catch (error: any) {
+            console.error('[PushNotification] Error in notifySubscribersBlockFound:', error.message);
+        }
+    }
+
+    /**
+     * Notify subscribers when a device status changes (online/offline)
+     * Called by NotificationService when a worker connects/disconnects
+     */
+    public async notifyDeviceStatusChange(params: {
+        address: string;
+        workerName?: string;
+        userAgent?: string;
+        sessionId: string;
+        isOnline: boolean;
+        timestamp: Date;
+        isReturning?: boolean;
+    }): Promise<void> {
+        try {
+            const { address, workerName, userAgent, isOnline, timestamp, isReturning } = params;
+
+            // Only notify subscriptions with device notifications enabled
+            const subscriptions = await this.pushSubscriptionService.getByAddressWithDeviceNotifications(address);
+
+            if (subscriptions.length === 0) {
+                return;
+            }
+
+            console.log(`[PushNotification] Device ${isOnline ? 'online' : 'offline'} for ${address}, sending to ${subscriptions.length} endpoint(s)`);
+
+            const worker = workerName || 'Unknown';
+            const agent = userAgent || 'Unknown';
+            const timeStr = timestamp.toLocaleString('en-US', {
+                dateStyle: 'short',
+                timeStyle: 'short',
+                timeZone: 'UTC'
+            });
+
+            let title: string;
+            let body: string;
+
+            if (isOnline) {
+                title = isReturning ? 'Device Back Online' : 'Device Online';
+                body = `${agent} (${worker}) at ${timeStr}`;
+            } else {
+                title = 'Device Offline';
+                body = `${agent} (${worker}) at ${timeStr}`;
+            }
+
+            const notificationMessage = `${title}|${body}|`;
+
+            for (const subscription of subscriptions) {
+                try {
+                    const success = await this.sendPlainPost(subscription.endpoint, notificationMessage);
+
+                    if (success) {
+                        console.log(`[PushNotification] Device status notification sent to ${subscription.platform} endpoint for ${address}`);
+                    } else {
+                        console.error(`[PushNotification] Failed to send device status notification to ${subscription.endpoint}`);
+                    }
+                } catch (error: any) {
+                    console.error(`[PushNotification] Error sending device status notification:`, error.message);
+                }
+            }
+        } catch (error: any) {
+            console.error('[PushNotification] Error in notifyDeviceStatusChange:', error.message);
+        }
+    }
 }
