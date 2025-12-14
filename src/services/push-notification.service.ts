@@ -94,9 +94,9 @@ export class PushNotificationService implements OnModuleInit {
         // Message format: "title|body|difficulty" (pipe-separated, ntfy compatible)
         const message = `${title}|${body}|${difficulty}`;
 
-        try {
-            if (this.useVAPID) {
-                // Use VAPID authentication
+        // Try VAPID first if configured
+        if (this.useVAPID) {
+            try {
                 await webpush.sendNotification(
                     { endpoint },
                     message,
@@ -105,15 +105,16 @@ export class PushNotificationService implements OnModuleInit {
                         urgency: 'high',
                     }
                 );
+                console.log('[PushNotification] Sent via VAPID');
                 return true;
-            } else {
-                // Fallback to plain POST (current ntfy support)
-                return await this.sendPlainPost(endpoint, message);
+            } catch (error: any) {
+                console.warn('[PushNotification] VAPID failed, falling back to plain POST:', error.message);
+                // Fall through to plain POST
             }
-        } catch (error: any) {
-            console.error('[PushNotification] Send error:', error.message);
-            return false;
         }
+
+        // Use plain POST (ntfy compatible) - either as primary or fallback
+        return await this.sendPlainPost(endpoint, message);
     }
 
     /**
