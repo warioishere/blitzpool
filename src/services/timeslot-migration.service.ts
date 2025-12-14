@@ -105,14 +105,30 @@ export class TimeslotMigrationService implements OnModuleInit {
 
       // Perform the migration: add 10 minutes to all time values
       // This changes labeling from start-time to end-time
+      // IMPORTANT: Update in DESCENDING order to avoid UNIQUE constraint violations
       for (const table of tables) {
         if (tableCounts[table] > 0) {
           console.log(`[TimeslotMigration] Migrating ${table}...`);
-          await queryRunner.query(`
-            UPDATE ${table}
-            SET time = time + ?
-          `, [this.TIME_SLOT_DURATION_MS]);
-          console.log(`[TimeslotMigration] ✓ Updated ${tableCounts[table].toLocaleString()} records in ${table}`);
+
+          // Get all time values in descending order
+          const timeValues = await queryRunner.query(
+            `SELECT DISTINCT time FROM ${table} ORDER BY time DESC`
+          );
+
+          // Update each time value individually, starting from highest
+          let updated = 0;
+          for (const row of timeValues) {
+            const oldTime = row.time;
+            const newTime = oldTime + this.TIME_SLOT_DURATION_MS;
+
+            await queryRunner.query(
+              `UPDATE ${table} SET time = ? WHERE time = ?`,
+              [newTime, oldTime]
+            );
+            updated++;
+          }
+
+          console.log(`[TimeslotMigration] ✓ Updated ${updated.toLocaleString()} unique time slots in ${table}`);
         }
       }
 
