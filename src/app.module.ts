@@ -17,6 +17,8 @@ import { ClientModule } from './ORM/client/client.module';
 import { RpcBlocksModule } from './ORM/rpc-block/rpc-block.module';
 import { TelegramSubscriptionsModule } from './ORM/telegram-subscriptions/telegram-subscriptions.module';
 import { NtfySubscriptionsModule } from './ORM/ntfy-subscriptions/ntfy-subscriptions.module';
+import { PushSubscriptionModule } from './ORM/push-subscriptions/push-subscription.module';
+import { BestDifficultyTrackerModule } from './ORM/best-difficulty-tracker/best-difficulty-tracker.module';
 import { AppService } from './services/app.service';
 import { BitcoinRpcService } from './services/bitcoin-rpc.service';
 import { BraiinsService } from './services/braiins.service';
@@ -36,7 +38,9 @@ import { AggregationService } from './services/aggregation.service';
 import { MetricsService } from './services/metrics.service';
 import { WorkerPoolService } from './services/worker-pool.service';
 import { TimeslotMigrationService } from './services/timeslot-migration.service';
+import { PushNotificationService } from './services/push-notification.service';
 import { ExternalShareController } from './controllers/external-share/external-share.controller';
+import { PushController } from './controllers/push/push.controller';
 import { ExternalSharesModule } from './ORM/external-shares/external-shares.module';
 import { PoolShareStatisticsModule } from './ORM/pool-share-statistics/pool-share-statistics.module';
 import { PoolRejectedStatisticsModule } from './ORM/pool-rejected-statistics/pool-rejected-statistics.module';
@@ -50,6 +54,8 @@ const ORMModules = [
     AddressSettingsModule,
     TelegramSubscriptionsModule,
     NtfySubscriptionsModule,
+    PushSubscriptionModule,
+    BestDifficultyTrackerModule,
     BlocksModule,
     RpcBlocksModule,
     ExternalSharesModule,
@@ -113,7 +119,8 @@ const ORMModules = [
         AppController,
         ClientController,
         AddressController,
-        ExternalShareController
+        ExternalShareController,
+        PushController
     ],
     providers: [
         TimeslotMigrationService, // Must run first on startup
@@ -122,6 +129,7 @@ const ORMModules = [
         StratumV1Service,
         TelegramService,
         NtfyService,
+        PushNotificationService,
         BitcoinRpcService,
         NotificationService,
         BitcoinAddressValidator,
