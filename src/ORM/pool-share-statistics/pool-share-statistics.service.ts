@@ -69,7 +69,8 @@ export class PoolShareStatisticsService implements OnModuleInit, OnModuleDestroy
 
   private getTimeSlot(): number {
     const coeff = 1000 * 60 * 10;
-    return Math.floor(Date.now() / coeff) * coeff;
+    // Time slot labeled by END time (e.g., slot "20:50" contains data from 20:40-20:50)
+    return Math.floor(Date.now() / coeff) * coeff + coeff;
   }
 
   private async handleShare(accepted: number, rejected: number) {

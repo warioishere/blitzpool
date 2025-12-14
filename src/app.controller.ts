@@ -20,6 +20,7 @@ import { StratumV1JobsService } from './services/stratum-v1-jobs.service';
 import { MetricsService } from './services/metrics.service';
 import { MiningJob } from './models/MiningJob';
 import * as bitcoinjs from 'bitcoinjs-lib';
+import { generateFormattedTimeSlots } from './utils/timeslot.utils';
 
 function extractHost(addr: string): string {
   if (!addr) return '';
@@ -61,7 +62,7 @@ export class AppController {
     poolInfo: parseInt(this.configService.get('API_CACHE_TTL_POOL_INFO') ?? '600'),
     coreInfo: parseInt(this.configService.get('API_CACHE_TTL_CORE_INFO') ?? '60'),
     peerInfo: parseInt(this.configService.get('API_CACHE_TTL_PEER_INFO') ?? '60'),
-    chart: parseInt(this.configService.get('API_CACHE_TTL_CHART') ?? '1800'),
+    chart: parseInt(this.configService.get('API_CACHE_TTL_CHART') ?? '300'), // Reduced from 1800s to 300s for more responsive charts
     shares: parseInt(this.configService.get('API_CACHE_TTL_SHARES') ?? '600'),
     workers: parseInt(this.configService.get('API_CACHE_TTL_WORKERS') ?? '1800'),
     accepted: parseInt(this.configService.get('API_CACHE_TTL_ACCEPTED') ?? '600'),
@@ -355,16 +356,9 @@ export class AppController {
       slotMap.set(entry.time, entry.accepted);
     }
 
-    const coeff = 1000 * 60 * 10;
-    const startSlot = Math.floor(sinceTime / coeff) * coeff;
-    const endSlot = Math.floor(now / coeff) * coeff;
-    const slotData: { time: string; counts: { accepted: number } }[] = [];
-    for (let t = startSlot; t <= endSlot; t += coeff) {
-      slotData.push({
-        time: new Date(t).toISOString(),
-        counts: { accepted: slotMap.get(t) || 0 },
-      });
-    }
+    const slotData = generateFormattedTimeSlots(sinceTime, now, (t) => ({
+      counts: { accepted: slotMap.get(t) || 0 },
+    }));
 
     await this.cacheManager.set(CACHE_KEY, { slotData }, this.cacheTTL.accepted);
 
@@ -398,29 +392,9 @@ export class AppController {
       });
     }
 
-    const coeff = 1000 * 60 * 10;
-    const startSlot = Math.floor(sinceTime / coeff) * coeff;
-    const endSlot = Math.floor(now / coeff) * coeff;
-    const slotData: {
-      time: string;
-      counts: { addresses: number; workers: number };
-    }[] = [];
-    for (let t = startSlot; t <= endSlot; t += coeff) {
-      const counts = slotMap.get(t) || {
-        addresses: 0,
-        workers: 0,
-      };
-      slotData.push({
-        time: new Date(t).toISOString(),
-        counts,
-      });
-    }
-
-    const currentSlot = Math.floor(now / coeff) * coeff;
-    if (endSlot === currentSlot && slotData.length > 0) {
-      const liveCounts = await this.clientService.getActiveWorkerCounts();
-      slotData[slotData.length - 1].counts = liveCounts;
-    }
+    const slotData = generateFormattedTimeSlots(sinceTime, now, (t) => ({
+      counts: slotMap.get(t) || { addresses: 0, workers: 0 },
+    }));
 
     await this.cacheManager.set(CACHE_KEY, { slotData }, this.cacheTTL.workers);
 
@@ -454,18 +428,14 @@ export class AppController {
       r[entry.reason] = entry.count;
     }
 
-    const coeff = 1000 * 60 * 10;
-    const startSlot = Math.floor(sinceTime / coeff) * coeff;
-    const endSlot = Math.floor(now / coeff) * coeff;
     const allReasons = Object.keys(eStratumErrorCode).filter(k => isNaN(Number(k)));
-    const slotData: { time: string; counts: Record<string, number> }[] = [];
-    for (let t = startSlot; t <= endSlot; t += coeff) {
+    const slotData = generateFormattedTimeSlots(sinceTime, now, (t) => {
       const counts: Record<string, number> = {};
       for (const reason of allReasons) {
         counts[reason] = slotMap.get(t)?.[reason] || 0;
       }
-      slotData.push({ time: new Date(t).toISOString(), counts });
-    }
+      return { counts };
+    });
 
     await this.cacheManager.set(CACHE_KEY, { slotData }, this.cacheTTL.rejected);
 
