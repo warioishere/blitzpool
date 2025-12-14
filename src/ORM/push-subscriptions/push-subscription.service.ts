@@ -84,10 +84,14 @@ export class PushSubscriptionService {
     public async updateNotificationPreferences(
         address: string,
         endpoint: string,
+        bestDiffNotifications?: boolean,
         deviceNotifications?: boolean,
         blockNotifications?: boolean
     ): Promise<void> {
         const updates: any = {};
+        if (bestDiffNotifications !== undefined) {
+            updates.bestDiffNotificationsEnabled = bestDiffNotifications;
+        }
         if (deviceNotifications !== undefined) {
             updates.deviceNotificationsEnabled = deviceNotifications;
         }
@@ -96,6 +100,15 @@ export class PushSubscriptionService {
         }
 
         await this.pushSubscriptionRepository.update({ address, endpoint }, updates);
+    }
+
+    /**
+     * Get subscriptions with best difficulty notifications enabled
+     */
+    public async getByAddressWithBestDiffNotifications(address: string): Promise<PushSubscriptionEntity[]> {
+        return await this.pushSubscriptionRepository.find({
+            where: { address, bestDiffNotificationsEnabled: true }
+        });
     }
 
     /**

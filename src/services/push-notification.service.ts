@@ -121,7 +121,12 @@ export class PushNotificationService implements OnModuleInit {
      * Send notifications for a specific address
      */
     private async sendNotificationsForAddress(address: string, difficulty: number): Promise<void> {
-        const subscriptions = await this.pushSubscriptionService.getByAddress(address);
+        // Only notify subscriptions with best difficulty notifications enabled
+        const subscriptions = await this.pushSubscriptionService.getByAddressWithBestDiffNotifications(address);
+
+        if (subscriptions.length === 0) {
+            return;
+        }
 
         console.log(`[PushNotification] Difficulty increased for ${address}: sending to ${subscriptions.length} endpoint(s)`);
 

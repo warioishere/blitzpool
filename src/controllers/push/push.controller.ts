@@ -92,6 +92,7 @@ export class PushController {
                     endpoint: s.endpoint,
                     createdAt: s.createdAt,
                     lastNotificationAt: s.lastNotificationAt,
+                    bestDiffNotificationsEnabled: s.bestDiffNotificationsEnabled,
                     deviceNotificationsEnabled: s.deviceNotificationsEnabled,
                     blockNotificationsEnabled: s.blockNotificationsEnabled
                 })),
@@ -114,10 +115,11 @@ export class PushController {
     async configure(@Body() body: {
         address: string;
         endpoint: string;
+        bestDiffNotifications?: boolean;
         deviceNotifications?: boolean;
         blockNotifications?: boolean;
     }) {
-        const { address, endpoint, deviceNotifications, blockNotifications } = body;
+        const { address, endpoint, bestDiffNotifications, deviceNotifications, blockNotifications } = body;
 
         if (!address || !endpoint) {
             throw new BadRequestException('Missing required fields: address, endpoint');
@@ -127,6 +129,7 @@ export class PushController {
             await this.pushSubscriptionService.updateNotificationPreferences(
                 address,
                 endpoint,
+                bestDiffNotifications,
                 deviceNotifications,
                 blockNotifications
             );

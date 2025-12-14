@@ -22,6 +22,9 @@ export class PushSubscriptionEntity extends TrackedEntity {
     @Column({ type: 'bigint', nullable: true })
     lastNotificationAt: number;
 
+    @Column({ default: true })
+    bestDiffNotificationsEnabled: boolean;
+
     @Column({ default: false })
     deviceNotificationsEnabled: boolean;
 
