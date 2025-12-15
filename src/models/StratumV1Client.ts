@@ -345,8 +345,6 @@ export class StratumV1Client {
 
                         // Handshake monitoring: subscribe received
                         this.subscribeReceivedTime = Date.now();
-                        const timeSinceStart = this.subscribeReceivedTime - this.handshakeStartTime;
-                        console.log(`[HANDSHAKE] ${this.sessionId} - Subscribe received: ${timeSinceStart}ms since connection start`);
                     }
 
                     this.clientSubscription = subscriptionMessage;
@@ -406,12 +404,6 @@ export class StratumV1Client {
 
                     // Handshake monitoring: authorize received
                     this.authorizeReceivedTime = Date.now();
-                    const timeSinceStart = this.authorizeReceivedTime - this.handshakeStartTime;
-                    const timeSinceSubscribe = this.subscribeReceivedTime ? this.authorizeReceivedTime - this.subscribeReceivedTime : null;
-                    const timingMsg = timeSinceSubscribe !== null ?
-                        `${timeSinceStart}ms since connection start, ${timeSinceSubscribe}ms since subscribe` :
-                        `${timeSinceStart}ms since connection start`;
-                    console.log(`[HANDSHAKE] ${this.sessionId} - Authorize received: ${timingMsg}`);
 
                     this.stratumV1Service.registerClient(this.clientAuthorization.address, this);
                     this.authorizeResponse = JSON.stringify(this.clientAuthorization.response()) + '\n';
@@ -604,8 +596,6 @@ export class StratumV1Client {
     private async initStratum() {
         // Handshake monitoring: initialization started
         this.initializeStartTime = Date.now();
-        const timeSinceStart = this.initializeStartTime - this.handshakeStartTime;
-        console.log(`[HANDSHAKE] ${this.sessionId} - Initialize stratum started: ${timeSinceStart}ms since connection start`);
 
         this.stratumInitialized = true;
 
@@ -644,24 +634,11 @@ export class StratumV1Client {
 
         // Handshake monitoring: job subscription starting
         this.jobSubscriptionTime = Date.now();
-        const timeSinceInitStart = this.jobSubscriptionTime - this.initializeStartTime;
-        const cachedJobCount = Object.keys(this.stratumV1JobsService.blocks).length;
-        console.log(`[HANDSHAKE] ${this.sessionId} - Job subscription made: ${timeSinceInitStart}ms after init started (${cachedJobCount} jobs cached)`);
 
         this.stratumSubscription = this.stratumV1JobsService.newMiningJob$.subscribe(async (jobTemplate) => {
             try {
                 if(jobTemplate.blockData.clearJobs){
                     this.miningSubmissionHashes.clear();
-                }
-                // Handshake monitoring: first job observable emission
-                if (!this.firstJobSentTime) {
-                    const jobEmitTime = Date.now();
-                    const waitForEmit = jobEmitTime - this.jobSubscriptionTime;
-                    const timeSinceInitStart = jobEmitTime - this.initializeStartTime;
-                    const jobAge = jobEmitTime - jobTemplate.blockData.creation;
-                    const isCached = waitForEmit < 5; // If emit happens in <5ms, likely from shareReplay cache
-                    const jobSource = isCached ? 'CACHED' : 'FRESH_BUILD';
-                    console.log(`[HANDSHAKE] ${this.sessionId} - First job observable emitted: ${waitForEmit}ms to emit, ${timeSinceInitStart}ms after init started (job age: ${jobAge}ms, source: ${jobSource})`);
                 }
                 await this.sendNewMiningJob(jobTemplate);
             } catch (e) {
@@ -675,12 +652,6 @@ export class StratumV1Client {
                 await this.checkDifficulty();
             }, this.difficultyCheckIntervalMs)
         );
-
-        // Handshake monitoring: initialization completed
-        const initCompleteTime = Date.now();
-        const totalTime = initCompleteTime - this.handshakeStartTime;
-        const initTime = initCompleteTime - this.initializeStartTime;
-        console.log(`[HANDSHAKE] ${this.sessionId} - Initialize stratum completed: ${initTime}ms for init, ${totalTime}ms total handshake time so far`);
     }
 
     private async sendNewMiningJob(jobTemplate: IJobTemplate) {
@@ -756,11 +727,6 @@ export class StratumV1Client {
         // Handshake monitoring: first job sent with detailed breakdown
         if (!this.firstJobSentTime && this.stratumInitialized) {
             this.firstJobSentTime = Date.now();
-            const totalTime = this.firstJobSentTime - this.handshakeStartTime;
-            const timeToFirstJob = this.firstJobSentTime - this.initializeStartTime;
-            const totalJobTime = this.firstJobSentTime - jobStartTime;
-            console.log(`[HANDSHAKE] ${this.sessionId} - First job sent: ${timeToFirstJob}ms after init start, ${totalTime}ms total handshake time`);
-            console.log(`[HANDSHAKE] ${this.sessionId} - Job timing breakdown: ${jobCreationTime}ms creation, ${addJobTime}ms addJob, ${socketWriteTime}ms socket write, ${totalJobTime}ms total`);
         }
 
         //console.log(`Sent new job to ${this.clientAuthorization.worker}.${this.sessionId}. (clearJobs: ${jobTemplate.blockData.clearJobs}, fee?: ${!this.noFee})`)
