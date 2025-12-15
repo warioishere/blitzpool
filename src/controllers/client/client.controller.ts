@@ -70,8 +70,8 @@ export class ClientController {
     }
 
     @Post(':address/reset')
-    resetClients(@Param('address') address: string) {
-        this.stratumV1Service.resetClientsForAddress(address);
+    async resetClients(@Param('address') address: string) {
+        await this.stratumV1Service.resetBestDifficultyForAddress(address);
         return { status: 'reset' };
     }
 

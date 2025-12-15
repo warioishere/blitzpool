@@ -495,9 +495,13 @@ export class NtfyService implements OnModuleInit {
       }
 
       try {
+        // Reset via stratum service (handles DB, cache, workers, and broadcast)
+        await this.stratumV1Service.resetBestDifficultyForAddress(address);
+
+        // Clear local notification service caches
         await this.addressSettingsService.updateBestDifficulty(address, 0, null);
         this.bestDiffCache.delete(address);
-        await this.stratumV1Service.resetBestDifficultyForAddress(address);
+
         await this.reply(origin, {
           de: `Best Difficulty für ${this.formatAddress(address)} zurückgesetzt.`,
           en: `Best difficulty for ${this.formatAddress(address)} reset.`

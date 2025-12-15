@@ -39,6 +39,7 @@ import { MetricsService } from './services/metrics.service';
 import { WorkerPoolService } from './services/worker-pool.service';
 import { TimeslotMigrationService } from './services/timeslot-migration.service';
 import { PushNotificationService } from './services/push-notification.service';
+import { WorkerResetBroadcastService } from './services/worker-reset-broadcast.service';
 import { ExternalShareController } from './controllers/external-share/external-share.controller';
 import { PushController } from './controllers/push/push.controller';
 import { ExternalSharesModule } from './ORM/external-shares/external-shares.module';
@@ -126,6 +127,7 @@ const ORMModules = [
         TimeslotMigrationService, // Must run first on startup
         DiscordService,
         AppService,
+        WorkerResetBroadcastService,
         StratumV1Service,
         TelegramService,
         NtfyService,
