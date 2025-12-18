@@ -9,6 +9,7 @@ import { eStratumErrorCode } from '../../models/enums/eStratumErrorCode';
 import { StratumV1Service } from '../../services/stratum-v1.service';
 import { ShareTotalsCacheService } from '../../services/share-totals-cache.service';
 import { generateFormattedTimeSlots } from '../../utils/timeslot.utils';
+import { LiveHashrateService } from '../../services/live-hashrate.service';
 
 
 @Controller('client')
@@ -22,6 +23,7 @@ export class ClientController {
         private readonly clientDifficultyStatisticsService: ClientDifficultyStatisticsService,
         private readonly stratumV1Service: StratumV1Service,
         private readonly shareTotalsCacheService: ShareTotalsCacheService,
+        private readonly liveHashrateService: LiveHashrateService,
     ) { }
 
 
@@ -81,6 +83,17 @@ export class ClientController {
         @Query('range') range: '1d' | '3d' | '7d' = '1d'
     ) {
         const chartData = await this.clientStatisticsService.getChartDataForAddress(address, range);
+        return chartData;
+    }
+
+    @Get(':address/chart/live')
+    async getClientInfoChartLive(
+        @Param('address') address: string,
+        @Query('range') range: '1h' | '6h' | '12h' | '24h' = '1h'
+    ) {
+        // Parse range to hours
+        const hours = range === '24h' ? 24 : range === '12h' ? 12 : range === '6h' ? 6 : 1;
+        const chartData = await this.liveHashrateService.getAddressLiveHashrate(address, hours);
         return chartData;
     }
 

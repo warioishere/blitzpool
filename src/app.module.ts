@@ -38,6 +38,7 @@ import { AggregationService } from './services/aggregation.service';
 import { MetricsService } from './services/metrics.service';
 import { WorkerPoolService } from './services/worker-pool.service';
 import { TimeslotMigrationService } from './services/timeslot-migration.service';
+import { LiveHashrateService } from './services/live-hashrate.service';
 import { PushNotificationService } from './services/push-notification.service';
 import { WorkerResetBroadcastService } from './services/worker-reset-broadcast.service';
 import { ExternalShareController } from './controllers/external-share/external-share.controller';
@@ -146,6 +147,7 @@ const ORMModules = [
         AggregationService,
         MetricsService,
         WorkerPoolService,
+        LiveHashrateService,
     ],
 })
 export class AppModule {

@@ -21,6 +21,7 @@ import { MetricsService } from './services/metrics.service';
 import { MiningJob } from './models/MiningJob';
 import * as bitcoinjs from 'bitcoinjs-lib';
 import { generateFormattedTimeSlots } from './utils/timeslot.utils';
+import { LiveHashrateService } from './services/live-hashrate.service';
 
 function extractHost(addr: string): string {
   if (!addr) return '';
@@ -63,6 +64,7 @@ export class AppController {
     coreInfo: parseInt(this.configService.get('API_CACHE_TTL_CORE_INFO') ?? '60'),
     peerInfo: parseInt(this.configService.get('API_CACHE_TTL_PEER_INFO') ?? '60'),
     chart: parseInt(this.configService.get('API_CACHE_TTL_CHART') ?? '300'), // Reduced from 1800s to 300s for more responsive charts
+    liveChart: parseInt(this.configService.get('API_CACHE_TTL_LIVE_CHART') ?? '5'),
     shares: parseInt(this.configService.get('API_CACHE_TTL_SHARES') ?? '600'),
     workers: parseInt(this.configService.get('API_CACHE_TTL_WORKERS') ?? '1800'),
     accepted: parseInt(this.configService.get('API_CACHE_TTL_ACCEPTED') ?? '600'),
@@ -82,6 +84,7 @@ export class AppController {
     private readonly configService: ConfigService,
     private readonly stratumV1JobsService: StratumV1JobsService,
     private readonly metricsService: MetricsService,
+    private readonly liveHashrateService: LiveHashrateService,
   ) {
     const packagePath = join(__dirname, '..', 'package.json');
     this.version = JSON.parse(readFileSync(packagePath, 'utf8')).version;
@@ -295,6 +298,29 @@ export class AppController {
     return chartData;
 
 
+  }
+
+  @Get('info/chart/live')
+  public async infoChartLive(@Query('range') range: '1h' | '6h' | '12h' | '24h' = '1h') {
+    const CACHE_KEY = `POOL_LIVE_HASHRATE_${range}`;
+    const cachedResult = await this.cacheManager.get(CACHE_KEY);
+
+    if (cachedResult != null) {
+      return cachedResult;
+    }
+
+    // Parse range to hours
+    const hours = range === '24h' ? 24 : range === '12h' ? 12 : range === '6h' ? 6 : 1;
+    const chartData = await this.liveHashrateService.getPoolLiveHashrate(hours);
+
+    await this.cacheManager.set(CACHE_KEY, chartData, this.cacheTTL.liveChart);
+
+    return chartData;
+  }
+
+  @Get('info/chart/live/metrics')
+  public infoChartLiveMetrics() {
+    return this.liveHashrateService.getAggregationMetrics();
   }
 
   @Get('info/shares')

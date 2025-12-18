@@ -1,4 +1,4 @@
-import { Injectable, OnModuleInit, OnModuleDestroy, Inject } from '@nestjs/core';
+import { Injectable, OnModuleInit, OnModuleDestroy, Inject } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
