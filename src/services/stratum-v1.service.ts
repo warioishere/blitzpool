@@ -17,6 +17,7 @@ import { ClientRejectedStatisticsService } from '../ORM/client-rejected-statisti
 import { ClientDifficultyStatisticsService } from '../ORM/client-difficulty-statistics/client-difficulty-statistics.service';
 import { ShareTotalsCacheService } from './share-totals-cache.service';
 import { AddressSettingsCacheService } from './address-settings-cache.service';
+import { DifficultyScoresCacheService } from './difficulty-scores-cache.service';
 import { StatisticsBatchService } from './statistics-batch.service';
 import { WorkerResetBroadcastService } from './worker-reset-broadcast.service';
 
@@ -34,6 +35,7 @@ export class StratumV1Service implements OnModuleInit {
     private readonly stratumV1JobsService: StratumV1JobsService,
     private readonly addressSettingsService: AddressSettingsService,
     private readonly addressSettingsCacheService: AddressSettingsCacheService,
+    private readonly difficultyScoresCacheService: DifficultyScoresCacheService,
     private readonly poolShareStatisticsService: PoolShareStatisticsService,
     private readonly poolRejectedStatisticsService: PoolRejectedStatisticsService,
     private readonly clientRejectedStatisticsService: ClientRejectedStatisticsService,
@@ -235,8 +237,9 @@ export class StratumV1Service implements OnModuleInit {
     // 1. Update database first
     await this.clientService.resetBestDifficultyForAddress(address);
 
-    // 2. Clear Redis cache to ensure notifications work immediately
+    // 2. Clear Redis caches to ensure fresh data
     await this.addressSettingsCacheService.clear(address);
+    await this.difficultyScoresCacheService.clearCache(address);
 
     // 3. Reset in-memory workers on this PM2 instance
     this.handleLocalReset(address);

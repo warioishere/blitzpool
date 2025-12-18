@@ -8,8 +8,9 @@ import { ClientDifficultyStatisticsService } from '../../ORM/client-difficulty-s
 import { eStratumErrorCode } from '../../models/enums/eStratumErrorCode';
 import { StratumV1Service } from '../../services/stratum-v1.service';
 import { ShareTotalsCacheService } from '../../services/share-totals-cache.service';
-import { generateFormattedTimeSlots } from '../../utils/timeslot.utils';
 import { LiveHashrateService } from '../../services/live-hashrate.service';
+import { DifficultyScoresCacheService } from '../../services/difficulty-scores-cache.service';
+import { generateFormattedTimeSlots } from '../../utils/timeslot.utils';
 
 
 @Controller('client')
@@ -24,6 +25,7 @@ export class ClientController {
         private readonly stratumV1Service: StratumV1Service,
         private readonly shareTotalsCacheService: ShareTotalsCacheService,
         private readonly liveHashrateService: LiveHashrateService,
+        private readonly difficultyScoresCacheService: DifficultyScoresCacheService,
     ) { }
 
 
@@ -205,18 +207,12 @@ export class ClientController {
         const startSlot = Math.floor(since / oneHour) * oneHour;
         const endSlot = Math.floor(now / oneHour) * oneHour;
 
-        const rawEntries = await this.clientDifficultyStatisticsService.getMaximaForAddress(address, startSlot, endSlot);
-        const bySlot = new Map<number, number>();
-        for (const entry of rawEntries) {
-            bySlot.set(entry.slotTime, Number(entry.maxDifficulty) || 0);
-        }
-
-        const slotData: { time: string; difficulty: number }[] = [];
-        for (let t = startSlot; t <= endSlot; t += oneHour) {
-            slotData.push({ time: new Date(t).toISOString(), difficulty: bySlot.get(t) ?? 0 });
-        }
-
-        return { slotData };
+        return this.difficultyScoresCacheService.getDifficultyScores(
+            address,
+            range,
+            startSlot,
+            endSlot,
+        );
     }
 
     @Get(':address/:workerName')
