@@ -260,4 +260,21 @@ export class StratumV1Service implements OnModuleInit {
     }
     this.clientsByAddress.delete(address);
   }
+
+  // Live hashrate service accessors
+  getClientsForAddress(address: string): Set<StratumV1Client> {
+    return this.clientsByAddress.get(address) || new Set();
+  }
+
+  getAllClients(): StratumV1Client[] {
+    const allClients: StratumV1Client[] = [];
+    this.clientsByAddress.forEach(clients => {
+      clients.forEach(client => allClients.push(client));
+    });
+    return allClients;
+  }
+
+  getAllAddresses(): string[] {
+    return Array.from(this.clientsByAddress.keys());
+  }
 }

@@ -166,6 +166,19 @@ export class StratumV1Client {
         return this.sessionDifficulty;
     }
 
+    public getSubmissionCacheForInterval(startTime: Date, endTime: Date): Array<{time: Date, difficulty: number}> {
+        if (!this.statistics) return [];
+
+        // Access private submissionCache via bracket notation
+        const cache = this.statistics['submissionCache'] as Array<{time: Date, difficulty: number}>;
+        if (!cache) return [];
+
+        // Filter to only submissions within the time range
+        return cache.filter(sub =>
+            sub.time >= startTime && sub.time < endTime
+        );
+    }
+
     public resetBestDifficulty(): void {
         if (this.entity) {
             this.entity.bestDifficulty = 0;
