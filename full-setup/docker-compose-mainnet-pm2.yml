@@ -59,6 +59,8 @@ services:
       - "./blitzpool.env:/public-pool/.env:ro"
       - "./logs:/public-pool/logs"
       - "/home/blitzpool/public-pool-keys:/app/keys"
+      # Firebase Cloud Messaging (FCM) - Optional
+      - "/home/blitzpool/fcm/blitzpool-d57be-firebase-adminsdk-fbsvc-6e4652c582.json:/app/fcm-key.json:ro"
     environment:
       - NODE_ENV=production
       # Redis configuration (Phase 2)
@@ -69,6 +71,8 @@ services:
       - REDIS_TTL=600
       # PM2 configuration
       - PM2_INSTANCES=4
+      # Firebase Cloud Messaging (FCM) - Optional
+      - FCM_SERVICE_ACCOUNT_PATH=/app/fcm-key.json
 
 networks:
   bitcoin:

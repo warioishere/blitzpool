@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 
 import { PushSubscriptionEntity } from './push-subscription.entity';
+import { PushSubscriptionType } from './push-subscription-type.enum';
 
 @Injectable()
 export class PushSubscriptionService {
@@ -15,10 +16,15 @@ export class PushSubscriptionService {
     /**
      * Create or update a push subscription (upsert)
      */
-    public async createOrUpdate(address: string, endpoint: string, platform: string): Promise<PushSubscriptionEntity> {
+    public async createOrUpdate(
+        address: string,
+        endpoint: string,
+        platform: string,
+        subscriptionType: PushSubscriptionType = PushSubscriptionType.UNIFIED_PUSH
+    ): Promise<PushSubscriptionEntity> {
         // Try to find existing subscription
         let subscription = await this.pushSubscriptionRepository.findOne({
-            where: { address, endpoint }
+            where: { address, endpoint, subscriptionType }
         });
 
         if (subscription) {
@@ -30,17 +36,26 @@ export class PushSubscriptionService {
             const newSubscription = this.pushSubscriptionRepository.create({
                 address,
                 endpoint,
-                platform
+                platform,
+                subscriptionType
             });
             return await this.pushSubscriptionRepository.save(newSubscription);
         }
     }
 
     /**
-     * Delete subscription by address and endpoint
+     * Delete subscription by address and endpoint (optionally by type)
      */
-    public async delete(address: string, endpoint: string): Promise<void> {
-        await this.pushSubscriptionRepository.delete({ address, endpoint });
+    public async delete(
+        address: string,
+        endpoint: string,
+        subscriptionType?: PushSubscriptionType
+    ): Promise<void> {
+        const where: any = { address, endpoint };
+        if (subscriptionType) {
+            where.subscriptionType = subscriptionType;
+        }
+        await this.pushSubscriptionRepository.delete(where);
     }
 
     /**
@@ -99,7 +114,22 @@ export class PushSubscriptionService {
             updates.blockNotificationsEnabled = blockNotifications;
         }
 
-        await this.pushSubscriptionRepository.update({ address, endpoint }, updates);
+        console.log(`[PushSubscriptionService] Updating preferences for ${address.substring(0, 20)}... with:`, {
+            bestDiffNotifications,
+            deviceNotifications,
+            blockNotifications,
+            updates
+        });
+
+        const result = await this.pushSubscriptionRepository.update({ address, endpoint }, updates);
+
+        console.log(`[PushSubscriptionService] Update result: affected=${result.affected}`);
+
+        // Verify the update
+        const updated = await this.pushSubscriptionRepository.findOne({ where: { address, endpoint } });
+        if (updated) {
+            console.log(`[PushSubscriptionService] After update: bestDiff=${updated.bestDiffNotificationsEnabled}, device=${updated.deviceNotificationsEnabled}, block=${updated.blockNotificationsEnabled}`);
+        }
     }
 
     /**
@@ -127,5 +157,116 @@ export class PushSubscriptionService {
         return await this.pushSubscriptionRepository.find({
             where: { address, blockNotificationsEnabled: true }
         });
+    }
+
+    /**
+     * Get FCM subscriptions with best difficulty notifications enabled
+     */
+    public async getFcmByAddressWithBestDiffNotifications(
+        address: string
+    ): Promise<PushSubscriptionEntity[]> {
+        return await this.pushSubscriptionRepository.find({
+            where: {
+                address,
+                subscriptionType: PushSubscriptionType.FCM,
+                bestDiffNotificationsEnabled: true
+            }
+        });
+    }
+
+    /**
+     * Get FCM subscriptions with device notifications enabled
+     */
+    public async getFcmByAddressWithDeviceNotifications(
+        address: string
+    ): Promise<PushSubscriptionEntity[]> {
+        return await this.pushSubscriptionRepository.find({
+            where: {
+                address,
+                subscriptionType: PushSubscriptionType.FCM,
+                deviceNotificationsEnabled: true
+            }
+        });
+    }
+
+    /**
+     * Get FCM subscriptions with block notifications enabled
+     */
+    public async getFcmByAddressWithBlockNotifications(
+        address: string
+    ): Promise<PushSubscriptionEntity[]> {
+        return await this.pushSubscriptionRepository.find({
+            where: {
+                address,
+                subscriptionType: PushSubscriptionType.FCM,
+                blockNotificationsEnabled: true
+            }
+        });
+    }
+
+    /**
+     * Get Unified Push subscriptions with best difficulty notifications enabled
+     */
+    public async getUnifiedPushByAddressWithBestDiffNotifications(
+        address: string
+    ): Promise<PushSubscriptionEntity[]> {
+        return await this.pushSubscriptionRepository.find({
+            where: {
+                address,
+                subscriptionType: PushSubscriptionType.UNIFIED_PUSH,
+                bestDiffNotificationsEnabled: true
+            }
+        });
+    }
+
+    /**
+     * Get Unified Push subscriptions with device notifications enabled
+     */
+    public async getUnifiedPushByAddressWithDeviceNotifications(
+        address: string
+    ): Promise<PushSubscriptionEntity[]> {
+        return await this.pushSubscriptionRepository.find({
+            where: {
+                address,
+                subscriptionType: PushSubscriptionType.UNIFIED_PUSH,
+                deviceNotificationsEnabled: true
+            }
+        });
+    }
+
+    /**
+     * Get Unified Push subscriptions with block notifications enabled
+     */
+    public async getUnifiedPushByAddressWithBlockNotifications(
+        address: string
+    ): Promise<PushSubscriptionEntity[]> {
+        return await this.pushSubscriptionRepository.find({
+            where: {
+                address,
+                subscriptionType: PushSubscriptionType.UNIFIED_PUSH,
+                blockNotificationsEnabled: true
+            }
+        });
+    }
+
+    /**
+     * Delete invalid FCM token
+     */
+    public async deleteInvalidFcmToken(address: string, token: string): Promise<void> {
+        await this.pushSubscriptionRepository.delete({
+            address,
+            endpoint: token,
+            subscriptionType: PushSubscriptionType.FCM
+        });
+    }
+
+    /**
+     * Delete all subscriptions of a specific type for an address
+     */
+    public async deleteAllByType(
+        address: string,
+        subscriptionType: PushSubscriptionType
+    ): Promise<void> {
+        await this.pushSubscriptionRepository.delete({ address, subscriptionType });
     }
 }

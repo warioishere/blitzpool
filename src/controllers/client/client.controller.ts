@@ -5,6 +5,7 @@ import { ClientStatisticsService } from '../../ORM/client-statistics/client-stat
 import { ClientService } from '../../ORM/client/client.service';
 import { ClientRejectedStatisticsService } from '../../ORM/client-rejected-statistics/client-rejected-statistics.service';
 import { ClientDifficultyStatisticsService } from '../../ORM/client-difficulty-statistics/client-difficulty-statistics.service';
+import { BestDifficultyTrackerService } from '../../ORM/best-difficulty-tracker/best-difficulty-tracker.service';
 import { eStratumErrorCode } from '../../models/enums/eStratumErrorCode';
 import { StratumV1Service } from '../../services/stratum-v1.service';
 import { ShareTotalsCacheService } from '../../services/share-totals-cache.service';
@@ -26,6 +27,7 @@ export class ClientController {
         private readonly shareTotalsCacheService: ShareTotalsCacheService,
         private readonly liveHashrateService: LiveHashrateService,
         private readonly difficultyScoresCacheService: DifficultyScoresCacheService,
+        private readonly trackerService: BestDifficultyTrackerService,
     ) { }
 
 
@@ -75,7 +77,17 @@ export class ClientController {
 
     @Post(':address/reset')
     async resetClients(@Param('address') address: string) {
+        console.log(`[ClientController] Starting reset for address ${address}`);
+
         await this.stratumV1Service.resetBestDifficultyForAddress(address);
+        console.log(`[ClientController] StratumV1Service reset completed for ${address}`);
+
+        await this.addressSettingsService.updateBestDifficulty(address, 0, null);
+        console.log(`[ClientController] AddressSettings reset completed for ${address}`);
+
+        await this.trackerService.resetTracker(address);
+        console.log(`[ClientController] Tracker reset completed for ${address}`);
+
         return { status: 'reset' };
     }
 

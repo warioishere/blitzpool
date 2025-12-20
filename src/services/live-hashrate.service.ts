@@ -182,11 +182,6 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
       };
 
       this.instanceDataCache.set(update.instanceId, instanceStats);
-      console.log(
-        `[LiveHashrate] Received update from instance ${update.instanceId}: ` +
-          `${Object.keys(update.addresses ?? {}).length} addresses, ` +
-          `pool hashrate: ${(update.pool / 1e9).toFixed(2)} GH/s`,
-      );
     } catch (error) {
       this.logAggregationError(`Error handling cluster update: ${error}`);
     }
@@ -330,10 +325,6 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
       for (const [address, agg] of addressAggregates.entries()) {
         if (agg.instances.length > 1) {
           multiInstanceAddresses++;
-          console.log(
-            `[LiveHashrate] Address ${address.substring(0, 16)}... connected to ${agg.instances.length} instances: ` +
-            `[${agg.instances.join(', ')}], aggregated hashrate: ${(agg.totalHashrate / 1e9).toFixed(2)} GH/s`
-          );
           this.aggregationMetrics.deduplicatedAddresses++;
         }
       }

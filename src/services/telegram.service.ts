@@ -10,6 +10,7 @@ import { TelegramSubscriptionsService } from '../ORM/telegram-subscriptions/tele
 import { ClientService } from '../ORM/client/client.service';
 import { AddressSettingsService } from '../ORM/address-settings/address-settings.service';
 import { ClientStatisticsService } from '../ORM/client-statistics/client-statistics.service';
+import { BestDifficultyTrackerService } from '../ORM/best-difficulty-tracker/best-difficulty-tracker.service';
 import { StratumV1Service } from './stratum-v1.service';
 import { NtfyService } from './ntfy.service';
 import { buildStatsMessage, buildWorkersOverviewMessage } from './common-command-handlers';
@@ -133,6 +134,7 @@ export class TelegramService implements OnModuleInit {
         private readonly clientService: ClientService,
         private readonly addressSettingsService: AddressSettingsService,
         private readonly clientStatisticsService: ClientStatisticsService,
+        private readonly trackerService: BestDifficultyTrackerService,
         @Inject(forwardRef(() => StratumV1Service))
         private readonly stratumV1Service: StratumV1Service,
         private readonly ntfyService: NtfyService
@@ -360,6 +362,7 @@ export class TelegramService implements OnModuleInit {
 
                 // Clear local notification service caches
                 await this.addressSettingsService.updateBestDifficulty(address, 0, null);
+                await this.trackerService.resetTracker(address);
                 this.bestDiffCache.delete(address);
                 this.ntfyService.resetBestDiffCache(address);
 

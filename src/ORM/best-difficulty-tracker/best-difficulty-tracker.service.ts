@@ -49,4 +49,19 @@ export class BestDifficultyTrackerService {
     public async getAllTrackers(): Promise<BestDifficultyTrackerEntity[]> {
         return await this.trackerRepository.find();
     }
+
+    /**
+     * Reset tracker for address
+     */
+    public async resetTracker(address: string): Promise<void> {
+        const existing = await this.trackerRepository.findOne({
+            where: { address }
+        });
+
+        if (existing) {
+            existing.bestDifficulty = 0;
+            existing.lastCheckedAt = Date.now();
+            await this.trackerRepository.save(existing);
+        }
+    }
 }
