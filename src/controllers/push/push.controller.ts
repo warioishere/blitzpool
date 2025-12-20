@@ -1,6 +1,7 @@
-import { Controller, Get, Post, Param, Body, BadRequestException } from '@nestjs/common';
+import { Controller, Get, Post, Param, Body, BadRequestException, ForbiddenException } from '@nestjs/common';
 import { PushSubscriptionService } from '../../ORM/push-subscriptions/push-subscription.service';
 import { BestDifficultyTrackerService } from '../../ORM/best-difficulty-tracker/best-difficulty-tracker.service';
+import { AddressSettingsService } from '../../ORM/address-settings/address-settings.service';
 import { PushSubscriptionType } from '../../ORM/push-subscriptions/push-subscription-type.enum';
 
 @Controller('push')
@@ -8,7 +9,22 @@ export class PushController {
     constructor(
         private readonly pushSubscriptionService: PushSubscriptionService,
         private readonly trackerService: BestDifficultyTrackerService,
+        private readonly addressSettingsService: AddressSettingsService,
     ) {}
+
+    /**
+     * Validate that an address has mined on this pool before allowing registration
+     * Security: Prevents spam and unauthorized monitoring of addresses
+     */
+    private async validateMinerAddress(address: string): Promise<void> {
+        const settings = await this.addressSettingsService.getSettings(address, false);
+
+        if (!settings) {
+            throw new ForbiddenException(
+                'Address has not mined on this pool. Only active miners can register for push notifications.'
+            );
+        }
+    }
 
     /**
      * GET /api/push/info
@@ -44,7 +60,7 @@ export class PushController {
                 {
                     method: 'POST',
                     path: '/api/push/register',
-                    description: 'Register Unified Push endpoint (all notification types enabled by default)',
+                    description: 'Register Unified Push endpoint (all notification types enabled by default). Requires address to have mined on this pool.',
                     body: {
                         address: 'bitcoin address (62 chars)',
                         endpoint: 'https://your-endpoint-url',
@@ -54,7 +70,7 @@ export class PushController {
                 {
                     method: 'POST',
                     path: '/api/push/fcm/register',
-                    description: 'Register FCM device token (all notification types enabled by default)',
+                    description: 'Register FCM device token (all notification types enabled by default). Requires address to have mined on this pool.',
                     body: {
                         address: 'bitcoin address (62 chars)',
                         token: 'FCM device token (100+ chars)',
@@ -164,6 +180,9 @@ export class PushController {
         if (!address || !endpoint) {
             throw new BadRequestException('Missing required fields: address, endpoint');
         }
+
+        // Security: Validate that address has mined on this pool
+        await this.validateMinerAddress(address);
 
         try {
             const subscription = await this.pushSubscriptionService.createOrUpdate(
@@ -299,6 +318,9 @@ export class PushController {
         if (!address || !token) {
             throw new BadRequestException('Missing required fields: address, token');
         }
+
+        // Security: Validate that address has mined on this pool
+        await this.validateMinerAddress(address);
 
         try {
             // Validate FCM token format (100+ chars)
