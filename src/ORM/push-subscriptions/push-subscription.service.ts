@@ -32,12 +32,15 @@ export class PushSubscriptionService {
             subscription.platform = platform;
             return await this.pushSubscriptionRepository.save(subscription);
         } else {
-            // Create new subscription
+            // Create new subscription with all notifications enabled by default
             const newSubscription = this.pushSubscriptionRepository.create({
                 address,
                 endpoint,
                 platform,
-                subscriptionType
+                subscriptionType,
+                bestDiffNotificationsEnabled: true,
+                deviceNotificationsEnabled: true,
+                blockNotificationsEnabled: true
             });
             return await this.pushSubscriptionRepository.save(newSubscription);
         }
