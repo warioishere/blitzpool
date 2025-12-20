@@ -1,9 +1,10 @@
 import { Column, Entity, Index, PrimaryGeneratedColumn } from 'typeorm';
 
 import { TrackedEntity } from '../utils/TrackedEntity.entity';
+import { PushSubscriptionType } from './push-subscription-type.enum';
 
 @Entity()
-@Index(['address', 'endpoint'], { unique: true })
+@Index(['address', 'endpoint', 'subscriptionType'], { unique: true })
 export class PushSubscriptionEntity extends TrackedEntity {
 
     @PrimaryGeneratedColumn()
@@ -19,15 +20,23 @@ export class PushSubscriptionEntity extends TrackedEntity {
     @Column({ default: 'unknown' })
     platform: string;
 
+    @Index()
+    @Column({
+        type: 'varchar',
+        length: 20,
+        default: PushSubscriptionType.UNIFIED_PUSH
+    })
+    subscriptionType: PushSubscriptionType;
+
     @Column({ type: 'bigint', nullable: true })
     lastNotificationAt: number;
 
-    @Column({ default: false })
+    @Column({ default: true })
     bestDiffNotificationsEnabled: boolean;
 
-    @Column({ default: false })
+    @Column({ default: true })
     deviceNotificationsEnabled: boolean;
 
-    @Column({ default: false })
+    @Column({ default: true })
     blockNotificationsEnabled: boolean;
 }

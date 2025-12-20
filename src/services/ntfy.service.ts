@@ -9,6 +9,7 @@ import { NtfySubscriptionsService } from '../ORM/ntfy-subscriptions/ntfy-subscri
 import { ClientService } from '../ORM/client/client.service';
 import { AddressSettingsService } from '../ORM/address-settings/address-settings.service';
 import { ClientStatisticsService } from '../ORM/client-statistics/client-statistics.service';
+import { BestDifficultyTrackerService } from '../ORM/best-difficulty-tracker/best-difficulty-tracker.service';
 import { StratumV1Service } from './stratum-v1.service';
 import { buildStatsMessage, buildWorkersOverviewMessage } from './common-command-handlers';
 
@@ -33,6 +34,7 @@ export class NtfyService implements OnModuleInit {
     private readonly clientService: ClientService,
     private readonly addressSettingsService: AddressSettingsService,
     private readonly clientStatisticsService: ClientStatisticsService,
+    private readonly trackerService: BestDifficultyTrackerService,
     @Inject(forwardRef(() => StratumV1Service))
     private readonly stratumV1Service: StratumV1Service,
   ) {
@@ -500,6 +502,7 @@ export class NtfyService implements OnModuleInit {
 
         // Clear local notification service caches
         await this.addressSettingsService.updateBestDifficulty(address, 0, null);
+        await this.trackerService.resetTracker(address);
         this.bestDiffCache.delete(address);
 
         await this.reply(origin, {

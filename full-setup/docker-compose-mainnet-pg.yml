@@ -56,6 +56,8 @@ services:
     volumes:
       - "./blitzpool.env:/public-pool/.env:ro"
       - "/home/blitzpool/public-pool-keys:/app/keys"
+      # Firebase Cloud Messaging (FCM) - Optional
+      - "/home/blitzpool/fcm/blitzpool-d57be-firebase-adminsdk-fbsvc-6e4652c582.json:/app/fcm-key.json:ro"
     environment:
       - NODE_ENV=production
       - DB_TYPE=postgres
@@ -66,6 +68,8 @@ services:
       - PG_DATABASE=${PG_DATABASE:-public_pool}
       - PG_SSL=${PG_SSL:-false}
       - DB_RUN_MIGRATIONS=true
+      # Firebase Cloud Messaging (FCM) - Optional
+      - FCM_SERVICE_ACCOUNT_PATH=/app/fcm-key.json
 
 networks:
   bitcoin:

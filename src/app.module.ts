@@ -41,6 +41,7 @@ import { TimeslotMigrationService } from './services/timeslot-migration.service'
 import { LiveHashrateService } from './services/live-hashrate.service';
 import { DifficultyScoresCacheService } from './services/difficulty-scores-cache.service';
 import { PushNotificationService } from './services/push-notification.service';
+import { FcmService } from './services/fcm.service';
 import { WorkerResetBroadcastService } from './services/worker-reset-broadcast.service';
 import { ExternalShareController } from './controllers/external-share/external-share.controller';
 import { PushController } from './controllers/push/push.controller';
@@ -133,6 +134,7 @@ const ORMModules = [
         StratumV1Service,
         TelegramService,
         NtfyService,
+        FcmService,
         PushNotificationService,
         BitcoinRpcService,
         NotificationService,
