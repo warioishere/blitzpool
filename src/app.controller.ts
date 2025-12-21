@@ -67,8 +67,8 @@ export class AppController {
     liveChart: parseInt(this.configService.get('API_CACHE_TTL_LIVE_CHART') ?? '5'),
     shares: parseInt(this.configService.get('API_CACHE_TTL_SHARES') ?? '600'),
     workers: parseInt(this.configService.get('API_CACHE_TTL_WORKERS') ?? '1800'),
-    accepted: parseInt(this.configService.get('API_CACHE_TTL_ACCEPTED') ?? '600'),
-    rejected: parseInt(this.configService.get('API_CACHE_TTL_REJECTED') ?? '600'),
+    accepted: parseInt(this.configService.get('API_CACHE_TTL_ACCEPTED') ?? '300'), // Reduced from 600s to match chart TTL
+    rejected: parseInt(this.configService.get('API_CACHE_TTL_REJECTED') ?? '300'), // Reduced from 600s to match chart TTL
   };
 
   constructor(
