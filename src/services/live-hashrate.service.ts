@@ -232,6 +232,8 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
   /**
    * Aggregate data from all instances into final hashrate values
    * Finds all timestamps with partial data and creates aggregated records
+   *
+   * OPTIMIZED: Single-pass SCAN with in-memory grouping to avoid nested SCAN loops
    */
   private async aggregateInstanceData(): Promise<void> {
     if (!this.redis) return;
@@ -247,11 +249,12 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
       // Get all instance heartbeats to identify active instances
       const activeInstances = await this.getActiveInstances();
 
-      // Find all timestamps that have partial data from any instance
-      // Look for keys like: livehash:i:*:addr:*:*
+      // OPTIMIZATION: Single SCAN to get all partial keys
+      // Previously this caused nested SCAN loops (one scan per timestamp)
       const allPartialKeys = await this.scanKeys(`${this.INSTANCE_PREFIX}:*:addr:*:*`);
 
-      const recentTimestamps = new Set<number>();
+      // Group keys by timestamp IN MEMORY (no additional scans needed!)
+      const keysByTimestamp = new Map<number, string[]>();
       for (const key of allPartialKeys) {
         try {
           // Parse key: livehash:i:0:addr:bc1qxyz:1702483260000
@@ -259,8 +262,11 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
           if (parts.length >= 6) {
             const timestamp = parseInt(parts[parts.length - 1], 10);
             if (!Number.isNaN(timestamp) && now - timestamp < 3600000) {
-              // Last hour
-              recentTimestamps.add(timestamp);
+              // Only process last hour
+              if (!keysByTimestamp.has(timestamp)) {
+                keysByTimestamp.set(timestamp, []);
+              }
+              keysByTimestamp.get(timestamp)!.push(key);
             }
           }
         } catch (err) {
@@ -268,10 +274,10 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
         }
       }
 
-      // Aggregate for each timestamp
+      // Aggregate for each timestamp using pre-grouped keys (no more scans!)
       let aggregatedCount = 0;
-      for (const timestamp of recentTimestamps) {
-        const aggregated = await this.aggregateForTimestamp(timestamp, activeInstances);
+      for (const [timestamp, keys] of keysByTimestamp.entries()) {
+        const aggregated = await this.aggregateForTimestamp(timestamp, keys, activeInstances);
         if (aggregated) {
           aggregatedCount++;
         }
@@ -299,8 +305,14 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
    * - No duplicates: each instance's data counted once
    * - No gaps: only complete minutes are aggregated
    * - No missing: sum all instances for each address
+   *
+   * OPTIMIZED: Accepts pre-filtered keys to avoid redundant SCAN operations
    */
-  private async aggregateForTimestamp(timestamp: number, activeInstances: Set<string>): Promise<boolean> {
+  private async aggregateForTimestamp(
+    timestamp: number,
+    partialKeys: string[],
+    activeInstances: Set<string>
+  ): Promise<boolean> {
     if (!this.redis) return false;
 
     try {
@@ -309,10 +321,9 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
         instances: string[];
       }>();
 
-      // Find all partial address data for this timestamp
-      const addressPartialKeys = await this.scanKeys(
-        `${this.INSTANCE_PREFIX}:*:addr:*:${timestamp}`
-      );
+      // OPTIMIZATION: Use pre-filtered keys from caller (no SCAN needed!)
+      // Previously: await this.scanKeys(`${this.INSTANCE_PREFIX}:*:addr:*:${timestamp}`)
+      const addressPartialKeys = partialKeys;
 
       // Sum up hashrates by address across all instances
       for (const partialKey of addressPartialKeys) {
