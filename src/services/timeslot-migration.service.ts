@@ -148,14 +148,15 @@ export class TimeslotMigrationService implements OnModuleInit {
           }
 
           // Update each time value individually, starting from highest
+          // IMPORTANT: Must include cutoff filter to avoid updating old data with same timestamp
           let updated = 0;
           for (const row of timeValues) {
             const oldTime = row.time;
             const newTime = oldTime + this.TIME_SLOT_DURATION_MS;
 
-            await queryRunner.query(
-              `UPDATE ${table} SET time = ? WHERE time = ?`,
-              [newTime, oldTime]
+            const result = await queryRunner.query(
+              `UPDATE ${table} SET time = ? WHERE time = ? AND time > ?`,
+              [newTime, oldTime, cutoffTime]
             );
             updated++;
           }
