@@ -25,6 +25,9 @@ export class PoolShareStatisticsService implements OnModuleInit, OnModuleDestroy
   private accepted = 0;
   private rejected = 0;
 
+  // Track current slot for Redis mode (for slot-transition flushing)
+  private redisCurrentSlot: number = null;
+
   async onModuleInit(): Promise<void> {
     try {
       const store: any = this.cacheManager.store;
@@ -75,7 +78,14 @@ export class PoolShareStatisticsService implements OnModuleInit, OnModuleDestroy
     const timeSlot = this.getTimeSlot();
 
     if (this.useRedis && this.redisClient) {
-      // Redis-backed implementation
+      // Redis-backed implementation with slot-transition flushing
+      // Flush previous slot when transitioning to a new slot (ensures data appears immediately in charts)
+      if (this.redisCurrentSlot !== null && this.redisCurrentSlot !== timeSlot) {
+        // Slot transition detected - flush old slot to database immediately
+        await this.flush();
+      }
+      this.redisCurrentSlot = timeSlot;
+
       const key = `pool:shares:${timeSlot}`;
 
       // Atomically increment accepted/rejected shares
