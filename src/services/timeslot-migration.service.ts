@@ -29,7 +29,7 @@ export class TimeslotMigrationService implements OnModuleInit {
   private readonly MIGRATION_KEY = 'TIMESLOT_END_TIME_MIGRATION_V2_COMPLETED';
   private readonly MIGRATION_LOCK_KEY = 'TIMESLOT_MIGRATION_LOCK';
   private readonly TIME_SLOT_DURATION_MS = 10 * 60 * 1000; // 10 minutes
-  private readonly LOCK_TTL_SECONDS = 300; // 5 minutes max migration time
+  private readonly LOCK_TTL_SECONDS = 900; // 15 minutes max migration time (73k+ timeslots)
 
   constructor(
     private readonly dataSource: DataSource,
