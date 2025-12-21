@@ -36,10 +36,10 @@ export class StatisticsBatchService implements OnModuleInit, OnModuleDestroy {
       10,
     );
 
-    // Default: 5 minutes (300000ms)
+    // Default: 1 minute (60000ms) - reduced from 5 minutes for faster slot updates
     this.flushIntervalMs = Number.isFinite(configuredInterval) && configuredInterval > 0
       ? configuredInterval
-      : 5 * 60 * 1000;
+      : 60 * 1000;
   }
 
   async onModuleInit(): Promise<void> {

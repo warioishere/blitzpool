@@ -22,6 +22,7 @@ FROM gcr.io/distroless/cc-debian11:nonroot
 COPY --chown=1000:1000 --from=build /app /app
 
 # Expose port 8332/18332 for RPC and 8333/18333 for peer connections
+EXPOSE 28332
 EXPOSE 8332 8333
 EXPOSE 18332 18333
 
@@ -35,4 +36,3 @@ USER 1000:1000
 # Additional arguments can be passed to bitcoind via CMD
 # For example, to run in testnet mode, use docker run with the argument `-testnet`
 CMD ["-printtoconsole", "-datadir=/app/data"]
-

@@ -27,7 +27,7 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
   private instanceId: string;
   private readonly COLLECTION_INTERVAL_MS = 60000; // 60 seconds
   private readonly HEARTBEAT_INTERVAL_MS = 30000; // 30 seconds
-  private readonly AGGREGATION_INTERVAL_MS = 10000; // 10 seconds
+  private readonly AGGREGATION_INTERVAL_MS = 30000; // 30 seconds (reduced from 10s to lower CPU load)
   private readonly RETENTION_HOURS = 24;
   private readonly RETENTION_SECONDS = this.RETENTION_HOURS * 3600;
   private readonly INSTANCE_TIMEOUT_MS = 120000; // 2 minutes - if no heartbeat, consider dead
@@ -56,6 +56,34 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
     @Optional() @Inject(CACHE_MANAGER) private readonly cacheManager?: Cache,
   ) {
     this.instanceId = process.env.NODE_APP_INSTANCE ?? '0';
+  }
+
+  /**
+   * Scan Redis keys using cursor-based iteration (non-blocking)
+   * This is the production-safe alternative to KEYS command
+   */
+  private async scanKeys(pattern: string): Promise<string[]> {
+    if (!this.redis) return [];
+
+    const keys: string[] = [];
+    let cursor = 0;
+
+    try {
+      do {
+        const result = await this.redis.scan(cursor, {
+          MATCH: pattern,
+          COUNT: 100, // Scan in batches of 100
+        });
+
+        cursor = result.cursor;
+        keys.push(...result.keys);
+      } while (cursor !== 0);
+
+      return keys;
+    } catch (error) {
+      console.error(`[LiveHashrate] Error scanning keys with pattern ${pattern}:`, error);
+      return [];
+    }
   }
 
   async onModuleInit() {
@@ -221,7 +249,7 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
 
       // Find all timestamps that have partial data from any instance
       // Look for keys like: livehash:i:*:addr:*:*
-      const allPartialKeys = await this.redis.keys(`${this.INSTANCE_PREFIX}:*:addr:*:*`);
+      const allPartialKeys = await this.scanKeys(`${this.INSTANCE_PREFIX}:*:addr:*:*`);
 
       const recentTimestamps = new Set<number>();
       for (const key of allPartialKeys) {
@@ -282,7 +310,7 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
       }>();
 
       // Find all partial address data for this timestamp
-      const addressPartialKeys = await this.redis.keys(
+      const addressPartialKeys = await this.scanKeys(
         `${this.INSTANCE_PREFIX}:*:addr:*:${timestamp}`
       );
 
@@ -382,7 +410,7 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
     if (!this.redis) return new Set([this.instanceId]);
 
     try {
-      const heartbeatKeys = await this.redis.keys(`${this.HEARTBEAT_PREFIX}:*`);
+      const heartbeatKeys = await this.scanKeys(`${this.HEARTBEAT_PREFIX}:*`);
       const activeInstances = new Set<string>();
 
       for (const key of heartbeatKeys) {
@@ -598,7 +626,7 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
 
       // Get all aggregated pool keys within the time range
       // Pattern: livehash:pool:{timestamp}
-      const keys = await this.redis.keys(`${this.POOL_PREFIX}:*`);
+      const keys = await this.scanKeys(`${this.POOL_PREFIX}:*`);
       const dataPoints: Array<{ label: number; data: number }> = [];
 
       for (const key of keys) {
@@ -656,7 +684,7 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
 
       // Get all aggregated address keys for this address
       // Pattern: livehash:addr:{address}:{timestamp}
-      const keys = await this.redis.keys(`${this.ADDR_PREFIX}:${address}:*`);
+      const keys = await this.scanKeys(`${this.ADDR_PREFIX}:${address}:*`);
       const dataPoints: Array<{ label: number; data: number }> = [];
 
       for (const key of keys) {

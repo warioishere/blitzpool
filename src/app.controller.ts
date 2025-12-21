@@ -63,12 +63,12 @@ export class AppController {
     poolInfo: parseInt(this.configService.get('API_CACHE_TTL_POOL_INFO') ?? '600'),
     coreInfo: parseInt(this.configService.get('API_CACHE_TTL_CORE_INFO') ?? '60'),
     peerInfo: parseInt(this.configService.get('API_CACHE_TTL_PEER_INFO') ?? '60'),
-    chart: parseInt(this.configService.get('API_CACHE_TTL_CHART') ?? '300'), // Reduced from 1800s to 300s for more responsive charts
+    chart: parseInt(this.configService.get('API_CACHE_TTL_CHART') ?? '60'), // Reduced from 300s to 60s for immediate slot updates
     liveChart: parseInt(this.configService.get('API_CACHE_TTL_LIVE_CHART') ?? '5'),
     shares: parseInt(this.configService.get('API_CACHE_TTL_SHARES') ?? '600'),
     workers: parseInt(this.configService.get('API_CACHE_TTL_WORKERS') ?? '1800'),
-    accepted: parseInt(this.configService.get('API_CACHE_TTL_ACCEPTED') ?? '300'), // Reduced from 600s to match chart TTL
-    rejected: parseInt(this.configService.get('API_CACHE_TTL_REJECTED') ?? '300'), // Reduced from 600s to match chart TTL
+    accepted: parseInt(this.configService.get('API_CACHE_TTL_ACCEPTED') ?? '60'), // Reduced from 300s to 60s for immediate slot updates
+    rejected: parseInt(this.configService.get('API_CACHE_TTL_REJECTED') ?? '60'), // Reduced from 300s to 60s for immediate slot updates
   };
 
   constructor(
