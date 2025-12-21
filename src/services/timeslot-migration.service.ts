@@ -14,11 +14,12 @@ import { DataSource } from 'typeorm';
  * This provides more intuitive labeling and reduces perceived lag by ~10 minutes.
  *
  * Migration:
- * - Adds 10 minutes (600000ms) to all time values in:
+ * - Adds 10 minutes (600000ms) to time values in last 8 days only:
  *   - client_statistics_entity
  *   - pool_share_statistics_entity
  *   - pool_rejected_statistics_entity
  *   - client_rejected_statistics_entity
+ * - Older data is not migrated (not displayed in UI, will be cleaned up later)
  * - Clears stale Redis keys (pool:rejected:*, pool:shares:*) BEFORE database migration
  * - Uses distributed locking to prevent multiple PM2 instances from running simultaneously
  * - Runs once on startup, tracks completion via migration flag in database
@@ -29,7 +30,7 @@ export class TimeslotMigrationService implements OnModuleInit {
   private readonly MIGRATION_KEY = 'TIMESLOT_END_TIME_MIGRATION_V2_COMPLETED';
   private readonly MIGRATION_LOCK_KEY = 'TIMESLOT_MIGRATION_LOCK';
   private readonly TIME_SLOT_DURATION_MS = 10 * 60 * 1000; // 10 minutes
-  private readonly LOCK_TTL_SECONDS = 900; // 15 minutes max migration time (73k+ timeslots)
+  private readonly LOCK_TTL_SECONDS = 900; // 15 minutes max migration time (safety buffer)
 
   constructor(
     private readonly dataSource: DataSource,
@@ -122,6 +123,12 @@ export class TimeslotMigrationService implements OnModuleInit {
         return;
       }
 
+      // Calculate cutoff time: only migrate data from last 8 days
+      // Older data is not displayed in UI and will eventually be cleaned up
+      const DAYS_TO_MIGRATE = 8;
+      const cutoffTime = Date.now() - (DAYS_TO_MIGRATE * 24 * 60 * 60 * 1000);
+      console.log(`[TimeslotMigration] Only migrating timeslots from last ${DAYS_TO_MIGRATE} days (cutoff: ${new Date(cutoffTime).toISOString()})`);
+
       // Perform the migration: add 10 minutes to all time values
       // This changes labeling from start-time to end-time
       // IMPORTANT: Update in DESCENDING order to avoid UNIQUE constraint violations
@@ -129,10 +136,16 @@ export class TimeslotMigrationService implements OnModuleInit {
         if (tableCounts[table] > 0) {
           console.log(`[TimeslotMigration] Migrating ${table}...`);
 
-          // Get all time values in descending order
+          // Get time values from last 8 days in descending order
           const timeValues = await queryRunner.query(
-            `SELECT DISTINCT time FROM ${table} ORDER BY time DESC`
+            `SELECT DISTINCT time FROM ${table} WHERE time > ? ORDER BY time DESC`,
+            [cutoffTime]
           );
+
+          if (timeValues.length === 0) {
+            console.log(`[TimeslotMigration] ⚠️  No recent timeslots to migrate in ${table}`);
+            continue;
+          }
 
           // Update each time value individually, starting from highest
           let updated = 0;
@@ -147,7 +160,7 @@ export class TimeslotMigrationService implements OnModuleInit {
             updated++;
           }
 
-          console.log(`[TimeslotMigration] ✓ Updated ${updated.toLocaleString()} unique time slots in ${table}`);
+          console.log(`[TimeslotMigration] ✓ Updated ${updated.toLocaleString()} unique time slots in ${table} (out of ${tableCounts[table].toLocaleString()} total)`);
         }
       }
 
