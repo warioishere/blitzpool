@@ -57,19 +57,9 @@ export class PoolRejectedStatisticsService implements OnModuleInit, OnModuleDest
         this.useRedis = true;
         console.log('[PoolRejectedStatisticsService] Using Redis for shared state across PM2 workers');
 
-        // Flush any stale pool:rejected:* keys to database on startup, then clean up
-        try {
-          const staleKeys = await this.redisClient.keys('pool:rejected:*');
-          if (staleKeys && staleKeys.length > 0) {
-            console.log(`[PoolRejectedStatisticsService] Found ${staleKeys.length} stale Redis keys on startup, flushing to database first`);
-            await this.mutex.runExclusive(async () => {
-              await this.saveCurrent();
-            });
-            console.log(`[PoolRejectedStatisticsService] Stale keys flushed and cleaned up successfully`);
-          }
-        } catch (redisError) {
-          console.warn('[PoolRejectedStatisticsService] Failed to flush stale Redis keys on startup:', redisError);
-        }
+        // NOTE: We do NOT flush stale keys on startup anymore
+        // TimeslotMigrationService clears all Redis keys BEFORE migrating the database
+        // This prevents race conditions where old-format data is flushed during/after migration
       } else {
         console.log('[PoolRejectedStatisticsService] Redis not available, using in-memory state');
       }

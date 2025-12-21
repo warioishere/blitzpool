@@ -45,3 +45,6 @@ full-setup/public-pool-*.env
 
 #https
 **.pem
+
+# Claude Code memory (local, not shared)
+.claude.local.md

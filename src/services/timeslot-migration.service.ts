@@ -19,14 +19,17 @@ import { DataSource } from 'typeorm';
  *   - pool_share_statistics_entity
  *   - pool_rejected_statistics_entity
  *   - client_rejected_statistics_entity
- * - Clears stale Redis keys (pool:rejected:*, pool:shares:*) to prevent conflicts
- * - Runs once on startup, tracks completion via migration flag file
- * - Safe to run multiple times (idempotent)
+ * - Clears stale Redis keys (pool:rejected:*, pool:shares:*) BEFORE database migration
+ * - Uses distributed locking to prevent multiple PM2 instances from running simultaneously
+ * - Runs once on startup, tracks completion via migration flag in database
+ * - Safe to run with multiple PM2 workers - only one instance will perform migration
  */
 @Injectable()
 export class TimeslotMigrationService implements OnModuleInit {
   private readonly MIGRATION_KEY = 'TIMESLOT_END_TIME_MIGRATION_V2_COMPLETED';
+  private readonly MIGRATION_LOCK_KEY = 'TIMESLOT_MIGRATION_LOCK';
   private readonly TIME_SLOT_DURATION_MS = 10 * 60 * 1000; // 10 minutes
+  private readonly LOCK_TTL_SECONDS = 300; // 5 minutes max migration time
 
   constructor(
     private readonly dataSource: DataSource,
@@ -45,13 +48,23 @@ export class TimeslotMigrationService implements OnModuleInit {
   }
 
   private async runMigration(): Promise<void> {
-    // Check if migration already completed
+    // Check if migration already completed (fast path - no locking needed)
     const completed = await this.checkMigrationCompleted();
     if (completed) {
       console.log('[TimeslotMigration] ✓ Already completed, skipping');
       return;
     }
 
+    // Try to acquire distributed lock (prevents multiple PM2 instances from migrating)
+    const lockAcquired = await this.acquireMigrationLock();
+    if (!lockAcquired) {
+      console.log('[TimeslotMigration] Another instance is running migration, waiting for completion...');
+      await this.waitForMigrationCompletion();
+      console.log('[TimeslotMigration] ✓ Migration completed by another instance');
+      return;
+    }
+
+    console.log('[TimeslotMigration] ✓ Acquired migration lock');
     console.log('[TimeslotMigration] Starting time slot adjustment migration...');
     const startTime = Date.now();
 
@@ -59,6 +72,12 @@ export class TimeslotMigrationService implements OnModuleInit {
     await queryRunner.connect();
 
     try {
+      // CRITICAL: Clear Redis keys BEFORE migrating database
+      // This prevents old-format data from being flushed during/after migration
+      console.log('[TimeslotMigration] Step 1: Clearing stale Redis keys...');
+      await this.clearRedisStatisticsKeys();
+      console.log('[TimeslotMigration] ✓ Redis keys cleared');
+
       // Start transaction for safety
       await queryRunner.startTransaction();
 
@@ -142,22 +161,23 @@ export class TimeslotMigrationService implements OnModuleInit {
       console.log(`[TimeslotMigration] ✓ Migration completed successfully in ${duration}s`);
       console.log('[TimeslotMigration] Time slots now use end-time labeling (e.g., "20:50" contains data from 20:40-20:50)');
 
-      // Clear Redis statistics keys to prevent stale old-format keys from being flushed
-      await this.clearRedisStatisticsKeys();
-
     } catch (error) {
       // Rollback on error
       await queryRunner.rollbackTransaction();
+      console.error('[TimeslotMigration] Migration failed, rolling back:', error);
       throw error;
     } finally {
       await queryRunner.release();
+      // Always release the lock, even on error
+      await this.releaseMigrationLock();
     }
   }
 
   /**
    * Clear Redis keys used for pool statistics
    *
-   * After migration, any existing Redis keys use the old time slot format.
+   * CRITICAL: This must be called BEFORE migrating the database.
+   * Any existing Redis keys use the old time slot format (start-time).
    * We must clear them to prevent old-format keys from being flushed to the
    * freshly migrated database, which would create inconsistent data.
    */
@@ -193,9 +213,91 @@ export class TimeslotMigrationService implements OnModuleInit {
         console.log('[TimeslotMigration] No stale Redis keys found, cleanup not needed');
       }
     } catch (error) {
-      // Don't fail the migration if Redis cleanup fails
-      console.warn('[TimeslotMigration] Failed to clear Redis keys (non-critical):', error);
-      console.warn('[TimeslotMigration] You may want to manually clear pool:rejected:* and pool:shares:* keys');
+      // Redis cleanup failure is CRITICAL - we must not continue
+      console.error('[TimeslotMigration] CRITICAL: Failed to clear Redis keys:', error);
+      throw new Error('Failed to clear Redis keys before migration - this would cause data corruption');
+    }
+  }
+
+  /**
+   * Acquire distributed lock for migration
+   * Uses Redis SET NX EX for atomic lock acquisition
+   * Returns true if lock acquired, false if another instance holds the lock
+   */
+  private async acquireMigrationLock(): Promise<boolean> {
+    try {
+      const store: any = this.cacheManager.store;
+      if (!store || !store.client) {
+        // No Redis - fall back to database-level locking via transactions
+        console.log('[TimeslotMigration] Redis not available, using database-level locking');
+        return true;
+      }
+
+      const redisClient = store.client;
+      const instanceId = process.env.pm_id || `node-${process.pid}`;
+
+      // SET key value NX EX seconds - atomic operation
+      // NX: Only set if key doesn't exist
+      // EX: Set expiry time (auto-release if migration crashes)
+      const result = await redisClient.set(
+        this.MIGRATION_LOCK_KEY,
+        instanceId,
+        'NX',
+        'EX',
+        this.LOCK_TTL_SECONDS
+      );
+
+      return result === 'OK';
+    } catch (error) {
+      console.error('[TimeslotMigration] Failed to acquire lock:', error);
+      // On error, assume we can't acquire lock (safe default)
+      return false;
+    }
+  }
+
+  /**
+   * Release migration lock
+   */
+  private async releaseMigrationLock(): Promise<void> {
+    try {
+      const store: any = this.cacheManager.store;
+      if (!store || !store.client) {
+        return;
+      }
+
+      const redisClient = store.client;
+      await redisClient.del(this.MIGRATION_LOCK_KEY);
+      console.log('[TimeslotMigration] ✓ Released migration lock');
+    } catch (error) {
+      console.warn('[TimeslotMigration] Failed to release lock (non-critical):', error);
+    }
+  }
+
+  /**
+   * Wait for migration to complete (by another instance)
+   * Polls the migration completion flag with exponential backoff
+   */
+  private async waitForMigrationCompletion(): Promise<void> {
+    const maxWaitSeconds = this.LOCK_TTL_SECONDS + 60; // Lock TTL + buffer
+    const startTime = Date.now();
+    let delay = 1000; // Start with 1 second
+
+    while (true) {
+      // Check if migration completed
+      const completed = await this.checkMigrationCompleted();
+      if (completed) {
+        return;
+      }
+
+      // Check timeout
+      const elapsed = (Date.now() - startTime) / 1000;
+      if (elapsed > maxWaitSeconds) {
+        throw new Error(`Migration did not complete within ${maxWaitSeconds}s - possible deadlock or failure`);
+      }
+
+      // Wait with exponential backoff (max 10 seconds)
+      await new Promise(resolve => setTimeout(resolve, delay));
+      delay = Math.min(delay * 1.5, 10000);
     }
   }
 
