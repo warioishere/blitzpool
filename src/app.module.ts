@@ -127,7 +127,7 @@ const ORMModules = [
         PushController
     ],
     providers: [
-        TimeslotMigrationService, // Must run first on startup
+        // TimeslotMigrationService, // Disabled - migration incomplete, leaving data in mixed state
         DiscordService,
         AppService,
         WorkerResetBroadcastService,
