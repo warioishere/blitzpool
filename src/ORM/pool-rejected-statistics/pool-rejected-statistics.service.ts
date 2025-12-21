@@ -35,9 +35,6 @@ export class PoolRejectedStatisticsService implements OnModuleInit, OnModuleDest
   private lastSave: number = null;
   private counts: Map<string, number> = new Map();
 
-  // Track current slot for Redis mode (for slot-transition flushing)
-  private redisCurrentSlot: number = null;
-
   // Anomaly detection state (per-worker, doesn't need to be shared)
   private recentDiffs: Map<string, number[]> = new Map();
   private readonly anomalousDiffDetectionEnabled: boolean;
@@ -167,14 +164,7 @@ export class PoolRejectedStatisticsService implements OnModuleInit, OnModuleDest
       }
 
       if (this.useRedis && this.redisClient) {
-        // Redis-backed implementation with slot-transition flushing
-        // Flush previous slot when transitioning to a new slot (ensures data appears immediately in charts)
-        if (this.redisCurrentSlot !== null && this.redisCurrentSlot !== timeSlot) {
-          // Slot transition detected - flush old slot to database immediately
-          await this.saveCurrent();
-        }
-        this.redisCurrentSlot = timeSlot;
-
+        // Redis-backed implementation
         const key = `pool:rejected:${timeSlot}`;
 
         // Atomically increment count for this reason
