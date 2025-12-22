@@ -26,6 +26,7 @@ export class StatisticsBatchService implements OnModuleInit, OnModuleDestroy {
   private flushTimer?: NodeJS.Timeout;
   private flushIntervalMs: number;
   private isFlushing = false;
+  private currentTimeSlot: number | null = null; // Track current slot for transition detection
 
   constructor(
     private readonly clientStatisticsService: ClientStatisticsService,
@@ -75,13 +76,50 @@ export class StatisticsBatchService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Get current time slot (10-minute intervals, end-time labeled)
+   */
+  private getTimeSlot(): number {
+    const coeff = 1000 * 60 * 10; // 10 minutes
+    // Time slot labeled by END time (e.g., slot "20:50" contains data from 20:40-20:50)
+    return Math.floor(Date.now() / coeff) * coeff + coeff;
+  }
+
+  /**
+   * Check for time slot transition and flush if needed
+   * Flush is non-blocking to avoid blocking share processing
+   */
+  private checkAndHandleSlotTransition(): void {
+    const currentSlot = this.getTimeSlot();
+
+    // First call or same slot - no transition
+    if (this.currentTimeSlot === null || this.currentTimeSlot === currentSlot) {
+      this.currentTimeSlot = currentSlot;
+      return;
+    }
+
+    // Slot transition detected - flush old data immediately (non-blocking)
+    console.log(`[StatisticsBatch] Slot transition detected (${this.currentTimeSlot} -> ${currentSlot}), flushing immediately`);
+    this.currentTimeSlot = currentSlot;
+
+    // Flush asynchronously to ensure completed slot data is written to DB
+    // Don't block share processing while flushing
+    this.flush().catch((error) => {
+      console.error('[StatisticsBatch] Slot transition flush failed:', error);
+    });
+  }
+
+  /**
    * Queue a statistics update (for existing records)
+   * Automatically flushes if a time slot transition is detected
    */
   public queueUpdate(payload: Partial<ClientStatisticsEntity>): void {
     if (!payload.address || !payload.clientName || !payload.sessionId || !payload.time) {
       console.warn('StatisticsBatchService: Invalid update payload, missing required fields');
       return;
     }
+
+    // Check for slot transition and flush if needed (non-blocking)
+    this.checkAndHandleSlotTransition();
 
     const key = this.getKey(
       payload.address,
@@ -98,12 +136,16 @@ export class StatisticsBatchService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Queue a statistics insert (for new records)
+   * Automatically flushes if a time slot transition is detected
    */
   public queueInsert(payload: Partial<ClientStatisticsEntity>): void {
     if (!payload.address || !payload.clientName || !payload.sessionId || !payload.time) {
       console.warn('StatisticsBatchService: Invalid insert payload, missing required fields');
       return;
     }
+
+    // Check for slot transition and flush if needed (non-blocking)
+    this.checkAndHandleSlotTransition();
 
     const key = this.getKey(
       payload.address,

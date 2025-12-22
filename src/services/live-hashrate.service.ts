@@ -27,7 +27,8 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
   private instanceId: string;
   private readonly COLLECTION_INTERVAL_MS = 60000; // 60 seconds
   private readonly HEARTBEAT_INTERVAL_MS = 30000; // 30 seconds
-  private readonly AGGREGATION_INTERVAL_MS = 30000; // 30 seconds (reduced from 10s to lower CPU load)
+  private readonly AGGREGATION_INTERVAL_MS = 180000; // 3 minutes (reduced from 30s to prevent CPU spikes)
+  private readonly AGGREGATION_LOCK_TTL_MS = 200000; // 200 seconds (longer than interval to prevent overlaps)
   private readonly RETENTION_HOURS = 24;
   private readonly RETENTION_SECONDS = this.RETENTION_HOURS * 3600;
   private readonly INSTANCE_TIMEOUT_MS = 120000; // 2 minutes - if no heartbeat, consider dead
@@ -35,6 +36,7 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
   private readonly ADDR_PREFIX = 'livehash:addr';
   private readonly INSTANCE_PREFIX = 'livehash:i';
   private readonly HEARTBEAT_PREFIX = 'livehash:hb';
+  private readonly AGGREGATION_LOCK_KEY = 'livehash:agg:lock';
   private readonly SYNC_CHANNEL = 'livehash:sync';
 
   // Local tracking
@@ -230,14 +232,65 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Try to acquire the aggregation lock
+   * Only one PM2 instance should aggregate at a time to prevent CPU spikes
+   * @returns true if lock was acquired, false otherwise
+   */
+  private async tryAcquireAggregationLock(): Promise<boolean> {
+    if (!this.redis) return false;
+
+    try {
+      // Use SET with NX (only set if not exists) and PX (milliseconds expiry)
+      const result = await this.redis.set(
+        this.AGGREGATION_LOCK_KEY,
+        this.instanceId,
+        {
+          NX: true, // Only set if key doesn't exist
+          PX: this.AGGREGATION_LOCK_TTL_MS, // Auto-expire after TTL
+        }
+      );
+
+      // SET returns 'OK' if successful, null if key already exists
+      return result === 'OK';
+    } catch (error) {
+      console.error('[LiveHashrate] Failed to acquire aggregation lock:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Release the aggregation lock
+   * Should be called after aggregation completes
+   */
+  private async releaseAggregationLock(): Promise<void> {
+    if (!this.redis) return;
+
+    try {
+      await this.redis.del(this.AGGREGATION_LOCK_KEY);
+      console.log(`[LiveHashrate] Instance ${this.instanceId} released aggregation lock`);
+    } catch (error) {
+      console.error('[LiveHashrate] Failed to release aggregation lock:', error);
+    }
+  }
+
+  /**
    * Aggregate data from all instances into final hashrate values
    * Finds all timestamps with partial data and creates aggregated records
    *
    * OPTIMIZED: Single-pass SCAN with in-memory grouping to avoid nested SCAN loops
+   * OPTIMIZED: Only one PM2 instance aggregates at a time using Redis lock
    */
   private async aggregateInstanceData(): Promise<void> {
     if (!this.redis) return;
 
+    // Try to acquire lock - if another instance is aggregating, skip
+    const lockAcquired = await this.tryAcquireAggregationLock();
+    if (!lockAcquired) {
+      console.log(`[LiveHashrate] Instance ${this.instanceId} skipping aggregation (another instance holds the lock)`);
+      return;
+    }
+
+    console.log(`[LiveHashrate] Instance ${this.instanceId} acquired aggregation lock`);
     this.aggregationMetrics.totalAggregations++;
 
     try {
@@ -288,6 +341,9 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
     } catch (error) {
       this.aggregationMetrics.failedAggregations++;
       this.logAggregationError(`Aggregation failed: ${error}`);
+    } finally {
+      // CRITICAL: Always release the lock, even if aggregation failed
+      await this.releaseAggregationLock();
     }
   }
 
