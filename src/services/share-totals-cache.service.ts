@@ -518,17 +518,10 @@ export class ShareTotalsCacheService implements OnModuleDestroy, OnModuleInit {
           return;
         }
 
-        // Check if any worker data already exists in Redis
-        const pattern = `shares:worker:${address}:*`;
-        const existingWorkerKeys = await this.redisClient.keys(pattern);
-        const dataExists = existingWorkerKeys.some(key => !key.endsWith(':hydrated') && !key.endsWith(':lock'));
-
-        if (dataExists) {
-          // Worker data still exists, just refresh the hydration marker
-          // This prevents unnecessary DB queries and preserves accumulated deltas
-          await this.redisClient.set(hydrationKey, '1', { EX: 3600 });
-          return;
-        }
+        // Note: We always re-hydrate all workers when the marker expires because
+        // the bulk hydration logic (lines 544-553) already safely preserves deltas
+        // using Math.max for baseline and keeping existing delta values. This ensures
+        // we pick up any new workers that appeared in the DB while preserving shares.
 
         const lockKey = `${hydrationKey}:lock`;
         const lockAcquired = await this.redisClient.set(lockKey, '1', {
