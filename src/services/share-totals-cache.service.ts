@@ -386,6 +386,15 @@ export class ShareTotalsCacheService implements OnModuleDestroy, OnModuleInit {
         return;
       }
 
+      // Check if data already exists in Redis (hydration marker may have expired)
+      const dataExists = await this.redisClient.exists(addressKey);
+      if (dataExists) {
+        // Data still exists, just refresh the hydration marker to prevent re-loading
+        // This preserves any accumulated delta and prevents data loss
+        await this.redisClient.set(hydrationKey, '1', { EX: 3600 });
+        return;
+      }
+
       // Use a Redis lock to prevent concurrent hydration
       const lockKey = `${hydrationKey}:lock`;
       const lockAcquired = await this.redisClient.set(lockKey, '1', {
@@ -458,6 +467,15 @@ export class ShareTotalsCacheService implements OnModuleDestroy, OnModuleInit {
           return;
         }
 
+        // Check if data already exists in Redis (hydration marker may have expired)
+        const dataExists = await this.redisClient.exists(workerKey);
+        if (dataExists) {
+          // Data still exists, just refresh the hydration marker to prevent re-loading
+          // This preserves any accumulated delta and prevents data loss
+          await this.redisClient.set(hydrationKey, '1', { EX: 3600 });
+          return;
+        }
+
         const lockKey = `${hydrationKey}:lock`;
         const lockAcquired = await this.redisClient.set(lockKey, '1', {
           NX: true,
@@ -497,6 +515,18 @@ export class ShareTotalsCacheService implements OnModuleDestroy, OnModuleInit {
         const hydrationKey = this.getWorkerHydrationKey(address);
         const isHydrated = await this.redisClient.get(hydrationKey);
         if (isHydrated) {
+          return;
+        }
+
+        // Check if any worker data already exists in Redis
+        const pattern = `shares:worker:${address}:*`;
+        const existingWorkerKeys = await this.redisClient.keys(pattern);
+        const dataExists = existingWorkerKeys.some(key => !key.endsWith(':hydrated') && !key.endsWith(':lock'));
+
+        if (dataExists) {
+          // Worker data still exists, just refresh the hydration marker
+          // This prevents unnecessary DB queries and preserves accumulated deltas
+          await this.redisClient.set(hydrationKey, '1', { EX: 3600 });
           return;
         }
 
