@@ -40,7 +40,8 @@ export class PushSubscriptionService {
                 subscriptionType,
                 bestDiffNotificationsEnabled: true,
                 deviceNotificationsEnabled: true,
-                blockNotificationsEnabled: true
+                blockNotificationsEnabled: true,
+                networkDiffNotificationsEnabled: true
             });
             return await this.pushSubscriptionRepository.save(newSubscription);
         }
@@ -104,7 +105,8 @@ export class PushSubscriptionService {
         endpoint: string,
         bestDiffNotifications?: boolean,
         deviceNotifications?: boolean,
-        blockNotifications?: boolean
+        blockNotifications?: boolean,
+        networkDiffNotifications?: boolean
     ): Promise<void> {
         const updates: any = {};
         if (bestDiffNotifications !== undefined) {
@@ -116,11 +118,15 @@ export class PushSubscriptionService {
         if (blockNotifications !== undefined) {
             updates.blockNotificationsEnabled = blockNotifications;
         }
+        if (networkDiffNotifications !== undefined) {
+            updates.networkDiffNotificationsEnabled = networkDiffNotifications;
+        }
 
         console.log(`[PushSubscriptionService] Updating preferences for ${address.substring(0, 20)}... with:`, {
             bestDiffNotifications,
             deviceNotifications,
             blockNotifications,
+            networkDiffNotifications,
             updates
         });
 
@@ -131,7 +137,7 @@ export class PushSubscriptionService {
         // Verify the update
         const updated = await this.pushSubscriptionRepository.findOne({ where: { address, endpoint } });
         if (updated) {
-            console.log(`[PushSubscriptionService] After update: bestDiff=${updated.bestDiffNotificationsEnabled}, device=${updated.deviceNotificationsEnabled}, block=${updated.blockNotificationsEnabled}`);
+            console.log(`[PushSubscriptionService] After update: bestDiff=${updated.bestDiffNotificationsEnabled}, device=${updated.deviceNotificationsEnabled}, block=${updated.blockNotificationsEnabled}, networkDiff=${updated.networkDiffNotificationsEnabled}`);
         }
     }
 
@@ -271,5 +277,29 @@ export class PushSubscriptionService {
         subscriptionType: PushSubscriptionType
     ): Promise<void> {
         await this.pushSubscriptionRepository.delete({ address, subscriptionType });
+    }
+
+    /**
+     * Get Unified Push subscriptions with network difficulty notifications enabled
+     */
+    public async getUnifiedPushWithNetworkDiffNotifications(): Promise<PushSubscriptionEntity[]> {
+        return await this.pushSubscriptionRepository.find({
+            where: {
+                subscriptionType: PushSubscriptionType.UNIFIED_PUSH,
+                networkDiffNotificationsEnabled: true
+            }
+        });
+    }
+
+    /**
+     * Get FCM subscriptions with network difficulty notifications enabled
+     */
+    public async getFcmWithNetworkDiffNotifications(): Promise<PushSubscriptionEntity[]> {
+        return await this.pushSubscriptionRepository.find({
+            where: {
+                subscriptionType: PushSubscriptionType.FCM,
+                networkDiffNotificationsEnabled: true
+            }
+        });
     }
 }

@@ -39,4 +39,7 @@ export class PushSubscriptionEntity extends TrackedEntity {
 
     @Column({ default: true })
     blockNotificationsEnabled: boolean;
+
+    @Column({ default: true })
+    networkDiffNotificationsEnabled: boolean;
 }

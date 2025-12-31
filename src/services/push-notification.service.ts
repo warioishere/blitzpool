@@ -6,6 +6,7 @@ import axios from 'axios';
 
 import { PushSubscriptionService } from '../ORM/push-subscriptions/push-subscription.service';
 import { BestDifficultyTrackerService } from '../ORM/best-difficulty-tracker/best-difficulty-tracker.service';
+import { NetworkDifficultyTrackerService } from '../ORM/network-difficulty-tracker/network-difficulty-tracker.service';
 import { AddressSettingsService } from '../ORM/address-settings/address-settings.service';
 import { FcmService } from './fcm.service';
 import { PushSubscriptionType } from '../ORM/push-subscriptions/push-subscription-type.enum';
@@ -21,6 +22,7 @@ export class PushNotificationService implements OnModuleInit {
         private readonly configService: ConfigService,
         private readonly pushSubscriptionService: PushSubscriptionService,
         private readonly trackerService: BestDifficultyTrackerService,
+        private readonly networkDiffTrackerService: NetworkDifficultyTrackerService,
         private readonly addressSettingsService: AddressSettingsService,
         private readonly fcmService: FcmService,
     ) {
@@ -539,6 +541,198 @@ export class PushNotificationService implements OnModuleInit {
                 }
             } catch (error: any) {
                 console.error(`[PushNotification] Error sending FCM block notification:`, error.message);
+            }
+        }
+    }
+
+    /**
+     * Fetch current network difficulty from mempool.space API
+     */
+    private async fetchNetworkDifficulty(): Promise<number | null> {
+        try {
+            const response = await axios.get('https://mempool.space/api/v1/mining/hashrate/3d', {
+                timeout: 10000
+            });
+
+            if (response.data && response.data.currentDifficulty) {
+                return response.data.currentDifficulty;
+            }
+
+            console.error('[PushNotification] Failed to get currentDifficulty from API response');
+            return null;
+        } catch (error: any) {
+            console.error('[PushNotification] Error fetching network difficulty:', error.message);
+            return null;
+        }
+    }
+
+    /**
+     * Calculate percentage change between two values
+     */
+    private calculatePercentageChange(oldValue: number, newValue: number): number {
+        return ((newValue - oldValue) / oldValue) * 100;
+    }
+
+    /**
+     * Check network difficulty for changes (every 10 minutes)
+     * Bitcoin difficulty adjusts approximately every 2016 blocks (~14 days)
+     */
+    @Cron('0 */10 * * * *')
+    async checkNetworkDifficulty(): Promise<void> {
+        if (!this.isPrimaryInstance) {
+            return;
+        }
+
+        try {
+            const currentDifficulty = await this.fetchNetworkDifficulty();
+
+            if (!currentDifficulty) {
+                console.error('[PushNotification] Failed to fetch network difficulty');
+                return;
+            }
+
+            const tracker = await this.networkDiffTrackerService.getTracker();
+
+            if (!tracker) {
+                // First time - initialize tracker
+                await this.networkDiffTrackerService.updateTracker(currentDifficulty, false);
+                console.log(`[PushNotification] Initialized network difficulty tracker: ${this.formatDifficulty(currentDifficulty)}`);
+                return;
+            }
+
+            // Check if difficulty has changed (allow small floating point variance)
+            const diffThreshold = 0.0001; // 0.01% threshold to avoid floating point issues
+            const diffChange = Math.abs(currentDifficulty - tracker.currentDifficulty);
+            const diffChangePercent = (diffChange / tracker.currentDifficulty) * 100;
+
+            if (diffChangePercent > diffThreshold) {
+                // Difficulty has changed!
+                const percentChange = this.calculatePercentageChange(tracker.currentDifficulty, currentDifficulty);
+                const changeDirection = percentChange > 0 ? 'increased' : 'decreased';
+
+                console.log(`[PushNotification] Network difficulty ${changeDirection}! ${this.formatDifficulty(tracker.currentDifficulty)} -> ${this.formatDifficulty(currentDifficulty)} (${percentChange > 0 ? '+' : ''}${percentChange.toFixed(2)}%)`);
+
+                // Send notifications to all subscribed users
+                await this.sendNetworkDifficultyNotifications(
+                    tracker.currentDifficulty,
+                    currentDifficulty,
+                    percentChange
+                );
+
+                // Update tracker
+                await this.networkDiffTrackerService.updateTracker(currentDifficulty, true);
+            } else {
+                // No change, just update last checked timestamp
+                await this.networkDiffTrackerService.updateTracker(currentDifficulty, false);
+            }
+        } catch (error: any) {
+            console.error('[PushNotification] Error in checkNetworkDifficulty:', error.message);
+        }
+    }
+
+    /**
+     * Send network difficulty change notifications (dispatches to both Unified Push and FCM)
+     */
+    private async sendNetworkDifficultyNotifications(
+        oldDifficulty: number,
+        newDifficulty: number,
+        percentChange: number
+    ): Promise<void> {
+        await this.sendUnifiedPushNetworkDiff(oldDifficulty, newDifficulty, percentChange);
+        await this.sendFcmNetworkDiff(oldDifficulty, newDifficulty, percentChange);
+    }
+
+    /**
+     * Send network difficulty change notification via Unified Push
+     */
+    private async sendUnifiedPushNetworkDiff(
+        oldDifficulty: number,
+        newDifficulty: number,
+        percentChange: number
+    ): Promise<void> {
+        const subscriptions = await this.pushSubscriptionService.getUnifiedPushWithNetworkDiffNotifications();
+
+        if (subscriptions.length === 0) {
+            console.log('[PushNotification] No Unified Push subscriptions with network diff enabled');
+            return;
+        }
+
+        console.log(`[PushNotification] Sending Unified Push network difficulty notification to ${subscriptions.length} endpoint(s)`);
+
+        const changeDirection = percentChange > 0 ? 'Increased' : 'Decreased';
+        const title = `Network Difficulty ${changeDirection}`;
+        const body = `Changed from ${this.formatDifficulty(oldDifficulty)} to ${this.formatDifficulty(newDifficulty)} (${percentChange > 0 ? '+' : ''}${percentChange.toFixed(2)}%)`;
+        const notificationMessage = `${title}|${body}|`;
+
+        for (const subscription of subscriptions) {
+            try {
+                const success = await this.sendPlainPost(subscription.endpoint, notificationMessage);
+
+                if (success) {
+                    console.log(`[PushNotification] Network diff notification sent to ${subscription.platform} endpoint for ${subscription.address}`);
+                } else {
+                    console.error(`[PushNotification] Failed to send network diff notification to ${subscription.endpoint}`);
+                }
+            } catch (error: any) {
+                console.error(`[PushNotification] Error sending network diff notification:`, error.message);
+            }
+        }
+    }
+
+    /**
+     * Send network difficulty change notification via FCM
+     */
+    private async sendFcmNetworkDiff(
+        oldDifficulty: number,
+        newDifficulty: number,
+        percentChange: number
+    ): Promise<void> {
+        const subscriptions = await this.pushSubscriptionService.getFcmWithNetworkDiffNotifications();
+
+        if (subscriptions.length === 0) {
+            console.log('[PushNotification] No FCM subscriptions with network diff enabled');
+            return;
+        }
+
+        console.log(`[PushNotification] Sending FCM network difficulty notification to ${subscriptions.length} device(s)`);
+
+        const changeDirection = percentChange > 0 ? 'Increased' : 'Decreased';
+        const notification = {
+            title: `Network Difficulty ${changeDirection}`,
+            body: `Changed from ${this.formatDifficulty(oldDifficulty)} to ${this.formatDifficulty(newDifficulty)} (${percentChange > 0 ? '+' : ''}${percentChange.toFixed(2)}%)`
+        };
+
+        const data = {
+            type: 'network_difficulty',
+            oldDifficulty: oldDifficulty.toString(),
+            newDifficulty: newDifficulty.toString(),
+            percentChange: percentChange.toString(),
+            formattedOldDifficulty: this.formatDifficulty(oldDifficulty),
+            formattedNewDifficulty: this.formatDifficulty(newDifficulty),
+            timestamp: Date.now().toString()
+        };
+
+        for (const subscription of subscriptions) {
+            try {
+                const result = await this.fcmService.sendNotification(
+                    subscription.endpoint,
+                    notification,
+                    data
+                );
+
+                if (result.success) {
+                    console.log(`[PushNotification] FCM network diff notification sent to ${subscription.platform} for ${subscription.address}`);
+                } else if (result.invalidToken) {
+                    await this.pushSubscriptionService.deleteInvalidFcmToken(
+                        subscription.address,
+                        subscription.endpoint
+                    );
+                    console.log(`[PushNotification] Deleted invalid FCM token for ${subscription.address}`);
+                } else {
+                    console.error(`[PushNotification] Failed to send FCM network diff notification to ${subscription.endpoint}`);
+                }
+            } catch (error: any) {
+                console.error(`[PushNotification] Error sending FCM network diff notification:`, error.message);
             }
         }
     }

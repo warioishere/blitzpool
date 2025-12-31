@@ -282,8 +282,9 @@ export class PushController {
         bestDiffNotifications?: boolean;
         deviceNotifications?: boolean;
         blockNotifications?: boolean;
+        networkDiffNotifications?: boolean;
     }) {
-        const { address, endpoint, bestDiffNotifications, deviceNotifications, blockNotifications } = body;
+        const { address, endpoint, bestDiffNotifications, deviceNotifications, blockNotifications, networkDiffNotifications } = body;
 
         if (!address || !endpoint) {
             throw new BadRequestException('Missing required fields: address, endpoint');
@@ -295,7 +296,8 @@ export class PushController {
                 endpoint,
                 bestDiffNotifications,
                 deviceNotifications,
-                blockNotifications
+                blockNotifications,
+                networkDiffNotifications
             );
 
             console.log(`[PushController] Updated notification preferences for ${address} -> ${endpoint}`);

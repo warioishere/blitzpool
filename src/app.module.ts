@@ -19,6 +19,7 @@ import { TelegramSubscriptionsModule } from './ORM/telegram-subscriptions/telegr
 import { NtfySubscriptionsModule } from './ORM/ntfy-subscriptions/ntfy-subscriptions.module';
 import { PushSubscriptionModule } from './ORM/push-subscriptions/push-subscription.module';
 import { BestDifficultyTrackerModule } from './ORM/best-difficulty-tracker/best-difficulty-tracker.module';
+import { NetworkDifficultyTrackerModule } from './ORM/network-difficulty-tracker/network-difficulty-tracker.module';
 import { AppService } from './services/app.service';
 import { BitcoinRpcService } from './services/bitcoin-rpc.service';
 import { BraiinsService } from './services/braiins.service';
@@ -60,6 +61,7 @@ const ORMModules = [
     NtfySubscriptionsModule,
     PushSubscriptionModule,
     BestDifficultyTrackerModule,
+    NetworkDifficultyTrackerModule,
     BlocksModule,
     RpcBlocksModule,
     ExternalSharesModule,
