@@ -939,7 +939,7 @@ export class StratumV1Client {
             }
             try {
                 await this.statistics.addShares(this.entity, this.sessionDifficulty);
-                await this.shareTotalsCacheService.increment(
+                this.shareTotalsCacheService.increment(
                     this.clientAuthorization.address,
                     this.clientAuthorization.worker,
                     this.sessionDifficulty,
