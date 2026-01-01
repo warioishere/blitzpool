@@ -32,6 +32,8 @@ export class CreateNtfySubscriptions1732060800000 implements MigrationInterface 
         `);
 
         // 3. Migrate NTFY-only data (where telegramChatId IS NULL) if any exist
+        // Note: hourlyStatsEnabled and hourlyWorkersEnabled don't exist in telegram_subscriptions_entity
+        // so we use default values (false) for the new ntfy_subscriptions_entity table
         await queryRunner.query(`
             INSERT INTO "ntfy_subscriptions_entity"
                 ("address", "language", "bestDiffNotificationsEnabled", "deviceNotificationsEnabled", "hourlyStatsEnabled", "hourlyWorkersEnabled", "createdAt", "updatedAt")
@@ -40,8 +42,8 @@ export class CreateNtfySubscriptions1732060800000 implements MigrationInterface 
                 'de' as "language",
                 COALESCE("bestDiffNotificationsEnabled", true) as "bestDiffNotificationsEnabled",
                 COALESCE("deviceNotificationsEnabled", false) as "deviceNotificationsEnabled",
-                COALESCE("hourlyStatsEnabled", false) as "hourlyStatsEnabled",
-                COALESCE("hourlyWorkersEnabled", false) as "hourlyWorkersEnabled",
+                false as "hourlyStatsEnabled",
+                false as "hourlyWorkersEnabled",
                 COALESCE("createdAt", now()) as "createdAt",
                 COALESCE("updatedAt", now()) as "updatedAt"
             FROM "telegram_subscriptions_entity"
@@ -74,16 +76,16 @@ export class CreateNtfySubscriptions1732060800000 implements MigrationInterface 
         `);
 
         // 2. Migrate data back from ntfy_subscriptions_entity to telegram_subscriptions_entity
+        // Note: telegram_subscriptions_entity doesn't have hourlyStatsEnabled/hourlyWorkersEnabled columns
+        // so we only migrate the columns that exist in both tables
         await queryRunner.query(`
             INSERT INTO "telegram_subscriptions_entity"
-                ("address", "telegramChatId", "bestDiffNotificationsEnabled", "deviceNotificationsEnabled", "hourlyStatsEnabled", "hourlyWorkersEnabled", "isDefault", "createdAt", "updatedAt")
+                ("address", "telegramChatId", "bestDiffNotificationsEnabled", "deviceNotificationsEnabled", "isDefault", "createdAt", "updatedAt")
             SELECT
                 "address",
                 NULL as "telegramChatId",
                 "bestDiffNotificationsEnabled",
                 "deviceNotificationsEnabled",
-                "hourlyStatsEnabled",
-                "hourlyWorkersEnabled",
                 false as "isDefault",
                 "createdAt",
                 "updatedAt"
