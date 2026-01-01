@@ -81,36 +81,38 @@ export class AddressSettingsService {
             return;
         }
 
-        // Build CASE statement for bulk update in a single SQL query
-        // This is 10-100x faster than individual UPDATEs
-        const addresses = updates.map(u => u.address);
-        const caseStatements = updates
-            .map((u, idx) => `WHEN :address_${idx} THEN :shares_${idx}`)
-            .join(' ');
+        // SQLite has a parameter limit of 999 (old versions) or 32766 (new versions)
+        // Split into batches of 400 to be safe (400 addresses + 400 shares = 800 params)
+        const BATCH_SIZE = 400;
 
-        const parameters = updates.reduce((params, u, idx) => {
-            params[`address_${idx}`] = u.address;
-            params[`shares_${idx}`] = u.shares;
-            return params;
-        }, {} as Record<string, any>);
+        for (let i = 0; i < updates.length; i += BATCH_SIZE) {
+            const batch = updates.slice(i, i + BATCH_SIZE);
 
-        const query = `
-            UPDATE address_settings_entity
-            SET shares = shares + CASE address ${caseStatements} END,
-                updatedAt = updatedAt
-            WHERE address IN (:...addresses)
-        `;
+            // Build CASE statement for bulk update
+            const caseWhenParts: string[] = [];
+            const parameters: any[] = [];
 
-        return await this.addressSettingsRepository
-            .createQueryBuilder()
-            .update(AddressSettingsEntity)
-            .set({
-                shares: () => `shares + CASE address ${caseStatements} END`,
-                updatedAt: () => '"updatedAt"',
-            })
-            .where('address IN (:...addresses)', { addresses })
-            .setParameters(parameters)
-            .execute();
+            batch.forEach((update) => {
+                caseWhenParts.push(`WHEN ? THEN ?`);
+                parameters.push(update.address, update.shares);
+            });
+
+            // Add addresses for WHERE IN clause
+            const placeholders = batch.map(() => '?').join(',');
+            const whereAddresses = batch.map(u => u.address);
+
+            const query = `
+                UPDATE address_settings_entity
+                SET shares = shares + CASE address ${caseWhenParts.join(' ')} END
+                WHERE address IN (${placeholders})
+            `;
+
+            // Execute raw query with proper parameter binding
+            await this.addressSettingsRepository.query(query, [
+                ...parameters,
+                ...whereAddresses
+            ]);
+        }
     }
 
     public async resetBestDifficultyAndShares() {
