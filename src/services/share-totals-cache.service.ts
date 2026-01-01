@@ -490,11 +490,10 @@ export class ShareTotalsCacheService implements OnModuleDestroy, OnModuleInit {
           }
         }
 
-        // Process database writes in small batches to avoid overwhelming SQLite
-        const BATCH_SIZE = 10;
-        for (let i = 0; i < pending.length; i += BATCH_SIZE) {
-          const batch = pending.slice(i, i + BATCH_SIZE);
-          await Promise.all(batch);
+        // Process database writes SERIALLY to avoid SQLITE_BUSY errors
+        // SQLite can only handle ONE write transaction at a time
+        for (const promise of pending) {
+          await promise;
         }
       } catch (error) {
         console.error('[ShareTotalsCache] Flush failed:', error);
@@ -532,11 +531,10 @@ export class ShareTotalsCacheService implements OnModuleDestroy, OnModuleInit {
         }
       }
 
-      // Process database writes in small batches to avoid overwhelming SQLite
-      const BATCH_SIZE = 10;
-      for (let i = 0; i < pending.length; i += BATCH_SIZE) {
-        const batch = pending.slice(i, i + BATCH_SIZE);
-        await Promise.all(batch);
+      // Process database writes SERIALLY to avoid SQLITE_BUSY errors
+      // SQLite can only handle ONE write transaction at a time
+      for (const promise of pending) {
+        await promise;
       }
     }
   }
