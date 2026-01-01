@@ -132,15 +132,26 @@ export class TimeslotMigrationService implements OnModuleInit {
       // Perform the migration: add 10 minutes to all time values
       // This changes labeling from start-time to end-time
       // IMPORTANT: Update in DESCENDING order to avoid UNIQUE constraint violations
+      // Detect database type for correct placeholder syntax
+      const databaseType = queryRunner.connection.options.type;
+
       for (const table of tables) {
         if (tableCounts[table] > 0) {
           console.log(`[TimeslotMigration] Migrating ${table}...`);
 
           // Get time values from last 8 days in descending order
-          const timeValues = await queryRunner.query(
-            `SELECT DISTINCT time FROM ${table} WHERE time > ? ORDER BY time DESC`,
-            [cutoffTime]
-          );
+          let timeValues;
+          if (databaseType === 'postgres') {
+            timeValues = await queryRunner.query(
+              `SELECT DISTINCT time FROM ${table} WHERE time > $1 ORDER BY time DESC`,
+              [cutoffTime]
+            );
+          } else {
+            timeValues = await queryRunner.query(
+              `SELECT DISTINCT time FROM ${table} WHERE time > ? ORDER BY time DESC`,
+              [cutoffTime]
+            );
+          }
 
           if (timeValues.length === 0) {
             console.log(`[TimeslotMigration] ⚠️  No recent timeslots to migrate in ${table}`);
@@ -154,10 +165,17 @@ export class TimeslotMigrationService implements OnModuleInit {
             const oldTime = row.time;
             const newTime = oldTime + this.TIME_SLOT_DURATION_MS;
 
-            const result = await queryRunner.query(
-              `UPDATE ${table} SET time = ? WHERE time = ? AND time > ?`,
-              [newTime, oldTime, cutoffTime]
-            );
+            if (databaseType === 'postgres') {
+              await queryRunner.query(
+                `UPDATE ${table} SET time = $1 WHERE time = $2 AND time > $3`,
+                [newTime, oldTime, cutoffTime]
+              );
+            } else {
+              await queryRunner.query(
+                `UPDATE ${table} SET time = ? WHERE time = ? AND time > ?`,
+                [newTime, oldTime, cutoffTime]
+              );
+            }
             updated++;
           }
 
@@ -324,19 +342,38 @@ export class TimeslotMigrationService implements OnModuleInit {
     await queryRunner.connect();
 
     try {
+      const databaseType = queryRunner.connection.options.type;
+
       // Create migrations table if it doesn't exist
-      await queryRunner.query(`
-        CREATE TABLE IF NOT EXISTS migrations (
-          key TEXT PRIMARY KEY,
-          completed_at INTEGER NOT NULL
-        )
-      `);
+      if (databaseType === 'postgres') {
+        await queryRunner.query(`
+          CREATE TABLE IF NOT EXISTS migrations (
+            key VARCHAR(255) PRIMARY KEY,
+            completed_at BIGINT NOT NULL
+          )
+        `);
+      } else {
+        await queryRunner.query(`
+          CREATE TABLE IF NOT EXISTS migrations (
+            key TEXT PRIMARY KEY,
+            completed_at INTEGER NOT NULL
+          )
+        `);
+      }
 
       // Check if our migration key exists
-      const result = await queryRunner.query(
-        'SELECT * FROM migrations WHERE key = ?',
-        [this.MIGRATION_KEY]
-      );
+      let result;
+      if (databaseType === 'postgres') {
+        result = await queryRunner.query(
+          'SELECT * FROM migrations WHERE key = $1',
+          [this.MIGRATION_KEY]
+        );
+      } else {
+        result = await queryRunner.query(
+          'SELECT * FROM migrations WHERE key = ?',
+          [this.MIGRATION_KEY]
+        );
+      }
 
       return result.length > 0;
     } finally {
@@ -348,18 +385,36 @@ export class TimeslotMigrationService implements OnModuleInit {
    * Mark migration as completed
    */
   private async markMigrationCompleted(queryRunner): Promise<void> {
+    const databaseType = queryRunner.connection.options.type;
+
     // Ensure migrations table exists
-    await queryRunner.query(`
-      CREATE TABLE IF NOT EXISTS migrations (
-        key TEXT PRIMARY KEY,
-        completed_at INTEGER NOT NULL
-      )
-    `);
+    if (databaseType === 'postgres') {
+      await queryRunner.query(`
+        CREATE TABLE IF NOT EXISTS migrations (
+          key VARCHAR(255) PRIMARY KEY,
+          completed_at BIGINT NOT NULL
+        )
+      `);
+    } else {
+      await queryRunner.query(`
+        CREATE TABLE IF NOT EXISTS migrations (
+          key TEXT PRIMARY KEY,
+          completed_at INTEGER NOT NULL
+        )
+      `);
+    }
 
     // Insert completion record
-    await queryRunner.query(
-      'INSERT INTO migrations (key, completed_at) VALUES (?, ?)',
-      [this.MIGRATION_KEY, Date.now()]
-    );
+    if (databaseType === 'postgres') {
+      await queryRunner.query(
+        'INSERT INTO migrations (key, completed_at) VALUES ($1, $2)',
+        [this.MIGRATION_KEY, Date.now()]
+      );
+    } else {
+      await queryRunner.query(
+        'INSERT INTO migrations (key, completed_at) VALUES (?, ?)',
+        [this.MIGRATION_KEY, Date.now()]
+      );
+    }
   }
 }

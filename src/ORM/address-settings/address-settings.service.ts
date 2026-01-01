@@ -81,31 +81,63 @@ export class AddressSettingsService {
             return;
         }
 
-        // Build CASE statement for bulk update in a SINGLE atomic query
-        // SQLite 3.40+ supports 32,766 parameters (we use ~800 for 400 addresses)
-        const caseWhenParts: string[] = [];
-        const parameters: any[] = [];
+        // Detect database type to use correct placeholder syntax
+        const databaseType = this.addressSettingsRepository.manager.connection.options.type;
 
-        updates.forEach((update) => {
-            caseWhenParts.push(`WHEN ? THEN ?`);
-            parameters.push(update.address, update.shares);
-        });
+        if (databaseType === 'postgres') {
+            // PostgreSQL: Use $1, $2, $3... placeholders
+            const caseWhenParts: string[] = [];
+            const parameters: any[] = [];
+            let paramIndex = 1;
 
-        // Add addresses for WHERE IN clause
-        const placeholders = updates.map(() => '?').join(',');
-        const whereAddresses = updates.map(u => u.address);
+            updates.forEach((update) => {
+                caseWhenParts.push(`WHEN $${paramIndex} THEN $${paramIndex + 1}`);
+                parameters.push(update.address, update.shares);
+                paramIndex += 2;
+            });
 
-        const query = `
-            UPDATE address_settings_entity
-            SET shares = shares + CASE address ${caseWhenParts.join(' ')} END
-            WHERE address IN (${placeholders})
-        `;
+            // WHERE IN clause with $N placeholders
+            const whereClause = updates.map((_, idx) => `$${paramIndex + idx}`).join(',');
+            const whereAddresses = updates.map(u => u.address);
 
-        // Execute as SINGLE atomic transaction
-        await this.addressSettingsRepository.query(query, [
-            ...parameters,
-            ...whereAddresses
-        ]);
+            const query = `
+                UPDATE address_settings_entity
+                SET shares = shares + CASE address ${caseWhenParts.join(' ')} END
+                WHERE address IN (${whereClause})
+            `;
+
+            // Execute as SINGLE atomic transaction
+            await this.addressSettingsRepository.query(query, [
+                ...parameters,
+                ...whereAddresses
+            ]);
+        } else {
+            // SQLite: Use ? placeholders
+            // SQLite 3.40+ supports 32,766 parameters (we use ~800 for 400 addresses)
+            const caseWhenParts: string[] = [];
+            const parameters: any[] = [];
+
+            updates.forEach((update) => {
+                caseWhenParts.push(`WHEN ? THEN ?`);
+                parameters.push(update.address, update.shares);
+            });
+
+            // Add addresses for WHERE IN clause
+            const placeholders = updates.map(() => '?').join(',');
+            const whereAddresses = updates.map(u => u.address);
+
+            const query = `
+                UPDATE address_settings_entity
+                SET shares = shares + CASE address ${caseWhenParts.join(' ')} END
+                WHERE address IN (${placeholders})
+            `;
+
+            // Execute as SINGLE atomic transaction
+            await this.addressSettingsRepository.query(query, [
+                ...parameters,
+                ...whereAddresses
+            ]);
+        }
     }
 
     public async resetBestDifficultyAndShares() {

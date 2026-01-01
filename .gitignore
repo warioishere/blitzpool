@@ -31,6 +31,9 @@ lerna-debug.log*
 settings.json
 # safer wildcard version
 full-setup/public-pool-*.env
+# PostgreSQL and other env files (but keep *-example.env for documentation)
+full-setup/blitzpool.env
+full-setup/blitzpool-pg.env
 
 # IDE - VSCode
 .vscode/*
