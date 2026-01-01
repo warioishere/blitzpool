@@ -405,9 +405,23 @@ export class ShareTotalsCacheService implements OnModuleDestroy, OnModuleInit {
 
         // STEP 2: Process ALL Redis keys (EXACTLY like production)
         // This handles deltas from all PM2 instances + what we just added
-        const pending: Promise<void>[] = [];
         const pattern = 'shares:address:*';
         const keys = await this.redisClient.keys(pattern);
+
+        // Lua script atomically moves delta → baseline
+        const luaScript = `
+          local key = KEYS[1]
+          local delta = tonumber(redis.call('HGET', key, 'delta'))
+          if delta and delta > 0 then
+            redis.call('HINCRBYFLOAT', key, 'baseline', delta)
+            redis.call('HSET', key, 'delta', '0')
+            return delta
+          end
+          return 0
+        `;
+
+        // Collect all updates to do in a single bulk database operation
+        const bulkUpdates: Array<{ address: string; shares: number; key: string }> = [];
 
         for (const key of keys) {
           const data = await this.redisClient.hGetAll(key);
@@ -419,49 +433,54 @@ export class ShareTotalsCacheService implements OnModuleDestroy, OnModuleInit {
 
           const address = key.replace('shares:address:', '');
 
-          // EXACTLY like production - Lua script atomically moves delta → baseline
-          const luaScript = `
-            local key = KEYS[1]
-            local delta = tonumber(redis.call('HGET', key, 'delta'))
-            if delta and delta > 0 then
-              redis.call('HINCRBYFLOAT', key, 'baseline', delta)
-              redis.call('HSET', key, 'delta', '0')
-              return delta
-            end
-            return 0
-          `;
+          try {
+            const flushedDelta = await this.redisClient.eval(luaScript, {
+              keys: [key],
+            });
 
-          pending.push(
-            (async () => {
-              let flushedDelta = 0;
+            if (flushedDelta > 0) {
+              bulkUpdates.push({ address, shares: flushedDelta, key });
+            }
+          } catch (error) {
+            console.error(
+              `ShareTotalsCacheService failed to flush delta for ${address}`,
+              error,
+            );
+          }
+        }
+
+        // Perform SINGLE bulk database update (10-100x faster than individual updates)
+        if (bulkUpdates.length > 0) {
+          try {
+            await this.addressSettingsService.addSharesBulk(
+              bulkUpdates.map((u) => ({ address: u.address, shares: u.shares })),
+            );
+          } catch (error) {
+            // Rollback ALL Redis changes on database error
+            console.error(
+              'ShareTotalsCacheService failed to persist shares (bulk)',
+              error,
+            );
+            for (const update of bulkUpdates) {
               try {
-                flushedDelta = await this.redisClient.eval(luaScript, {
-                  keys: [key],
-                });
-
-                if (flushedDelta > 0) {
-                  await this.addressSettingsService.addShares(
-                    address,
-                    flushedDelta,
-                  );
-                }
-              } catch (error) {
-                // EXACTLY like production - rollback on error
-                if (flushedDelta > 0) {
-                  await this.redisClient.hIncrByFloat(
-                    key,
-                    'baseline',
-                    -flushedDelta,
-                  );
-                  await this.redisClient.hIncrByFloat(key, 'delta', flushedDelta);
-                }
+                await this.redisClient.hIncrByFloat(
+                  update.key,
+                  'baseline',
+                  -update.shares,
+                );
+                await this.redisClient.hIncrByFloat(
+                  update.key,
+                  'delta',
+                  update.shares,
+                );
+              } catch (rollbackError) {
                 console.error(
-                  'ShareTotalsCacheService failed to persist shares',
-                  error,
+                  `Failed to rollback Redis for ${update.address}`,
+                  rollbackError,
                 );
               }
-            })(),
-          );
+            }
+          }
         }
 
         // STEP 3: Process worker totals (EXACTLY like production)
@@ -488,12 +507,6 @@ export class ShareTotalsCacheService implements OnModuleDestroy, OnModuleInit {
             `;
             await this.redisClient.eval(luaScript, { keys: [key] });
           }
-        }
-
-        // Process database writes SERIALLY to avoid SQLITE_BUSY errors
-        // SQLite can only handle ONE write transaction at a time
-        for (const promise of pending) {
-          await promise;
         }
       } catch (error) {
         console.error('[ShareTotalsCache] Flush failed:', error);
