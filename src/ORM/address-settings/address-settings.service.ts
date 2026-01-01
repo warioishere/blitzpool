@@ -81,38 +81,31 @@ export class AddressSettingsService {
             return;
         }
 
-        // SQLite has a parameter limit of 999 (old versions) or 32766 (new versions)
-        // Split into batches of 400 to be safe (400 addresses + 400 shares = 800 params)
-        const BATCH_SIZE = 400;
+        // Build CASE statement for bulk update in a SINGLE atomic query
+        // SQLite 3.40+ supports 32,766 parameters (we use ~800 for 400 addresses)
+        const caseWhenParts: string[] = [];
+        const parameters: any[] = [];
 
-        for (let i = 0; i < updates.length; i += BATCH_SIZE) {
-            const batch = updates.slice(i, i + BATCH_SIZE);
+        updates.forEach((update) => {
+            caseWhenParts.push(`WHEN ? THEN ?`);
+            parameters.push(update.address, update.shares);
+        });
 
-            // Build CASE statement for bulk update
-            const caseWhenParts: string[] = [];
-            const parameters: any[] = [];
+        // Add addresses for WHERE IN clause
+        const placeholders = updates.map(() => '?').join(',');
+        const whereAddresses = updates.map(u => u.address);
 
-            batch.forEach((update) => {
-                caseWhenParts.push(`WHEN ? THEN ?`);
-                parameters.push(update.address, update.shares);
-            });
+        const query = `
+            UPDATE address_settings_entity
+            SET shares = shares + CASE address ${caseWhenParts.join(' ')} END
+            WHERE address IN (${placeholders})
+        `;
 
-            // Add addresses for WHERE IN clause
-            const placeholders = batch.map(() => '?').join(',');
-            const whereAddresses = batch.map(u => u.address);
-
-            const query = `
-                UPDATE address_settings_entity
-                SET shares = shares + CASE address ${caseWhenParts.join(' ')} END
-                WHERE address IN (${placeholders})
-            `;
-
-            // Execute raw query with proper parameter binding
-            await this.addressSettingsRepository.query(query, [
-                ...parameters,
-                ...whereAddresses
-            ]);
-        }
+        // Execute as SINGLE atomic transaction
+        await this.addressSettingsRepository.query(query, [
+            ...parameters,
+            ...whereAddresses
+        ]);
     }
 
     public async resetBestDifficultyAndShares() {
