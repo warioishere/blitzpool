@@ -13,7 +13,7 @@ export class ExternalSharesEntity extends TrackedEntity {
     @Column()
     clientName: string;
 
-    @Column({ type: 'integer' })
+    @Column({ type: 'bigint', transformer: { to: (value: number) => value, from: (value: string) => parseInt(value, 10) } })
     time: number;
 
     @Column({ type: 'real' })

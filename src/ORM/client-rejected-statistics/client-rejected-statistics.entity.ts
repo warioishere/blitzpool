@@ -11,7 +11,7 @@ export class ClientRejectedStatisticsEntity extends TrackedEntity {
   @Column({ length: 62, type: 'varchar' })
   address: string;
 
-  @Column({ type: 'integer' })
+  @Column({ type: 'bigint', transformer: { to: (value: number) => value, from: (value: string) => parseInt(value, 10) } })
   time: number;
 
   @Column({ type: 'varchar' })
