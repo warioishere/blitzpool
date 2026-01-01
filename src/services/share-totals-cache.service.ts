@@ -490,7 +490,12 @@ export class ShareTotalsCacheService implements OnModuleDestroy, OnModuleInit {
           }
         }
 
-        await Promise.all(pending);
+        // Process database writes in small batches to avoid overwhelming SQLite
+        const BATCH_SIZE = 10;
+        for (let i = 0; i < pending.length; i += BATCH_SIZE) {
+          const batch = pending.slice(i, i + BATCH_SIZE);
+          await Promise.all(batch);
+        }
       } catch (error) {
         console.error('[ShareTotalsCache] Flush failed:', error);
       } finally {
@@ -527,7 +532,12 @@ export class ShareTotalsCacheService implements OnModuleDestroy, OnModuleInit {
         }
       }
 
-      await Promise.all(pending);
+      // Process database writes in small batches to avoid overwhelming SQLite
+      const BATCH_SIZE = 10;
+      for (let i = 0; i < pending.length; i += BATCH_SIZE) {
+        const batch = pending.slice(i, i + BATCH_SIZE);
+        await Promise.all(batch);
+      }
     }
   }
 
