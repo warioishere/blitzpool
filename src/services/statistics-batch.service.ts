@@ -178,44 +178,101 @@ export class StatisticsBatchService implements OnModuleInit, OnModuleDestroy {
     this.isFlushing = true;
 
     try {
-      // Process inserts first (new records)
+      // Process inserts first (new records) - SINGLE BULK INSERT
       if (insertCount > 0) {
-        const inserts = Array.from(this.pendingInserts.values()).map(entry => entry.payload);
-        this.pendingInserts.clear();
+        const allInserts = Array.from(this.pendingInserts.entries());
 
-        // Insert in batches of 50 to avoid memory issues
-        for (let i = 0; i < inserts.length; i += 50) {
-          const batch = inserts.slice(i, i + 50);
-          try {
-            for (const payload of batch) {
-              await this.clientStatisticsService.insert(payload);
+        // Filter out invalid records (missing required fields - happens when miners disconnect)
+        const validInserts: Array<{ key: string; payload: Partial<ClientStatisticsEntity> }> = [];
+        const invalidKeys: string[] = [];
+
+        for (const [key, entry] of allInserts) {
+          const p = entry.payload;
+          if (!p.address || !p.clientName || !p.sessionId || !p.time) {
+            console.warn('StatisticsBatchService: Skipping invalid insert (missing required fields, likely miner disconnect)');
+            invalidKeys.push(key);
+          } else {
+            validInserts.push({ key, payload: p });
+          }
+        }
+
+        // Remove invalid records immediately (they're not retryable)
+        for (const key of invalidKeys) {
+          this.pendingInserts.delete(key);
+        }
+
+        if (validInserts.length > 0) {
+          // Process in batches of 1000 to stay under parameter limits
+          // If one batch fails, others can still succeed
+          const BATCH_SIZE = 1000;
+          for (let i = 0; i < validInserts.length; i += BATCH_SIZE) {
+            const batch = validInserts.slice(i, i + BATCH_SIZE);
+            try {
+              await this.clientStatisticsService.bulkInsert(batch.map(v => v.payload));
+              // Success - clear only this batch
+              for (const { key } of batch) {
+                this.pendingInserts.delete(key);
+              }
+            } catch (error) {
+              console.error(`StatisticsBatchService: Bulk insert batch ${i / BATCH_SIZE + 1} failed, keeping ${batch.length} records for retry:`, error);
+              // Don't clear this batch - will retry on next flush
             }
-          } catch (error) {
-            console.error('StatisticsBatchService: Failed to insert batch', error);
           }
         }
       }
 
-      // Process updates (existing records)
+      // Process updates (existing records) - SINGLE BULK UPDATE
       if (updateCount > 0) {
-        const updates = Array.from(this.pendingUpdates.values()).map(entry => entry.payload);
-        this.pendingUpdates.clear();
+        const allUpdates = Array.from(this.pendingUpdates.entries());
 
-        // Update in batches of 50
-        for (let i = 0; i < updates.length; i += 50) {
-          const batch = updates.slice(i, i + 50);
-          try {
-            for (const payload of batch) {
-              await this.clientStatisticsService.update(payload);
+        // Filter out invalid records (missing required fields - happens when miners disconnect)
+        const validUpdates: Array<{ key: string; payload: Partial<ClientStatisticsEntity> }> = [];
+        const invalidKeys: string[] = [];
+
+        for (const [key, entry] of allUpdates) {
+          const p = entry.payload;
+          if (!p.address || !p.clientName || !p.sessionId || !p.time) {
+            console.warn('StatisticsBatchService: Skipping invalid update (missing required fields, likely miner disconnect)');
+            invalidKeys.push(key);
+          } else {
+            validUpdates.push({ key, payload: p });
+          }
+        }
+
+        // Remove invalid records immediately (they're not retryable)
+        for (const key of invalidKeys) {
+          this.pendingUpdates.delete(key);
+        }
+
+        if (validUpdates.length > 0) {
+          // Process in batches of 1000 to stay under parameter limits
+          // If one batch fails, others can still succeed
+          const BATCH_SIZE = 1000;
+          for (let i = 0; i < validUpdates.length; i += BATCH_SIZE) {
+            const batch = validUpdates.slice(i, i + BATCH_SIZE);
+            try {
+              await this.clientStatisticsService.bulkUpdate(batch.map(v => v.payload));
+              // Success - clear only this batch
+              for (const { key } of batch) {
+                this.pendingUpdates.delete(key);
+              }
+            } catch (error) {
+              console.error(`StatisticsBatchService: Bulk update batch ${i / BATCH_SIZE + 1} failed, keeping ${batch.length} records for retry:`, error);
+              // Don't clear this batch - will retry on next flush
             }
-          } catch (error) {
-            console.error('StatisticsBatchService: Failed to update batch', error);
           }
         }
       }
 
-      if (updateCount > 0 || insertCount > 0) {
-        console.log(`StatisticsBatchService: Flushed ${insertCount} inserts, ${updateCount} updates`);
+      const actualInserts = insertCount - this.pendingInserts.size;
+      const actualUpdates = updateCount - this.pendingUpdates.size;
+
+      if (actualInserts > 0 || actualUpdates > 0) {
+        console.log(`StatisticsBatchService: Flushed ${actualInserts} inserts, ${actualUpdates} updates`);
+      }
+
+      if (this.pendingInserts.size > 0 || this.pendingUpdates.size > 0) {
+        console.warn(`StatisticsBatchService: ${this.pendingInserts.size} inserts and ${this.pendingUpdates.size} updates still pending (will retry next flush)`);
       }
     } finally {
       this.isFlushing = false;

@@ -32,15 +32,9 @@ export class DifficultyScoresCacheService implements OnModuleInit {
       if (store && store.client) {
         this.redisClient = store.client;
         this.useRedis = true;
-        console.log('[DifficultyScoresCacheService] Using Redis for PM2-safe cache');
-      } else {
-        console.log('[DifficultyScoresCacheService] Redis not available, using in-memory cache');
       }
     } catch (error) {
-      console.warn(
-        '[DifficultyScoresCacheService] Failed to access Redis client, using in-memory cache:',
-        error,
-      );
+      // Silently fall back to in-memory cache
     }
   }
 
@@ -61,11 +55,8 @@ export class DifficultyScoresCacheService implements OnModuleInit {
     // Try to get from cache (Redis or in-memory)
     const cached = await this.getFromCache(cacheKey);
     if (cached) {
-      console.log(`[DifficultyScoresCache] Cache HIT for ${address} ${range}`);
       return cached;
     }
-
-    console.log(`[DifficultyScoresCache] Cache MISS for ${address} ${range}`);
 
     // Load from database
     const result = await this.loadFromDatabase(address, startSlot, endSlot);
@@ -99,7 +90,7 @@ export class DifficultyScoresCacheService implements OnModuleInit {
           return JSON.parse(data);
         }
       } catch (error) {
-        console.error('[DifficultyScoresCache] Redis read error:', error);
+        // Silently fail
       }
       return null;
     } else {
@@ -120,7 +111,7 @@ export class DifficultyScoresCacheService implements OnModuleInit {
       try {
         await this.redisClient.setEx(key, ttl, JSON.stringify(value));
       } catch (error) {
-        console.error('[DifficultyScoresCache] Redis write error:', error);
+        // Silently fail
       }
     } else {
       // In-memory fallback (no automatic expiration, but simpler)
@@ -197,12 +188,9 @@ export class DifficultyScoresCacheService implements OnModuleInit {
         const keys = await this.redisClient.keys(pattern);
         if (keys && keys.length > 0) {
           await this.redisClient.del(keys);
-          console.log(
-            `[DifficultyScoresCache] Cleared ${keys.length} cache entries for address: ${address || 'all'}`,
-          );
         }
       } catch (error) {
-        console.error('[DifficultyScoresCache] Error clearing cache:', error);
+        // Silently fail
       }
     } else {
       // Clear in-memory cache
@@ -216,13 +204,8 @@ export class DifficultyScoresCacheService implements OnModuleInit {
           }
         }
         keysToDelete.forEach((k) => this.memoryCache.delete(k));
-        console.log(
-          `[DifficultyScoresCache] Cleared ${keysToDelete.length} in-memory cache entries for address: ${address}`,
-        );
       } else {
-        const size = this.memoryCache.size;
         this.memoryCache.clear();
-        console.log(`[DifficultyScoresCache] Cleared ${size} in-memory cache entries`);
       }
     }
   }

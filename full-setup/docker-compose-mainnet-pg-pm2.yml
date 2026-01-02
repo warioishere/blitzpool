@@ -20,7 +20,7 @@ services:
 
   postgres:
     container_name: public-pool-postgres
-    image: postgres:15-alpine
+    image: postgres:17-alpine
     restart: unless-stopped
     stop_grace_period: 30s
     networks:

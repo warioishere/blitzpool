@@ -46,6 +46,178 @@ export class ClientStatisticsService {
     await this.clientStatisticsRepository.insert(clientStatistic);
   }
 
+  public async bulkInsert(records: Array<Partial<ClientStatisticsEntity>>) {
+    if (records.length === 0) {
+      return;
+    }
+
+    // Note: Caller (StatisticsBatchService) already batches to 1000 records max
+    const databaseType = this.clientStatisticsRepository.manager.connection.options.type;
+
+    if (databaseType === 'postgres') {
+      // PostgreSQL: Use INSERT ... ON CONFLICT DO UPDATE (UPSERT)
+      // Build the query manually to handle conflicts on composite key
+      const values: any[] = [];
+      let paramIndex = 1;
+
+      const valueTuples = records.map(r => {
+        const tuple = `($${paramIndex}, $${paramIndex + 1}, $${paramIndex + 2}, $${paramIndex + 3}, $${paramIndex + 4}, $${paramIndex + 5}, $${paramIndex + 6}, $${paramIndex + 7}, $${paramIndex + 8}, $${paramIndex + 9}, $${paramIndex + 10}, $${paramIndex + 11}, $${paramIndex + 12})`;
+        values.push(
+          r.address, r.clientName, r.sessionId, r.time,
+          r.shares, r.acceptedCount, r.rejectedCount,
+          r.rejectedJobNotFoundCount, r.rejectedJobNotFoundDiff1,
+          r.rejectedDuplicateShareCount, r.rejectedDuplicateShareDiff1,
+          r.rejectedLowDifficultyShareCount, r.rejectedLowDifficultyShareDiff1
+        );
+        paramIndex += 13;
+        return tuple;
+      }).join(', ');
+
+      const query = `
+        INSERT INTO client_statistics_entity
+          (address, "clientName", "sessionId", time, shares, "acceptedCount", "rejectedCount",
+           "rejectedJobNotFoundCount", "rejectedJobNotFoundDiff1", "rejectedDuplicateShareCount",
+           "rejectedDuplicateShareDiff1", "rejectedLowDifficultyShareCount", "rejectedLowDifficultyShareDiff1")
+        VALUES ${valueTuples}
+        ON CONFLICT (address, "clientName", "sessionId", time)
+        DO UPDATE SET
+          shares = EXCLUDED.shares,
+          "acceptedCount" = EXCLUDED."acceptedCount",
+          "rejectedCount" = EXCLUDED."rejectedCount",
+          "rejectedJobNotFoundCount" = EXCLUDED."rejectedJobNotFoundCount",
+          "rejectedJobNotFoundDiff1" = EXCLUDED."rejectedJobNotFoundDiff1",
+          "rejectedDuplicateShareCount" = EXCLUDED."rejectedDuplicateShareCount",
+          "rejectedDuplicateShareDiff1" = EXCLUDED."rejectedDuplicateShareDiff1",
+          "rejectedLowDifficultyShareCount" = EXCLUDED."rejectedLowDifficultyShareCount",
+          "rejectedLowDifficultyShareDiff1" = EXCLUDED."rejectedLowDifficultyShareDiff1",
+          "updatedAt" = NOW()
+      `;
+
+      await this.clientStatisticsRepository.query(query, values);
+    } else {
+      // SQLite: Use INSERT OR REPLACE (UPSERT)
+      const values: any[] = [];
+
+      const valueTuples = records.map(r => {
+        const tuple = `(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+        values.push(
+          r.address, r.clientName, r.sessionId, r.time,
+          r.shares, r.acceptedCount, r.rejectedCount,
+          r.rejectedJobNotFoundCount, r.rejectedJobNotFoundDiff1,
+          r.rejectedDuplicateShareCount, r.rejectedDuplicateShareDiff1,
+          r.rejectedLowDifficultyShareCount, r.rejectedLowDifficultyShareDiff1
+        );
+        return tuple;
+      }).join(', ');
+
+      const query = `
+        INSERT OR REPLACE INTO client_statistics_entity
+          (address, clientName, sessionId, time, shares, acceptedCount, rejectedCount,
+           rejectedJobNotFoundCount, rejectedJobNotFoundDiff1, rejectedDuplicateShareCount,
+           rejectedDuplicateShareDiff1, rejectedLowDifficultyShareCount, rejectedLowDifficultyShareDiff1)
+        VALUES ${valueTuples}
+      `;
+
+      await this.clientStatisticsRepository.query(query, values);
+    }
+  }
+
+  public async bulkUpdate(updates: Array<Partial<ClientStatisticsEntity>>) {
+    if (updates.length === 0) {
+      return;
+    }
+
+    // Note: Caller (StatisticsBatchService) already batches to 1000 records max
+    const databaseType = this.clientStatisticsRepository.manager.connection.options.type;
+    const parameters: any[] = [];
+
+    // Build CASE statements for each field
+    const dataFields = [
+      'shares', 'acceptedCount', 'rejectedCount',
+      'rejectedJobNotFoundCount', 'rejectedJobNotFoundDiff1',
+      'rejectedDuplicateShareCount', 'rejectedDuplicateShareDiff1',
+      'rejectedLowDifficultyShareCount', 'rejectedLowDifficultyShareDiff1'
+    ];
+
+    if (databaseType === 'postgres') {
+      // PostgreSQL version
+      let paramIndex = 1;
+      const caseParts: Record<string, string[]> = {};
+
+      dataFields.forEach(field => {
+        caseParts[field] = [];
+      });
+
+      updates.forEach((update) => {
+        const keyParams = [paramIndex, paramIndex + 1, paramIndex + 2, paramIndex + 3];
+        parameters.push(update.address, update.clientName, update.sessionId, update.time);
+        paramIndex += 4;
+
+        dataFields.forEach(field => {
+          caseParts[field].push(`WHEN ($${keyParams[0]}, $${keyParams[1]}, $${keyParams[2]}, $${keyParams[3]}) THEN $${paramIndex}`);
+          parameters.push(update[field]);
+          paramIndex++;
+        });
+      });
+
+      const setClauses = dataFields.map(field =>
+        `"${field}" = CASE (address, "clientName", "sessionId", time) ${caseParts[field].join(' ')} END`
+      ).join(', ');
+
+      const whereTuples = updates.map((_, idx) => {
+        const base = paramIndex;
+        paramIndex += 4;
+        return `($${base}, $${base + 1}, $${base + 2}, $${base + 3})`;
+      }).join(', ');
+
+      updates.forEach(u => {
+        parameters.push(u.address, u.clientName, u.sessionId, u.time);
+      });
+
+      const query = `
+        UPDATE client_statistics_entity
+        SET ${setClauses}, "updatedAt" = NOW()
+        WHERE (address, "clientName", "sessionId", time) IN (${whereTuples})
+      `;
+
+      await this.clientStatisticsRepository.query(query, parameters);
+    } else {
+      // SQLite version
+      const caseParts: Record<string, string[]> = {};
+
+      dataFields.forEach(field => {
+        caseParts[field] = [];
+      });
+
+      updates.forEach((update) => {
+        parameters.push(update.address, update.clientName, update.sessionId, update.time);
+
+        dataFields.forEach(field => {
+          caseParts[field].push(`WHEN (?, ?, ?, ?) THEN ?`);
+          parameters.push(update[field]);
+        });
+      });
+
+      const setClauses = dataFields.map(field =>
+        `${field} = CASE (address, clientName, sessionId, time) ${caseParts[field].join(' ')} END`
+      ).join(', ');
+
+      const wherePlaceholders = updates.map(() => '(?, ?, ?, ?)').join(', ');
+
+      updates.forEach(u => {
+        parameters.push(u.address, u.clientName, u.sessionId, u.time);
+      });
+
+      const query = `
+        UPDATE client_statistics_entity
+        SET ${setClauses}, updatedAt = datetime('now')
+        WHERE (address, clientName, sessionId, time) IN (${wherePlaceholders})
+      `;
+
+      await this.clientStatisticsRepository.query(query, parameters);
+    }
+  }
+
   public async deleteOldStatistics() {
     const now = Date.now();
     const detailCutoffTimestamp = new Date(now - 7 * 24 * 60 * 60 * 1000).getTime();
