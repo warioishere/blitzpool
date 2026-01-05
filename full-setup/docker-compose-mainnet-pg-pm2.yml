@@ -52,7 +52,7 @@ services:
     command: >
       redis-server
       --appendonly yes
-      --maxmemory ${REDIS_MAX_MEMORY:-256mb}
+      --maxmemory ${REDIS_MAX_MEMORY:-1024mb}
       --maxmemory-policy allkeys-lru
       ${REDIS_PASSWORD:+--requirepass ${REDIS_PASSWORD}}
     volumes:
