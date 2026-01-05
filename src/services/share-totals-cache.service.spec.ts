@@ -1,6 +1,3 @@
-import { ConfigService } from '@nestjs/config';
-
-import { AddressSettingsService } from '../ORM/address-settings/address-settings.service';
 import { ClientStatisticsService } from '../ORM/client-statistics/client-statistics.service';
 import { ShareTotalsCacheService } from './share-totals-cache.service';
 
@@ -8,10 +5,8 @@ describe('ShareTotalsCacheService', () => {
   let clientStatisticsService: {
     getTotalSharesForAddress: jest.Mock;
     getTotalSharesForWorkers: jest.Mock;
-    getTotalSharesForWorker: jest.Mock;
   };
-  let addressSettingsService: { addShares: jest.Mock };
-  let configService: { get: jest.Mock };
+  let cacheManager: any;
   let service: ShareTotalsCacheService;
 
   beforeEach(() => {
@@ -21,113 +16,164 @@ describe('ShareTotalsCacheService', () => {
         { clientName: 'worker-1', total: 60 },
         { clientName: 'worker-2', total: 40 },
       ]),
-      getTotalSharesForWorker: jest.fn().mockImplementation(
-        async (_address: string, workerName: string) => {
-          if (workerName === 'worker-1') {
-            return 60;
-          }
-          if (workerName === 'worker-2') {
-            return 40;
-          }
-          return 0;
-        },
-      ),
     };
-    addressSettingsService = {
-      addShares: jest.fn().mockResolvedValue(undefined),
-    };
-    configService = {
-      get: jest.fn().mockImplementation((key: string) => {
-        if (key === 'SHARE_TOTALS_FLUSH_INTERVAL_MS') {
-          return '0';
-        }
-        return undefined;
-      }),
+
+    // Mock cache manager without Redis (fallback mode)
+    cacheManager = {
+      store: {},
     };
 
     service = new ShareTotalsCacheService(
+      cacheManager,
       clientStatisticsService as unknown as ClientStatisticsService,
-      addressSettingsService as unknown as AddressSettingsService,
-      configService as unknown as ConfigService,
     );
   });
 
-  afterEach(async () => {
-    await service.onModuleDestroy();
+  describe('without Redis (fallback mode)', () => {
+    beforeEach(async () => {
+      await service.onModuleInit();
+    });
+
+    it('falls back to database queries when Redis is not available', async () => {
+      const total = await service.getAddressTotal('addr1');
+      expect(total).toBe(100);
+      expect(clientStatisticsService.getTotalSharesForAddress).toHaveBeenCalledWith('addr1');
+    });
+
+    it('returns worker totals from database when Redis is not available', async () => {
+      const workerTotals = await service.getWorkerTotals('addr1');
+      expect(workerTotals).toEqual([
+        { workerName: 'worker-1', total: 60 },
+        { workerName: 'worker-2', total: 40 },
+      ]);
+      expect(clientStatisticsService.getTotalSharesForWorkers).toHaveBeenCalledWith('addr1');
+    });
+
+    it('silently skips increment when Redis is not available', () => {
+      // Should not throw
+      service.increment('addr1', 'worker-1', 25);
+      expect(true).toBe(true);
+    });
   });
 
-  it('hydrates address totals and applies increments', async () => {
-    const total = await service.getAddressTotal('addr1');
-    expect(total).toBe(100);
-    expect(clientStatisticsService.getTotalSharesForAddress).toHaveBeenCalledTimes(1);
+  describe('with Redis', () => {
+    let mockRedisClient: any;
 
-    await service.increment('addr1', 'worker-1', 25);
-    const updatedTotal = await service.getAddressTotal('addr1');
-    expect(updatedTotal).toBe(125);
-    expect(clientStatisticsService.getTotalSharesForAddress).toHaveBeenCalledTimes(1);
-  });
+    beforeEach(async () => {
+      mockRedisClient = {
+        hIncrByFloat: jest.fn().mockResolvedValue(undefined),
+        hGetAll: jest.fn().mockResolvedValue({}),
+        keys: jest.fn().mockResolvedValue([]),
+      };
 
-  it('hydrates worker totals and adds new workers when incremented', async () => {
-    const workerTotalsFirst = await service.getWorkerTotals('addr1');
-    expect(workerTotalsFirst).toEqual([
-      { workerName: 'worker-1', total: 60 },
-      { workerName: 'worker-2', total: 40 },
-    ]);
-    expect(clientStatisticsService.getTotalSharesForWorkers).toHaveBeenCalledTimes(1);
-    expect(clientStatisticsService.getTotalSharesForWorker).not.toHaveBeenCalled();
+      cacheManager = {
+        store: {
+          client: mockRedisClient,
+        },
+      };
 
-    const workerTotalsSecond = await service.getWorkerTotals('addr1');
-    expect(workerTotalsSecond).toEqual([
-      { workerName: 'worker-1', total: 60 },
-      { workerName: 'worker-2', total: 40 },
-    ]);
-    expect(clientStatisticsService.getTotalSharesForWorkers).toHaveBeenCalledTimes(1);
-  });
+      service = new ShareTotalsCacheService(
+        cacheManager,
+        clientStatisticsService as unknown as ClientStatisticsService,
+      );
 
-  it('hydrates individual worker baselines lazily when incrementing', async () => {
-    clientStatisticsService.getTotalSharesForWorker.mockResolvedValue(5);
-    clientStatisticsService.getTotalSharesForWorkers.mockResolvedValueOnce([
-      { clientName: 'worker-1', total: 60 },
-      { clientName: 'worker-2', total: 40 },
-      { clientName: 'worker-3', total: 5 },
-    ]);
+      await service.onModuleInit();
+    });
 
-    await service.increment('addr1', 'worker-3', 15);
+    it('increments address total atomically in Redis', () => {
+      service.increment('addr1', undefined, 25);
 
-    expect(clientStatisticsService.getTotalSharesForWorker).toHaveBeenCalledTimes(1);
-    expect(clientStatisticsService.getTotalSharesForWorker).toHaveBeenCalledWith(
-      'addr1',
-      'worker-3',
-    );
-    expect(clientStatisticsService.getTotalSharesForWorkers).not.toHaveBeenCalled();
+      expect(mockRedisClient.hIncrByFloat).toHaveBeenCalledWith(
+        'shares:address:addr1',
+        'delta',
+        25,
+      );
+    });
 
-    const updated = await service.getWorkerTotals('addr1');
-    const sorted = [...updated].sort((a, b) => a.workerName.localeCompare(b.workerName));
-    expect(sorted).toEqual([
-      { workerName: 'worker-1', total: 60 },
-      { workerName: 'worker-2', total: 40 },
-      { workerName: 'worker-3', total: 20 },
-    ]);
-    expect(clientStatisticsService.getTotalSharesForWorkers).toHaveBeenCalledTimes(1);
-  });
+    it('increments worker total atomically in Redis', () => {
+      service.increment('addr1', 'worker-1', 25);
 
-  it('flushes deltas to durable storage and resets in-memory accumulators', async () => {
-    await service.increment('addr1', 'worker-1', 30);
-    await service.increment('addr1', 'worker-2', 10);
+      expect(mockRedisClient.hIncrByFloat).toHaveBeenCalledWith(
+        'shares:address:addr1',
+        'delta',
+        25,
+      );
+      expect(mockRedisClient.hIncrByFloat).toHaveBeenCalledWith(
+        'shares:worker:addr1:worker-1',
+        'delta',
+        25,
+      );
+    });
 
-    await service.flush();
+    it('returns total from Redis baseline + delta', async () => {
+      mockRedisClient.hGetAll.mockResolvedValue({
+        baseline: '100',
+        delta: '25',
+      });
 
-    expect(addressSettingsService.addShares).toHaveBeenCalledTimes(1);
-    expect(addressSettingsService.addShares).toHaveBeenCalledWith('addr1', 40);
+      const total = await service.getAddressTotal('addr1');
+      expect(total).toBe(125);
+      expect(mockRedisClient.hGetAll).toHaveBeenCalledWith('shares:address:addr1');
+    });
 
-    const totals = await service.getWorkerTotals('addr1');
-    const sorted = [...totals].sort((a, b) => a.workerName.localeCompare(b.workerName));
-    expect(sorted).toEqual([
-      { workerName: 'worker-1', total: 90 },
-      { workerName: 'worker-2', total: 50 },
-    ]);
+    it('returns 0 when address not found in Redis', async () => {
+      mockRedisClient.hGetAll.mockResolvedValue({});
 
-    await service.flush();
-    expect(addressSettingsService.addShares).toHaveBeenCalledTimes(1);
+      const total = await service.getAddressTotal('addr1');
+      expect(total).toBe(0);
+    });
+
+    it('returns worker totals from Redis', async () => {
+      mockRedisClient.keys.mockResolvedValue([
+        'shares:worker:addr1:worker-1',
+        'shares:worker:addr1:worker-2',
+      ]);
+
+      mockRedisClient.hGetAll
+        .mockResolvedValueOnce({ baseline: '60', delta: '5' })
+        .mockResolvedValueOnce({ baseline: '40', delta: '10' });
+
+      const workerTotals = await service.getWorkerTotals('addr1');
+      expect(workerTotals).toEqual([
+        { workerName: 'worker-1', total: 65 },
+        { workerName: 'worker-2', total: 50 },
+      ]);
+    });
+
+    it('returns empty array when no workers found in Redis', async () => {
+      mockRedisClient.keys.mockResolvedValue([]);
+
+      const workerTotals = await service.getWorkerTotals('addr1');
+      expect(workerTotals).toEqual([]);
+    });
+
+    it('filters out hydration markers and lock keys', async () => {
+      mockRedisClient.keys.mockResolvedValue([
+        'shares:worker:addr1:worker-1',
+        'shares:worker:addr1:worker-2:hydrated',
+        'shares:worker:addr1:worker-3:lock',
+      ]);
+
+      mockRedisClient.hGetAll.mockResolvedValueOnce({ baseline: '60', delta: '5' });
+
+      const workerTotals = await service.getWorkerTotals('addr1');
+      expect(workerTotals).toEqual([
+        { workerName: 'worker-1', total: 65 },
+      ]);
+    });
+
+    it('skips increment when difficulty is invalid', () => {
+      service.increment('addr1', 'worker-1', 0);
+      service.increment('addr1', 'worker-1', -5);
+      service.increment('addr1', 'worker-1', NaN);
+
+      expect(mockRedisClient.hIncrByFloat).not.toHaveBeenCalled();
+    });
+
+    it('skips increment when address is empty', () => {
+      service.increment('', 'worker-1', 25);
+
+      expect(mockRedisClient.hIncrByFloat).not.toHaveBeenCalled();
+    });
   });
 });

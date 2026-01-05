@@ -27,7 +27,13 @@ export class PushNotificationService implements OnModuleInit {
         private readonly fcmService: FcmService,
     ) {
         // Only run on PM2 instance 0 (or when not in cluster mode)
-        this.isPrimaryInstance = !process.env.NODE_APP_INSTANCE || process.env.NODE_APP_INSTANCE === '0';
+        // Check multiple PM2 environment variables (pm2-runtime uses pm_id, pm2 uses NODE_APP_INSTANCE)
+        const pm2InstanceId = process.env.NODE_APP_INSTANCE ?? process.env.pm_id ?? process.env.PM2_INSTANCE_ID;
+        const normalizedInstanceId = typeof pm2InstanceId === 'string' ? pm2InstanceId.trim() : undefined;
+
+        // If no PM2 instance ID is set, assume standalone (primary)
+        // If PM2 instance ID is set, only instance 0 is primary
+        this.isPrimaryInstance = !normalizedInstanceId || normalizedInstanceId === '0';
 
         // Initialize VAPID if keys are configured
         const vapidPublicKey = this.configService.get<string>('VAPID_PUBLIC_KEY');
@@ -46,7 +52,8 @@ export class PushNotificationService implements OnModuleInit {
 
     async onModuleInit(): Promise<void> {
         if (!this.isPrimaryInstance) {
-            console.log('[PushNotification] Disabled on PM2 instance ' + process.env.NODE_APP_INSTANCE + ' (only runs on instance 0)');
+            const instanceId = process.env.NODE_APP_INSTANCE ?? process.env.pm_id ?? process.env.PM2_INSTANCE_ID ?? 'unknown';
+            console.log('[PushNotification] Disabled on PM2 instance ' + instanceId + ' (only runs on instance 0)');
             return;
         }
 

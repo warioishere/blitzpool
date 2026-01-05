@@ -1,4 +1,4 @@
-import { Column, Entity, Index, PrimaryGeneratedColumn } from 'typeorm';
+import { Column, Entity, Index, PrimaryGeneratedColumn, Unique } from 'typeorm';
 
 import { TrackedEntity } from '../utils/TrackedEntity.entity';
 
@@ -7,6 +7,8 @@ import { TrackedEntity } from '../utils/TrackedEntity.entity';
 @Index(["address", "clientName", "sessionId"])
 //Index for statistics save
 @Index(["address", "clientName", "sessionId", "time"])
+// UNIQUE constraint to prevent duplicates (required for INSERT OR REPLACE upsert logic)
+@Unique(["address", "clientName", "sessionId", "time"])
 export class ClientStatisticsEntity extends TrackedEntity {
 
     @PrimaryGeneratedColumn()

@@ -10,38 +10,22 @@ export interface HashrateDataPoint {
   data: number;
 }
 
-interface InstanceStats {
-  instanceId: string;
-  timestamp: number;
-  poolHashrate: number;
-  addresses: Record<string, number>;
-  isStale: boolean;
-}
-
 @Injectable()
 export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
   private collectionInterval: NodeJS.Timeout;
-  private heartbeatInterval: NodeJS.Timeout;
   private aggregationInterval: NodeJS.Timeout;
   private redis: RedisClientType;
   private instanceId: string;
+  private readonly isPrimaryInstance: boolean;
   private readonly COLLECTION_INTERVAL_MS = 60000; // 60 seconds
-  private readonly HEARTBEAT_INTERVAL_MS = 30000; // 30 seconds
   private readonly AGGREGATION_INTERVAL_MS = 180000; // 3 minutes (reduced from 30s to prevent CPU spikes)
-  private readonly AGGREGATION_LOCK_TTL_MS = 200000; // 200 seconds (longer than interval to prevent overlaps)
   private readonly RETENTION_HOURS = 24;
   private readonly RETENTION_SECONDS = this.RETENTION_HOURS * 3600;
-  private readonly INSTANCE_TIMEOUT_MS = 120000; // 2 minutes - if no heartbeat, consider dead
   private readonly POOL_PREFIX = 'livehash:pool';
   private readonly ADDR_PREFIX = 'livehash:addr';
   private readonly INSTANCE_PREFIX = 'livehash:i';
-  private readonly HEARTBEAT_PREFIX = 'livehash:hb';
-  private readonly AGGREGATION_LOCK_KEY = 'livehash:agg:lock';
-  private readonly SYNC_CHANNEL = 'livehash:sync';
 
-  // Local tracking
-  private instanceDataCache = new Map<string, InstanceStats>();
-  private lastAggregationTime = 0;
+  // Aggregation tracking
   private aggregationMetrics = {
     totalAggregations: 0,
     successfulAggregations: 0,
@@ -57,7 +41,12 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
     private readonly configService: ConfigService,
     @Optional() @Inject(CACHE_MANAGER) private readonly cacheManager?: Cache,
   ) {
-    this.instanceId = process.env.NODE_APP_INSTANCE ?? '0';
+    // Check multiple PM2 environment variables (pm2-runtime uses pm_id, pm2 uses NODE_APP_INSTANCE)
+    const pm2InstanceId = process.env.NODE_APP_INSTANCE ?? process.env.pm_id ?? process.env.PM2_INSTANCE_ID;
+    this.instanceId = pm2InstanceId ?? '0';
+
+    const normalizedInstanceId = typeof pm2InstanceId === 'string' ? pm2InstanceId.trim() : undefined;
+    this.isPrimaryInstance = !normalizedInstanceId || normalizedInstanceId === '0';
   }
 
   /**
@@ -108,9 +97,6 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
 
         await this.redis.connect();
         console.log('[LiveHashrate] Redis connection established');
-
-        // Subscribe to cluster updates
-        this.subscribeToClusterUpdates();
       } catch (error) {
         console.error('[LiveHashrate] Failed to connect to Redis:', error);
         // Don't throw - graceful degradation
@@ -125,23 +111,20 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
       this.COLLECTION_INTERVAL_MS,
     );
 
-    // Start heartbeat to signal this instance is alive
-    this.heartbeatInterval = setInterval(
-      () => this.publishHeartbeat(),
-      this.HEARTBEAT_INTERVAL_MS,
-    );
+    // Start aggregation job to combine data from all instances (only on primary instance)
+    if (this.isPrimaryInstance) {
+      this.aggregationInterval = setInterval(
+        () => this.aggregateInstanceData(),
+        this.AGGREGATION_INTERVAL_MS,
+      );
+    }
 
-    // Start aggregation job to combine data from all instances
-    this.aggregationInterval = setInterval(
-      () => this.aggregateInstanceData(),
-      this.AGGREGATION_INTERVAL_MS,
-    );
-
-    // Collect and aggregate immediately on startup
+    // Collect immediately on startup, and aggregate if primary
     try {
       await this.collectAndStoreCurrentHashrate();
-      await this.publishHeartbeat();
-      await this.aggregateInstanceData();
+      if (this.isPrimaryInstance) {
+        await this.aggregateInstanceData();
+      }
     } catch (error) {
       console.error('[LiveHashrate] Error on initial startup:', error);
     }
@@ -152,9 +135,6 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
   async onModuleDestroy() {
     if (this.collectionInterval) {
       clearInterval(this.collectionInterval);
-    }
-    if (this.heartbeatInterval) {
-      clearInterval(this.heartbeatInterval);
     }
     if (this.aggregationInterval) {
       clearInterval(this.aggregationInterval);
@@ -167,140 +147,25 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
     console.log(`[LiveHashrate] Instance ${this.instanceId} shutdown`);
   }
 
-  private subscribeToClusterUpdates() {
-    if (!this.redis) return;
 
-    try {
-      const subscriber = this.redis.duplicate();
-      subscriber.subscribe(this.SYNC_CHANNEL, async (message: string) => {
-        try {
-          const update = JSON.parse(message);
-          this.handleClusterUpdate(update);
-        } catch (error) {
-          this.logAggregationError(`Failed to process cluster update: ${error}`);
-        }
-      });
-      console.log('[LiveHashrate] Subscribed to cluster updates on channel', this.SYNC_CHANNEL);
-    } catch (error) {
-      this.logAggregationError(`Failed to subscribe to cluster updates: ${error}`);
-    }
-  }
-
-  /**
-   * Handle incoming cluster updates from other PM2 instances
-   * Stores instance data in local cache for later aggregation
-   */
-  private handleClusterUpdate(update: any) {
-    try {
-      if (!update.instanceId || !update.timestamp) {
-        console.warn('[LiveHashrate] Received invalid cluster update:', update);
-        return;
-      }
-
-      // Ignore our own messages
-      if (update.instanceId === this.instanceId) {
-        return;
-      }
-
-      // Store in instance cache
-      const instanceStats: InstanceStats = {
-        instanceId: update.instanceId,
-        timestamp: update.timestamp,
-        poolHashrate: update.pool ?? 0,
-        addresses: update.addresses ?? {},
-        isStale: false,
-      };
-
-      this.instanceDataCache.set(update.instanceId, instanceStats);
-    } catch (error) {
-      this.logAggregationError(`Error handling cluster update: ${error}`);
-    }
-  }
-
-  /**
-   * Publish this instance's hashrate data to the cluster
-   */
-  private async publishHeartbeat(): Promise<void> {
-    if (!this.redis) return;
-
-    try {
-      const heartbeatKey = `${this.HEARTBEAT_PREFIX}:${this.instanceId}`;
-      await this.redis.setEx(heartbeatKey, 300, JSON.stringify({ instanceId: this.instanceId, timestamp: Date.now() }));
-    } catch (error) {
-      this.logAggregationError(`Failed to publish heartbeat: ${error}`);
-    }
-  }
-
-  /**
-   * Try to acquire the aggregation lock
-   * Only one PM2 instance should aggregate at a time to prevent CPU spikes
-   * @returns true if lock was acquired, false otherwise
-   */
-  private async tryAcquireAggregationLock(): Promise<boolean> {
-    if (!this.redis) return false;
-
-    try {
-      // Use SET with NX (only set if not exists) and PX (milliseconds expiry)
-      const result = await this.redis.set(
-        this.AGGREGATION_LOCK_KEY,
-        this.instanceId,
-        {
-          NX: true, // Only set if key doesn't exist
-          PX: this.AGGREGATION_LOCK_TTL_MS, // Auto-expire after TTL
-        }
-      );
-
-      // SET returns 'OK' if successful, null if key already exists
-      return result === 'OK';
-    } catch (error) {
-      console.error('[LiveHashrate] Failed to acquire aggregation lock:', error);
-      return false;
-    }
-  }
-
-  /**
-   * Release the aggregation lock
-   * Should be called after aggregation completes
-   */
-  private async releaseAggregationLock(): Promise<void> {
-    if (!this.redis) return;
-
-    try {
-      await this.redis.del(this.AGGREGATION_LOCK_KEY);
-      console.log(`[LiveHashrate] Instance ${this.instanceId} released aggregation lock`);
-    } catch (error) {
-      console.error('[LiveHashrate] Failed to release aggregation lock:', error);
-    }
-  }
 
   /**
    * Aggregate data from all instances into final hashrate values
    * Finds all timestamps with partial data and creates aggregated records
    *
    * OPTIMIZED: Single-pass SCAN with in-memory grouping to avoid nested SCAN loops
-   * OPTIMIZED: Only one PM2 instance aggregates at a time using Redis lock
+   * Only instance 0 aggregates - no need for distributed locking
    */
   private async aggregateInstanceData(): Promise<void> {
+    // Only instance 0 aggregates - no need for distributed locking
+    if (!this.isPrimaryInstance) return;
     if (!this.redis) return;
 
-    // Try to acquire lock - if another instance is aggregating, skip
-    const lockAcquired = await this.tryAcquireAggregationLock();
-    if (!lockAcquired) {
-      console.log(`[LiveHashrate] Instance ${this.instanceId} skipping aggregation (another instance holds the lock)`);
-      return;
-    }
-
-    console.log(`[LiveHashrate] Instance ${this.instanceId} acquired aggregation lock`);
+    console.log(`[LiveHashrate] Instance ${this.instanceId} starting aggregation`);
     this.aggregationMetrics.totalAggregations++;
 
     try {
       const now = Date.now();
-
-      // Clean up stale instances (no heartbeat for > INSTANCE_TIMEOUT_MS)
-      await this.cleanupStaleInstances();
-
-      // Get all instance heartbeats to identify active instances
-      const activeInstances = await this.getActiveInstances();
 
       // OPTIMIZATION: Single SCAN to get all partial keys
       // Previously this caused nested SCAN loops (one scan per timestamp)
@@ -330,7 +195,7 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
       // Aggregate for each timestamp using pre-grouped keys (no more scans!)
       let aggregatedCount = 0;
       for (const [timestamp, keys] of keysByTimestamp.entries()) {
-        const aggregated = await this.aggregateForTimestamp(timestamp, keys, activeInstances);
+        const aggregated = await this.aggregateForTimestamp(timestamp, keys);
         if (aggregated) {
           aggregatedCount++;
         }
@@ -341,9 +206,6 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
     } catch (error) {
       this.aggregationMetrics.failedAggregations++;
       this.logAggregationError(`Aggregation failed: ${error}`);
-    } finally {
-      // CRITICAL: Always release the lock, even if aggregation failed
-      await this.releaseAggregationLock();
     }
   }
 
@@ -366,8 +228,7 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
    */
   private async aggregateForTimestamp(
     timestamp: number,
-    partialKeys: string[],
-    activeInstances: Set<string>
+    partialKeys: string[]
   ): Promise<boolean> {
     if (!this.redis) return false;
 
@@ -433,7 +294,6 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
           JSON.stringify({
             hashrate: poolTotalHashrate,
             timestamp,
-            activeInstances: Array.from(activeInstances),
             addressCount: addressAggregates.size,
             aggregatedAt: Date.now(),
             multiInstanceAddressCount: multiInstanceAddresses
@@ -470,67 +330,6 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  /**
-   * Get all active instances based on recent heartbeats
-   */
-  private async getActiveInstances(): Promise<Set<string>> {
-    if (!this.redis) return new Set([this.instanceId]);
-
-    try {
-      const heartbeatKeys = await this.scanKeys(`${this.HEARTBEAT_PREFIX}:*`);
-      const activeInstances = new Set<string>();
-
-      for (const key of heartbeatKeys) {
-        const instanceId = key.substring(this.HEARTBEAT_PREFIX.length + 1);
-        activeInstances.add(instanceId);
-      }
-
-      // Always include this instance
-      activeInstances.add(this.instanceId);
-
-      return activeInstances;
-    } catch (error) {
-      this.logAggregationError(`Failed to get active instances: ${error}`);
-      return new Set([this.instanceId]);
-    }
-  }
-
-  /**
-   * Clean up instances that haven't sent a heartbeat recently
-   */
-  private async cleanupStaleInstances(): Promise<void> {
-    if (!this.redis) return;
-
-    try {
-      const now = Date.now();
-      const staleInstanceIds: string[] = [];
-
-      for (const [instanceId, instanceStats] of this.instanceDataCache.entries()) {
-        if (now - instanceStats.timestamp > this.INSTANCE_TIMEOUT_MS) {
-          if (!instanceStats.isStale) {
-            instanceStats.isStale = true;
-            staleInstanceIds.push(instanceId);
-            this.aggregationMetrics.droppedStaleInstances++;
-            console.warn(
-              `[LiveHashrate] Marked instance ${instanceId} as stale (no update for ${Math.round((now - instanceStats.timestamp) / 1000)}s)`,
-            );
-          }
-        }
-      }
-
-      // Remove instances that have been stale for more than 5 minutes
-      for (const instanceId of this.instanceDataCache.keys()) {
-        const instanceStats = this.instanceDataCache.get(instanceId);
-        if (instanceStats?.isStale && now - instanceStats.timestamp > 300000) {
-          // 5 minutes
-          this.instanceDataCache.delete(instanceId);
-          console.log(`[LiveHashrate] Removed completely stale instance ${instanceId}`);
-        }
-      }
-    } catch (error) {
-      this.logAggregationError(`Failed to cleanup stale instances: ${error}`);
-    }
-  }
 
   /**
    * Log aggregation errors and track them for monitoring
@@ -642,34 +441,9 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
 
         addressHashrates[address] = addressHashrate;
       }
-
-      // Publish to cluster for real-time updates
-      await this.publishHashrateUpdate(previousMinuteEnd, poolHashrate, addressHashrates);
     } catch (error) {
       console.error('[LiveHashrate] Error during collection:', error);
       this.logAggregationError(`Collection failed: ${error}`);
-    }
-  }
-
-  private async publishHashrateUpdate(
-    timestamp: number,
-    poolHashrate: number,
-    addresses: Record<string, number>,
-  ): Promise<void> {
-    if (!this.redis) return;
-
-    try {
-      const message = JSON.stringify({
-        type: 'update',
-        instanceId: this.instanceId,
-        timestamp,
-        pool: poolHashrate,
-        addresses,
-      });
-
-      await this.redis.publish(this.SYNC_CHANNEL, message);
-    } catch (error) {
-      this.logAggregationError(`Failed to publish cluster update: ${error}`);
     }
   }
 

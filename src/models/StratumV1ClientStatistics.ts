@@ -1,110 +1,86 @@
-import { ClientStatisticsService } from '../ORM/client-statistics/client-statistics.service';
-import { ClientEntity } from '../ORM/client/client.entity';
 import { ConfigService } from '@nestjs/config';
-import { StatisticsBatchService } from '../services/statistics-batch.service';
+import { DIFFICULTY_1 } from '../constants/mining.constants';
+import { TimeSlotHelper } from '../utils/time-slot.helper';
 
 const CACHE_SIZE = 30;
 const CACHE_WINDOW_SECONDS = 300;
 const MIN_DIFF = 0.00001;
+
+/**
+ * Simplified client statistics tracker - PR #109 pattern
+ *
+ * ONLY handles:
+ * 1. Live hashrate calculation
+ * 2. Difficulty adjustment
+ *
+ * Does NOT handle persistence - that's done by ClientStatisticsService
+ * Mirrors the PoolShareStatisticsService stateless pattern
+ */
 export class StratumV1ClientStatistics {
 
-    private shares: number = 0;
-    private acceptedCount: number = 0;
-    private rejectedCount: number = 0;
-    private rejectedJobNotFoundCount: number = 0;
-    private rejectedJobNotFoundDiff1: number = 0;
-    private rejectedDuplicateShareCount: number = 0;
-    private rejectedDuplicateShareDiff1: number = 0;
-    private rejectedLowDifficultyShareCount: number = 0;
-    private rejectedLowDifficultyShareDiff1: number = 0;
-
+    // Submission cache for difficulty adjustment
     private submissionCacheStart: Date;
     private submissionCache: { time: Date, difficulty: number }[] = [];
 
+    // Live hashrate calculation (in-memory only)
+    public hashRate = 0;
     private currentTimeSlot: number = null;
-    private lastSave: number = null;
-	
-	public hashRate = 0;
-
     private previousTimeSlotTime: Date;
     private currentTimeSlotTime: Date;
-
     private previousShares: number = 0;
+    private shares: number = 0;
+
+    // Configuration
     private targetSharesPerMinute: number;
     private targetSubmissionPerSecond: number;
 
-    constructor(
-        private readonly clientStatisticsService: ClientStatisticsService,
-        private readonly configService: ConfigService,
-        private readonly statisticsBatchService?: StatisticsBatchService,
-    ) {
+    constructor(private readonly configService: ConfigService) {
         this.submissionCacheStart = new Date();
         const tpm = parseFloat(this.configService.get('TARGET_SHARES_PER_MINUTE') ?? '6');
         this.targetSharesPerMinute = isNaN(tpm) ? 6 : tpm;
         this.targetSubmissionPerSecond = 60 / this.targetSharesPerMinute;
     }
 
-    private resetRejectedStats() {
-        this.rejectedCount = 0;
-        this.rejectedJobNotFoundCount = 0;
-        this.rejectedJobNotFoundDiff1 = 0;
-        this.rejectedDuplicateShareCount = 0;
-        this.rejectedDuplicateShareDiff1 = 0;
-        this.rejectedLowDifficultyShareCount = 0;
-        this.rejectedLowDifficultyShareDiff1 = 0;
-    }
+    /**
+     * Update live hashrate calculation when share is accepted
+     * Does NOT persist - caller must use ClientStatisticsService.addAcceptedShare()
+     */
+    public updateHashRate(targetDifficulty: number) {
+        const date = new Date();
+        const timeSlot = TimeSlotHelper.getSlotForTime(date.getTime());
 
-    private incrementRejectedStats(reason: string, difficulty: number) {
-        const diff1 = Number.isFinite(difficulty) ? difficulty : 0;
-        this.rejectedCount++;
+        // Update submission cache for difficulty adjustment
+        this.updateSubmissionCache(date, targetDifficulty);
 
-        switch (reason) {
-            case 'JobNotFound':
-                this.rejectedJobNotFoundCount++;
-                this.rejectedJobNotFoundDiff1 += diff1;
-                break;
-            case 'DuplicateShare':
-                this.rejectedDuplicateShareCount++;
-                this.rejectedDuplicateShareDiff1 += diff1;
-                break;
-            case 'LowDifficultyShare':
-                this.rejectedLowDifficultyShareCount++;
-                this.rejectedLowDifficultyShareDiff1 += diff1;
-                break;
-            default:
-                break;
+        // Update hashrate calculation
+        if (this.currentTimeSlot == null) {
+            // First share
+            this.previousTimeSlotTime = new Date();
+            this.currentTimeSlotTime = new Date();
+            this.currentTimeSlot = timeSlot;
+            this.shares = targetDifficulty;
+        } else if (this.currentTimeSlot != timeSlot) {
+            // Transitioning to new time slot
+            this.previousShares = this.shares;
+            this.previousTimeSlotTime = this.currentTimeSlotTime;
+            this.currentTimeSlotTime = new Date();
+            this.currentTimeSlot = timeSlot;
+            this.shares = targetDifficulty;
+        } else {
+            // Same time slot - accumulate for live hashrate
+            this.shares += targetDifficulty;
+            if (this.shares > 0) {
+                const time = date.getTime() - this.previousTimeSlotTime.getTime();
+                this.hashRate = ((this.previousShares + this.shares) * DIFFICULTY_1) / (time / 1000);
+            }
         }
     }
 
-    private buildPersistencePayload(client: ClientEntity) {
-        return {
-            time: this.currentTimeSlot,
-            shares: this.shares,
-            acceptedCount: this.acceptedCount,
-            rejectedCount: this.rejectedCount,
-            rejectedJobNotFoundCount: this.rejectedJobNotFoundCount,
-            rejectedJobNotFoundDiff1: this.rejectedJobNotFoundDiff1,
-            rejectedDuplicateShareCount: this.rejectedDuplicateShareCount,
-            rejectedDuplicateShareDiff1: this.rejectedDuplicateShareDiff1,
-            rejectedLowDifficultyShareCount: this.rejectedLowDifficultyShareCount,
-            rejectedLowDifficultyShareDiff1: this.rejectedLowDifficultyShareDiff1,
-            address: client.address,
-            clientName: client.clientName,
-            sessionId: client.sessionId
-        };
-    }
-
-
-    // We don't want to save them here because it can be DB intensive, instead do it every once in
-    // awhile with saveShares()
-    public async addShares(client: ClientEntity, targetDifficulty: number) {
-
-        // 10 min
-        var coeff = 1000 * 60 * 10;
-        var date = new Date();
-        // Time slot labeled by END time (e.g., slot "20:50" contains data from 20:40-20:50)
-        var timeSlot = new Date(Math.floor(date.getTime() / coeff) * coeff + coeff).getTime();
-
+    /**
+     * Maintain sliding window of recent submissions for difficulty adjustment
+     */
+    private updateSubmissionCache(date: Date, difficulty: number) {
+        // Remove submissions older than CACHE_WINDOW_SECONDS
         while (
             this.submissionCache.length &&
             date.getTime() - this.submissionCache[0].time.getTime() > CACHE_WINDOW_SECONDS * 1000
@@ -112,142 +88,25 @@ export class StratumV1ClientStatistics {
             this.submissionCache.shift();
         }
 
+        // Limit cache size
         if (this.submissionCache.length >= CACHE_SIZE) {
             this.submissionCache.shift();
         }
 
+        // Add new submission
         this.submissionCache.push({
             time: date,
-            difficulty: targetDifficulty,
+            difficulty: difficulty,
         });
-
-
-        if (this.currentTimeSlot == null) {
-            // First record, insert it
-            this.previousTimeSlotTime = new Date();
-            this.currentTimeSlotTime = new Date();
-            this.currentTimeSlot = timeSlot;
-            this.shares += targetDifficulty;
-            this.acceptedCount++;
-            this.resetRejectedStats();
-
-            // Use batch service if available, otherwise direct insert
-            if (this.statisticsBatchService) {
-                this.statisticsBatchService.queueInsert(this.buildPersistencePayload(client));
-            } else {
-                await this.clientStatisticsService.insert(this.buildPersistencePayload(client));
-            }
-            this.lastSave = new Date().getTime();
-        } else if (this.currentTimeSlot != timeSlot) {
-            // Transitioning to a new time slot,
-            // First update the old time slot with the latest data
-            if (this.statisticsBatchService) {
-                this.statisticsBatchService.queueUpdate(this.buildPersistencePayload(client));
-            } else {
-                await this.clientStatisticsService.update(this.buildPersistencePayload(client));
-            }
-
-            this.previousShares = this.shares;
-            this.previousTimeSlotTime = this.currentTimeSlotTime;
-            this.currentTimeSlotTime = new Date();
-            // Set the new time slot and add incoming shares then insert it
-            this.currentTimeSlot = timeSlot;
-            this.shares = targetDifficulty;
-            this.acceptedCount = 1;
-            this.resetRejectedStats();
-
-            if (this.statisticsBatchService) {
-                this.statisticsBatchService.queueInsert(this.buildPersistencePayload(client));
-            } else {
-                await this.clientStatisticsService.insert(this.buildPersistencePayload(client));
-            }
-            this.lastSave = new Date().getTime();
-        } else if ((date.getTime() - 60 * 1000) > this.lastSave) {
-            // If we haven't saved for a minute, queue update (batch service will flush periodically)
-            this.shares += targetDifficulty;
-            this.acceptedCount++;
-
-            if (this.statisticsBatchService) {
-                this.statisticsBatchService.queueUpdate(this.buildPersistencePayload(client));
-            } else {
-                await this.clientStatisticsService.update(this.buildPersistencePayload(client));
-            }
-            this.lastSave = new Date().getTime();
-        } else {
-            // Accept the shares if none of the prior conditions are met,
-            // saving to memory for storing later
-            this.shares += targetDifficulty;
-            this.acceptedCount++;
-			if(this.shares > 0) {
-            const time = new Date().getTime() - this.previousTimeSlotTime.getTime();
-            this.hashRate = ((this.previousShares + this.shares) * 4294967296) / (time / 1000);
-        }
-        }
-
     }
 
-    public async addRejectedShare(client: ClientEntity, reason: string, difficulty: number) {
+    /**
+     * Calculate suggested difficulty based on recent submission rate
+     * Returns null if no adjustment needed
+     */
+    public getSuggestedDifficulty(clientDifficulty: number): number | null {
 
-        var coeff = 1000 * 60 * 10;
-        var date = new Date();
-        // Time slot labeled by END time (e.g., slot "20:50" contains data from 20:40-20:50)
-        var timeSlot = new Date(Math.floor(date.getTime() / coeff) * coeff + coeff).getTime();
-
-        if (this.currentTimeSlot == null) {
-            this.previousTimeSlotTime = new Date();
-            this.currentTimeSlotTime = new Date();
-            this.currentTimeSlot = timeSlot;
-            this.shares = this.shares ?? 0;
-            this.acceptedCount = this.acceptedCount ?? 0;
-            this.resetRejectedStats();
-            this.incrementRejectedStats(reason, difficulty);
-
-            if (this.statisticsBatchService) {
-                this.statisticsBatchService.queueInsert(this.buildPersistencePayload(client));
-            } else {
-                await this.clientStatisticsService.insert(this.buildPersistencePayload(client));
-            }
-            this.lastSave = null;
-            return;
-        }
-
-        if (this.currentTimeSlot != timeSlot) {
-            if (this.statisticsBatchService) {
-                this.statisticsBatchService.queueUpdate(this.buildPersistencePayload(client));
-            } else {
-                await this.clientStatisticsService.update(this.buildPersistencePayload(client));
-            }
-
-            this.previousShares = this.shares;
-            this.previousTimeSlotTime = this.currentTimeSlotTime;
-            this.currentTimeSlotTime = new Date();
-            this.currentTimeSlot = timeSlot;
-            this.shares = 0;
-            this.acceptedCount = 0;
-            this.resetRejectedStats();
-            this.incrementRejectedStats(reason, difficulty);
-
-            if (this.statisticsBatchService) {
-                this.statisticsBatchService.queueInsert(this.buildPersistencePayload(client));
-            } else {
-                await this.clientStatisticsService.insert(this.buildPersistencePayload(client));
-            }
-            this.lastSave = null;
-            return;
-        }
-
-        this.incrementRejectedStats(reason, difficulty);
-        if (this.statisticsBatchService) {
-            this.statisticsBatchService.queueUpdate(this.buildPersistencePayload(client));
-        } else {
-            await this.clientStatisticsService.update(this.buildPersistencePayload(client));
-        }
-        this.lastSave = null;
-    }
-
-    public getSuggestedDifficulty(clientDifficulty: number) {
-
-        // miner hasn't submitted shares in one minute
+        // miner hasn't submitted enough shares yet
         if (this.submissionCache.length < 5) {
             if ((new Date().getTime() - this.submissionCacheStart.getTime()) / 1000 > 60) {
                 return this.nearestDifficultyStep(clientDifficulty / this.targetSharesPerMinute);
@@ -275,7 +134,10 @@ export class StratumV1ClientStatistics {
         return null;
     }
 
-    private nearestDifficultyStep(val: number): number {
+    /**
+     * Round difficulty to nearest power-of-2 step
+     */
+    private nearestDifficultyStep(val: number): number | null {
         if (val === 0) {
             return null;
         }

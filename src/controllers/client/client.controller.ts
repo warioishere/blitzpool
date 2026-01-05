@@ -1,4 +1,7 @@
-import { Controller, Get, NotFoundException, Param, Query, Post } from '@nestjs/common';
+import { Controller, Get, NotFoundException, Param, Query, Post, Inject } from '@nestjs/common';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import { Cache } from 'cache-manager';
+import { ConfigService } from '@nestjs/config';
 
 import { AddressSettingsService } from '../../ORM/address-settings/address-settings.service';
 import { ClientStatisticsService } from '../../ORM/client-statistics/client-statistics.service';
@@ -17,7 +20,23 @@ import { generateFormattedTimeSlots } from '../../utils/timeslot.utils';
 @Controller('client')
 export class ClientController {
 
+    // Configurable cache TTLs (in seconds)
+    private readonly cacheTTL = {
+        clientInfo: parseInt(this.configService.get('API_CACHE_TTL_CLIENT_INFO') ?? '10'),        // Live data (workers, hashrate, difficulty)
+        clientChart: parseInt(this.configService.get('API_CACHE_TTL_CLIENT_CHART') ?? '60'),      // Historical chart data
+        clientChartLive: parseInt(this.configService.get('API_CACHE_TTL_CLIENT_CHART_LIVE') ?? '10'), // Live hashrate chart
+        clientWorkerShares: parseInt(this.configService.get('API_CACHE_TTL_CLIENT_WORKER_SHARES') ?? '15'), // Worker share totals
+        clientWorkers: parseInt(this.configService.get('API_CACHE_TTL_CLIENT_WORKERS') ?? '60'),  // Historical worker counts
+        clientAccepted: parseInt(this.configService.get('API_CACHE_TTL_CLIENT_ACCEPTED') ?? '60'), // Historical accepted shares
+        clientRejected: parseInt(this.configService.get('API_CACHE_TTL_CLIENT_REJECTED') ?? '60'), // Historical rejected shares
+        clientDiffScores: parseInt(this.configService.get('API_CACHE_TTL_CLIENT_DIFF_SCORES') ?? '300'), // Difficulty scores (5 min)
+        clientWorkerGroup: parseInt(this.configService.get('API_CACHE_TTL_CLIENT_WORKER_GROUP') ?? '60'), // Worker group info
+        clientWorkerSession: parseInt(this.configService.get('API_CACHE_TTL_CLIENT_WORKER_SESSION') ?? '60'), // Worker session info
+    };
+
     constructor(
+        @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
+        private readonly configService: ConfigService,
         private readonly clientService: ClientService,
         private readonly clientStatisticsService: ClientStatisticsService,
         private readonly addressSettingsService: AddressSettingsService,
@@ -34,6 +53,13 @@ export class ClientController {
     @Get(':address')
     async getClientInfo(@Param('address') address: string) {
 
+        const CACHE_KEY = `CLIENT_INFO_${address}`;
+        const cachedResult = await this.cacheManager.get(CACHE_KEY);
+
+        if (cachedResult != null) {
+            return cachedResult;
+        }
+
         const workers = await this.clientService.getByAddress(address);
 
         const addressSettings = await this.addressSettingsService.getSettings(address, false);
@@ -42,7 +68,7 @@ export class ClientController {
         const totalHashrate = workers.reduce((sum, w) => sum + (w.hashRate ?? 0), 0);
         const currentDifficulties = this.stratumV1Service.getCurrentDifficulties(address);
 
-        return {
+        const result = {
             bestDifficulty: addressSettings?.bestDifficulty,
             workersCount: workers.length,
             totalShares,
@@ -72,7 +98,10 @@ export class ClientController {
                     };
                 })
             )
-        }
+        };
+
+        await this.cacheManager.set(CACHE_KEY, result, this.cacheTTL.clientInfo * 1000);
+        return result;
     }
 
     @Post(':address/reset')
@@ -96,7 +125,15 @@ export class ClientController {
         @Param('address') address: string,
         @Query('range') range: '1d' | '3d' | '7d' = '1d'
     ) {
+        const CACHE_KEY = `CLIENT_CHART_${address}_${range}`;
+        const cachedResult = await this.cacheManager.get(CACHE_KEY);
+
+        if (cachedResult != null) {
+            return cachedResult;
+        }
+
         const chartData = await this.clientStatisticsService.getChartDataForAddress(address, range);
+        await this.cacheManager.set(CACHE_KEY, chartData, this.cacheTTL.clientChart * 1000);
         return chartData;
     }
 
@@ -105,16 +142,33 @@ export class ClientController {
         @Param('address') address: string,
         @Query('range') range: '1h' | '6h' | '12h' | '24h' = '1h'
     ) {
+        const CACHE_KEY = `CLIENT_CHART_LIVE_${address}_${range}`;
+        const cachedResult = await this.cacheManager.get(CACHE_KEY);
+
+        if (cachedResult != null) {
+            return cachedResult;
+        }
+
         // Parse range to hours
         const hours = range === '24h' ? 24 : range === '12h' ? 12 : range === '6h' ? 6 : 1;
         const chartData = await this.liveHashrateService.getAddressLiveHashrate(address, hours);
+        await this.cacheManager.set(CACHE_KEY, chartData, this.cacheTTL.clientChartLive * 1000);
         return chartData;
     }
 
     @Get(':address/worker-shares')
     async getWorkerShares(@Param('address') address: string) {
+        const CACHE_KEY = `CLIENT_WORKER_SHARES_${address}`;
+        const cachedResult = await this.cacheManager.get(CACHE_KEY);
+
+        if (cachedResult != null) {
+            return cachedResult;
+        }
+
         const workerShares = await this.shareTotalsCacheService.getWorkerTotals(address);
-        return workerShares.map(ws => ({ workerName: ws.workerName, totalShares: ws.total }));
+        const result = workerShares.map(ws => ({ workerName: ws.workerName, totalShares: ws.total }));
+        await this.cacheManager.set(CACHE_KEY, result, this.cacheTTL.clientWorkerShares * 1000);
+        return result;
     }
 
     @Get(':address/workers')
@@ -122,6 +176,13 @@ export class ClientController {
         @Param('address') address: string,
         @Query('range') range: '1d' | '3d' | '7d' = '1d'
     ) {
+        const CACHE_KEY = `CLIENT_WORKERS_${address}_${range}`;
+        const cachedResult = await this.cacheManager.get(CACHE_KEY);
+
+        if (cachedResult != null) {
+            return cachedResult;
+        }
+
         const now = Date.now();
         const oneDay = 24 * 60 * 60 * 1000;
         const days = range === '7d' ? 7 : range === '3d' ? 3 : 1;
@@ -137,7 +198,9 @@ export class ClientController {
             counts: slotMap.get(t) || { workers: 0, sessions: 0 },
         }));
 
-        return { slotData };
+        const result = { slotData };
+        await this.cacheManager.set(CACHE_KEY, result, this.cacheTTL.clientWorkers * 1000);
+        return result;
     }
 
     @Get(':address/accepted')
@@ -145,6 +208,13 @@ export class ClientController {
         @Param('address') address: string,
         @Query('range') range: '1d' | '3d' | '7d' = '1d'
     ) {
+        const CACHE_KEY = `CLIENT_ACCEPTED_${address}_${range}`;
+        const cachedResult = await this.cacheManager.get(CACHE_KEY);
+
+        if (cachedResult != null) {
+            return cachedResult;
+        }
+
         const now = Date.now();
         const oneDay = 24 * 60 * 60 * 1000;
         const days = range === '7d' ? 7 : range === '3d' ? 3 : 1;
@@ -160,7 +230,9 @@ export class ClientController {
             counts: { accepted: slotMap.get(t) || 0 }
         }));
 
-        return { slotData };
+        const result = { slotData };
+        await this.cacheManager.set(CACHE_KEY, result, this.cacheTTL.clientAccepted * 1000);
+        return result;
     }
 
     @Get(':address/rejected')
@@ -168,6 +240,13 @@ export class ClientController {
         @Param('address') address: string,
         @Query('range') range: '1d' | '3d' | '7d' = '1d'
     ) {
+        const CACHE_KEY = `CLIENT_REJECTED_${address}_${range}`;
+        const cachedResult = await this.cacheManager.get(CACHE_KEY);
+
+        if (cachedResult != null) {
+            return cachedResult;
+        }
+
         const now = Date.now();
         const oneDay = 24 * 60 * 60 * 1000;
         const days = range === '7d' ? 7 : range === '3d' ? 3 : 1;
@@ -193,7 +272,9 @@ export class ClientController {
             return { counts };
         });
 
-        return { slotData };
+        const result = { slotData };
+        await this.cacheManager.set(CACHE_KEY, result, this.cacheTTL.clientRejected * 1000);
+        return result;
     }
 
     @Get(':address/diff-scores')
@@ -201,6 +282,13 @@ export class ClientController {
         @Param('address') address: string,
         @Query('range') range: '1d' | '7d' | '30d' = '1d'
     ) {
+        const CACHE_KEY = `CLIENT_DIFF_SCORES_${address}_${range}`;
+        const cachedResult = await this.cacheManager.get(CACHE_KEY);
+
+        if (cachedResult != null) {
+            return cachedResult;
+        }
+
         const now = Date.now();
         const oneHour = 60 * 60 * 1000;
         let hours = 24;
@@ -219,12 +307,14 @@ export class ClientController {
         const startSlot = Math.floor(since / oneHour) * oneHour;
         const endSlot = Math.floor(now / oneHour) * oneHour;
 
-        return this.difficultyScoresCacheService.getDifficultyScores(
+        const result = await this.difficultyScoresCacheService.getDifficultyScores(
             address,
             range,
             startSlot,
             endSlot,
         );
+        await this.cacheManager.set(CACHE_KEY, result, this.cacheTTL.clientDiffScores * 1000);
+        return result;
     }
 
     @Get(':address/:workerName')
@@ -233,6 +323,12 @@ export class ClientController {
         @Param('workerName') workerName: string,
         @Query('range') range: '1d' | '3d' | '7d' = '1d',
     ) {
+        const CACHE_KEY = `CLIENT_WORKER_GROUP_${address}_${workerName}_${range}`;
+        const cachedResult = await this.cacheManager.get(CACHE_KEY);
+
+        if (cachedResult != null) {
+            return cachedResult;
+        }
 
         const workers = await this.clientService.getByName(address, workerName);
 
@@ -244,17 +340,24 @@ export class ClientController {
         }, 0);
 
         const chartData = await this.clientStatisticsService.getChartDataForGroup(address, workerName, range);
-        return {
-
+        const result = {
             name: workerName,
             bestDifficulty: Math.floor(bestDifficulty),
             chartData: chartData,
+        };
 
-        }
+        await this.cacheManager.set(CACHE_KEY, result, this.cacheTTL.clientWorkerGroup * 1000);
+        return result;
     }
 
     @Get(':address/:workerName/:sessionId')
     async getWorkerInfo(@Param('address') address: string, @Param('workerName') workerName: string, @Param('sessionId') sessionId: string) {
+        const CACHE_KEY = `CLIENT_WORKER_SESSION_${address}_${workerName}_${sessionId}`;
+        const cachedResult = await this.cacheManager.get(CACHE_KEY);
+
+        if (cachedResult != null) {
+            return cachedResult;
+        }
 
         const worker = await this.clientService.getBySessionId(address, workerName, sessionId);
         if (worker == null) {
@@ -262,12 +365,15 @@ export class ClientController {
         }
         const chartData = await this.clientStatisticsService.getChartDataForSession(worker.address, worker.clientName, worker.sessionId);
 
-        return {
+        const result = {
             sessionId: worker.sessionId,
             name: worker.clientName,
             bestDifficulty: Math.floor(worker.bestDifficulty),
             chartData: chartData,
             startTime: worker.startTime
-        }
+        };
+
+        await this.cacheManager.set(CACHE_KEY, result, this.cacheTTL.clientWorkerSession * 1000);
+        return result;
     }
 }

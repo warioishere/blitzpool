@@ -47,7 +47,13 @@ export class AggregationService implements OnModuleInit {
 
     // Only run aggregation on PM2 instance 0 (or when not in cluster mode)
     // This prevents duplicate cron jobs across PM2 cluster instances
-    this.isPrimaryInstance = !process.env.NODE_APP_INSTANCE || process.env.NODE_APP_INSTANCE === '0';
+    // Check multiple PM2 environment variables (pm2-runtime uses pm_id, pm2 uses NODE_APP_INSTANCE)
+    const pm2InstanceId = process.env.NODE_APP_INSTANCE ?? process.env.pm_id ?? process.env.PM2_INSTANCE_ID;
+    const normalizedInstanceId = typeof pm2InstanceId === 'string' ? pm2InstanceId.trim() : undefined;
+
+    // If no PM2 instance ID is set, assume standalone (primary)
+    // If PM2 instance ID is set, only instance 0 is primary
+    this.isPrimaryInstance = !normalizedInstanceId || normalizedInstanceId === '0';
 
     // Pool stats: every 10 minutes (default)
     this.poolStatsInterval = parseInt(
@@ -64,7 +70,8 @@ export class AggregationService implements OnModuleInit {
 
   async onModuleInit(): Promise<void> {
     if (!this.isPrimaryInstance) {
-      console.log('[Aggregation] Disabled on PM2 instance ' + process.env.NODE_APP_INSTANCE + ' (only runs on instance 0)');
+      const instanceId = process.env.NODE_APP_INSTANCE ?? process.env.pm_id ?? process.env.PM2_INSTANCE_ID ?? 'unknown';
+      console.log('[Aggregation] Disabled on PM2 instance ' + instanceId + ' (only runs on instance 0)');
       return;
     }
 
