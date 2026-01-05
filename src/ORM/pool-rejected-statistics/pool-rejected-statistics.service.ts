@@ -1,5 +1,4 @@
-import { Injectable, Inject, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
-import { Interval } from '@nestjs/schedule';
+import { Injectable, Inject, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, MoreThan } from 'typeorm';
 import { Mutex } from 'async-mutex';
@@ -10,7 +9,7 @@ import { Cache } from 'cache-manager';
 import { PoolRejectedStatisticsEntity } from './pool-rejected-statistics.entity';
 
 @Injectable()
-export class PoolRejectedStatisticsService implements OnModuleInit, OnModuleDestroy {
+export class PoolRejectedStatisticsService implements OnModuleInit {
   constructor(
     @InjectRepository(PoolRejectedStatisticsEntity)
     private poolRejectedStatisticsRepository: Repository<PoolRejectedStatisticsEntity>,
@@ -28,15 +27,6 @@ export class PoolRejectedStatisticsService implements OnModuleInit, OnModuleDest
 
   private mutex = new Mutex();
   private redisClient: any = null;
-  private useRedis: boolean = false;
-
-  // Fallback in-memory state
-  private currentTimeSlot: number = null;
-  private lastSave: number = null;
-  private counts: Map<string, number> = new Map();
-
-  // Track current slot for Redis mode (for slot-transition flushing)
-  private redisCurrentSlot: number = null;
 
   // Anomaly detection state (per-worker, doesn't need to be shared)
   private recentDiffs: Map<string, number[]> = new Map();
@@ -57,31 +47,13 @@ export class PoolRejectedStatisticsService implements OnModuleInit, OnModuleDest
       const store: any = this.cacheManager.store;
       if (store && store.client) {
         this.redisClient = store.client;
-        this.useRedis = true;
-        console.log('[PoolRejectedStatisticsService] Using Redis for shared state across PM2 workers');
-
-        // NOTE: We do NOT flush stale keys on startup anymore
-        // TimeslotMigrationService clears all Redis keys BEFORE migrating the database
-        // This prevents race conditions where old-format data is flushed during/after migration
+        console.log('[PoolRejectedStatisticsService] Using Redis for atomic share increments');
       } else {
-        console.log('[PoolRejectedStatisticsService] Redis not available, using in-memory state');
+        throw new Error('Redis not available - required for pool rejected statistics');
       }
     } catch (error) {
-      console.warn('[PoolRejectedStatisticsService] Failed to access Redis client, using in-memory state:', error);
-    }
-  }
-
-  async onModuleDestroy(): Promise<void> {
-    console.log('[PoolRejectedStatisticsService] Flushing pending rejected shares to database before shutdown...');
-    try {
-      if (this.currentTimeSlot != null) {
-        await this.mutex.runExclusive(async () => {
-          await this.saveCurrent();
-        });
-      }
-      console.log('[PoolRejectedStatisticsService] Flush on shutdown completed successfully');
-    } catch (error) {
-      console.error('[PoolRejectedStatisticsService] Failed to flush on shutdown:', error);
+      console.error('[PoolRejectedStatisticsService] Failed to access Redis client:', error);
+      throw error;
     }
   }
 
@@ -124,14 +96,6 @@ export class PoolRejectedStatisticsService implements OnModuleInit, OnModuleDest
     return bucket;
   }
 
-  @Interval(60 * 1000)
-  private async flushInterval() {
-    await this.mutex.runExclusive(async () => {
-      await this.saveCurrent();
-      this.lastSave = Date.now();
-    });
-  }
-
   public async addRejectedShare(reason: string, diff: number): Promise<boolean> {
     return await this.mutex.runExclusive(async () => {
       const coeff = 1000 * 60 * 10;
@@ -166,192 +130,15 @@ export class PoolRejectedStatisticsService implements OnModuleInit, OnModuleDest
         this.recentDiffs.set(key, history);
       }
 
-      if (this.useRedis && this.redisClient) {
-        // Redis-backed implementation with slot-transition flushing
-        // Flush previous slot when transitioning to a new slot (ensures data appears immediately in charts)
-        if (this.redisCurrentSlot !== null && this.redisCurrentSlot !== timeSlot) {
-          // Slot transition detected - flush old slot to database immediately
-          // Run asynchronously to avoid blocking share processing
-          this.saveCurrent().catch(err =>
-            console.error('[PoolRejectedStatisticsService] Slot transition flush failed:', err)
-          );
-        }
-        this.redisCurrentSlot = timeSlot;
+      // Atomically increment count for this reason in Redis
+      const key = `pool:rejected:${timeSlot}`;
+      await this.redisClient.hIncrByFloat(key, reason, diff);
 
-        const key = `pool:rejected:${timeSlot}`;
-
-        // Atomically increment count for this reason
-        await this.redisClient.hIncrByFloat(key, reason, diff);
-
-        // Set expiry on key (24 hours)
-        await this.redisClient.expire(key, 86400);
-      } else {
-        // Fallback in-memory implementation
-        if (this.currentTimeSlot == null) {
-          this.currentTimeSlot = timeSlot;
-          this.counts.clear();
-          this.lastSave = now;
-        }
-
-        if (this.currentTimeSlot !== timeSlot) {
-          await this.saveCurrent();
-          this.currentTimeSlot = timeSlot;
-          this.counts.clear();
-          this.lastSave = now;
-        }
-
-        const current = this.counts.get(reason) || 0;
-        this.counts.set(reason, current + diff);
-
-        if (now - this.lastSave > 60 * 1000) {
-          await this.saveCurrent();
-          this.lastSave = now;
-        }
-      }
+      // Set expiry on key (24 hours)
+      await this.redisClient.expire(key, 86400);
 
       return true;
     });
-  }
-
-  private async saveCurrent() {
-    if (this.useRedis && this.redisClient) {
-      // Redis-backed implementation with atomic claim-and-fetch
-      const pattern = 'pool:rejected:*';
-      const allKeys = await this.redisClient.keys(pattern);
-
-      if (!allKeys || allKeys.length === 0) return;
-
-      // Filter out processing locks to avoid WRONGTYPE errors
-      const dataKeys = allKeys.filter(key => !key.endsWith(':processing'));
-
-      for (const key of dataKeys) {
-        // Atomically claim this key for processing using Lua script
-        // This prevents multiple workers from processing the same key
-        const claimScript = `
-          local key = KEYS[1]
-          local lockKey = key .. ':processing'
-          local acquired = redis.call('SET', lockKey, '1', 'NX', 'EX', 10)
-          if acquired then
-            local data = redis.call('HGETALL', key)
-            redis.call('DEL', key)
-            return data
-          else
-            return nil
-          end
-        `;
-
-        let data: any;
-        try {
-          const result = await this.redisClient.eval(claimScript, {
-            keys: [key],
-          });
-
-          if (!result || result.length === 0) {
-            // Another worker is processing this key or it's already been processed
-            continue;
-          }
-
-          // Convert array result to object (Redis HGETALL returns [key1, val1, key2, val2, ...])
-          data = {};
-          for (let i = 0; i < result.length; i += 2) {
-            data[result[i]] = result[i + 1];
-          }
-        } catch (claimError) {
-          console.warn(`[PoolRejectedStatisticsService] Failed to claim key ${key}:`, claimError);
-          continue;
-        }
-
-        if (!data || Object.keys(data).length === 0) {
-          await this.redisClient.del(`${key}:processing`);
-          continue;
-        }
-
-        // Extract timeSlot from key (pool:rejected:1234567890)
-        const timeSlot = parseInt(key.split(':')[2]);
-
-        const values = Object.entries(data)
-          .map(([reason, count]) => ({
-            time: timeSlot,
-            reason,
-            count: parseFloat(count as string),
-          }))
-          .filter(v => v.count > 0);
-
-        if (values.length === 0) {
-          await this.redisClient.del(`${key}:processing`);
-          continue;
-        }
-
-        try {
-          await this.poolRejectedStatisticsRepository
-            .createQueryBuilder()
-            .insert()
-            .into(PoolRejectedStatisticsEntity)
-            .values(values)
-            .onConflict(
-              '("time", "reason") DO UPDATE SET "count" = "count" + EXCLUDED."count", "updatedAt" = :updatedAt',
-            )
-            .setParameters({ updatedAt: new Date() })
-            .execute();
-
-          // Delete the processing lock after successful flush
-          await this.redisClient.del(`${key}:processing`);
-        } catch (error: any) {
-          // Suppress TypeORM entity ID mapping errors on upsert - the data is persisted despite the error
-          if (error?.message?.includes('entity id is not set')) {
-            await this.redisClient.del(`${key}:processing`);
-            return; // Data was successfully persisted
-          }
-          console.error(`[PoolRejectedStatisticsService] Failed to flush timeSlot ${timeSlot}:`, error);
-          // On error, restore the data to Redis and remove lock
-          try {
-            await this.redisClient.hSet(key, data);
-            await this.redisClient.del(`${key}:processing`);
-          } catch (restoreError) {
-            console.error(`[PoolRejectedStatisticsService] Failed to restore data to Redis:`, restoreError);
-          }
-        }
-      }
-    } else {
-      // Fallback in-memory implementation
-      if (this.counts.size === 0) {
-        return;
-      }
-
-      const values = Array.from(this.counts.entries())
-        .filter(([, delta]) => delta !== 0)
-        .map(([reason, delta]) => ({
-          time: this.currentTimeSlot,
-          reason,
-          count: delta,
-        }));
-
-      if (values.length === 0) {
-        this.counts.clear();
-        return;
-      }
-
-      try {
-        await this.poolRejectedStatisticsRepository
-          .createQueryBuilder()
-          .insert()
-          .into(PoolRejectedStatisticsEntity)
-          .values(values)
-          .onConflict(
-            '("time", "reason") DO UPDATE SET "count" = "count" + EXCLUDED."count", "updatedAt" = :updatedAt',
-          )
-          .setParameters({ updatedAt: new Date() })
-          .execute();
-      } catch (error: any) {
-        // Suppress TypeORM entity ID mapping errors on upsert - the data is persisted despite the error
-        if (!error?.message?.includes('entity id is not set')) {
-          throw error;
-        }
-        // Data was successfully persisted despite the TypeORM error
-      }
-
-      this.counts.clear();
-    }
   }
 
   public async getTotalsSince(time: number): Promise<Record<string, number>> {

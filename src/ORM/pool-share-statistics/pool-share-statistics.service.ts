@@ -1,71 +1,35 @@
-import { Injectable, Inject, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
-import { Interval } from '@nestjs/schedule';
+import { Injectable, Inject, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, MoreThan } from 'typeorm';
-import { Mutex } from 'async-mutex';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
 
 import { PoolShareStatisticsEntity } from './pool-share-statistics.entity';
+import { DIFFICULTY_1, REDIS_STATISTICS_TTL } from '../../constants/mining.constants';
+import { TimeSlotHelper } from '../../utils/time-slot.helper';
 
 @Injectable()
-export class PoolShareStatisticsService implements OnModuleInit, OnModuleDestroy {
+export class PoolShareStatisticsService implements OnModuleInit {
   constructor(
     @InjectRepository(PoolShareStatisticsEntity)
     private poolShareStatisticsRepository: Repository<PoolShareStatisticsEntity>,
     @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
   ) {}
 
-  private mutex = new Mutex();
   private redisClient: any = null;
-  private useRedis: boolean = false;
-
-  // Fallback in-memory state
-  private currentTimeSlot: number = null;
-  private accepted = 0;
-  private rejected = 0;
-
-  // Track current slot for Redis mode (for slot-transition flushing)
-  private redisCurrentSlot: number = null;
 
   async onModuleInit(): Promise<void> {
     try {
       const store: any = this.cacheManager.store;
       if (store && store.client) {
         this.redisClient = store.client;
-        this.useRedis = true;
-        console.log('[PoolShareStatisticsService] Using Redis for shared state across PM2 workers');
-
-        // NOTE: We do NOT flush stale keys on startup anymore
-        // TimeslotMigrationService clears all Redis keys BEFORE migrating the database
-        // This prevents race conditions where old-format data is flushed during/after migration
+        console.log('[PoolShareStatisticsService] Using Redis for atomic share increments');
       } else {
-        console.log('[PoolShareStatisticsService] Redis not available, using in-memory state');
+        console.error('[PoolShareStatisticsService] Redis not available - shares will not be tracked!');
       }
     } catch (error) {
-      console.warn('[PoolShareStatisticsService] Failed to access Redis client, using in-memory state:', error);
+      console.error('[PoolShareStatisticsService] Failed to access Redis client:', error);
     }
-  }
-
-  async onModuleDestroy(): Promise<void> {
-    console.log('[PoolShareStatisticsService] Flushing pending shares to database before shutdown...');
-    try {
-      await this.flush();
-      console.log('[PoolShareStatisticsService] Flush on shutdown completed successfully');
-    } catch (error) {
-      console.error('[PoolShareStatisticsService] Failed to flush on shutdown:', error);
-    }
-  }
-
-  @Interval(60 * 1000)
-  private async flushInterval() {
-    await this.flush();
-  }
-
-  private getTimeSlot(): number {
-    const coeff = 1000 * 60 * 10;
-    // Time slot labeled by END time (e.g., slot "20:50" contains data from 20:40-20:50)
-    return Math.floor(Date.now() / coeff) * coeff + coeff;
   }
 
   private async handleShare(accepted: number, rejected: number) {
@@ -75,184 +39,25 @@ export class PoolShareStatisticsService implements OnModuleInit, OnModuleDestroy
       );
       return;
     }
-    const timeSlot = this.getTimeSlot();
 
-    if (this.useRedis && this.redisClient) {
-      // Redis-backed implementation with slot-transition flushing
-      // Flush previous slot when transitioning to a new slot (ensures data appears immediately in charts)
-      if (this.redisCurrentSlot !== null && this.redisCurrentSlot !== timeSlot) {
-        // Slot transition detected - flush old slot to database immediately
-        // Run asynchronously to avoid blocking share processing
-        this.flush().catch(err =>
-          console.error('[PoolShareStatisticsService] Slot transition flush failed:', err)
-        );
-      }
-      this.redisCurrentSlot = timeSlot;
-
-      const key = `pool:shares:${timeSlot}`;
-
-      // Atomically increment accepted/rejected shares
-      if (accepted > 0) {
-        await this.redisClient.hIncrByFloat(key, 'accepted', accepted);
-      }
-      if (rejected > 0) {
-        await this.redisClient.hIncrByFloat(key, 'rejected', rejected);
-      }
-
-      // Set expiry on key (24 hours)
-      await this.redisClient.expire(key, 86400);
-    } else {
-      // Fallback in-memory implementation
-      if (this.currentTimeSlot === null) {
-        this.currentTimeSlot = timeSlot;
-      } else if (this.currentTimeSlot !== timeSlot) {
-        await this.flush();
-        this.currentTimeSlot = timeSlot;
-      }
-
-      this.accepted += accepted;
-      this.rejected += rejected;
+    if (!this.redisClient) {
+      console.error('[PoolShareStatisticsService] Cannot track share - Redis not available');
+      return;
     }
-  }
 
-  private async flush() {
-    await this.mutex.runExclusive(async () => {
-      if (this.useRedis && this.redisClient) {
-        // Redis-backed implementation with atomic claim-and-fetch
-        const pattern = 'pool:shares:*';
-        const allKeys = await this.redisClient.keys(pattern);
+    const timeSlot = TimeSlotHelper.getCurrentSlot();
+    const key = `pool:shares:${timeSlot}`;
 
-        if (!allKeys || allKeys.length === 0) return;
+    // Atomically increment accepted/rejected shares
+    if (accepted > 0) {
+      await this.redisClient.hIncrByFloat(key, 'accepted', accepted);
+    }
+    if (rejected > 0) {
+      await this.redisClient.hIncrByFloat(key, 'rejected', rejected);
+    }
 
-        // Filter out processing locks to avoid WRONGTYPE errors
-        const dataKeys = allKeys.filter(key => !key.endsWith(':processing'));
-
-        for (const key of dataKeys) {
-          // Atomically claim this key for processing using Lua script
-          // This prevents multiple workers from processing the same key
-          const claimScript = `
-            local key = KEYS[1]
-            local lockKey = key .. ':processing'
-            local acquired = redis.call('SET', lockKey, '1', 'NX', 'EX', 10)
-            if acquired then
-              local data = redis.call('HGETALL', key)
-              redis.call('DEL', key)
-              return data
-            else
-              return nil
-            end
-          `;
-
-          let data: any;
-          try {
-            const result = await this.redisClient.eval(claimScript, {
-              keys: [key],
-            });
-
-            if (!result || result.length === 0) {
-              // Another worker is processing this key or it's already been processed
-              continue;
-            }
-
-            // Convert array result to object (Redis HGETALL returns [key1, val1, key2, val2, ...])
-            data = {};
-            for (let i = 0; i < result.length; i += 2) {
-              data[result[i]] = result[i + 1];
-            }
-          } catch (claimError) {
-            console.warn(`[PoolShareStatisticsService] Failed to claim key ${key}:`, claimError);
-            continue;
-          }
-
-          if (!data || (!data.accepted && !data.rejected)) continue;
-
-          const accepted = parseFloat(data.accepted) || 0;
-          const rejected = parseFloat(data.rejected) || 0;
-
-          if (accepted === 0 && rejected === 0) {
-            // Clean up lock
-            await this.redisClient.del(`${key}:processing`);
-            continue;
-          }
-
-          // Extract timeSlot from key (pool:shares:1234567890)
-          const timeSlot = parseInt(key.split(':')[2]);
-          const updatedAt = new Date();
-
-          try {
-            await this.poolShareStatisticsRepository
-              .createQueryBuilder()
-              .insert()
-              .into(PoolShareStatisticsEntity)
-              .values({
-                time: timeSlot,
-                accepted,
-                rejected,
-              })
-              .onConflict(
-                '("time") DO UPDATE SET "accepted" = "accepted" + EXCLUDED."accepted", "rejected" = "rejected" + EXCLUDED."rejected", "updatedAt" = :updatedAt',
-              )
-              .setParameters({ updatedAt })
-              .execute();
-
-            // Delete the processing lock after successful flush
-            await this.redisClient.del(`${key}:processing`);
-          } catch (error: any) {
-            // Suppress TypeORM entity ID mapping errors on upsert - the data is persisted despite the error
-            if (error?.message?.includes('entity id is not set')) {
-              await this.redisClient.del(`${key}:processing`);
-              return; // Data was successfully persisted
-            }
-            console.error(`[PoolShareStatisticsService] Failed to flush timeSlot ${timeSlot}:`, error);
-            // On error, restore the data to Redis and remove lock
-            try {
-              await this.redisClient.hSet(key, data);
-              await this.redisClient.del(`${key}:processing`);
-            } catch (restoreError) {
-              console.error(`[PoolShareStatisticsService] Failed to restore data to Redis:`, restoreError);
-            }
-          }
-        }
-      } else {
-        // Fallback in-memory implementation
-        if (this.currentTimeSlot == null) return;
-        if (this.accepted === 0 && this.rejected === 0) return;
-
-        const accepted = this.accepted;
-        const rejected = this.rejected;
-        const timeSlot = this.currentTimeSlot;
-
-        this.accepted = 0;
-        this.rejected = 0;
-
-        const updatedAt = new Date();
-
-        try {
-          await this.poolShareStatisticsRepository
-            .createQueryBuilder()
-            .insert()
-            .into(PoolShareStatisticsEntity)
-            .values({
-              time: timeSlot,
-              accepted,
-              rejected,
-            })
-            .onConflict(
-              '("time") DO UPDATE SET "accepted" = "accepted" + EXCLUDED."accepted", "rejected" = "rejected" + EXCLUDED."rejected", "updatedAt" = :updatedAt',
-            )
-            .setParameters({ updatedAt })
-            .execute();
-        } catch (error: any) {
-          // Suppress TypeORM entity ID mapping errors on upsert - the data is persisted despite the error
-          if (!error?.message?.includes('entity id is not set')) {
-            this.accepted += accepted;
-            this.rejected += rejected;
-            throw error;
-          }
-          // Data was successfully persisted despite the TypeORM error
-        }
-      }
-    });
+    // Set expiry on key (24 hours)
+    await this.redisClient.expire(key, REDIS_STATISTICS_TTL);
   }
 
   private async addShares(accepted: number, rejected: number) {

@@ -34,7 +34,7 @@ import { ExternalSharesService } from './services/external-shares.service';
 import { GeoIpService } from './services/geoip.service';
 import { ShareTotalsCacheService } from './services/share-totals-cache.service';
 import { AddressSettingsCacheService } from './services/address-settings-cache.service';
-import { StatisticsBatchService } from './services/statistics-batch.service';
+import { StatisticsCoordinatorService } from './services/statistics-coordinator.service';
 import { AggregationService } from './services/aggregation.service';
 import { MetricsService } from './services/metrics.service';
 import { WorkerPoolService } from './services/worker-pool.service';
@@ -148,7 +148,7 @@ const ORMModules = [
         GeoIpService,
         ShareTotalsCacheService,
         AddressSettingsCacheService,
-        StatisticsBatchService,
+        StatisticsCoordinatorService, // Simplified statistics coordination (instance 0 only)
         AggregationService,
         MetricsService,
         WorkerPoolService,

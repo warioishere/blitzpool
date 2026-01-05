@@ -1,5 +1,7 @@
 import { Injectable, OnModuleInit, Inject, forwardRef } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import { Cache } from 'cache-manager';
 import { Server, Socket } from 'net';
 
 import { StratumV1Client } from '../models/StratumV1Client';
@@ -18,12 +20,12 @@ import { ClientDifficultyStatisticsService } from '../ORM/client-difficulty-stat
 import { ShareTotalsCacheService } from './share-totals-cache.service';
 import { AddressSettingsCacheService } from './address-settings-cache.service';
 import { DifficultyScoresCacheService } from './difficulty-scores-cache.service';
-import { StatisticsBatchService } from './statistics-batch.service';
 import { WorkerResetBroadcastService } from './worker-reset-broadcast.service';
 
 @Injectable()
 export class StratumV1Service implements OnModuleInit {
   private readonly clientsByAddress = new Map<string, Set<StratumV1Client>>();
+  private redisClient: any = null;
 
   constructor(
     private readonly bitcoinRpcService: BitcoinRpcService,
@@ -42,12 +44,23 @@ export class StratumV1Service implements OnModuleInit {
     private readonly externalSharesService: ExternalSharesService,
     private readonly clientDifficultyStatisticsService: ClientDifficultyStatisticsService,
     private readonly shareTotalsCacheService: ShareTotalsCacheService,
-    private readonly statisticsBatchService: StatisticsBatchService,
+    @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
     @Inject(forwardRef(() => WorkerResetBroadcastService))
     private readonly workerResetBroadcastService: WorkerResetBroadcastService,
   ) {}
 
   async onModuleInit(): Promise<void> {
+    // Extract Redis client for passing to StratumV1ClientStatistics
+    try {
+      const store: any = this.cacheManager.store;
+      if (store && store.client) {
+        this.redisClient = store.client;
+        console.log('[StratumV1Service] Redis client available for client statistics');
+      }
+    } catch (error) {
+      console.warn('[StratumV1Service] Failed to access Redis client:', error);
+    }
+
     if (process.env.NODE_APP_INSTANCE === undefined) {
       await this.clientService.deleteAll();
     }
@@ -127,10 +140,10 @@ export class StratumV1Service implements OnModuleInit {
         this.externalSharesService,
         this.clientDifficultyStatisticsService,
         this.shareTotalsCacheService,
-        this.statisticsBatchService,
         this,
         initialDifficulty,
         allowSuggestedDifficulty,
+        this.redisClient, // Pass Redis client for statistics coordinator
       );
 
       socket.on('close', async (hadError: boolean) => {

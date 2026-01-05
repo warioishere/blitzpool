@@ -1,5 +1,6 @@
 import { ConfigService } from '@nestjs/config';
 import * as bitcoinjs from 'bitcoinjs-lib';
+import { getAddressInfo } from 'bitcoin-address-validation';
 import { plainToInstance } from 'class-transformer';
 import { validate, ValidatorOptions } from 'class-validator';
 import * as crypto from 'crypto';
@@ -36,7 +37,6 @@ import { StratumV1Service } from '../services/stratum-v1.service';
 import { ClientDifficultyStatisticsService } from '../ORM/client-difficulty-statistics/client-difficulty-statistics.service';
 import { ShareTotalsCacheService } from '../services/share-totals-cache.service';
 import { AddressSettingsCacheService } from '../services/address-settings-cache.service';
-import { StatisticsBatchService } from '../services/statistics-batch.service';
 
 
 export class StratumV1Client {
@@ -106,10 +106,10 @@ export class StratumV1Client {
         private readonly externalSharesService: ExternalSharesService,
         private readonly clientDifficultyStatisticsService: ClientDifficultyStatisticsService,
         private readonly shareTotalsCacheService: ShareTotalsCacheService,
-        private readonly statisticsBatchService: StatisticsBatchService,
         private readonly stratumV1Service: StratumV1Service,
         initialDifficulty: number,
         private readonly allowSuggestedDifficulty: boolean = true,
+        private readonly redisClient?: any,
     ) {
         this.initialDifficulty = Number.isFinite(initialDifficulty)
             ? initialDifficulty
@@ -348,9 +348,7 @@ export class StratumV1Client {
                     if (this.sessionStart == null) {
                         this.sessionStart = new Date();
                         this.statistics = new StratumV1ClientStatistics(
-                            this.clientStatisticsService,
                             this.configService,
-                            this.statisticsBatchService,
                         );
                         this.sessionId = this.getRandomHexString();
                         this.extraNonce = this.sessionId;
@@ -411,6 +409,21 @@ export class StratumV1Client {
                     AuthorizationMessage,
                     parsedMessage,
                 );
+
+                // Validate Bitcoin address before accepting authorization
+                try {
+                    getAddressInfo(authorizationMessage.address);
+                } catch (error) {
+                    console.warn(`[StratumV1Client] Invalid Bitcoin address from ${this.socket.remoteAddress}: ${authorizationMessage.address}`);
+                    const err = new StratumErrorMessage(
+                        authorizationMessage.id,
+                        eStratumErrorCode.OtherUnknown,
+                        'Invalid Bitcoin address'
+                    ).response();
+                    await this.write(err);
+                    this.socket.destroy();
+                    return;
+                }
 
                 {
                     this.clientAuthorization = authorizationMessage;
@@ -813,7 +826,8 @@ export class StratumV1Client {
                 eStratumErrorCode[eStratumErrorCode.DuplicateShare],
                 this.sessionDifficulty,
             );
-            await this.statistics.addRejectedShare(
+            // Persist rejected share to Redis atomically (stateless service)
+            await this.clientStatisticsService.addRejectedShare(
                 this.entity,
                 eStratumErrorCode[eStratumErrorCode.DuplicateShare],
                 this.sessionDifficulty,
@@ -847,7 +861,8 @@ export class StratumV1Client {
                 eStratumErrorCode[eStratumErrorCode.JobNotFound],
                 this.sessionDifficulty,
             );
-            await this.statistics.addRejectedShare(
+            // Persist rejected share to Redis atomically (stateless service)
+            await this.clientStatisticsService.addRejectedShare(
                 this.entity,
                 eStratumErrorCode[eStratumErrorCode.JobNotFound],
                 this.sessionDifficulty,
@@ -878,7 +893,8 @@ export class StratumV1Client {
                 eStratumErrorCode[eStratumErrorCode.JobNotFound],
                 this.sessionDifficulty,
             );
-            await this.statistics.addRejectedShare(
+            // Persist rejected share to Redis atomically (stateless service)
+            await this.clientStatisticsService.addRejectedShare(
                 this.entity,
                 eStratumErrorCode[eStratumErrorCode.JobNotFound],
                 this.sessionDifficulty,
@@ -938,7 +954,12 @@ export class StratumV1Client {
                 }
             }
             try {
-                await this.statistics.addShares(this.entity, this.sessionDifficulty);
+                // Update live hashrate calculation
+                this.statistics.updateHashRate(this.sessionDifficulty);
+
+                // Persist to Redis atomically (stateless service)
+                await this.clientStatisticsService.addAcceptedShare(this.entity, this.sessionDifficulty);
+
                 this.shareTotalsCacheService.increment(
                     this.clientAuthorization.address,
                     this.clientAuthorization.worker,
@@ -1020,7 +1041,8 @@ export class StratumV1Client {
                 eStratumErrorCode[eStratumErrorCode.LowDifficultyShare],
                 this.sessionDifficulty,
             );
-            await this.statistics.addRejectedShare(
+            // Persist rejected share to Redis atomically (stateless service)
+            await this.clientStatisticsService.addRejectedShare(
                 this.entity,
                 eStratumErrorCode[eStratumErrorCode.LowDifficultyShare],
                 this.sessionDifficulty,

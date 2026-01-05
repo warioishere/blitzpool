@@ -51,3 +51,6 @@ full-setup/blitzpool-pg.env
 
 # Claude Code memory (local, not shared)
 .claude.local.md
+
+# Build output
+dist/

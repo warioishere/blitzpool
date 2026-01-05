@@ -1,116 +1,57 @@
-import { Injectable } from '@nestjs/common';
-import { Interval } from '@nestjs/schedule';
+import { Injectable, Inject, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, MoreThan } from 'typeorm';
-import { Mutex } from 'async-mutex';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import { Cache } from 'cache-manager';
 
 import { ClientRejectedStatisticsEntity } from './client-rejected-statistics.entity';
 
 @Injectable()
-export class ClientRejectedStatisticsService {
+export class ClientRejectedStatisticsService implements OnModuleInit {
   constructor(
     @InjectRepository(ClientRejectedStatisticsEntity)
     private clientRejectedStatisticsRepository: Repository<ClientRejectedStatisticsEntity>,
+    @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
   ) {}
 
-  private mutex = new Mutex();
-  private currentTimeSlot: number = null;
-  private lastSave: number = null;
-  private counts: Map<string, Map<string, { count: number; shares: number }>> = new Map();
+  private redisClient: any = null;
 
-  @Interval(60 * 1000)
-  private async flushInterval() {
-    if (this.currentTimeSlot != null) {
-      await this.mutex.runExclusive(async () => {
-        await this.saveCurrent();
-        this.lastSave = Date.now();
-      });
+  async onModuleInit(): Promise<void> {
+    try {
+      const store: any = this.cacheManager.store;
+      if (store && store.client) {
+        this.redisClient = store.client;
+        console.log('[ClientRejectedStatisticsService] Using Redis for atomic increments');
+      } else {
+        console.error('[ClientRejectedStatisticsService] Redis not available - client rejected statistics will not be tracked!');
+      }
+    } catch (error) {
+      console.error('[ClientRejectedStatisticsService] Failed to access Redis client:', error);
     }
+  }
+
+  private getTimeSlot(): number {
+    const coeff = 1000 * 60 * 10;
+    // Time slot labeled by END time (e.g., slot "20:50" contains data from 20:40-20:50)
+    return Math.floor(Date.now() / coeff) * coeff + coeff;
   }
 
   public async addRejectedShare(address: string, reason: string, diff: number) {
-    await this.mutex.runExclusive(async () => {
-      const coeff = 1000 * 60 * 10;
-      const now = Date.now();
-      // Time slot labeled by END time (e.g., slot "20:50" contains data from 20:40-20:50)
-      const timeSlot = Math.floor(now / coeff) * coeff + coeff;
-
-      if (this.currentTimeSlot == null) {
-        this.currentTimeSlot = timeSlot;
-        this.counts.clear();
-        this.lastSave = now;
-      }
-
-      if (this.currentTimeSlot !== timeSlot) {
-        await this.saveCurrent();
-        this.currentTimeSlot = timeSlot;
-        this.counts.clear();
-        this.lastSave = now;
-      }
-
-      if (!this.counts.has(address)) {
-        this.counts.set(address, new Map());
-      }
-      const addrMap = this.counts.get(address);
-      const current = addrMap.get(reason) || { count: 0, shares: 0 };
-      addrMap.set(reason, {
-        count: current.count + 1,
-        shares: current.shares + Math.max(0, diff - 1),
-      });
-
-      if (now - this.lastSave > 60 * 1000) {
-        await this.saveCurrent();
-        this.lastSave = now;
-      }
-    });
-  }
-
-  private async saveCurrent() {
-    if (this.counts.size === 0) {
+    if (!this.redisClient) {
+      console.error('[ClientRejectedStatisticsService] Cannot track reject - Redis not available');
       return;
     }
 
-    const values: Array<{
-      time: number;
-      address: string;
-      reason: string;
-      count: number;
-      shares: number;
-    }> = [];
+    const timeSlot = this.getTimeSlot();
+    const key = `client:rejected:${address}:${timeSlot}`;
 
-    for (const [address, reasons] of this.counts.entries()) {
-      for (const [reason, stats] of reasons.entries()) {
-        if (stats.count === 0 && stats.shares === 0) {
-          continue;
-        }
+    // Atomically increment count and shares for this reason
+    // shares = sum of (diff - 1) values
+    await this.redisClient.hIncrBy(key, `${reason}:count`, 1);
+    await this.redisClient.hIncrByFloat(key, `${reason}:shares`, Math.max(0, diff - 1));
 
-        values.push({
-          time: this.currentTimeSlot,
-          address,
-          reason,
-          count: stats.count,
-          shares: stats.shares,
-        });
-      }
-    }
-
-    if (values.length === 0) {
-      this.counts.clear();
-      return;
-    }
-
-    await this.clientRejectedStatisticsRepository
-      .createQueryBuilder()
-      .insert()
-      .into(ClientRejectedStatisticsEntity)
-      .values(values)
-      .onConflict(
-        '("time", "address", "reason") DO UPDATE SET "count" = "count" + EXCLUDED."count", "shares" = COALESCE("shares", 0) + EXCLUDED."shares", "updatedAt" = :updatedAt',
-      )
-      .setParameters({ updatedAt: new Date() })
-      .execute();
-
-    this.counts.clear();
+    // Set expiry on key (24 hours)
+    await this.redisClient.expire(key, 86400);
   }
 
   public async getTotalsSince(

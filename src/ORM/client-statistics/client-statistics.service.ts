@@ -1,17 +1,105 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Inject, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import { Cache } from 'cache-manager';
 
 import { ClientStatisticsEntity } from './client-statistics.entity';
-
-const DIFFICULTY_1 = 4294967296;
+import { ClientEntity } from '../client/client.entity';
+import { DIFFICULTY_1, REDIS_STATISTICS_TTL } from '../../constants/mining.constants';
+import { TimeSlotHelper } from '../../utils/time-slot.helper';
 
 @Injectable()
-export class ClientStatisticsService {
+export class ClientStatisticsService implements OnModuleInit {
   constructor(
     @InjectRepository(ClientStatisticsEntity)
     private clientStatisticsRepository: Repository<ClientStatisticsEntity>,
+    @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
   ) {}
+
+  private redisClient: any = null;
+
+  async onModuleInit(): Promise<void> {
+    try {
+      const store: any = this.cacheManager.store;
+      if (store && store.client) {
+        this.redisClient = store.client;
+        console.log('[ClientStatisticsService] Using Redis for atomic share increments');
+      } else {
+        console.error('[ClientStatisticsService] Redis not available - shares will not be tracked!');
+      }
+    } catch (error) {
+      console.error('[ClientStatisticsService] Failed to access Redis client:', error);
+    }
+  }
+
+  /**
+   * Add an accepted share - writes directly to Redis atomically
+   * Stateless - no in-memory accumulation
+   * Mirrors PoolShareStatisticsService pattern
+   */
+  public async addAcceptedShare(client: ClientEntity, difficulty: number) {
+    if (!Number.isFinite(difficulty)) {
+      console.warn(`[ClientStatisticsService] Discarded non-finite share: difficulty=${difficulty}`);
+      return;
+    }
+
+    if (!this.redisClient) {
+      console.error('[ClientStatisticsService] Cannot track share - Redis not available');
+      return;
+    }
+
+    const timeSlot = TimeSlotHelper.getCurrentSlot();
+    const key = `client:shares:${client.address}:${client.clientName}:${client.sessionId}:${timeSlot}`;
+
+    // Atomically increment accepted shares - INCREMENTAL, not accumulated!
+    await this.redisClient.hIncrByFloat(key, 'shares', difficulty);
+    await this.redisClient.hIncrBy(key, 'acceptedCount', 1);
+    await this.redisClient.expire(key, REDIS_STATISTICS_TTL);
+  }
+
+  /**
+   * Add a rejected share - writes directly to Redis atomically
+   * Stateless - no in-memory accumulation
+   * Mirrors PoolShareStatisticsService pattern
+   */
+  public async addRejectedShare(client: ClientEntity, reason: string, difficulty: number) {
+    if (!Number.isFinite(difficulty)) {
+      difficulty = 0;
+    }
+
+    if (!this.redisClient) {
+      console.error('[ClientStatisticsService] Cannot track rejected share - Redis not available');
+      return;
+    }
+
+    const timeSlot = TimeSlotHelper.getCurrentSlot();
+    const key = `client:shares:${client.address}:${client.clientName}:${client.sessionId}:${timeSlot}`;
+
+    // Base rejected count increment
+    const promises = [
+      this.redisClient.hIncrBy(key, 'rejectedCount', 1),
+      this.redisClient.expire(key, REDIS_STATISTICS_TTL),
+    ];
+
+    // Add reason-specific increments
+    switch (reason) {
+      case 'JobNotFound':
+        promises.push(this.redisClient.hIncrBy(key, 'rejectedJobNotFoundCount', 1));
+        promises.push(this.redisClient.hIncrByFloat(key, 'rejectedJobNotFoundDiff1', difficulty));
+        break;
+      case 'DuplicateShare':
+        promises.push(this.redisClient.hIncrBy(key, 'rejectedDuplicateShareCount', 1));
+        promises.push(this.redisClient.hIncrByFloat(key, 'rejectedDuplicateShareDiff1', difficulty));
+        break;
+      case 'LowDifficultyShare':
+        promises.push(this.redisClient.hIncrBy(key, 'rejectedLowDifficultyShareCount', 1));
+        promises.push(this.redisClient.hIncrByFloat(key, 'rejectedLowDifficultyShareDiff1', difficulty));
+        break;
+    }
+
+    await Promise.all(promises);
+  }
 
   private calcHashRate(shares: number) {
     return (shares * DIFFICULTY_1) / 600;
@@ -51,7 +139,7 @@ export class ClientStatisticsService {
       return;
     }
 
-    // Note: Caller (StatisticsBatchService) already batches to 1000 records max
+    // Note: Caller (StatisticsCoordinatorService) already batches to 1000 records max
     const databaseType = this.clientStatisticsRepository.manager.connection.options.type;
 
     if (databaseType === 'postgres') {
@@ -127,7 +215,7 @@ export class ClientStatisticsService {
       return;
     }
 
-    // Note: Caller (StatisticsBatchService) already batches to 1000 records max
+    // Note: Caller (StatisticsCoordinatorService) already batches to 1000 records max
     const databaseType = this.clientStatisticsRepository.manager.connection.options.type;
     const parameters: any[] = [];
 
