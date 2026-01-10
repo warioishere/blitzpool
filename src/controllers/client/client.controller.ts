@@ -166,7 +166,17 @@ export class ClientController {
         }
 
         const workerShares = await this.shareTotalsCacheService.getWorkerTotals(address);
-        const result = workerShares.map(ws => ({ workerName: ws.workerName, totalShares: ws.total }));
+        const workerRejected = await this.clientStatisticsService.getTotalRejectedForWorkers(address);
+
+        // Create a map for quick lookup of rejected counts
+        const rejectedMap = new Map(workerRejected.map(wr => [wr.clientName, wr.totalRejected]));
+
+        const result = workerShares.map(ws => ({
+            workerName: ws.workerName,
+            totalShares: ws.total,
+            totalRejected: rejectedMap.get(ws.workerName) || 0
+        }));
+
         await this.cacheManager.set(CACHE_KEY, result, this.cacheTTL.clientWorkerShares * 1000);
         return result;
     }

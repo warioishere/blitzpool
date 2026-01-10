@@ -811,6 +811,22 @@ export class ClientStatisticsService implements OnModuleInit {
     return result?.total ? parseFloat(result.total) : 0;
   }
 
+  public async getTotalRejectedForWorkers(
+    address: string,
+  ): Promise<Array<{ clientName: string; totalRejected: number }>> {
+    const results = await this.clientStatisticsRepository
+      .createQueryBuilder('entry')
+      .select('entry.clientName', 'clientName')
+      .addSelect('SUM(entry.rejectedCount)', 'totalRejected')
+      .where('entry.address = :address', { address })
+      .groupBy('entry.clientName')
+      .getRawMany();
+    return results.map((r) => ({
+      clientName: r.clientName,
+      totalRejected: r.totalRejected ? parseInt(r.totalRejected, 10) : 0,
+    }));
+  }
+
   public async deleteAll() {
     return await this.clientStatisticsRepository.delete({});
   }
