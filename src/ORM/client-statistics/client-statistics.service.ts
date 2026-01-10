@@ -698,6 +698,10 @@ export class ClientStatisticsService implements OnModuleInit {
       workers: number;
     }>
   > {
+    const now = Date.now();
+    const coeff = 1000 * 60 * 10; // 10-minute slots
+    const currentSlot = Math.floor(now / coeff) * coeff + coeff; // Current incomplete slot (end-time labeled)
+
     const query = this.clientStatisticsRepository
       .createQueryBuilder('stat')
       .select('stat.time', 'time')
@@ -707,6 +711,7 @@ export class ClientStatisticsService implements OnModuleInit {
         'workers',
       )
       .where('stat.time > :since', { since: time })
+      .andWhere('stat.time < :currentSlot', { currentSlot }) // Exclude current incomplete slot
       .andWhere("stat.sessionId != 'AGG'")
       .andWhere("stat.address != 'POOL'")
       .groupBy('stat.time')
@@ -730,6 +735,10 @@ export class ClientStatisticsService implements OnModuleInit {
       sessions: number;
     }>
   > {
+    const now = Date.now();
+    const coeff = 1000 * 60 * 10; // 10-minute slots
+    const currentSlot = Math.floor(now / coeff) * coeff + coeff; // Current incomplete slot (end-time labeled)
+
     const query = this.clientStatisticsRepository
       .createQueryBuilder('stat')
       .select('stat.time', 'time')
@@ -740,6 +749,7 @@ export class ClientStatisticsService implements OnModuleInit {
       )
       .where('stat.address = :address', { address })
       .andWhere('stat.time > :since', { since: time })
+      .andWhere('stat.time < :currentSlot', { currentSlot }) // Exclude current incomplete slot
       .andWhere("stat.sessionId != 'AGG'")
       .groupBy('stat.time')
       .orderBy('stat.time', 'ASC');
