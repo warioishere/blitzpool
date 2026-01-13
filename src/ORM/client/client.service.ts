@@ -250,4 +250,13 @@ export class ClientService {
         return rows.map(r => r.address);
     }
 
+    public async hardDeleteForAddress(address: string): Promise<void> {
+        await this.clientRepository
+            .createQueryBuilder()
+            .delete()
+            .from(ClientEntity)
+            .where('address = :address', { address })
+            .execute();
+    }
+
 }

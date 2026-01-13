@@ -64,4 +64,11 @@ export class BestDifficultyTrackerService {
             await this.trackerRepository.save(existing);
         }
     }
+
+    /**
+     * Delete tracker for address
+     */
+    public async deleteTracker(address: string): Promise<void> {
+        await this.trackerRepository.delete({ address });
+    }
 }
