@@ -840,4 +840,29 @@ export class ClientStatisticsService implements OnModuleInit {
   public async deleteAll() {
     return await this.clientStatisticsRepository.delete({});
   }
+
+  public async deleteForAddress(address: string) {
+    return await this.clientStatisticsRepository.delete({ address });
+  }
+
+  /**
+   * Clear all Redis cache keys for an address (used for delete operations)
+   */
+  public async clearRedisKeysForAddress(address: string): Promise<void> {
+    if (!this.redisClient) {
+      return;
+    }
+
+    try {
+      // Delete all client share keys for this address
+      const pattern = `client:shares:${address}:*`;
+      const keys = await this.redisClient.keys(pattern);
+
+      if (keys && keys.length > 0) {
+        await this.redisClient.del(...keys);
+      }
+    } catch (error) {
+      console.error(`[ClientStatisticsService] Failed to clear Redis keys for address ${address}:`, error);
+    }
+  }
 }

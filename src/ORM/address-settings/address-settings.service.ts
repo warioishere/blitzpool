@@ -146,4 +146,8 @@ export class AddressSettingsService {
             bestDifficulty: 0
         });
     }
+
+    public async deleteForAddress(address: string) {
+        return await this.addressSettingsRepository.delete({ address });
+    }
 }

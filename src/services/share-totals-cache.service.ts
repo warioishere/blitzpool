@@ -194,4 +194,29 @@ export class ShareTotalsCacheService implements OnModuleInit {
 
     return result;
   }
+
+  /**
+   * Clear all Redis cache keys for an address (used for delete operations)
+   */
+  public async clearAddressData(address: string): Promise<void> {
+    if (!this.useRedis || !this.redisClient) {
+      return;
+    }
+
+    try {
+      // Delete address total key
+      const addressKey = this.getAddressKey(address);
+      await this.redisClient.del(addressKey);
+
+      // Delete all worker keys for this address
+      const workerPattern = `shares:worker:${address}:*`;
+      const workerKeys = await this.redisClient.keys(workerPattern);
+
+      if (workerKeys && workerKeys.length > 0) {
+        await this.redisClient.del(...workerKeys);
+      }
+    } catch (error) {
+      console.error(`[ShareTotalsCacheService] Failed to clear data for address ${address}:`, error);
+    }
+  }
 }

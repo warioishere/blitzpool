@@ -120,6 +120,114 @@ export class ClientController {
         return { status: 'reset' };
     }
 
+    @Post(':address/delete-stats')
+    async deleteStats(@Param('address') address: string) {
+        console.log(`[ClientController] Starting delete-stats for address ${address}`);
+
+        // Clear all cache keys for this address (including worker-specific caches)
+        // Try to get Redis client to use keys() for pattern matching
+        try {
+            const store: any = this.cacheManager.store;
+            if (store && store.client) {
+                const redisClient = store.client;
+                // Find all cache keys containing this address
+                const patterns = [
+                    `CLIENT_INFO_${address}*`,
+                    `CLIENT_CHART_${address}*`,
+                    `CLIENT_CHART_LIVE_${address}*`,
+                    `CLIENT_WORKER_SHARES_${address}*`,
+                    `CLIENT_WORKERS_${address}*`,
+                    `CLIENT_ACCEPTED_${address}*`,
+                    `CLIENT_REJECTED_${address}*`,
+                    `CLIENT_DIFF_SCORES_${address}*`,
+                    `CLIENT_WORKER_GROUP_${address}*`,
+                    `CLIENT_WORKER_SESSION_${address}*`,
+                ];
+
+                for (const pattern of patterns) {
+                    const keys = await redisClient.keys(pattern);
+                    if (keys && keys.length > 0) {
+                        await redisClient.del(...keys);
+                    }
+                }
+                console.log(`[ClientController] Cache keys cleared for ${address}`);
+            }
+        } catch (error) {
+            console.error(`[ClientController] Error clearing cache keys:`, error);
+            // Fallback: clear known cache keys
+            const cacheKeys = [
+                `CLIENT_INFO_${address}`,
+                `CLIENT_CHART_${address}_1d`,
+                `CLIENT_CHART_${address}_3d`,
+                `CLIENT_CHART_${address}_7d`,
+                `CLIENT_CHART_LIVE_${address}_1h`,
+                `CLIENT_CHART_LIVE_${address}_6h`,
+                `CLIENT_CHART_LIVE_${address}_12h`,
+                `CLIENT_CHART_LIVE_${address}_24h`,
+                `CLIENT_WORKER_SHARES_${address}`,
+                `CLIENT_WORKERS_${address}_1d`,
+                `CLIENT_WORKERS_${address}_3d`,
+                `CLIENT_WORKERS_${address}_7d`,
+                `CLIENT_ACCEPTED_${address}_1d`,
+                `CLIENT_ACCEPTED_${address}_3d`,
+                `CLIENT_ACCEPTED_${address}_7d`,
+                `CLIENT_REJECTED_${address}_1d`,
+                `CLIENT_REJECTED_${address}_3d`,
+                `CLIENT_REJECTED_${address}_7d`,
+                `CLIENT_DIFF_SCORES_${address}_1d`,
+                `CLIENT_DIFF_SCORES_${address}_7d`,
+                `CLIENT_DIFF_SCORES_${address}_30d`,
+            ];
+            await Promise.all(cacheKeys.map(key => this.cacheManager.del(key)));
+        }
+
+        // Clear Redis keys for statistics
+        await this.clientStatisticsService.clearRedisKeysForAddress(address);
+        await this.clientRejectedStatisticsService.clearRedisKeysForAddress(address);
+        await this.shareTotalsCacheService.clearAddressData(address);
+        console.log(`[ClientController] Redis keys cleared for ${address}`);
+
+        // Delete statistics from database
+        await this.clientStatisticsService.deleteForAddress(address);
+        console.log(`[ClientController] Client statistics deleted for ${address}`);
+
+        await this.clientRejectedStatisticsService.deleteForAddress(address);
+        console.log(`[ClientController] Client rejected statistics deleted for ${address}`);
+
+        await this.clientDifficultyStatisticsService.deleteForAddress(address);
+        console.log(`[ClientController] Client difficulty statistics deleted for ${address}`);
+
+        // Reset best difficulty tracking
+        await this.stratumV1Service.resetBestDifficultyForAddress(address);
+        await this.addressSettingsService.updateBestDifficulty(address, 0, null);
+        await this.trackerService.resetTracker(address);
+        console.log(`[ClientController] Best difficulty tracking reset for ${address}`);
+
+        return { status: 'stats-deleted', address };
+    }
+
+    @Post(':address/delete-all')
+    async deleteAll(@Param('address') address: string) {
+        console.log(`[ClientController] Starting delete-all for address ${address}`);
+
+        // First delete all statistics (reuse delete-stats logic)
+        await this.deleteStats(address);
+
+        // Delete client records (hard delete)
+        await this.clientService.hardDeleteForAddress(address);
+        console.log(`[ClientController] Client records deleted for ${address}`);
+
+        // Delete address settings
+        await this.addressSettingsService.deleteForAddress(address);
+        console.log(`[ClientController] Address settings deleted for ${address}`);
+
+        // Delete tracker
+        await this.trackerService.deleteTracker(address);
+        console.log(`[ClientController] Tracker deleted for ${address}`);
+
+        return { status: 'all-deleted', address };
+    }
+
     @Get(':address/chart')
     async getClientInfoChart(
         @Param('address') address: string,

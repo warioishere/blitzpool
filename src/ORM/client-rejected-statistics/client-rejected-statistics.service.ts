@@ -84,4 +84,29 @@ export class ClientRejectedStatisticsService implements OnModuleInit {
       order: { time: 'ASC' },
     });
   }
+
+  public async deleteForAddress(address: string) {
+    return await this.clientRejectedStatisticsRepository.delete({ address });
+  }
+
+  /**
+   * Clear all Redis cache keys for an address (used for delete operations)
+   */
+  public async clearRedisKeysForAddress(address: string): Promise<void> {
+    if (!this.redisClient) {
+      return;
+    }
+
+    try {
+      // Delete all client rejected share keys for this address
+      const pattern = `client:rejected:${address}:*`;
+      const keys = await this.redisClient.keys(pattern);
+
+      if (keys && keys.length > 0) {
+        await this.redisClient.del(...keys);
+      }
+    } catch (error) {
+      console.error(`[ClientRejectedStatisticsService] Failed to clear Redis keys for address ${address}:`, error);
+    }
+  }
 }

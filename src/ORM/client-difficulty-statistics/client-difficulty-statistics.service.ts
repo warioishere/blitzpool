@@ -107,4 +107,8 @@ export class ClientDifficultyStatisticsService {
       .where('slotTime < :cutoff', { cutoff })
       .execute();
   }
+
+  async deleteForAddress(address: string): Promise<void> {
+    await this.repository.delete({ address });
+  }
 }
