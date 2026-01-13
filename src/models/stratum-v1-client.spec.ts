@@ -7,6 +7,7 @@ interface CreateClientOptions {
   initialDifficulty?: number;
   configValues?: Record<string, string>;
   allowSuggestedDifficulty?: boolean;
+  targetSharesPerMinute?: number;
 }
 
 // Helper to create a client with mocked dependencies
@@ -16,6 +17,7 @@ function createClient(options: CreateClientOptions = {}) {
     initialDifficulty = 16384,
     configValues = {},
     allowSuggestedDifficulty = true,
+    targetSharesPerMinute = 6,
   } = options;
   const socket = new net.Socket();
   const dummy = {} as any;
@@ -68,6 +70,7 @@ function createClient(options: CreateClientOptions = {}) {
     stratumV1Service as any,
     initialDifficulty,
     allowSuggestedDifficulty,
+    targetSharesPerMinute,
   );
 
   Object.assign(client as any, overrides);

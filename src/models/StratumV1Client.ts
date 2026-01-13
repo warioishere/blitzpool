@@ -109,6 +109,7 @@ export class StratumV1Client {
         private readonly stratumV1Service: StratumV1Service,
         initialDifficulty: number,
         private readonly allowSuggestedDifficulty: boolean = true,
+        private readonly targetSharesPerMinute: number = 6,
         private readonly redisClient?: any,
     ) {
         this.initialDifficulty = Number.isFinite(initialDifficulty)
@@ -348,7 +349,7 @@ export class StratumV1Client {
                     if (this.sessionStart == null) {
                         this.sessionStart = new Date();
                         this.statistics = new StratumV1ClientStatistics(
-                            this.configService,
+                            this.targetSharesPerMinute,
                         );
                         this.sessionId = this.getRandomHexString();
                         this.extraNonce = this.sessionId;

@@ -34,10 +34,9 @@ export class StratumV1ClientStatistics {
     private targetSharesPerMinute: number;
     private targetSubmissionPerSecond: number;
 
-    constructor(private readonly configService: ConfigService) {
+    constructor(targetSharesPerMinute: number) {
         this.submissionCacheStart = new Date();
-        const tpm = parseFloat(this.configService.get('TARGET_SHARES_PER_MINUTE') ?? '6');
-        this.targetSharesPerMinute = isNaN(tpm) ? 6 : tpm;
+        this.targetSharesPerMinute = targetSharesPerMinute > 0 ? targetSharesPerMinute : 6;
         this.targetSubmissionPerSecond = 60 / this.targetSharesPerMinute;
     }
 

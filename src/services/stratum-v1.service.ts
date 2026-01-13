@@ -78,6 +78,9 @@ export class StratumV1Service implements OnModuleInit {
       const defaultDifficulty = parseFloat(
         this.configService.get<string>('STRATUM_START_DIFFICULTY') ?? '16384',
       );
+      const defaultTargetShares = parseFloat(
+        this.configService.get<string>('TARGET_SHARES_PER_MINUTE') ?? '6',
+      );
       const highDiffPort = parseInt(
         this.configService.get<string>('STRATUM_HIGH_DIFF_PORT') ?? '3339',
         10,
@@ -87,24 +90,38 @@ export class StratumV1Service implements OnModuleInit {
           'STRATUM_HIGH_DIFF_START_DIFFICULTY',
         ) ?? '1000000',
       );
+      const highDiffTargetShares = parseFloat(
+        this.configService.get<string>(
+          'STRATUM_HIGH_DIFF_TARGET_SHARES_PER_MINUTE',
+        ) ?? defaultTargetShares.toString(),
+      );
 
       const normalizedDefaultPort = Number.isNaN(defaultPort) ? 3333 : defaultPort;
       const normalizedDefaultDifficulty = Number.isNaN(defaultDifficulty)
         ? 16384
         : defaultDifficulty;
+      const normalizedDefaultTargetShares = Number.isNaN(defaultTargetShares)
+        ? 6
+        : defaultTargetShares;
       this.startSocketServer(
         normalizedDefaultPort,
         normalizedDefaultDifficulty,
+        true,
+        normalizedDefaultTargetShares,
       );
 
       if (!Number.isNaN(highDiffPort) && highDiffPort !== normalizedDefaultPort) {
         const normalizedHighDiffDifficulty = Number.isNaN(highDiffDifficulty)
           ? 1000000
           : highDiffDifficulty;
+        const normalizedHighDiffTargetShares = Number.isNaN(highDiffTargetShares)
+          ? normalizedDefaultTargetShares
+          : highDiffTargetShares;
         this.startSocketServer(
           highDiffPort,
           normalizedHighDiffDifficulty,
           false,
+          normalizedHighDiffTargetShares,
         );
       }
     }, 1000 * 10);
@@ -114,6 +131,7 @@ export class StratumV1Service implements OnModuleInit {
     port: number,
     initialDifficulty: number,
     allowSuggestedDifficulty = true,
+    targetSharesPerMinute = 6,
   ) {
     const server = new Server(async (socket: Socket) => {
       // Disable Nagle's algorithm and use UTF-8 encoding for better latency
@@ -143,6 +161,7 @@ export class StratumV1Service implements OnModuleInit {
         this,
         initialDifficulty,
         allowSuggestedDifficulty,
+        targetSharesPerMinute,
         this.redisClient, // Pass Redis client for statistics coordinator
       );
 
