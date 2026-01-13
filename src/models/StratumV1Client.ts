@@ -441,6 +441,34 @@ export class StratumV1Client {
                         const jobTemplate = await firstValueFrom(this.stratumV1JobsService.newMiningJob$);
                         await this.sendNewMiningJob(jobTemplate);
                     }
+
+                    // Send device online notification immediately after successful authorization
+                    // This ensures notifications are sent even if device disconnects before submitting shares
+                    if (!this.deviceOnlineNotified) {
+                        this.deviceOnlineNotified = true;
+                        this.deviceOfflineNotified = false;
+
+                        // Check if this is a returning device (non-blocking)
+                        const startTime = new Date();
+                        this.clientService.getFirstSeenIfRecent(
+                            this.clientAuthorization.address,
+                            this.clientAuthorization.worker
+                        ).then(firstSeen => {
+                            this.notificationService.notifyDeviceStatusChange({
+                                address: this.clientAuthorization.address,
+                                workerName: this.clientAuthorization.worker,
+                                userAgent: this.clientSubscription?.userAgent,
+                                sessionId: this.sessionId,
+                                isOnline: true,
+                                timestamp: startTime,
+                                isReturning: firstSeen !== null,
+                            }).catch(err => {
+                                console.error('Failed to notify device online status', err);
+                            });
+                        }).catch(err => {
+                            console.error('Failed to check firstSeen for device online notification', err);
+                        });
+                    }
                 }
 
                 break;
@@ -783,23 +811,7 @@ export class StratumV1Client {
                             currentDifficulty: this.sessionDifficulty,
                         });
                         await this.persistSessionDifficultyIfPossible();
-                        this.deviceOfflineNotified = false;
-                        if (this.clientAuthorization && !this.deviceOnlineNotified) {
-                            this.deviceOnlineNotified = true;
-                            try {
-                                await this.notificationService.notifyDeviceStatusChange({
-                                    address: this.clientAuthorization.address,
-                                    workerName: this.clientAuthorization.worker,
-                                    userAgent: this.clientSubscription?.userAgent,
-                                    sessionId: this.entity.sessionId,
-                                    isOnline: true,
-                                    timestamp: startTime,
-                                    isReturning: firstSeen !== null,
-                                });
-                            } catch (err) {
-                                console.error('Failed to notify device online status', err);
-                            }
-                        }
+                        // Note: deviceOfflineNotified reset and online notification now handled in authorization handler
                     } catch (e) {
                         reject(e);
                     }
