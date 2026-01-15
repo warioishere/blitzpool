@@ -6,6 +6,7 @@ import { Cache } from 'cache-manager';
 
 import { ClientStatisticsEntity } from './client-statistics.entity';
 import { ClientEntity } from '../client/client.entity';
+import { PoolShareStatisticsEntity } from '../pool-share-statistics/pool-share-statistics.entity';
 import { DIFFICULTY_1, REDIS_STATISTICS_TTL } from '../../constants/mining.constants';
 import { TimeSlotHelper } from '../../utils/time-slot.helper';
 
@@ -14,6 +15,8 @@ export class ClientStatisticsService implements OnModuleInit {
   constructor(
     @InjectRepository(ClientStatisticsEntity)
     private clientStatisticsRepository: Repository<ClientStatisticsEntity>,
+    @InjectRepository(PoolShareStatisticsEntity)
+    private poolShareStatisticsRepository: Repository<PoolShareStatisticsEntity>,
     @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
   ) {}
 
@@ -465,14 +468,12 @@ export class ClientStatisticsService implements OnModuleInit {
 
     const since = new Date(now - diffDays * 24 * 60 * 60 * 1000);
     const limit = diffDays * 144;
-    const result = await this.clientStatisticsRepository
+    const result = await this.poolShareStatisticsRepository
       .createQueryBuilder('entry')
       .select('entry.time', 'label')
-      .addSelect(`ROUND((SUM(entry.shares) * ${DIFFICULTY_1}) / 600)`, 'data')
+      .addSelect(`ROUND((entry.accepted * ${DIFFICULTY_1}) / 600)`, 'data')
       .where('entry.time >= :since', { since: since.getTime() })
       .andWhere('entry.time < :currentSlot', { currentSlot }) // Exclude current incomplete slot
-      .andWhere('entry.sessionId != :agg', { agg: 'AGG' })
-      .groupBy('entry.time')
       .orderBy('entry.time', 'ASC')
       .limit(limit)
       .getRawMany();
