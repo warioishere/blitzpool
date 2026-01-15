@@ -828,13 +828,13 @@ export class ClientStatisticsService implements OnModuleInit {
     const results = await this.clientStatisticsRepository
       .createQueryBuilder('entry')
       .select('entry.clientName', 'clientName')
-      .addSelect('SUM(entry.rejectedCount)', 'totalRejected')
+      .addSelect('SUM(entry.rejectedJobNotFoundDiff1 + entry.rejectedDuplicateShareDiff1 + entry.rejectedLowDifficultyShareDiff1)', 'totalRejected')
       .where('entry.address = :address', { address })
       .groupBy('entry.clientName')
       .getRawMany();
     return results.map((r) => ({
       clientName: r.clientName,
-      totalRejected: r.totalRejected ? parseInt(r.totalRejected, 10) : 0,
+      totalRejected: r.totalRejected ? parseFloat(r.totalRejected) : 0,
     }));
   }
 
