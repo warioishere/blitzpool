@@ -1,6 +1,6 @@
 #!/bin/bash
 
-mkdir -p data/{mainnet,testnet}/bitcoin
-mkdir -p data/{mainnet,testnet}/public-pool
-mkdir -p data/{mainnet,testnet}/public-pool/pg
+mkdir -p data/{mainnet,testnet,regtest}/bitcoin
+mkdir -p data/{mainnet,testnet,regtest}/public-pool
+mkdir -p data/{mainnet,testnet,regtest}/public-pool/pg
 

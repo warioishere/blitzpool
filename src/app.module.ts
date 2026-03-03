@@ -9,6 +9,7 @@ import { redisStore } from 'cache-manager-redis-yet';
 import { AppController } from './app.controller';
 import { AddressController } from './controllers/address/address.controller';
 import { ClientController } from './controllers/client/client.controller';
+import { InfoController } from './controllers/info/info.controller';
 import { BitcoinAddressValidator } from './models/validators/bitcoin-address.validator';
 import { AddressSettingsModule } from './ORM/address-settings/address-settings.module';
 import { BlocksModule } from './ORM/blocks/blocks.module';
@@ -28,6 +29,8 @@ import { DiscordService } from './services/discord.service';
 import { NotificationService } from './services/notification.service';
 import { StratumV1JobsService } from './services/stratum-v1-jobs.service';
 import { StratumV1Service } from './services/stratum-v1.service';
+import { ProtocolDetectorService } from './services/protocol-detector.service';
+import { StratumV2Service } from './services/stratum-v2.service';
 import { TelegramService } from './services/telegram.service';
 import { NtfyService } from './services/ntfy.service';
 import { ExternalSharesService } from './services/external-shares.service';
@@ -44,6 +47,10 @@ import { DifficultyScoresCacheService } from './services/difficulty-scores-cache
 import { PushNotificationService } from './services/push-notification.service';
 import { FcmService } from './services/fcm.service';
 import { WorkerResetBroadcastService } from './services/worker-reset-broadcast.service';
+import { TemplateDistributionService } from './services/template-distribution.service';
+import { DownstreamReportService } from './services/downstream-report.service';
+import { JobDeclarationService } from './services/job-declaration.service';
+import { DownstreamReportController } from './controllers/downstream-report/downstream-report.controller';
 import { ExternalShareController } from './controllers/external-share/external-share.controller';
 import { PushController } from './controllers/push/push.controller';
 import { ExternalSharesModule } from './ORM/external-shares/external-shares.module';
@@ -125,8 +132,10 @@ const ORMModules = [
         AppController,
         ClientController,
         AddressController,
+        DownstreamReportController,
         ExternalShareController,
-        PushController
+        PushController,
+        InfoController
     ],
     providers: [
         // TimeslotMigrationService, // Disabled - migration incomplete, leaving data in mixed state
@@ -154,6 +163,11 @@ const ORMModules = [
         WorkerPoolService,
         LiveHashrateService,
         DifficultyScoresCacheService,
+        DownstreamReportService,
+        ProtocolDetectorService,
+        TemplateDistributionService,
+        StratumV2Service,
+        JobDeclarationService,
     ],
 })
 export class AppModule {

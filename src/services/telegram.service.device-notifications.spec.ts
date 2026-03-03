@@ -62,7 +62,9 @@ describe('TelegramService device notifications without polling', () => {
             clientService as any,
             addressSettingsService as any,
             clientStatisticsService as any,
+            {} as any,
             stratumV1Service as any,
+            {} as any,
             ntfyService as any,
         );
 
@@ -97,7 +99,9 @@ describe('TelegramService device notifications without polling', () => {
             clientService as any,
             addressSettingsService as any,
             clientStatisticsService as any,
+            {} as any,
             stratumV1Service as any,
+            {} as any,
             ntfyService as any,
         );
 
@@ -127,7 +131,9 @@ describe('TelegramService device notifications without polling', () => {
             clientService as any,
             addressSettingsService as any,
             clientStatisticsService as any,
+            {} as any,
             stratumV1Service as any,
+            {} as any,
             ntfyService as any,
         );
 
@@ -158,7 +164,9 @@ describe('TelegramService device notifications without polling', () => {
             clientService as any,
             addressSettingsService as any,
             clientStatisticsService as any,
+            {} as any,
             stratumV1Service as any,
+            {} as any,
             ntfyService as any,
         );
 

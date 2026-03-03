@@ -54,6 +54,7 @@ services:
       - "0.0.0.0:3333:3333/tcp"
       - "0.0.0.0:3339:3339/tcp"
       - "0.0.0.0:3334:3334/tcp"
+      - "0.0.0.0:3335:3335/tcp"
     volumes:
       - "./data/mainnet/public-pool:/public-pool/DB"
       - "./blitzpool.env:/public-pool/.env:ro"

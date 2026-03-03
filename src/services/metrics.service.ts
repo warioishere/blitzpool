@@ -17,6 +17,7 @@ export class MetricsService implements OnModuleInit {
   public readonly stratumClientsConnected = new Gauge({
     name: 'stratum_clients_connected',
     help: 'Number of currently connected stratum clients',
+    labelNames: ['protocol'],
   });
 
   public readonly stratumDifficultyAdjustments = new Counter({

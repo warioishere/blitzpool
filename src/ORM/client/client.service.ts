@@ -117,6 +117,30 @@ export class ClientService {
         return await this.clientRepository.update({ sessionId }, { currentDifficulty });
     }
 
+    public async updateUserAgentByAddress(address: string, oldUserAgent: string, newUserAgent: string): Promise<number> {
+        const result = await this.clientRepository
+            .createQueryBuilder()
+            .update(ClientEntity)
+            .set({ userAgent: newUserAgent })
+            .where('address = :address AND userAgent = :oldUserAgent', { address, oldUserAgent })
+            .execute();
+        return result.affected || 0;
+    }
+
+    public async updateUserAgent(sessionId: string, userAgent: string): Promise<void> {
+        await this.clientRepository.update({ sessionId }, { userAgent });
+    }
+
+    public async updateSv2UserAgentByAddress(address: string, newUserAgent: string): Promise<number> {
+        const result = await this.clientRepository
+            .createQueryBuilder()
+            .update(ClientEntity)
+            .set({ userAgent: newUserAgent })
+            .where('address = :address AND userAgent IN (:...agents)', { address, agents: ['jd-client/sv2', '/sv2'] })
+            .execute();
+        return result.affected || 0;
+    }
+
     public async resetBestDifficultyForAddress(address: string): Promise<void> {
         await this.clientRepository
             .createQueryBuilder()
@@ -230,12 +254,18 @@ export class ClientService {
         return await this.clientRepository.softDelete({})
     }
 
-    public async getUserAgents() {
-        const result = await this.clientRepository.createQueryBuilder('client')
+    public async getUserAgents(excludeAddresses?: string[]) {
+        const qb = this.clientRepository.createQueryBuilder('client')
             .select('client.userAgent as userAgent')
             .addSelect('COUNT(client.userAgent)', 'count')
             .addSelect('MAX(client.bestDifficulty)', 'bestDifficulty')
-            .addSelect('SUM(client.hashRate)', 'totalHashRate')
+            .addSelect('SUM(client.hashRate)', 'totalHashRate');
+
+        if (excludeAddresses && excludeAddresses.length > 0) {
+            qb.where('client.address NOT IN (:...excludeAddresses)', { excludeAddresses });
+        }
+
+        const result = await qb
             .groupBy('client.userAgent')
             .orderBy('count', 'DESC')
             .getRawMany();

@@ -1,3 +1,5 @@
+jest.mock('node-telegram-bot-api', () => jest.fn());
+
 import { Test, TestingModule } from '@nestjs/testing';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { of } from 'rxjs';
@@ -15,6 +17,8 @@ import { PoolRejectedStatisticsService } from './ORM/pool-rejected-statistics/po
 import { AddressSettingsService } from './ORM/address-settings/address-settings.service';
 import { ConfigService } from '@nestjs/config';
 import { StratumV1JobsService, IJobTemplate } from './services/stratum-v1-jobs.service';
+import { MetricsService } from './services/metrics.service';
+import { LiveHashrateService } from './services/live-hashrate.service';
 
 describe('AppController /api/client/:address/block-template', () => {
   let app: NestFastifyApplication;
@@ -87,6 +91,8 @@ describe('AppController /api/client/:address/block-template', () => {
             getNextId: () => '1',
           },
         },
+        { provide: MetricsService, useValue: {} },
+        { provide: LiveHashrateService, useValue: {} },
       ],
     }).compile();
 

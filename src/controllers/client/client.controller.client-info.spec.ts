@@ -1,5 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import { ConfigService } from '@nestjs/config';
 
 jest.mock('node-telegram-bot-api', () => ({}));
 
@@ -10,7 +12,11 @@ import { AddressSettingsService } from '../../ORM/address-settings/address-setti
 import { ClientRejectedStatisticsService } from '../../ORM/client-rejected-statistics/client-rejected-statistics.service';
 import { ClientDifficultyStatisticsService } from '../../ORM/client-difficulty-statistics/client-difficulty-statistics.service';
 import { StratumV1Service } from '../../services/stratum-v1.service';
+import { StratumV2Service } from '../../services/stratum-v2.service';
 import { ShareTotalsCacheService } from '../../services/share-totals-cache.service';
+import { LiveHashrateService } from '../../services/live-hashrate.service';
+import { DifficultyScoresCacheService } from '../../services/difficulty-scores-cache.service';
+import { BestDifficultyTrackerService } from '../../ORM/best-difficulty-tracker/best-difficulty-tracker.service';
 
 describe('ClientController getClientInfo', () => {
   let app: NestFastifyApplication;
@@ -18,6 +24,7 @@ describe('ClientController getClientInfo', () => {
   let clientStatisticsService: { getTotalSharesForAddress: jest.Mock };
   let addressSettingsService: { getSettings: jest.Mock };
   let stratumV1Service: { getCurrentDifficulties: jest.Mock };
+  let stratumV2Service: { getCurrentDifficulties: jest.Mock };
   let shareTotalsCacheService: { getAddressTotal: jest.Mock };
 
   beforeEach(async () => {
@@ -54,6 +61,9 @@ describe('ClientController getClientInfo', () => {
         .fn()
         .mockReturnValue(new Map([['session-1', 2048]])),
     };
+    stratumV2Service = {
+      getCurrentDifficulties: jest.fn().mockReturnValue(new Map()),
+    };
     shareTotalsCacheService = {
       getAddressTotal: jest.fn().mockResolvedValue(12345),
     };
@@ -61,13 +71,19 @@ describe('ClientController getClientInfo', () => {
     const module: TestingModule = await Test.createTestingModule({
       controllers: [ClientController],
       providers: [
+        { provide: CACHE_MANAGER, useValue: { get: jest.fn(), set: jest.fn() } },
+        { provide: ConfigService, useValue: { get: jest.fn() } },
         { provide: ClientService, useValue: clientService },
         { provide: ClientStatisticsService, useValue: clientStatisticsService },
         { provide: AddressSettingsService, useValue: addressSettingsService },
         { provide: ClientRejectedStatisticsService, useValue: {} },
         { provide: ClientDifficultyStatisticsService, useValue: {} },
         { provide: StratumV1Service, useValue: stratumV1Service },
+        { provide: StratumV2Service, useValue: stratumV2Service },
         { provide: ShareTotalsCacheService, useValue: shareTotalsCacheService },
+        { provide: LiveHashrateService, useValue: {} },
+        { provide: DifficultyScoresCacheService, useValue: {} },
+        { provide: BestDifficultyTrackerService, useValue: {} },
       ],
     }).compile();
 

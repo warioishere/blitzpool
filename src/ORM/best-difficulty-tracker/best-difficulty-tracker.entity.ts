@@ -11,6 +11,6 @@ export class BestDifficultyTrackerEntity extends TrackedEntity {
     @Column({ type: 'real' })
     bestDifficulty: number;
 
-    @Column({ type: 'bigint' })
+    @Column({ type: 'bigint', transformer: { to: (value: number) => value, from: (value: string) => parseInt(value, 10) } })
     lastCheckedAt: number;
 }

@@ -7,14 +7,14 @@ const onMock = jest.fn();
 const setMyCommandsMock = jest.fn().mockResolvedValue(undefined);
 const sendMessageMock = jest.fn();
 
-const TelegramBotMock = jest.fn().mockImplementation(() => ({
-    onText: onTextMock,
-    on: onMock,
-    setMyCommands: setMyCommandsMock,
-    sendMessage: sendMessageMock,
-}));
-
-jest.mock('node-telegram-bot-api', () => TelegramBotMock);
+jest.mock('node-telegram-bot-api', () =>
+    jest.fn().mockImplementation(() => ({
+        onText: onTextMock,
+        on: onMock,
+        setMyCommands: setMyCommandsMock,
+        sendMessage: sendMessageMock,
+    })),
+);
 
 describe('TelegramService /show_workers handler', () => {
     const configServiceGetMock = jest.fn();
@@ -41,7 +41,7 @@ describe('TelegramService /show_workers handler', () => {
 
     beforeEach(() => {
         jest.clearAllMocks();
-        TelegramBotMock.mockClear();
+        (require('node-telegram-bot-api') as jest.Mock).mockClear();
         configServiceGetMock.mockImplementation((key: string) => {
             if (key === 'TELEGRAM_BOT_TOKEN') return 'token';
             if (key === 'TELEGRAM_TIMEZONE') return 'Europe/Berlin';
@@ -58,11 +58,14 @@ describe('TelegramService /show_workers handler', () => {
             clientService as any,
             addressSettingsService as any,
             clientStatisticsService as any,
+            {} as any,
             stratumV1Service as any,
+            {} as any,
             ntfyService as any,
         );
 
-        expect(TelegramBotMock).toHaveBeenCalledWith('token', { polling: true });
+        const TelegramBot = require('node-telegram-bot-api') as jest.Mock;
+        expect(TelegramBot).toHaveBeenCalledWith('token', { polling: true });
         expect((service as any).shouldRegisterHandlers).toBe(true);
 
         await service.onModuleInit();

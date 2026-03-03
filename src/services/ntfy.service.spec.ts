@@ -1,9 +1,14 @@
+jest.mock('node-telegram-bot-api', () => jest.fn());
+
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import { NtfyService } from './ntfy.service';
 
 jest.mock('axios', () => ({
-    post: jest.fn().mockResolvedValue(undefined),
+    __esModule: true,
+    default: {
+        post: jest.fn().mockResolvedValue(undefined),
+    },
 }));
 
 describe('NtfyService', () => {
@@ -14,6 +19,7 @@ describe('NtfyService', () => {
 
     const telegramSubscriptionsService = {
         getAllAddresses: jest.fn(),
+        getLanguage: jest.fn().mockResolvedValue('en'),
     };
 
     const clientService = {
@@ -40,6 +46,9 @@ describe('NtfyService', () => {
             clientService as any,
             addressSettingsService as any,
             clientStatisticsService as any,
+            {} as any,
+            {} as any,
+            {} as any,
         );
 
         const address = '1BoatSLRHtKNngkdXEeobR76b53LETtpyT';
@@ -77,6 +86,9 @@ describe('NtfyService', () => {
             clientService as any,
             addressSettingsService as any,
             clientStatisticsService as any,
+            {} as any,
+            {} as any,
+            {} as any,
         );
 
         const secondaryService = new NtfyService(
@@ -85,6 +97,9 @@ describe('NtfyService', () => {
             clientService as any,
             addressSettingsService as any,
             clientStatisticsService as any,
+            {} as any,
+            {} as any,
+            {} as any,
         );
 
         (primaryService as any).bestDiffCache.set(address, persistedBest);

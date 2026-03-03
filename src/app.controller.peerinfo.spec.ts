@@ -1,3 +1,5 @@
+jest.mock('node-telegram-bot-api', () => jest.fn());
+
 import { Test, TestingModule } from '@nestjs/testing';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 
@@ -12,6 +14,8 @@ import { PoolRejectedStatisticsService } from './ORM/pool-rejected-statistics/po
 import { AddressSettingsService } from './ORM/address-settings/address-settings.service';
 import { ConfigService } from '@nestjs/config';
 import { StratumV1JobsService } from './services/stratum-v1-jobs.service';
+import { MetricsService } from './services/metrics.service';
+import { LiveHashrateService } from './services/live-hashrate.service';
 import { of } from 'rxjs';
 
 import { IPeerInfo } from './models/bitcoin-rpc/IPeerInfo';
@@ -39,6 +43,8 @@ describe('AppController info/peers', () => {
         { provide: GeoIpService, useValue: { getLocation: jest.fn() } },
         { provide: ConfigService, useValue: { get: jest.fn() } },
         { provide: StratumV1JobsService, useValue: { newMiningJob$: of({}), getNextId: jest.fn() } },
+        { provide: MetricsService, useValue: {} },
+        { provide: LiveHashrateService, useValue: {} },
       ],
     }).compile();
 

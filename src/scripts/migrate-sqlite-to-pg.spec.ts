@@ -16,13 +16,38 @@ import { TelegramSubscriptionsEntity } from '../ORM/telegram-subscriptions/teleg
 import { InitialSchema1700000000000 } from '../migrations/1700000000000-InitialSchema';
 import { UseTimestamptzForDates1707352800000 } from '../migrations/1707352800000-UseTimestamptzForDates';
 import { AddClientDifficultyStatistics1717430400000 } from '../migrations/1717430400000-AddClientDifficultyStatistics';
+import { AddDeviceNotificationsToTelegramSubscriptions1718000000000 } from '../migrations/1718000000000-AddDeviceNotificationsToTelegramSubscriptions';
 import { AddCurrentDifficultyToClients1719000000000 } from '../migrations/1719000000000-AddCurrentDifficultyToClients';
+import { MigrationInterface, QueryRunner } from 'typeorm';
 import {
     MIGRATION_ENTITIES,
     MigrationLogger,
     migrateSqliteToPostgres,
     runAutomaticSqliteToPostgresMigration,
 } from '../migration/sqlite-to-postgres';
+
+/**
+ * Inline migration: adds hourlyStatsEnabled and hourlyWorkersEnabled columns
+ * to telegram_subscriptions_entity.  The entity defines them but no production
+ * migration creates them on this table, so the pg-mem schema needs them.
+ */
+class AddHourlyColumnsToTelegramSubscriptions1719500000000 implements MigrationInterface {
+    name = 'AddHourlyColumnsToTelegramSubscriptions1719500000000';
+
+    public async up(queryRunner: QueryRunner): Promise<void> {
+        if (queryRunner.connection.options.type !== 'postgres') return;
+        await queryRunner.query(`
+            ALTER TABLE "telegram_subscriptions_entity"
+            ADD "hourlyStatsEnabled" boolean NOT NULL DEFAULT false
+        `);
+        await queryRunner.query(`
+            ALTER TABLE "telegram_subscriptions_entity"
+            ADD "hourlyWorkersEnabled" boolean NOT NULL DEFAULT false
+        `);
+    }
+
+    public async down(): Promise<void> { /* noop */ }
+}
 import { promises as fs } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -97,7 +122,9 @@ describe('migrateSqliteToPostgres', () => {
                 InitialSchema1700000000000,
                 UseTimestamptzForDates1707352800000,
                 AddClientDifficultyStatistics1717430400000,
+                AddDeviceNotificationsToTelegramSubscriptions1718000000000,
                 AddCurrentDifficultyToClients1719000000000,
+                AddHourlyColumnsToTelegramSubscriptions1719500000000,
             ],
             synchronize: false,
         });

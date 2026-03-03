@@ -11,6 +11,7 @@ describe('AddressSettingsCacheService', () => {
     };
     service = new AddressSettingsCacheService(
       addressSettingsService as unknown as AddressSettingsService,
+      { store: {} } as any,
     );
   });
 

@@ -11,6 +11,7 @@ import { ClientDifficultyStatisticsService } from '../../ORM/client-difficulty-s
 import { BestDifficultyTrackerService } from '../../ORM/best-difficulty-tracker/best-difficulty-tracker.service';
 import { eStratumErrorCode } from '../../models/enums/eStratumErrorCode';
 import { StratumV1Service } from '../../services/stratum-v1.service';
+import { StratumV2Service } from '../../services/stratum-v2.service';
 import { ShareTotalsCacheService } from '../../services/share-totals-cache.service';
 import { LiveHashrateService } from '../../services/live-hashrate.service';
 import { DifficultyScoresCacheService } from '../../services/difficulty-scores-cache.service';
@@ -43,6 +44,7 @@ export class ClientController {
         private readonly clientRejectedStatisticsService: ClientRejectedStatisticsService,
         private readonly clientDifficultyStatisticsService: ClientDifficultyStatisticsService,
         private readonly stratumV1Service: StratumV1Service,
+        private readonly stratumV2Service: StratumV2Service,
         private readonly shareTotalsCacheService: ShareTotalsCacheService,
         private readonly liveHashrateService: LiveHashrateService,
         private readonly difficultyScoresCacheService: DifficultyScoresCacheService,
@@ -66,7 +68,9 @@ export class ClientController {
 
         const totalShares = await this.shareTotalsCacheService.getAddressTotal(address);
         const totalHashrate = workers.reduce((sum, w) => sum + (w.hashRate ?? 0), 0);
-        const currentDifficulties = this.stratumV1Service.getCurrentDifficulties(address);
+        const v1Difficulties = this.stratumV1Service.getCurrentDifficulties(address);
+        const v2Difficulties = this.stratumV2Service.getCurrentDifficulties(address);
+        const currentDifficulties = new Map([...v1Difficulties, ...v2Difficulties]);
 
         const result = {
             bestDifficulty: addressSettings?.bestDifficulty,
@@ -109,7 +113,8 @@ export class ClientController {
         console.log(`[ClientController] Starting reset for address ${address}`);
 
         await this.stratumV1Service.resetBestDifficultyForAddress(address);
-        console.log(`[ClientController] StratumV1Service reset completed for ${address}`);
+        await this.stratumV2Service.resetBestDifficultyForAddress(address);
+        console.log(`[ClientController] Stratum reset completed for ${address}`);
 
         await this.addressSettingsService.updateBestDifficulty(address, 0, null);
         console.log(`[ClientController] AddressSettings reset completed for ${address}`);
@@ -199,6 +204,7 @@ export class ClientController {
 
         // Reset best difficulty tracking
         await this.stratumV1Service.resetBestDifficultyForAddress(address);
+        await this.stratumV2Service.resetBestDifficultyForAddress(address);
         await this.addressSettingsService.updateBestDifficulty(address, 0, null);
         await this.trackerService.resetTracker(address);
         console.log(`[ClientController] Best difficulty tracking reset for ${address}`);

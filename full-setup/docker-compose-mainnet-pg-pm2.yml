@@ -20,7 +20,7 @@ services:
 
   postgres:
     container_name: public-pool-postgres
-    image: postgres:17-alpine
+    image: postgres:18-alpine
     restart: unless-stopped
     stop_grace_period: 30s
     networks:
@@ -30,6 +30,24 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    command: >
+      postgres
+      -c max_connections=120
+      -c shared_buffers=256MB
+      -c effective_cache_size=1GB
+      -c work_mem=16MB
+      -c maintenance_work_mem=128MB
+      -c wal_buffers=16MB
+      -c max_wal_size=2GB
+      -c min_wal_size=1GB
+      -c checkpoint_completion_target=0.9
+      -c random_page_cost=1.1
+      -c effective_io_concurrency=200
+      -c autovacuum_vacuum_scale_factor=0.05
+      -c autovacuum_analyze_scale_factor=0.02
+      -c autovacuum_vacuum_cost_delay=2ms
+      -c idle_in_transaction_session_timeout=30000
+      -c log_min_duration_statement=2000
     environment:
       POSTGRES_DB: ${PG_DATABASE:-public_pool}
       POSTGRES_USER: ${PG_USER:-postgres}
@@ -76,25 +94,33 @@ services:
       - "0.0.0.0:3333:3333/tcp"
       - "0.0.0.0:3339:3339/tcp"
       - "0.0.0.0:3334:3334/tcp"
+      - "0.0.0.0:3335:3335/tcp"
     volumes:
-      - "./blitzpool-pg.env:/public-pool/.env:ro"
+      - "./blitzpool.env:/public-pool/.env:ro"
       - "./logs:/public-pool/logs"
       - "/home/blitzpool/public-pool-keys:/app/keys"
       # Firebase Cloud Messaging (FCM) - Optional
       - "/home/blitzpool/fcm/blitzpool-d57be-firebase-adminsdk-fbsvc-6e4652c582.json:/app/fcm-key.json:ro"
-      # SQLite database (for migration) - will be copied to PostgreSQL on first startup
+      # SQLite database (for migration) - migrated to PostgreSQL on first startup, then ignored
       - "./data/mainnet/public-pool/public-pool.sqlite:/public-pool/DB/public-pool.sqlite:ro"
     environment:
       - NODE_ENV=production
+      # Database - PostgreSQL
       - DB_TYPE=postgres
       - PG_HOST=postgres
       - PG_PORT=5432
       - PG_USER=${PG_USER:-postgres}
       - PG_PASSWORD=${PG_PASSWORD:-postgres}
       - PG_DATABASE=${PG_DATABASE:-public_pool}
-      - PG_SSL=${PG_SSL:-false}
+      - PG_SSL=false
       - DB_RUN_MIGRATIONS=true
-      # Redis configuration (Phase 2)
+      - DB_MIGRATE_SQLITE_ON_BOOT=true
+      # PostgreSQL connection pooling (per PM2 instance)
+      - PG_POOL_SIZE=23
+      - PG_MAX_QUERY_TIME=30000
+      - PG_ACQUIRE_TIMEOUT=60000
+      - PG_IDLE_TIMEOUT=10000
+      # Redis configuration
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD:-}

@@ -56,6 +56,8 @@ describe.each(['sqlite', 'postgres'] as const)(
       dataSource = await createDataSource(driver);
       service = new ClientStatisticsService(
         dataSource.getRepository(ClientStatisticsEntity),
+        {} as any,
+        { store: {} } as any,
       );
     });
 

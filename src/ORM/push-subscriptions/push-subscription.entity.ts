@@ -28,7 +28,7 @@ export class PushSubscriptionEntity extends TrackedEntity {
     })
     subscriptionType: PushSubscriptionType;
 
-    @Column({ type: 'bigint', nullable: true })
+    @Column({ type: 'bigint', nullable: true, transformer: { to: (value: number | null) => value, from: (value: string | null) => value !== null ? parseInt(value, 10) : null } })
     lastNotificationAt: number;
 
     @Column({ default: true })

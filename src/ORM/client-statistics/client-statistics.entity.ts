@@ -3,11 +3,11 @@ import { Column, Entity, Index, PrimaryGeneratedColumn, Unique } from 'typeorm';
 import { TrackedEntity } from '../utils/TrackedEntity.entity';
 
 @Entity()
-//Index for getHashRateForSession
-@Index(["address", "clientName", "sessionId"])
-//Index for statistics save
-@Index(["address", "clientName", "sessionId", "time"])
-// UNIQUE constraint to prevent duplicates (required for INSERT OR REPLACE upsert logic)
+// UNIQUE constraint serves as the primary composite index AND upsert conflict target.
+// PostgreSQL automatically creates a B-tree index for UNIQUE constraints,
+// so separate @Index decorators on the same columns are redundant and waste write throughput.
+// Prefix scans (address) and (address, clientName) are served by IDX_cs_address_time
+// and IDX_cs_address_clientname_time from the performance indexes migration.
 @Unique(["address", "clientName", "sessionId", "time"])
 export class ClientStatisticsEntity extends TrackedEntity {
 
