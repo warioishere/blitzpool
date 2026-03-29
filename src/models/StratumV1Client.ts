@@ -723,7 +723,7 @@ export class StratumV1Client {
 
         if (this.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
             // PPLNS: Shared coinbase with proportional payouts
-            this.pplnsService.setNetworkDifficulty(jobTemplate.blockData.networkDifficulty);
+            // Network difficulty is synced centrally via PplnsService's job subscription
             payoutInformation = await this.pplnsService.getPayoutDistribution(jobTemplate.blockData.coinbasevalue);
             this.noFee = false;
             if (!payoutInformation || payoutInformation.length === 0) {

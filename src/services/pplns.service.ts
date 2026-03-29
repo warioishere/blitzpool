@@ -1,11 +1,13 @@
-import { Injectable, Inject, OnModuleInit } from '@nestjs/common';
+import { Injectable, Inject, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { Subscription } from 'rxjs';
 import { PplnsBalanceService } from '../ORM/pplns-balance/pplns-balance.service';
 import { PplnsPayoutHistoryEntity } from '../ORM/pplns-balance/pplns-payout-history.entity';
+import { StratumV1JobsService } from './stratum-v1-jobs.service';
 
 /**
  * PPLNS (Pay Per Last N Shares) engine.
@@ -28,12 +30,13 @@ export interface PplnsPayoutEntry {
 }
 
 @Injectable()
-export class PplnsService implements OnModuleInit {
+export class PplnsService implements OnModuleInit, OnModuleDestroy {
     private redis: any = null;
     private enabled = false;
     private feeAddress: string;
     private feePercent: number;
     private networkDifficulty = 0;
+    private jobSubscription: Subscription | null = null;
 
     constructor(
         private readonly configService: ConfigService,
@@ -41,6 +44,7 @@ export class PplnsService implements OnModuleInit {
         private readonly balanceService: PplnsBalanceService,
         @InjectRepository(PplnsPayoutHistoryEntity)
         private readonly payoutHistoryRepo: Repository<PplnsPayoutHistoryEntity>,
+        private readonly stratumV1JobsService: StratumV1JobsService,
     ) {
         this.feeAddress = this.configService.get('PPLNS_FEE_ADDRESS') ?? '';
         this.feePercent = parseFloat(this.configService.get('PPLNS_FEE_PERCENT') ?? '2');
@@ -61,6 +65,18 @@ export class PplnsService implements OnModuleInit {
         } catch (error) {
             console.error('[PPLNS] Failed to access Redis client:', error);
         }
+
+        // Subscribe to new block templates to keep network difficulty in sync
+        this.jobSubscription = this.stratumV1JobsService.newMiningJob$.subscribe((jobTemplate) => {
+            if (jobTemplate?.blockData?.networkDifficulty) {
+                this.setNetworkDifficulty(jobTemplate.blockData.networkDifficulty);
+            }
+        });
+        console.log('[PPLNS] Subscribed to block template updates for network difficulty');
+    }
+
+    onModuleDestroy(): void {
+        this.jobSubscription?.unsubscribe();
     }
 
     isEnabled(): boolean {
