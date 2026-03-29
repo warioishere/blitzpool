@@ -200,8 +200,10 @@ export class JobDeclarationService implements OnModuleInit, JobDeclarationServic
 
     if (this.pplnsService.isEnabled()) {
       // PPLNS: get current distribution addresses (fee + miners)
-      // Use a dummy block reward — we only need the addresses, not amounts
-      const distribution = await this.pplnsService.getPayoutDistribution(312_500_000);
+      // Use actual block reward from latest template for correct dust threshold calculation
+      const latestTemplate = this.templateDistributionService.getLatestTemplate();
+      const blockRewardSats = latestTemplate?.jobTemplate?.blockData?.coinbasevalue ?? 312_500_000;
+      const distribution = await this.pplnsService.getPayoutDistribution(blockRewardSats);
       for (const entry of distribution) {
         addresses.push(entry.address);
       }
