@@ -39,6 +39,7 @@ import { ClientRejectedStatisticsService } from '../ORM/client-rejected-statisti
 import { ExternalSharesService } from './external-shares.service';
 import { ClientDifficultyStatisticsService } from '../ORM/client-difficulty-statistics/client-difficulty-statistics.service';
 import { ShareTotalsCacheService } from './share-totals-cache.service';
+import { PplnsService } from './pplns.service';
 import { WorkerResetBroadcastService } from './worker-reset-broadcast.service';
 import { DifficultyScoresCacheService } from './difficulty-scores-cache.service';
 
@@ -96,6 +97,7 @@ export class StratumV2Service implements OnModuleInit, IProtocolHandler {
     private readonly templateDistributionService: TemplateDistributionService,
     @Inject(forwardRef(() => JobDeclarationService))
     private readonly jobDeclarationService: JobDeclarationService,
+    private readonly pplnsService: PplnsService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -254,6 +256,7 @@ export class StratumV2Service implements OnModuleInit, IProtocolHandler {
       this.shareTotalsCacheService,
       this.extranonceManager,
       this.templateDistributionService,
+      this.pplnsService,
     );
 
     // Client self-registers when channel is opened and self-unregisters on close.

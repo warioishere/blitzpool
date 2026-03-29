@@ -37,6 +37,8 @@ import { StratumV1Service } from '../services/stratum-v1.service';
 import { ClientDifficultyStatisticsService } from '../ORM/client-difficulty-statistics/client-difficulty-statistics.service';
 import { ShareTotalsCacheService } from '../services/share-totals-cache.service';
 import { AddressSettingsCacheService } from '../services/address-settings-cache.service';
+import { PplnsService } from '../services/pplns.service';
+import { PayoutMode } from './interfaces/unified-stratum.interfaces';
 
 
 export class StratumV1Client {
@@ -111,6 +113,8 @@ export class StratumV1Client {
         private readonly allowSuggestedDifficulty: boolean = true,
         private readonly targetSharesPerMinute: number = 6,
         private readonly redisClient?: any,
+        private readonly payoutMode: PayoutMode = 'solo',
+        private readonly pplnsService?: PplnsService,
     ) {
         this.initialDifficulty = Number.isFinite(initialDifficulty)
             ? initialDifficulty
@@ -712,37 +716,50 @@ export class StratumV1Client {
         }
 
         let payoutInformation;
-        const devFeeAddress = this.configService.get('DEV_FEE_ADDRESS');
-        const devFeePercent = parseFloat(
-            this.configService.get('DEV_FEE_PERCENT') ?? '1.5',
-        );
 
         if (this.entity && this.clientAuthorization) {
             this.hashRate = this.statistics.hashRate;
         }
 
-        if (!this.clientAuthorization) {
-            if (!devFeeAddress) {
+        if (this.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
+            // PPLNS: Shared coinbase with proportional payouts
+            this.pplnsService.setNetworkDifficulty(jobTemplate.blockData.networkDifficulty);
+            payoutInformation = await this.pplnsService.getPayoutDistribution(jobTemplate.blockData.coinbasevalue);
+            this.noFee = false;
+            if (!payoutInformation || payoutInformation.length === 0) {
+                // Fallback: no miners in window yet, skip job
                 return;
             }
-            this.noFee = false;
-            payoutInformation = [
-                { address: devFeeAddress, percent: 100 },
-            ];
         } else {
-            this.noFee = devFeeAddress == null || devFeeAddress.length < 1;
-            if (this.noFee) {
+            // Solo: Existing behavior
+            const devFeeAddress = this.configService.get('DEV_FEE_ADDRESS');
+            const devFeePercent = parseFloat(
+                this.configService.get('DEV_FEE_PERCENT') ?? '1.5',
+            );
+
+            if (!this.clientAuthorization) {
+                if (!devFeeAddress) {
+                    return;
+                }
+                this.noFee = false;
                 payoutInformation = [
-                    { address: this.clientAuthorization.address, percent: 100 },
+                    { address: devFeeAddress, percent: 100 },
                 ];
             } else {
-                payoutInformation = [
-                    { address: devFeeAddress, percent: devFeePercent },
-                    {
-                        address: this.clientAuthorization.address,
-                        percent: 100 - devFeePercent,
-                    },
-                ];
+                this.noFee = devFeeAddress == null || devFeeAddress.length < 1;
+                if (this.noFee) {
+                    payoutInformation = [
+                        { address: this.clientAuthorization.address, percent: 100 },
+                    ];
+                } else {
+                    payoutInformation = [
+                        { address: devFeeAddress, percent: devFeePercent },
+                        {
+                            address: this.clientAuthorization.address,
+                            percent: 100 - devFeePercent,
+                        },
+                    ];
+                }
             }
         }
 
@@ -962,6 +979,14 @@ export class StratumV1Client {
                 if (result === 'SUCCESS!') {
                     await this.addressSettingsService.resetBestDifficultyAndShares();
                     await this.addressSettingsCacheService.clear();
+
+                    // Process PPLNS payouts (update pending balances)
+                    if (this.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
+                        await this.pplnsService.onBlockFound(
+                            jobTemplate.blockData.height,
+                            jobTemplate.blockData.coinbasevalue,
+                        );
+                    }
                 }
             }
             try {
@@ -970,6 +995,14 @@ export class StratumV1Client {
 
                 // Persist to Redis atomically (stateless service)
                 await this.clientStatisticsService.addAcceptedShare(this.entity, this.sessionDifficulty);
+
+                // Record share in PPLNS window if on PPLNS port
+                if (this.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
+                    await this.pplnsService.recordShare(
+                        this.clientAuthorization.address,
+                        this.sessionDifficulty,
+                    );
+                }
 
                 this.shareTotalsCacheService.increment(
                     this.clientAuthorization.address,

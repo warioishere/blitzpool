@@ -40,6 +40,7 @@ describe('StratumV1Service.onModuleInit', () => {
       {} as unknown as ShareTotalsCacheService,
       { store: {} } as any,
       { onReset: jest.fn() } as any,
+      { isEnabled: () => false } as any,
     );
   }
 

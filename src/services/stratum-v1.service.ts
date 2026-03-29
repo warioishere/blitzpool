@@ -22,6 +22,7 @@ import { ShareTotalsCacheService } from './share-totals-cache.service';
 import { AddressSettingsCacheService } from './address-settings-cache.service';
 import { DifficultyScoresCacheService } from './difficulty-scores-cache.service';
 import { WorkerResetBroadcastService } from './worker-reset-broadcast.service';
+import { PplnsService } from './pplns.service';
 
 @Injectable()
 export class StratumV1Service implements OnModuleInit {
@@ -48,6 +49,7 @@ export class StratumV1Service implements OnModuleInit {
     @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
     @Inject(forwardRef(() => WorkerResetBroadcastService))
     private readonly workerResetBroadcastService: WorkerResetBroadcastService,
+    private readonly pplnsService: PplnsService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -116,6 +118,8 @@ export class StratumV1Service implements OnModuleInit {
       portConfig.allowSuggestedDifficulty,
       portConfig.targetSharesPerMinute,
       this.redisClient,
+      portConfig.payoutMode ?? 'solo',
+      this.pplnsService,
     );
 
     socket.on('close', async (hadError: boolean) => {
