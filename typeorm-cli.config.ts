@@ -20,6 +20,8 @@ import { PoolShareStatisticsEntity } from './src/ORM/pool-share-statistics/pool-
 import { PushSubscriptionEntity } from './src/ORM/push-subscriptions/push-subscription.entity';
 import { RpcBlockEntity } from './src/ORM/rpc-block/rpc-block.entity';
 import { TelegramSubscriptionsEntity } from './src/ORM/telegram-subscriptions/telegram-subscriptions.entity';
+import { PplnsBalanceEntity } from './src/ORM/pplns-balance/pplns-balance.entity';
+import { PplnsPayoutHistoryEntity } from './src/ORM/pplns-balance/pplns-payout-history.entity';
 
 loadEnv({ path: process.env.TYPEORM_ENV_PATH ?? '.env' });
 
@@ -42,6 +44,8 @@ const entities = [
     PushSubscriptionEntity,
     RpcBlockEntity,
     TelegramSubscriptionsEntity,
+    PplnsBalanceEntity,
+    PplnsPayoutHistoryEntity,
 ];
 
 const { autoLoadEntities, ...rest } = moduleOptions as DataSourceOptions & { autoLoadEntities?: boolean };

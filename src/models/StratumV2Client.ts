@@ -22,6 +22,7 @@ import { ClientRejectedStatisticsService } from '../ORM/client-rejected-statisti
 import { ExternalSharesService } from '../services/external-shares.service';
 import { ClientDifficultyStatisticsService } from '../ORM/client-difficulty-statistics/client-difficulty-statistics.service';
 import { ShareTotalsCacheService } from '../services/share-totals-cache.service';
+import { PplnsService } from '../services/pplns.service';
 import { ClientEntity } from '../ORM/client/client.entity';
 import { MiningJob } from './MiningJob';
 import { StratumV1ClientStatistics } from './StratumV1ClientStatistics';
@@ -210,6 +211,7 @@ export class StratumV2Client {
     private readonly shareTotalsCacheService: ShareTotalsCacheService,
     private readonly extranonceManager?: Sv2ExtranonceManager,
     private readonly templateDistributionService?: TemplateDistributionService,
+    private readonly pplnsService?: PplnsService,
   ) {
     this.sessionId = this.generateSessionId();
     this.sessionStart = new Date();
@@ -1167,7 +1169,8 @@ export class StratumV2Client {
       const stored = this.templateDistributionService.getLatestTemplate();
       if (stored) {
         // Build payout information and create a proper MiningJob with real coinbase outputs
-        const payoutInformation = this.buildPayoutInformation();
+        const payoutInformation = await this.buildPayoutInformationAsync(stored.jobTemplate.blockData.coinbasevalue)
+          ?? this.buildPayoutInformation();
         if (!payoutInformation) return;
 
         const jobIdStr = this.stratumV1JobsService.getNextId();
@@ -1276,7 +1279,8 @@ export class StratumV2Client {
     }
 
     // Build payout information and create a proper MiningJob with real coinbase outputs
-    const payoutInformation = this.buildPayoutInformation();
+    const payoutInformation = await this.buildPayoutInformationAsync(jobTemplate.blockData.coinbasevalue)
+      ?? this.buildPayoutInformation();
     if (!payoutInformation) return;
 
     const jobIdStr = this.stratumV1JobsService.getNextId();
@@ -1550,6 +1554,14 @@ export class StratumV2Client {
       if (result === 'SUCCESS!') {
         await this.addressSettingsService.resetBestDifficultyAndShares();
         await this.addressSettingsCacheService.clear();
+
+        // Process PPLNS payouts (update pending balances)
+        if (this.portConfig.payoutMode === 'pplns' && this.pplnsService?.isEnabled() && jobTemplate) {
+          await this.pplnsService.onBlockFound(
+            jobTemplate.blockData.height,
+            jobTemplate.blockData.coinbasevalue,
+          );
+        }
       }
     }
 
@@ -1557,6 +1569,11 @@ export class StratumV2Client {
       this.statistics.updateHashRate(jobDifficulty);
       this.hashRate = this.statistics.hashRate;
       await this.clientStatisticsService.addAcceptedShare(this.entity!, jobDifficulty);
+
+      // Record share in PPLNS window if on PPLNS port
+      if (this.portConfig.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
+        await this.pplnsService.recordShare(this.address!, jobDifficulty);
+      }
 
       this.shareTotalsCacheService.increment(
         this.address!,
@@ -1784,13 +1801,23 @@ export class StratumV2Client {
 
   // ── Send Mining Job ───────────────────────────────────────────────
 
-  private buildPayoutInformation(): { address: string; percent: number }[] | null {
-    const devFeeAddress = this.configService.get('DEV_FEE_ADDRESS');
-    const devFeePercent = parseFloat(this.configService.get('DEV_FEE_PERCENT') ?? '1.5');
-
+  private buildPayoutInformation(blockRewardSats?: number): { address: string; percent: number }[] | null {
     if (this.entity && this.address) {
       this.hashRate = this.statistics.hashRate;
     }
+
+    // PPLNS mode: shared coinbase with proportional payouts
+    if (this.portConfig.payoutMode === 'pplns' && this.pplnsService?.isEnabled() && blockRewardSats) {
+      // Note: getPayoutDistribution is async but buildPayoutInformation is sync.
+      // We rely on the cached distribution from the last job update cycle.
+      // For the initial call, the caller should use getPayoutDistributionAsync() instead.
+      this.noFee = false;
+      return null; // Signal caller to use async path
+    }
+
+    // Solo mode: existing behavior
+    const devFeeAddress = this.configService.get('DEV_FEE_ADDRESS');
+    const devFeePercent = parseFloat(this.configService.get('DEV_FEE_PERCENT') ?? '1.5');
 
     if (!this.address) {
       if (!devFeeAddress) return null;
@@ -1808,13 +1835,25 @@ export class StratumV2Client {
     ];
   }
 
+  private async buildPayoutInformationAsync(blockRewardSats: number): Promise<{ address: string; percent: number }[] | null> {
+    if (this.portConfig.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
+      const distribution = await this.pplnsService.getPayoutDistribution(blockRewardSats);
+      if (distribution && distribution.length > 0) {
+        this.noFee = false;
+        return distribution;
+      }
+    }
+    return this.buildPayoutInformation();
+  }
+
   private async sendNewMiningJob(jobTemplate: IJobTemplate, sendPrevHash: boolean, channelId?: number): Promise<void> {
     const targetChannelId = channelId ?? this.primaryChannelId;
     if (targetChannelId == null) return;
     const channel = this.channels.get(targetChannelId);
     if (!channel) return;
 
-    const payoutInformation = this.buildPayoutInformation();
+    const payoutInformation = await this.buildPayoutInformationAsync(jobTemplate.blockData.coinbasevalue)
+      ?? this.buildPayoutInformation();
     if (!payoutInformation) return;
 
     const job = new MiningJob(

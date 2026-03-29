@@ -6,6 +6,13 @@ import { Socket } from 'net';
 export type ProtocolVersion = 'v1' | 'v2';
 
 /**
+ * Payout mode for a stratum port.
+ * - 'solo': Each miner gets their own coinbase (existing behavior)
+ * - 'pplns': Shared coinbase with proportional payouts based on PPLNS window
+ */
+export type PayoutMode = 'solo' | 'pplns';
+
+/**
  * Configuration passed when starting a stratum port.
  */
 export interface StratumPortConfig {
@@ -13,6 +20,7 @@ export interface StratumPortConfig {
   initialDifficulty: number;
   allowSuggestedDifficulty: boolean;
   targetSharesPerMinute: number;
+  payoutMode?: PayoutMode;
 }
 
 /**

@@ -50,6 +50,11 @@ import { WorkerResetBroadcastService } from './services/worker-reset-broadcast.s
 import { TemplateDistributionService } from './services/template-distribution.service';
 import { DownstreamReportService } from './services/downstream-report.service';
 import { JobDeclarationService } from './services/job-declaration.service';
+import { PplnsService } from './services/pplns.service';
+import { PplnsBalanceService } from './ORM/pplns-balance/pplns-balance.service';
+import { PplnsBalanceEntity } from './ORM/pplns-balance/pplns-balance.entity';
+import { PplnsPayoutHistoryEntity } from './ORM/pplns-balance/pplns-payout-history.entity';
+import { PplnsController } from './controllers/pplns/pplns.controller';
 import { DownstreamReportController } from './controllers/downstream-report/downstream-report.controller';
 import { ExternalShareController } from './controllers/external-share/external-share.controller';
 import { PushController } from './controllers/push/push.controller';
@@ -126,6 +131,7 @@ const ORMModules = [
         }),
         ScheduleModule.forRoot(),
         HttpModule,
+        TypeOrmModule.forFeature([PplnsBalanceEntity, PplnsPayoutHistoryEntity]),
         ...ORMModules
     ],
     controllers: [
@@ -135,7 +141,8 @@ const ORMModules = [
         DownstreamReportController,
         ExternalShareController,
         PushController,
-        InfoController
+        InfoController,
+        PplnsController
     ],
     providers: [
         // TimeslotMigrationService, // Disabled - migration incomplete, leaving data in mixed state
@@ -168,6 +175,8 @@ const ORMModules = [
         TemplateDistributionService,
         StratumV2Service,
         JobDeclarationService,
+        PplnsService,
+        PplnsBalanceService,
     ],
 })
 export class AppModule {

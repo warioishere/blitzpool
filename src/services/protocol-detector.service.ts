@@ -58,6 +58,7 @@ export class ProtocolDetectorService implements OnModuleInit {
       initialDifficulty: normalizedDefaultDifficulty,
       allowSuggestedDifficulty: true,
       targetSharesPerMinute: normalizedDefaultTargetShares,
+      payoutMode: 'solo',
     });
 
     if (!Number.isNaN(highDiffPort) && highDiffPort !== normalizedDefaultPort) {
@@ -71,7 +72,31 @@ export class ProtocolDetectorService implements OnModuleInit {
         initialDifficulty: normalizedHighDiffDifficulty,
         allowSuggestedDifficulty: false,
         targetSharesPerMinute: normalizedHighDiffTargetShares,
+        payoutMode: 'solo',
       });
+    }
+
+    // PPLNS port (optional)
+    const pplnsPortStr = this.configService.get<string>('PPLNS_PORT');
+    if (pplnsPortStr) {
+      const pplnsPort = parseInt(pplnsPortStr, 10);
+      if (!Number.isNaN(pplnsPort) && pplnsPort !== normalizedDefaultPort && pplnsPort !== highDiffPort) {
+        const pplnsDifficulty = parseFloat(
+          this.configService.get<string>('PPLNS_START_DIFFICULTY') ?? normalizedDefaultDifficulty.toString(),
+        );
+        const pplnsTargetShares = parseFloat(
+          this.configService.get<string>('PPLNS_TARGET_SHARES_PER_MINUTE') ?? normalizedDefaultTargetShares.toString(),
+        );
+
+        this.startUnifiedServer({
+          port: Number.isNaN(pplnsPort) ? 3340 : pplnsPort,
+          initialDifficulty: Number.isNaN(pplnsDifficulty) ? normalizedDefaultDifficulty : pplnsDifficulty,
+          allowSuggestedDifficulty: true,
+          targetSharesPerMinute: Number.isNaN(pplnsTargetShares) ? normalizedDefaultTargetShares : pplnsTargetShares,
+          payoutMode: 'pplns',
+        });
+        console.log(`[ProtocolDetector] PPLNS port configured: ${pplnsPort}`);
+      }
     }
   }
 
