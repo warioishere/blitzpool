@@ -290,6 +290,9 @@ export class PplnsService implements OnModuleInit {
 
         const rewardForMiners = Math.floor(((100 - this.feePercent) / 100) * blockRewardSats);
 
+        // Track which pending addresses we've already processed
+        const processedAddresses = new Set<string>();
+
         for (const [addr, diff] of addressDiff) {
             const ratio = diff / totalDiff;
             const sats = Math.floor(ratio * rewardForMiners);
@@ -297,6 +300,7 @@ export class PplnsService implements OnModuleInit {
             const totalSats = sats + pending;
 
             const percent = (ratio * (100 - this.feePercent));
+            processedAddresses.add(addr);
 
             if (totalSats >= DUST_LIMIT_SATS) {
                 // Was included in coinbase — mark pending as paid
@@ -314,6 +318,21 @@ export class PplnsService implements OnModuleInit {
                     blockHeight, address: addr, paidSats: sats, percent, inCoinbase: false,
                 }));
                 console.log(`[PPLNS]   ${addr}: ${sats} sats → pending (total: ${sats + pending})`);
+            }
+        }
+
+        // Process pending-only addresses (no current shares but pending >= dust was in coinbase)
+        const pendingEntities = await this.balanceService.getAllWithPending();
+        for (const entity of pendingEntities) {
+            if (processedAddresses.has(entity.address)) continue;
+            if (entity.pendingSats >= DUST_LIMIT_SATS) {
+                // This address was included in coinbase via getPayoutDistribution() — mark as paid
+                const paidAmount = entity.pendingSats;
+                await this.balanceService.markPaid(entity.address, paidAmount);
+                await this.payoutHistoryRepo.save(this.payoutHistoryRepo.create({
+                    blockHeight, address: entity.address, paidSats: paidAmount, percent: (paidAmount / blockRewardSats) * 100, inCoinbase: true,
+                }));
+                console.log(`[PPLNS]   ${entity.address}: ${paidAmount} sats (pending-only, paid in coinbase)`);
             }
         }
 
