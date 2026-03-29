@@ -24,6 +24,11 @@ const REDIS_KEY_SHARES = 'pplns:shares';
 const REDIS_KEY_COUNTER = 'pplns:counter';
 const REDIS_KEY_WINDOW_TOTAL = 'pplns:window:total';
 
+// Coinbase weight budget — must match bitcoin.conf blockreservedweight
+const DEFAULT_COINBASE_WEIGHT_BUDGET = 50_000; // WU — fits ~400 P2WPKH outputs
+const COINBASE_BASE_WEIGHT = 320; // Approx: input + witness + OP_RETURN commitment
+const COINBASE_OUTPUT_WEIGHT = 124; // Per P2WPKH output: (8 value + 1 len + 22 script) * 4
+
 export interface PplnsPayoutEntry {
     address: string;
     percent: number;
@@ -38,6 +43,7 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
     private networkDifficulty = 0;
     private jobSubscription: Subscription | null = null;
     private readonly isPrimaryInstance: boolean;
+    private readonly coinbaseWeightBudget: number;
 
     // Distribution cache — avoids re-reading entire Redis sorted set on every job
     private cachedDistribution: PplnsPayoutEntry[] | null = null;
@@ -55,6 +61,7 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
     ) {
         this.feeAddress = this.configService.get('PPLNS_FEE_ADDRESS') ?? '';
         this.feePercent = parseFloat(this.configService.get('PPLNS_FEE_PERCENT') ?? '2');
+        this.coinbaseWeightBudget = parseInt(this.configService.get('PPLNS_COINBASE_WEIGHT_BUDGET') ?? DEFAULT_COINBASE_WEIGHT_BUDGET.toString(), 10) || DEFAULT_COINBASE_WEIGHT_BUDGET;
         this.enabled = !!this.configService.get('PPLNS_PORT');
 
         // PM2 cluster safety: only primary instance processes block payouts
@@ -109,6 +116,16 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
      */
     getWindowSize(): number {
         return PPLNS_WINDOW_FACTOR * this.networkDifficulty;
+    }
+
+    /**
+     * Max miner outputs that fit in the coinbase weight budget.
+     */
+    getMaxCoinbaseOutputs(): number {
+        const feeOutputCount = this.feeAddress ? 1 : 0;
+        return Math.floor(
+            (this.coinbaseWeightBudget - COINBASE_BASE_WEIGHT - (feeOutputCount + 1) * COINBASE_OUTPUT_WEIGHT) / COINBASE_OUTPUT_WEIGHT,
+        );
     }
 
     // ── Share Recording ──────────────────────────────────────────
@@ -262,15 +279,30 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         }
 
         // Separate into coinbase-eligible (>= dust) and pending (< dust)
-        for (const ms of minerShares) {
-            if (ms.sats >= DUST_LIMIT_SATS) {
-                payouts.push({ address: ms.address, percent: ms.percent });
-                totalAssignedPercent += ms.percent;
-            }
-            // Sub-dust amounts are handled in onBlockFound()
+        const eligible = minerShares
+            .filter(ms => ms.sats >= DUST_LIMIT_SATS)
+            .sort((a, b) => b.sats - a.sats); // largest first
+
+        // 5. Coinbase weight check — trim smallest outputs if coinbase would exceed budget
+        // +1 for fee output, +1 for OP_RETURN witness commitment
+        const feeOutputCount = this.feeAddress ? 1 : 0;
+        const maxMinerOutputs = Math.floor(
+            (this.coinbaseWeightBudget - COINBASE_BASE_WEIGHT - (feeOutputCount + 1) * COINBASE_OUTPUT_WEIGHT) / COINBASE_OUTPUT_WEIGHT,
+        );
+
+        let trimmed = eligible;
+        if (eligible.length > maxMinerOutputs && maxMinerOutputs > 0) {
+            trimmed = eligible.slice(0, maxMinerOutputs);
+            const removedCount = eligible.length - maxMinerOutputs;
+            console.warn(`[PPLNS] Coinbase weight limit: trimmed ${removedCount} smallest outputs to pending (${eligible.length} → ${trimmed.length} outputs, budget ${this.coinbaseWeightBudget} WU)`);
         }
 
-        // 5. Add pool fee
+        for (const ms of trimmed) {
+            payouts.push({ address: ms.address, percent: ms.percent });
+            totalAssignedPercent += ms.percent;
+        }
+
+        // 6. Add pool fee
         if (this.feeAddress) {
             payouts.unshift({ address: this.feeAddress, percent: feePercent });
             totalAssignedPercent += feePercent;

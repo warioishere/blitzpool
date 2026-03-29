@@ -90,7 +90,7 @@ function createMockPayoutHistoryRepo() {
 
 // ── Service Factory ─────────────────────────────────────────────
 
-function createService(opts: { feeAddress?: string; feePercent?: string; port?: string } = {}) {
+function createService(opts: { feeAddress?: string; feePercent?: string; port?: string; weightBudget?: string } = {}) {
   const redis = createMockRedis();
   const balanceService = createMockBalanceService();
   const payoutHistoryRepo = createMockPayoutHistoryRepo();
@@ -101,6 +101,7 @@ function createService(opts: { feeAddress?: string; feePercent?: string; port?: 
         PPLNS_FEE_ADDRESS: opts.feeAddress ?? 'bc1qfee',
         PPLNS_FEE_PERCENT: opts.feePercent ?? '2',
         PPLNS_PORT: opts.port ?? '3340',
+        ...(opts.weightBudget ? { PPLNS_COINBASE_WEIGHT_BUDGET: opts.weightBudget } : {}),
       };
       return config[key];
     }),
@@ -584,6 +585,91 @@ describe('PplnsService', () => {
       const dist = await service.getPayoutDistribution(312_500_000);
       expect(dist).toHaveLength(1);
       expect(dist[0].percent).toBe(100);
+    });
+  });
+
+  // ── Coinbase Weight Validation ────────────────────────────────
+
+  describe('coinbase weight validation', () => {
+    const BLOCK_REWARD = 312_500_000;
+
+    it('should report correct max outputs for default budget', () => {
+      const { service } = createService();
+      const max = service.getMaxCoinbaseOutputs();
+      // Budget 50000, base 320, fee+opreturn = 2*124 = 248
+      // (50000 - 320 - 248) / 124 = floor(49432/124) = 398
+      expect(max).toBeGreaterThan(300);
+      expect(max).toBeLessThan(500);
+    });
+
+    it('should trim outputs when miners exceed weight budget', async () => {
+      // Tiny budget: only fits ~3 miner outputs
+      // Budget 1000, base 320, fee+opreturn = 248, remaining = 432, per output = 124
+      // max miner outputs = floor(432/124) = 3
+      const { service } = createService({ weightBudget: '1000' });
+      service.setNetworkDifficulty(100_000_000); // large window
+
+      // Add 10 miners with equal shares
+      for (let i = 0; i < 10; i++) {
+        await service.recordShare(`miner${i}`, 1000);
+      }
+
+      const dist = await service.getPayoutDistribution(BLOCK_REWARD);
+
+      // Should have: fee + max 3 miners = 4 outputs (not 11)
+      const minerOutputs = dist.filter(d => d.address !== 'bc1qfee');
+      expect(minerOutputs.length).toBeLessThanOrEqual(3);
+      expect(dist.length).toBeLessThanOrEqual(4); // fee + 3 miners
+
+      // Percentages should still sum to ~100
+      const totalPercent = dist.reduce((s, d) => s + d.percent, 0);
+      expect(totalPercent).toBeCloseTo(100, 0);
+    });
+
+    it('should keep largest miners when trimming', async () => {
+      // Budget for ~3 miner outputs
+      const { service } = createService({ weightBudget: '1000' });
+      service.setNetworkDifficulty(100_000_000);
+
+      // Miners with very different shares
+      await service.recordShare('big1', 10000);
+      await service.recordShare('big2', 8000);
+      await service.recordShare('big3', 6000);
+      await service.recordShare('small1', 100);
+      await service.recordShare('small2', 50);
+      await service.recordShare('small3', 10);
+
+      const dist = await service.getPayoutDistribution(BLOCK_REWARD);
+      const minerAddrs = dist.filter(d => d.address !== 'bc1qfee').map(d => d.address);
+
+      // Big miners should be in, small miners trimmed
+      expect(minerAddrs).toContain('big1');
+      expect(minerAddrs).toContain('big2');
+      expect(minerAddrs).toContain('big3');
+      expect(minerAddrs).not.toContain('small1');
+      expect(minerAddrs).not.toContain('small2');
+      expect(minerAddrs).not.toContain('small3');
+    });
+
+    it('should not trim when miners fit within budget', async () => {
+      const { service } = createService(); // default 50000 budget
+      service.setNetworkDifficulty(100_000_000);
+
+      // 5 miners — well within 400 output limit
+      for (let i = 0; i < 5; i++) {
+        await service.recordShare(`miner${i}`, 1000);
+      }
+
+      const dist = await service.getPayoutDistribution(BLOCK_REWARD);
+      const minerOutputs = dist.filter(d => d.address !== 'bc1qfee');
+      expect(minerOutputs.length).toBe(5); // all 5 kept
+    });
+
+    it('should handle custom weight budget from env', () => {
+      const { service } = createService({ weightBudget: '100000' });
+      const max = service.getMaxCoinbaseOutputs();
+      // (100000 - 320 - 248) / 124 = floor(99432/124) = 802
+      expect(max).toBeGreaterThan(700);
     });
   });
 });
