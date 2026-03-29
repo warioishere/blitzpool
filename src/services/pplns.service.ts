@@ -37,6 +37,7 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
     private feePercent: number;
     private networkDifficulty = 0;
     private jobSubscription: Subscription | null = null;
+    private readonly isPrimaryInstance: boolean;
 
     constructor(
         private readonly configService: ConfigService,
@@ -49,6 +50,11 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         this.feeAddress = this.configService.get('PPLNS_FEE_ADDRESS') ?? '';
         this.feePercent = parseFloat(this.configService.get('PPLNS_FEE_PERCENT') ?? '2');
         this.enabled = !!this.configService.get('PPLNS_PORT');
+
+        // PM2 cluster safety: only primary instance processes block payouts
+        const pm2InstanceId = process.env.NODE_APP_INSTANCE ?? process.env.pm_id ?? process.env.PM2_INSTANCE_ID;
+        const normalized = typeof pm2InstanceId === 'string' ? pm2InstanceId.trim() : undefined;
+        this.isPrimaryInstance = !normalized || normalized === '0';
     }
 
     async onModuleInit(): Promise<void> {
@@ -283,6 +289,12 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
      */
     async onBlockFound(blockHeight: number, blockRewardSats: number): Promise<void> {
         if (!this.redis || !this.enabled) return;
+
+        // PM2 cluster: only primary instance processes payouts to avoid double-crediting
+        if (!this.isPrimaryInstance) {
+            console.log(`[PPLNS] Block ${blockHeight} found — skipping payout processing (non-primary PM2 instance)`);
+            return;
+        }
 
         console.log(`[PPLNS] Block ${blockHeight} found! Processing payouts...`);
 
