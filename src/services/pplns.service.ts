@@ -39,6 +39,12 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
     private jobSubscription: Subscription | null = null;
     private readonly isPrimaryInstance: boolean;
 
+    // Distribution cache — avoids re-reading entire Redis sorted set on every job
+    private cachedDistribution: PplnsPayoutEntry[] | null = null;
+    private cachedDistributionReward = 0;
+    private cachedDistributionAt = 0;
+    private static readonly DISTRIBUTION_CACHE_TTL_MS = 30_000; // 30 seconds max
+
     constructor(
         private readonly configService: ConfigService,
         @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
@@ -118,6 +124,9 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         await this.redis.zAdd(REDIS_KEY_SHARES, { score: counter, value: entry });
         await this.redis.incrByFloat(REDIS_KEY_WINDOW_TOTAL, difficulty);
 
+        // Invalidate cached distribution — share weights changed
+        this.cachedDistribution = null;
+
         await this.trimWindow();
     }
 
@@ -182,6 +191,15 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
     async getPayoutDistribution(blockRewardSats: number): Promise<PplnsPayoutEntry[]> {
         if (!this.redis || !this.enabled) {
             return this.fallbackDistribution();
+        }
+
+        // Return cached distribution if still valid (same reward, not expired, not invalidated)
+        if (
+            this.cachedDistribution &&
+            this.cachedDistributionReward === blockRewardSats &&
+            Date.now() - this.cachedDistributionAt < PplnsService.DISTRIBUTION_CACHE_TTL_MS
+        ) {
+            return this.cachedDistribution;
         }
 
         // 1. Read all shares from window
@@ -268,7 +286,14 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
             }
         }
 
-        return payouts.length > 0 ? payouts : this.fallbackDistribution();
+        const result = payouts.length > 0 ? payouts : this.fallbackDistribution();
+
+        // Cache the result
+        this.cachedDistribution = result;
+        this.cachedDistributionReward = blockRewardSats;
+        this.cachedDistributionAt = Date.now();
+
+        return result;
     }
 
     /**
@@ -289,6 +314,9 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
      */
     async onBlockFound(blockHeight: number, blockRewardSats: number): Promise<void> {
         if (!this.redis || !this.enabled) return;
+
+        // Invalidate cache — pending balances are about to change
+        this.cachedDistribution = null;
 
         // PM2 cluster: only primary instance processes payouts to avoid double-crediting
         if (!this.isPrimaryInstance) {
