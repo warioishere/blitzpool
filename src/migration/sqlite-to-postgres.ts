@@ -80,6 +80,8 @@ export interface MigrationSummary {
 export interface AutomaticMigrationOptions extends MigrationOptions {
     sqlitePath?: string;
     logger?: MigrationLogger;
+    /** Called after pre-flight checks pass but before data is copied. */
+    beforeMigration?: () => Promise<void>;
 }
 
 export interface AutomaticMigrationSummary extends Omit<MigrationSummary, 'skipReason'> {
@@ -357,11 +359,25 @@ export async function runAutomaticSqliteToPostgresMigration(
 ): Promise<AutomaticMigrationSummary> {
     const logger = options.logger ?? defaultLogger;
     const sqlitePath = options.sqlitePath ?? DEFAULT_SQLITE_PATH;
-    const { logger: _ignoredLogger, sqlitePath: _ignoredPath, ...migrationOptions } = options;
+    const { logger: _ignoredLogger, sqlitePath: _ignoredPath, beforeMigration, ...migrationOptions } = options;
 
     if (!existsSync(sqlitePath)) {
         logger.info(`SQLite database not found at path ${sqlitePath}. Skipping automatic migration.`);
         return { didRun: false, migratedRows: 0, skipReason: 'sqlite-not-found', sqlitePath };
+    }
+
+    // Check if target already has data before running beforeMigration hook
+    const skipIfTargetHasData = options.skipIfTargetHasData ?? true;
+    if (skipIfTargetHasData) {
+        const alreadyHasData = await targetHasExistingData(postgresDataSource);
+        if (alreadyHasData) {
+            logger.info('Target Postgres database already contains data. Skipping migration.');
+            return { didRun: false, migratedRows: 0, skipReason: 'target-not-empty', sqlitePath };
+        }
+    }
+
+    if (beforeMigration) {
+        await beforeMigration();
     }
 
     const sqliteDataSource = new DataSource({
@@ -375,7 +391,7 @@ export async function runAutomaticSqliteToPostgresMigration(
         const summary = await migrateSqliteToPostgres(
             sqliteDataSource,
             postgresDataSource,
-            { ...migrationOptions, skipIfTargetHasData: options.skipIfTargetHasData ?? true },
+            { ...migrationOptions, skipIfTargetHasData: false },
             logger,
         );
 

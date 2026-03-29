@@ -57,21 +57,23 @@ services:
 
   redis:
     container_name: public-pool-redis
-    image: redis:7-alpine
+    image: valkey/valkey:8-alpine
     restart: unless-stopped
     stop_grace_period: 30s
     networks:
       - bitcoin
     healthcheck:
-      test: ["CMD", "sh", "-c", "redis-cli ${REDIS_PASSWORD:+-a \"$$REDIS_PASSWORD\"} ping"]
+      test: ["CMD", "sh", "-c", "valkey-cli ${REDIS_PASSWORD:+-a \"$$REDIS_PASSWORD\"} ping"]
       interval: 10s
       timeout: 5s
       retries: 5
     command: >
-      redis-server
+      valkey-server
       --appendonly yes
       --maxmemory ${REDIS_MAX_MEMORY:-1024mb}
       --maxmemory-policy allkeys-lru
+      --io-threads 2
+      --io-threads-do-reads yes
       ${REDIS_PASSWORD:+--requirepass ${REDIS_PASSWORD}}
     volumes:
       - "./data/mainnet/public-pool/redis:/data"

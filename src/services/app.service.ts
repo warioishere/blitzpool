@@ -1,4 +1,6 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import { Cache } from 'cache-manager';
 import { ConfigService } from '@nestjs/config';
 import { DataSource } from 'typeorm';
 
@@ -61,6 +63,7 @@ export class AppService implements OnModuleInit {
     private readonly autoSynchronize: boolean;
 
     constructor(
+        @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
         private readonly clientStatisticsService: ClientStatisticsService,
         private readonly clientDifficultyStatisticsService: ClientDifficultyStatisticsService,
         private readonly clientService: ClientService,
@@ -139,6 +142,22 @@ export class AppService implements OnModuleInit {
     }
 
 
+    private async flushRedisBeforeMigration(): Promise<void> {
+        try {
+            const store: any = this.cacheManager.store;
+            if (store?.client) {
+                this.logger.log('Flushing Redis database before SQLite→PostgreSQL migration...');
+                await store.client.flushDb();
+                this.logger.log('Redis FLUSHDB complete.');
+            } else {
+                this.logger.warn('Redis client not available — skipping FLUSHDB before migration.');
+            }
+        } catch (error) {
+            this.logger.error('Failed to flush Redis before migration', error instanceof Error ? error.stack : undefined);
+            throw error;
+        }
+    }
+
     private async runAutomaticSqliteMigrationIfNeeded(): Promise<void> {
         const nodeInstance = process.env.NODE_APP_INSTANCE;
         if (nodeInstance !== undefined && nodeInstance !== '0') {
@@ -172,6 +191,7 @@ export class AppService implements OnModuleInit {
         const summary = await runAutomaticSqliteToPostgresMigration(this.dataSource, {
             sqlitePath,
             logger: this.migrationLogger,
+            beforeMigration: () => this.flushRedisBeforeMigration(),
         });
 
         if (!summary.didRun) {
