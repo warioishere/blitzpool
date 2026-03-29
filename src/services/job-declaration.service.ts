@@ -16,6 +16,7 @@ import { TemplateDistributionService } from './template-distribution.service';
 import { BlocksService } from '../ORM/blocks/blocks.service';
 import { NotificationService } from './notification.service';
 import { normalizeIp } from '../utils/network.utils';
+import { PplnsService } from './pplns.service';
 
 @Injectable()
 export class JobDeclarationService implements OnModuleInit, JobDeclarationServiceRef {
@@ -33,6 +34,7 @@ export class JobDeclarationService implements OnModuleInit, JobDeclarationServic
     private readonly blocksService: BlocksService,
     @Inject(forwardRef(() => NotificationService))
     private readonly notificationService: NotificationService,
+    private readonly pplnsService: PplnsService,
   ) {
     this.jdpPort = parseInt(this.configService.get('SV2_JDP_PORT') ?? '3337', 10);
     if (isNaN(this.jdpPort)) this.jdpPort = 3337;
@@ -185,40 +187,87 @@ export class JobDeclarationService implements OnModuleInit, JobDeclarationServic
    * The Rust JD client deserializes this with bitcoin::consensus::deserialize::<Vec<TxOut>>().
    * Format: varint(count) || for each TxOut: u64_le(value) || varint(script_len) || script_bytes
    *
-   * Like the reference jd-server, we send a single TxOut with value=0 and the
-   * miner's scriptPubKey. The JD client fills in the actual block reward at runtime.
+   * Spec 6.4.3: JDS MUST reserve the first output as pool payout.
+   * JDS MAY add more 0 value outputs. All outputs have value=0 — JDC allocates
+   * the actual block reward at runtime.
+   *
+   * For PPLNS: sends multiple outputs (pool fee + all eligible miners).
+   * For Solo (fallback): sends pool fee address only.
    */
-  getCoinbaseOutputsForToken(minerAddress: string): Buffer {
+  async getCoinbaseOutputsForToken(): Promise<Buffer> {
+    const network = this.getNetwork();
+    const addresses: string[] = [];
+
+    if (this.pplnsService.isEnabled()) {
+      // PPLNS: get current distribution addresses (fee + miners)
+      // Use a dummy block reward — we only need the addresses, not amounts
+      const distribution = await this.pplnsService.getPayoutDistribution(312_500_000);
+      for (const entry of distribution) {
+        addresses.push(entry.address);
+      }
+    }
+
+    // Fallback: pool fee address only
+    if (addresses.length === 0) {
+      const feeAddress = this.configService.get('PPLNS_FEE_ADDRESS')
+        ?? this.configService.get('DEV_FEE_ADDRESS');
+      if (feeAddress) {
+        addresses.push(feeAddress);
+      }
+    }
+
+    if (addresses.length === 0) {
+      // No addresses at all — return empty outputs
+      return Buffer.from([0x00]);
+    }
+
+    return this.encodeCoinbaseOutputs(addresses, network);
+  }
+
+  /**
+   * Encode an array of addresses as Bitcoin consensus Vec<TxOut>, all with 0 sats.
+   */
+  private encodeCoinbaseOutputs(addresses: string[], network: bitcoinjs.Network): Buffer {
+    const parts: Buffer[] = [];
+
+    // VarInt: output count
+    if (addresses.length < 253) {
+      parts.push(Buffer.from([addresses.length]));
+    } else {
+      const lenBuf = Buffer.alloc(3);
+      lenBuf[0] = 0xfd;
+      lenBuf.writeUInt16LE(addresses.length, 1);
+      parts.push(lenBuf);
+    }
+
+    for (const addr of addresses) {
+      const scriptPubKey = bitcoinjs.address.toOutputScript(addr, network);
+
+      // TxOut value: 0 satoshis (u64 LE)
+      parts.push(Buffer.alloc(8, 0));
+
+      // Script length (VarInt) + script bytes
+      if (scriptPubKey.length < 253) {
+        parts.push(Buffer.from([scriptPubKey.length]));
+      } else {
+        const lenBuf = Buffer.alloc(3);
+        lenBuf[0] = 0xfd;
+        lenBuf.writeUInt16LE(scriptPubKey.length, 1);
+        parts.push(lenBuf);
+      }
+      parts.push(scriptPubKey);
+    }
+
+    return Buffer.concat(parts);
+  }
+
+  private getNetwork(): bitcoinjs.Network {
     const networkName = this.configService.get('NETWORK') ?? 'mainnet';
-    const network = networkName === 'testnet'
+    return networkName === 'testnet'
       ? bitcoinjs.networks.testnet
       : networkName === 'regtest'
         ? bitcoinjs.networks.regtest
         : bitcoinjs.networks.bitcoin;
-
-    const scriptPubKey = bitcoinjs.address.toOutputScript(minerAddress, network);
-
-    // Encode as Bitcoin consensus Vec<TxOut>
-    const parts: Buffer[] = [];
-
-    // VarInt: 1 output
-    parts.push(Buffer.from([0x01]));
-
-    // TxOut value: 0 satoshis (u64 LE) — JD client fills in actual block reward
-    parts.push(Buffer.alloc(8, 0));
-
-    // Script length (VarInt) + script bytes
-    if (scriptPubKey.length < 253) {
-      parts.push(Buffer.from([scriptPubKey.length]));
-    } else {
-      const lenBuf = Buffer.alloc(3);
-      lenBuf[0] = 0xfd;
-      lenBuf.writeUInt16LE(scriptPubKey.length, 1);
-      parts.push(lenBuf);
-    }
-    parts.push(scriptPubKey);
-
-    return Buffer.concat(parts);
   }
 
   onJobDeclared(clientId: string, job: Sv2DeclareMiningJob, token: Buffer): void {

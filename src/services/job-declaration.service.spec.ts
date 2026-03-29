@@ -65,6 +65,11 @@ function createService(envOverrides: Record<string, string> = {}) {
   const blocksService = { save: jest.fn().mockResolvedValue(undefined) };
   const notificationService = { notifySubscribersBlockFound: jest.fn().mockResolvedValue(undefined) };
 
+  const pplnsService = {
+    isEnabled: jest.fn().mockReturnValue(false),
+    getPayoutDistribution: jest.fn().mockResolvedValue([]),
+  };
+
   const service = new JobDeclarationService(
     configService as any,
     bitcoinRpcService as any,
@@ -72,6 +77,7 @@ function createService(envOverrides: Record<string, string> = {}) {
     templateDistributionService as any,
     blocksService as any,
     notificationService as any,
+    pplnsService as any,
   );
 
   return { service, configService, bitcoinRpcService, stratumV2Service };
@@ -288,9 +294,9 @@ describe('JobDeclarationService', () => {
   });
 
   describe('getCoinbaseOutputsForToken', () => {
-    it('should return valid Bitcoin consensus-encoded Vec<TxOut> with p2wpkh script', () => {
-      const { service } = createService({ NETWORK: 'mainnet' });
-      const result = service.getCoinbaseOutputsForToken('bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4');
+    it('should return pool fee address when PPLNS disabled', async () => {
+      const { service } = createService({ NETWORK: 'mainnet', DEV_FEE_ADDRESS: 'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4' });
+      const result = await service.getCoinbaseOutputsForToken();
 
       // varint(1) + u64_le(0) + varint(22) + p2wpkh_script(22)
       expect(result.length).toBe(1 + 8 + 1 + 22); // 32 bytes
@@ -301,15 +307,13 @@ describe('JobDeclarationService', () => {
       expect(result[11]).toBe(0x14);          // push 20 bytes
     });
 
-    it('should encode different p2wpkh addresses correctly', () => {
+    it('should return empty when no addresses configured', async () => {
       const { service } = createService({ NETWORK: 'mainnet' });
-      const result = service.getCoinbaseOutputsForToken('bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq');
+      const result = await service.getCoinbaseOutputsForToken();
 
-      // varint(1) + u64_le(0) + varint(22) + p2wpkh_script(22)
-      expect(result.length).toBe(32);
-      expect(result[0]).toBe(0x01);
-      expect(result.readBigUInt64LE(1)).toBe(0n);
-      expect(result[9]).toBe(22);
+      // Empty Vec<TxOut>: varint(0)
+      expect(result.length).toBe(1);
+      expect(result[0]).toBe(0x00);
     });
   });
 

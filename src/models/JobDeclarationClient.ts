@@ -40,7 +40,7 @@ export interface JobDeclarationServiceRef {
   getMinerAddressByIp(remoteIp: string): string | null;
   getMinerInfoByIp(remoteIp: string): { address: string; worker: string; sessionId: string } | null;
   getBlockHeight(): number;
-  getCoinbaseOutputsForToken(minerAddress: string): Buffer;
+  getCoinbaseOutputsForToken(): Promise<Buffer>;
   getTemplateTransactions(): Map<string, Buffer>;
   getCurrentPrevHash(): Buffer | null;
   getRawTransaction(txid: string): Promise<Buffer | null>;
@@ -246,35 +246,15 @@ export class JobDeclarationClient {
     }
     this.lastTokenAllocAt = now;
 
-    // user_identifier is the Bitcoin address directly (e.g. "bc1q...")
-    let minerAddress: string | null = null;
-    const candidateAddress = msg.userIdentifier.trim();
-
-    if (this.looksLikeBitcoinAddress(candidateAddress)) {
-      minerAddress = candidateAddress;
-      console.log(`[JDP ${this.clientId}] 📍 Bitcoin address from user_identifier: ${minerAddress}`);
-    } else {
-      // Fallback: try to look up from mining connection (for clients that don't send address)
-      console.log(`[JDP ${this.clientId}] ℹ️  user_identifier "${candidateAddress}" is not a Bitcoin address, trying IP-based lookup`);
-      minerAddress = this.service.getMinerAddressByIp(this.remoteAddress);
-      if (minerAddress) {
-        console.log(`[JDP ${this.clientId}] 📍 Found Bitcoin address from mining connection: ${minerAddress}`);
-      }
-    }
-
-    if (!minerAddress) {
-      console.error(`[JDP ${this.clientId}] ❌ No Bitcoin address found`);
-      console.error(`[JDP ${this.clientId}]    - user_identifier: "${msg.userIdentifier}"`);
-      console.error(`[JDP ${this.clientId}]    - Remote IP: ${this.remoteAddress}`);
-      console.error(`[JDP ${this.clientId}]    - Expected format: "username::bitcoin_address"`);
-      return;
-    }
+    // user_identifier is used for identification/logging only — not for coinbase construction.
+    // Coinbase outputs come from the pool's PPLNS distribution (or pool fee address).
+    console.log(`[JDP ${this.clientId}] 📍 user_identifier: "${msg.userIdentifier.trim()}" (used for identification only)`);
 
     // Generate unique opaque token
     const token = this.generateToken();
 
-    // Build coinbase outputs with the miner's address (solo pool: miner gets block reward)
-    const coinbaseOutputs = this.service.getCoinbaseOutputsForToken(minerAddress);
+    // Build coinbase outputs from PPLNS distribution (or pool fee fallback)
+    const coinbaseOutputs = await this.service.getCoinbaseOutputsForToken();
 
     // Store with 1-hour expiry, including the coinbase outputs for later validation
     const tokenHex = token.toString('hex');
@@ -291,7 +271,7 @@ export class JobDeclarationClient {
     });
     await this.sendFrame(Sv2MsgType.JDP_ALLOCATE_MINING_JOB_TOKEN_SUCCESS, successPayload);
 
-    console.log(`[JDP ${this.clientId}] ✅ AllocateMiningJobTokenSuccess: token=${tokenHex.substring(0, 16)}..., minerAddress=${minerAddress}, coinbaseOutputsLen=${coinbaseOutputs.length}`);
+    console.log(`[JDP ${this.clientId}] ✅ AllocateMiningJobTokenSuccess: token=${tokenHex.substring(0, 16)}..., coinbaseOutputsLen=${coinbaseOutputs.length}, outputCount=${coinbaseOutputs[0]}`);
   }
 
   private async handleDeclareMiningJob(payload: Buffer): Promise<void> {
@@ -621,46 +601,54 @@ export class JobDeclarationClient {
       return null; // No outputs to validate against
     }
 
-    // Parse the pool payout script from the first output in coinbaseOutputs.
-    // Format: varint(count) || TxOut(value u64_le || varint(scriptLen) || scriptBytes) ...
-    // We only need the first output's script (the pool payout output).
+    // Parse ALL pool output scripts from coinbaseOutputs and verify each is present.
+    // Format: varint(count) || for each: TxOut(value u64_le || varint(scriptLen) || scriptBytes)
     const poolOutputs = tokenEntry.coinbaseOutputs;
     try {
       let offset = 0;
+
       // Read varint count
-      const count = poolOutputs[offset];
-      offset += (count < 0xfd) ? 1 : (count === 0xfd ? 3 : (count === 0xfe ? 5 : 9));
-      if (count === 0) return null; // No outputs to validate
-
-      // Skip value (8 bytes)
-      offset += 8;
-
-      // Read script length (varint)
-      let scriptLen = poolOutputs[offset];
-      if (scriptLen < 0xfd) {
+      let count = poolOutputs[offset];
+      if (count < 0xfd) {
         offset += 1;
-      } else if (scriptLen === 0xfd) {
-        scriptLen = poolOutputs.readUInt16LE(offset + 1);
+      } else if (count === 0xfd) {
+        count = poolOutputs.readUInt16LE(offset + 1);
         offset += 3;
       } else {
-        return null; // Unusual script length encoding, skip validation
+        return null; // Very large count, skip validation
       }
+      if (count === 0) return null;
 
-      // Extract pool payout script
-      const poolPayoutScript = poolOutputs.subarray(offset, offset + scriptLen);
+      // Validate each output script is present in the coinbase suffix
+      for (let i = 0; i < count; i++) {
+        // Skip value (8 bytes)
+        offset += 8;
 
-      // Verify the pool payout script appears somewhere in coinbaseTxSuffix.
-      // The suffix contains the serialized outputs, so the script bytes must be present.
-      if (job.coinbaseTxSuffix.indexOf(poolPayoutScript) === -1) {
-        return 'Pool payout output script not found in coinbase — JDC must include the pool payout output';
+        // Read script length (varint)
+        let scriptLen = poolOutputs[offset];
+        if (scriptLen < 0xfd) {
+          offset += 1;
+        } else if (scriptLen === 0xfd) {
+          scriptLen = poolOutputs.readUInt16LE(offset + 1);
+          offset += 3;
+        } else {
+          return null; // Unusual encoding, skip
+        }
+
+        const script = poolOutputs.subarray(offset, offset + scriptLen);
+        offset += scriptLen;
+
+        // Verify this script appears in coinbaseTxSuffix
+        if (job.coinbaseTxSuffix.indexOf(script) === -1) {
+          return `Pool output #${i} script not found in coinbase — JDC must include all pool payout outputs`;
+        }
       }
     } catch {
-      // If parsing fails, skip validation rather than blocking the miner
       console.warn(`[JDP ${this.clientId}] ⚠️  Could not parse pool payout outputs for validation, skipping`);
       return null;
     }
 
-    return null; // Valid
+    return null; // All outputs validated
   }
 
   /**
