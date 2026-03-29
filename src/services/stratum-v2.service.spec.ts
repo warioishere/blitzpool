@@ -64,6 +64,7 @@ function createService(envOverrides: Record<string, string> = {}) {
     difficultyScoresCacheService as any, // difficultyScoresCacheService
     {} as any, // templateDistributionService
     {} as any, // jobDeclarationService
+    { isEnabled: () => false } as any, // pplnsService
   );
 
   return { service, configService, clientService, addressSettingsCacheService, difficultyScoresCacheService };

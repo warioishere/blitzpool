@@ -37,6 +37,7 @@ describe('StratumV1Service.onModuleInit', () => {
       {} as any,
       {} as unknown as ShareTotalsCacheService,
       { store: {} } as any,
+      { isEnabled: () => false } as any,
     );
   }
 
