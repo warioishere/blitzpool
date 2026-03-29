@@ -6,14 +6,14 @@ const onMock = jest.fn();
 const setMyCommandsMock = jest.fn().mockResolvedValue(undefined);
 const sendMessageMock = jest.fn().mockResolvedValue(undefined);
 
-const TelegramBotMock = jest.fn().mockImplementation(() => ({
-    onText: onTextMock,
-    on: onMock,
-    setMyCommands: setMyCommandsMock,
-    sendMessage: sendMessageMock,
-}));
-
-jest.mock('node-telegram-bot-api', () => TelegramBotMock);
+jest.mock('node-telegram-bot-api', () =>
+    jest.fn().mockImplementation(() => ({
+        onText: onTextMock,
+        on: onMock,
+        setMyCommands: setMyCommandsMock,
+        sendMessage: sendMessageMock,
+    })),
+);
 
 describe('TelegramService best diff commands', () => {
     const configServiceGetMock = jest.fn();
@@ -42,13 +42,19 @@ describe('TelegramService best diff commands', () => {
         resetClientsForAddress: jest.fn(),
         resetBestDifficultyForAddress: jest.fn(),
     };
+    const trackerService = {
+        resetTracker: jest.fn().mockResolvedValue(undefined),
+    };
+    const stratumV2Service = {
+        resetBestDifficultyForAddress: jest.fn().mockResolvedValue(undefined),
+    };
     const ntfyService = {
         resetBestDiffCache: jest.fn(),
     };
 
     beforeEach(() => {
         jest.clearAllMocks();
-        TelegramBotMock.mockClear();
+        (require('node-telegram-bot-api') as jest.Mock).mockClear();
         configServiceGetMock.mockImplementation((key: string) => {
             if (key === 'TELEGRAM_BOT_TOKEN') return 'token';
             if (key === 'TELEGRAM_TIMEZONE') return 'Europe/Berlin';
@@ -75,7 +81,9 @@ describe('TelegramService best diff commands', () => {
             clientService as any,
             addressSettingsService as any,
             clientStatisticsService as any,
+            trackerService as any,
             stratumV1Service as any,
+            stratumV2Service as any,
             ntfyService as any,
         );
 
@@ -106,7 +114,9 @@ describe('TelegramService best diff commands', () => {
             clientService as any,
             addressSettingsService as any,
             clientStatisticsService as any,
+            trackerService as any,
             stratumV1Service as any,
+            stratumV2Service as any,
             ntfyService as any,
         );
 
@@ -138,7 +148,9 @@ describe('TelegramService best diff commands', () => {
             clientService as any,
             addressSettingsService as any,
             clientStatisticsService as any,
+            trackerService as any,
             stratumV1Service as any,
+            stratumV2Service as any,
             ntfyService as any,
         );
 
@@ -179,7 +191,9 @@ describe('TelegramService best diff commands', () => {
             clientService as any,
             addressSettingsService as any,
             clientStatisticsService as any,
+            trackerService as any,
             stratumV1Service as any,
+            stratumV2Service as any,
             ntfyService as any,
         );
 
@@ -230,7 +244,9 @@ describe('TelegramService best diff commands', () => {
             clientService as any,
             addressSettingsService as any,
             clientStatisticsService as any,
+            trackerService as any,
             stratumV1Service as any,
+            stratumV2Service as any,
             ntfyService as any,
         );
 
@@ -240,7 +256,9 @@ describe('TelegramService best diff commands', () => {
             clientService as any,
             addressSettingsService as any,
             clientStatisticsService as any,
+            trackerService as any,
             stratumV1Service as any,
+            stratumV2Service as any,
             ntfyService as any,
         );
 

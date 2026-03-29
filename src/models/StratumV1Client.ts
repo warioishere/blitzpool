@@ -568,13 +568,7 @@ export class StratumV1Client {
                 );
 
                 if (this.stratumInitialized && this.clientAuthorization) {
-                    const result = await this.handleMiningSubmission(miningSubmitMessage);
-                    if (result == true) {
-                        const success = await this.write(JSON.stringify(miningSubmitMessage.response()) + '\n');
-                        if (!success) {
-                            return;
-                        }
-                    }
+                    await this.handleMiningSubmission(miningSubmitMessage);
                 } else if (!this.clientAuthorization) {
                     const err = new StratumErrorMessage(
                         miningSubmitMessage.id,
@@ -940,6 +934,10 @@ export class StratumV1Client {
 
 
         if (submissionDifficulty >= this.sessionDifficulty) {
+            // Send success response immediately for minimum latency
+            this.write(JSON.stringify(submission.response()) + '\n');
+
+            // Accounting and block submission below — all fully awaited, nothing skipped
             await this.poolShareStatisticsService.addAcceptedShare(this.sessionDifficulty);
 
             if (submissionDifficulty >= jobTemplate.blockData.networkDifficulty) {
@@ -961,7 +959,7 @@ export class StratumV1Client {
                     result,
                 );
                 //success
-                if (result == null) {
+                if (result === 'SUCCESS!') {
                     await this.addressSettingsService.resetBestDifficultyAndShares();
                     await this.addressSettingsCacheService.clear();
                 }

@@ -1,5 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import { ConfigService } from '@nestjs/config';
 
 jest.mock('node-telegram-bot-api', () => ({}));
 
@@ -9,8 +11,12 @@ import { ClientStatisticsService } from '../../ORM/client-statistics/client-stat
 import { AddressSettingsService } from '../../ORM/address-settings/address-settings.service';
 import { ClientRejectedStatisticsService } from '../../ORM/client-rejected-statistics/client-rejected-statistics.service';
 import { StratumV1Service } from '../../services/stratum-v1.service';
+import { StratumV2Service } from '../../services/stratum-v2.service';
 import { ClientDifficultyStatisticsService } from '../../ORM/client-difficulty-statistics/client-difficulty-statistics.service';
 import { ShareTotalsCacheService } from '../../services/share-totals-cache.service';
+import { LiveHashrateService } from '../../services/live-hashrate.service';
+import { DifficultyScoresCacheService } from '../../services/difficulty-scores-cache.service';
+import { BestDifficultyTrackerService } from '../../ORM/best-difficulty-tracker/best-difficulty-tracker.service';
 
 describe('ClientController worker chart data', () => {
   let app: NestFastifyApplication;
@@ -42,13 +48,19 @@ describe('ClientController worker chart data', () => {
     const module: TestingModule = await Test.createTestingModule({
       controllers: [ClientController],
       providers: [
+        { provide: CACHE_MANAGER, useValue: { get: jest.fn(), set: jest.fn() } },
+        { provide: ConfigService, useValue: { get: jest.fn() } },
         { provide: ClientService, useValue: clientService },
         { provide: ClientStatisticsService, useValue: clientStatisticsService },
         { provide: AddressSettingsService, useValue: {} },
         { provide: ClientRejectedStatisticsService, useValue: {} },
         { provide: ClientDifficultyStatisticsService, useValue: {} },
         { provide: StratumV1Service, useValue: {} },
+        { provide: StratumV2Service, useValue: {} },
         { provide: ShareTotalsCacheService, useValue: {} },
+        { provide: LiveHashrateService, useValue: {} },
+        { provide: DifficultyScoresCacheService, useValue: {} },
+        { provide: BestDifficultyTrackerService, useValue: {} },
       ],
     }).compile();
 

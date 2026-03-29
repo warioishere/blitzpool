@@ -95,6 +95,21 @@ export class MiningJob {
         return this.coinbaseTransaction.__toBuffer().toString('hex');
     }
 
+    /** Non-witness coinbase prefix (everything before the 8-byte extranonce slot) */
+    public getCoinbasePrefixBuffer(): Buffer {
+        return Buffer.from(this.coinbasePart1, 'hex');
+    }
+
+    /** Non-witness coinbase suffix (everything after the extranonce slot: sequence + outputs + locktime) */
+    public getCoinbaseSuffixBuffer(): Buffer {
+        return Buffer.from(this.coinbasePart2, 'hex');
+    }
+
+    /** Deep-clone the coinbase transaction (includes outputs, witness, block height). */
+    public cloneCoinbaseTransaction(): bitcoinjs.Transaction {
+        return bitcoinjs.Transaction.fromBuffer(this.coinbaseTransaction.toBuffer());
+    }
+
     public copyAndUpdateBlock(jobTemplate: IJobTemplate, versionMask: number, nonce: number, extraNonce: string, extraNonce2: string, timestamp: number): bitcoinjs.Block {
 
         const testBlock = Object.assign(new bitcoinjs.Block(), jobTemplate.block);

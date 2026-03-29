@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
 import { StratumV1Service } from './stratum-v1.service';
+import { StratumV2Service } from './stratum-v2.service';
 import { createClient, RedisClientType } from 'redis';
 
 export interface HashrateDataPoint {
@@ -38,6 +39,7 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
 
   constructor(
     private readonly stratumV1Service: StratumV1Service,
+    private readonly stratumV2Service: StratumV2Service,
     private readonly configService: ConfigService,
     @Optional() @Inject(CACHE_MANAGER) private readonly cacheManager?: Cache,
   ) {
@@ -372,22 +374,37 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
         return;
       }
 
-      const allAddresses = this.stratumV1Service.getAllAddresses();
+      // Merge addresses from both V1 and V2 services
+      const v1Addresses = this.stratumV1Service.getAllAddresses();
+      const v2Addresses = this.stratumV2Service.getAllAddresses();
+      const allAddresses = [...new Set([...v1Addresses, ...v2Addresses])];
 
       // Collect hashrate for each address in the previous minute
       const addressDifficulties = new Map<string, number>(); // Raw difficulty, not hashrate yet
       let poolTotalDifficulty = 0;
 
       for (const address of allAddresses) {
-        const clientsForAddress = this.stratumV1Service.getClientsForAddress(address);
         let addressTotalDifficulty = 0;
+        const startDate = new Date(previousMinuteStart);
+        const endDate = new Date(previousMinuteEnd);
 
-        // Get submissions from all workers for this address in the previous minute
-        for (const client of clientsForAddress) {
-          const startDate = new Date(previousMinuteStart);
-          const endDate = new Date(previousMinuteEnd);
+        // V1 clients
+        const v1Clients = this.stratumV1Service.getClientsForAddress(address);
+        for (const client of v1Clients) {
           const submissions = client.getSubmissionCacheForInterval(startDate, endDate);
+          if (submissions.length > 0) {
+            const totalDifficulty = submissions.reduce(
+              (sum, sub) => sum + (sub.difficulty ?? 0),
+              0,
+            );
+            addressTotalDifficulty += totalDifficulty;
+          }
+        }
 
+        // V2 clients
+        const v2Clients = this.stratumV2Service.getClientsForAddress(address);
+        for (const client of v2Clients) {
+          const submissions = client.getSubmissionCacheForInterval(startDate, endDate);
           if (submissions.length > 0) {
             const totalDifficulty = submissions.reduce(
               (sum, sub) => sum + (sub.difficulty ?? 0),

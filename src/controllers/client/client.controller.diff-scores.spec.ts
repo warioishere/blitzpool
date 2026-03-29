@@ -1,5 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import { ConfigService } from '@nestjs/config';
 
 jest.mock('node-telegram-bot-api', () => ({}));
 
@@ -9,13 +11,20 @@ import { ClientStatisticsService } from '../../ORM/client-statistics/client-stat
 import { AddressSettingsService } from '../../ORM/address-settings/address-settings.service';
 import { ClientRejectedStatisticsService } from '../../ORM/client-rejected-statistics/client-rejected-statistics.service';
 import { StratumV1Service } from '../../services/stratum-v1.service';
+import { StratumV2Service } from '../../services/stratum-v2.service';
 import { ShareTotalsCacheService } from '../../services/share-totals-cache.service';
 import { ClientDifficultyStatisticsService } from '../../ORM/client-difficulty-statistics/client-difficulty-statistics.service';
+import { LiveHashrateService } from '../../services/live-hashrate.service';
+import { DifficultyScoresCacheService } from '../../services/difficulty-scores-cache.service';
+import { BestDifficultyTrackerService } from '../../ORM/best-difficulty-tracker/best-difficulty-tracker.service';
 
 describe('ClientController difficulty scores', () => {
   let app: NestFastifyApplication;
   let clientDifficultyStatisticsService: {
     getMaximaForAddress: jest.Mock;
+  };
+  let difficultyScoresCacheService: {
+    getDifficultyScores: jest.Mock;
   };
   let dateNowSpy: jest.SpyInstance<number, []>;
 
@@ -23,17 +32,26 @@ describe('ClientController difficulty scores', () => {
     clientDifficultyStatisticsService = {
       getMaximaForAddress: jest.fn().mockResolvedValue([]),
     };
+    difficultyScoresCacheService = {
+      getDifficultyScores: jest.fn().mockResolvedValue({ slotData: [] }),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       controllers: [ClientController],
       providers: [
+        { provide: CACHE_MANAGER, useValue: { get: jest.fn(), set: jest.fn() } },
+        { provide: ConfigService, useValue: { get: jest.fn() } },
         { provide: ClientService, useValue: {} },
         { provide: ClientStatisticsService, useValue: {} },
         { provide: AddressSettingsService, useValue: {} },
         { provide: ClientRejectedStatisticsService, useValue: {} },
         { provide: ClientDifficultyStatisticsService, useValue: clientDifficultyStatisticsService },
         { provide: StratumV1Service, useValue: {} },
+        { provide: StratumV2Service, useValue: {} },
         { provide: ShareTotalsCacheService, useValue: {} },
+        { provide: LiveHashrateService, useValue: {} },
+        { provide: DifficultyScoresCacheService, useValue: difficultyScoresCacheService },
+        { provide: BestDifficultyTrackerService, useValue: {} },
       ],
     }).compile();
 
@@ -58,10 +76,14 @@ describe('ClientController difficulty scores', () => {
     const startSlot = Math.floor((now - hours * oneHour) / oneHour) * oneHour;
     const endSlot = Math.floor(now / oneHour) * oneHour;
 
-    clientDifficultyStatisticsService.getMaximaForAddress.mockResolvedValue([
-      { slotTime: startSlot, maxDifficulty: 42 },
-      { slotTime: startSlot + 2 * oneHour, maxDifficulty: 99 },
-    ]);
+    difficultyScoresCacheService.getDifficultyScores.mockResolvedValue({
+      slotData: [
+        { time: new Date(startSlot).toISOString(), difficulty: 42 },
+        { time: new Date(startSlot + oneHour).toISOString(), difficulty: 0 },
+        { time: new Date(startSlot + 2 * oneHour).toISOString(), difficulty: 99 },
+        { time: new Date(endSlot).toISOString(), difficulty: 0 },
+      ],
+    });
 
     const res = await app.inject({
       method: 'GET',
@@ -70,8 +92,9 @@ describe('ClientController difficulty scores', () => {
 
     expect(res.statusCode).toBe(200);
 
-    expect(clientDifficultyStatisticsService.getMaximaForAddress).toHaveBeenCalledWith(
+    expect(difficultyScoresCacheService.getDifficultyScores).toHaveBeenCalledWith(
       'addr123',
+      '7d',
       startSlot,
       endSlot,
     );
@@ -96,7 +119,9 @@ describe('ClientController difficulty scores', () => {
   });
 
   it('defaults to returning one day of data when no range is specified', async () => {
-    clientDifficultyStatisticsService.getMaximaForAddress.mockResolvedValue([]);
+    difficultyScoresCacheService.getDifficultyScores.mockResolvedValue({
+      slotData: [],
+    });
 
     const res = await app.inject({
       method: 'GET',
@@ -106,11 +131,12 @@ describe('ClientController difficulty scores', () => {
     expect(res.statusCode).toBe(200);
 
     const call =
-      clientDifficultyStatisticsService.getMaximaForAddress.mock.calls[
-        clientDifficultyStatisticsService.getMaximaForAddress.mock.calls.length - 1
+      difficultyScoresCacheService.getDifficultyScores.mock.calls[
+        difficultyScoresCacheService.getDifficultyScores.mock.calls.length - 1
       ];
-    const [address, start, end] = call;
+    const [address, range, start, end] = call;
     expect(address).toBe('addr123');
+    expect(range).toBe('1d');
     const oneHour = 60 * 60 * 1000;
     const now = Date.now();
     const expectedStart = Math.floor((now - 24 * oneHour) / oneHour) * oneHour;

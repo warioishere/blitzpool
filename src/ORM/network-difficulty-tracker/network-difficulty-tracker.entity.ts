@@ -19,9 +19,9 @@ export class NetworkDifficultyTrackerEntity extends TrackedEntity {
     @Column({ type: 'double precision', nullable: true })
     previousDifficulty: number;
 
-    @Column({ type: 'bigint' })
+    @Column({ type: 'bigint', transformer: { to: (value: number) => value, from: (value: string) => parseInt(value, 10) } })
     lastCheckedAt: number;
 
-    @Column({ type: 'bigint', nullable: true })
+    @Column({ type: 'bigint', nullable: true, transformer: { to: (value: number | null) => value, from: (value: string | null) => value !== null ? parseInt(value, 10) : null } })
     lastChangedAt: number;
 }

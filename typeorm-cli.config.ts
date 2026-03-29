@@ -6,14 +6,18 @@ import { join } from 'path';
 
 import { buildDatabaseConfig } from './src/config/database.config';
 import { AddressSettingsEntity } from './src/ORM/address-settings/address-settings.entity';
+import { BestDifficultyTrackerEntity } from './src/ORM/best-difficulty-tracker/best-difficulty-tracker.entity';
 import { BlocksEntity } from './src/ORM/blocks/blocks.entity';
 import { ClientEntity } from './src/ORM/client/client.entity';
 import { ClientDifficultyStatisticsEntity } from './src/ORM/client-difficulty-statistics/client-difficulty-statistics.entity';
 import { ClientRejectedStatisticsEntity } from './src/ORM/client-rejected-statistics/client-rejected-statistics.entity';
 import { ClientStatisticsEntity } from './src/ORM/client-statistics/client-statistics.entity';
 import { ExternalSharesEntity } from './src/ORM/external-shares/external-shares.entity';
+import { NetworkDifficultyTrackerEntity } from './src/ORM/network-difficulty-tracker/network-difficulty-tracker.entity';
+import { NtfySubscriptionsEntity } from './src/ORM/ntfy-subscriptions/ntfy-subscriptions.entity';
 import { PoolRejectedStatisticsEntity } from './src/ORM/pool-rejected-statistics/pool-rejected-statistics.entity';
 import { PoolShareStatisticsEntity } from './src/ORM/pool-share-statistics/pool-share-statistics.entity';
+import { PushSubscriptionEntity } from './src/ORM/push-subscriptions/push-subscription.entity';
 import { RpcBlockEntity } from './src/ORM/rpc-block/rpc-block.entity';
 import { TelegramSubscriptionsEntity } from './src/ORM/telegram-subscriptions/telegram-subscriptions.entity';
 
@@ -24,14 +28,18 @@ const moduleOptions = buildDatabaseConfig(configService);
 
 const entities = [
     AddressSettingsEntity,
+    BestDifficultyTrackerEntity,
     BlocksEntity,
     ClientEntity,
+    ClientDifficultyStatisticsEntity,
     ClientRejectedStatisticsEntity,
     ClientStatisticsEntity,
-    ClientDifficultyStatisticsEntity,
     ExternalSharesEntity,
+    NetworkDifficultyTrackerEntity,
+    NtfySubscriptionsEntity,
     PoolRejectedStatisticsEntity,
     PoolShareStatisticsEntity,
+    PushSubscriptionEntity,
     RpcBlockEntity,
     TelegramSubscriptionsEntity,
 ];

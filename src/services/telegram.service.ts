@@ -12,6 +12,7 @@ import { AddressSettingsService } from '../ORM/address-settings/address-settings
 import { ClientStatisticsService } from '../ORM/client-statistics/client-statistics.service';
 import { BestDifficultyTrackerService } from '../ORM/best-difficulty-tracker/best-difficulty-tracker.service';
 import { StratumV1Service } from './stratum-v1.service';
+import { StratumV2Service } from './stratum-v2.service';
 import { NtfyService } from './ntfy.service';
 import { buildStatsMessage, buildWorkersOverviewMessage } from './common-command-handlers';
 
@@ -137,6 +138,8 @@ export class TelegramService implements OnModuleInit {
         private readonly trackerService: BestDifficultyTrackerService,
         @Inject(forwardRef(() => StratumV1Service))
         private readonly stratumV1Service: StratumV1Service,
+        @Inject(forwardRef(() => StratumV2Service))
+        private readonly stratumV2Service: StratumV2Service,
         private readonly ntfyService: NtfyService
     ) {
         this.numberSuffix = new NumberSuffix();
@@ -357,8 +360,9 @@ export class TelegramService implements OnModuleInit {
             }
 
             try {
-                // Reset via stratum service (handles DB, cache, workers, and broadcast)
+                // Reset via stratum services (handles DB, cache, workers, and broadcast)
                 await this.stratumV1Service.resetBestDifficultyForAddress(address);
+                await this.stratumV2Service.resetBestDifficultyForAddress(address);
 
                 // Clear local notification service caches
                 await this.addressSettingsService.updateBestDifficulty(address, 0, null);

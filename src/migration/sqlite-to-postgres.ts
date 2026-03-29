@@ -9,14 +9,18 @@ import {
 } from 'typeorm';
 
 import { AddressSettingsEntity } from '../ORM/address-settings/address-settings.entity';
+import { BestDifficultyTrackerEntity } from '../ORM/best-difficulty-tracker/best-difficulty-tracker.entity';
 import { BlocksEntity } from '../ORM/blocks/blocks.entity';
 import { ClientRejectedStatisticsEntity } from '../ORM/client-rejected-statistics/client-rejected-statistics.entity';
 import { ClientStatisticsEntity } from '../ORM/client-statistics/client-statistics.entity';
 import { ClientDifficultyStatisticsEntity } from '../ORM/client-difficulty-statistics/client-difficulty-statistics.entity';
 import { ClientEntity } from '../ORM/client/client.entity';
 import { ExternalSharesEntity } from '../ORM/external-shares/external-shares.entity';
+import { NetworkDifficultyTrackerEntity } from '../ORM/network-difficulty-tracker/network-difficulty-tracker.entity';
+import { NtfySubscriptionsEntity } from '../ORM/ntfy-subscriptions/ntfy-subscriptions.entity';
 import { PoolRejectedStatisticsEntity } from '../ORM/pool-rejected-statistics/pool-rejected-statistics.entity';
 import { PoolShareStatisticsEntity } from '../ORM/pool-share-statistics/pool-share-statistics.entity';
+import { PushSubscriptionEntity } from '../ORM/push-subscriptions/push-subscription.entity';
 import { RpcBlockEntity } from '../ORM/rpc-block/rpc-block.entity';
 import { TelegramSubscriptionsEntity } from '../ORM/telegram-subscriptions/telegram-subscriptions.entity';
 
@@ -24,14 +28,18 @@ export const DEFAULT_SQLITE_PATH = './DB/public-pool.sqlite';
 
 export const MIGRATION_ENTITIES = [
     AddressSettingsEntity,
+    BestDifficultyTrackerEntity,
     BlocksEntity,
     ClientEntity,
     ClientRejectedStatisticsEntity,
     ClientStatisticsEntity,
     ClientDifficultyStatisticsEntity,
     ExternalSharesEntity,
+    NetworkDifficultyTrackerEntity,
+    NtfySubscriptionsEntity,
     PoolRejectedStatisticsEntity,
     PoolShareStatisticsEntity,
+    PushSubscriptionEntity,
     TelegramSubscriptionsEntity,
     RpcBlockEntity,
 ] as const satisfies readonly EntityTarget<unknown>[];

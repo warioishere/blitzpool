@@ -21,6 +21,7 @@ import { MetricsService } from './services/metrics.service';
 import { MiningJob } from './models/MiningJob';
 import * as bitcoinjs from 'bitcoinjs-lib';
 import { generateFormattedTimeSlots } from './utils/timeslot.utils';
+
 import { LiveHashrateService } from './services/live-hashrate.service';
 
 function extractHost(addr: string): string {

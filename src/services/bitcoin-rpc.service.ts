@@ -80,6 +80,10 @@ export class BitcoinRpcService implements OnModuleInit {
         }
     }
 
+    public getBlockHeight(): number {
+        return this.blockHeight;
+    }
+
     public async pollMiningInfo() {
         const miningInfo = await this.getMiningInfo();
         if (miningInfo != null && miningInfo.blocks > this.blockHeight) {
@@ -179,6 +183,39 @@ export class BitcoinRpcService implements OnModuleInit {
             return await this.client.getnetworkinfo();
         } catch (e) {
             console.error('Error getnetworkinfo', e.message);
+            return null;
+        }
+    }
+
+    public async getRawMempool(): Promise<string[]> {
+        try {
+            return await this.client.getrawmempool();
+        } catch (e) {
+            console.error('Error getrawmempool', e.message);
+            return [];
+        }
+    }
+
+    public async getRawMempoolWtxids(): Promise<Set<string>> {
+        try {
+            const verbose = await this.client.getrawmempool({ verbose: true });
+            const wtxids = new Set<string>();
+            for (const txid of Object.keys(verbose)) {
+                const entry = verbose[txid];
+                wtxids.add(entry.wtxid || txid);
+            }
+            return wtxids;
+        } catch (e) {
+            console.error('Error getrawmempool verbose', e.message);
+            return new Set();
+        }
+    }
+
+    public async getRawTransaction(txid: string): Promise<string | null> {
+        try {
+            return await this.client.getrawtransaction({ txid });
+        } catch (e) {
+            console.error('Error getrawtransaction:', e.message);
             return null;
         }
     }

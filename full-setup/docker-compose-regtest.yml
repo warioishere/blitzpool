@@ -5,7 +5,7 @@ services:
     container_name: bitcoin-regtest
     build:
       context: ./docker/bitcoin
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile_regtest
     restart: unless-stopped
     stop_grace_period: 30s
     networks:
@@ -22,26 +22,60 @@ services:
       - "./data/regtest/bitcoin:/app/data"
       - "./bitcoin-regtest.conf:/app/data/bitcoin.conf:ro"
 
+  redis:
+    container_name: public-pool-regtest-redis
+    image: redis:7-alpine
+    restart: unless-stopped
+    networks:
+      - bitcoin-regtest
+    healthcheck:
+      test: ["CMD", "sh", "-c", "redis-cli ${REDIS_PASSWORD:+-a \"$$REDIS_PASSWORD\"} ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory ${REDIS_MAX_MEMORY:-1024mb}
+      --maxmemory-policy allkeys-lru
+      ${REDIS_PASSWORD:+--requirepass ${REDIS_PASSWORD}}
+    volumes:
+      - "./data/regtest/public-pool/redis:/data"
+
   public-pool-regtest:
     container_name: public-pool-regtest
     build:
       context: ..
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile_pm2_regtest
     restart: unless-stopped
     stop_grace_period: 30s
+    depends_on:
+      redis:
+        condition: service_healthy
     networks:
       - bitcoin-regtest
     ports:
-      - "0.0.0.0:23333:23333/tcp"
-      - "0.0.0.0:23339:23339/tcp"
-      - "127.0.0.1:23334:23334/tcp"
+      - "0.0.0.0:3333:3333/tcp"
+      - "0.0.0.0:3339:3339/tcp"
+      - "0.0.0.0:3334:3334/tcp"
+      - "0.0.0.0:3335:3335/tcp"
     volumes:
       - "./data/regtest/public-pool:/public-pool/DB"
-      - "./public-pool-regtest.env:/public-pool/.env:ro"
+      - "./blitzpool-regtest.env:/public-pool/.env:ro"
+      - "./logs:/public-pool/logs"
+      - "/home/blitzpool/public-pool-keys:/app/keys"
       # Firebase Cloud Messaging (FCM) - Optional
       - "/home/blitzpool/fcm/blitzpool-d57be-firebase-adminsdk-fbsvc-6e4652c582.json:/app/fcm-key.json:ro"
     environment:
       - NODE_ENV=production
+      # Redis configuration (Phase 2)
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - REDIS_DB=0
+      - REDIS_TTL=600
+      # PM2 configuration
+      - PM2_INSTANCES=4
       # Firebase Cloud Messaging (FCM) - Optional
       - FCM_SERVICE_ACCOUNT_PATH=/app/fcm-key.json
 

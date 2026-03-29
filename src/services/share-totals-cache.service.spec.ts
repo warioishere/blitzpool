@@ -63,6 +63,7 @@ describe('ShareTotalsCacheService', () => {
       mockRedisClient = {
         hIncrByFloat: jest.fn().mockResolvedValue(undefined),
         hGetAll: jest.fn().mockResolvedValue({}),
+        hSet: jest.fn().mockResolvedValue(undefined),
         keys: jest.fn().mockResolvedValue([]),
       };
 
@@ -116,8 +117,9 @@ describe('ShareTotalsCacheService', () => {
       expect(mockRedisClient.hGetAll).toHaveBeenCalledWith('shares:address:addr1');
     });
 
-    it('returns 0 when address not found in Redis', async () => {
+    it('returns 0 when address not found in Redis and database is empty', async () => {
       mockRedisClient.hGetAll.mockResolvedValue({});
+      clientStatisticsService.getTotalSharesForAddress.mockResolvedValueOnce(0);
 
       const total = await service.getAddressTotal('addr1');
       expect(total).toBe(0);
@@ -140,8 +142,9 @@ describe('ShareTotalsCacheService', () => {
       ]);
     });
 
-    it('returns empty array when no workers found in Redis', async () => {
+    it('returns empty array when no workers found in Redis and database is empty', async () => {
       mockRedisClient.keys.mockResolvedValue([]);
+      clientStatisticsService.getTotalSharesForWorkers.mockResolvedValueOnce([]);
 
       const workerTotals = await service.getWorkerTotals('addr1');
       expect(workerTotals).toEqual([]);
