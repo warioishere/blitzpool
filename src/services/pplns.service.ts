@@ -51,6 +51,10 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
     private cachedDistributionAt = 0;
     private static readonly DISTRIBUTION_CACHE_TTL_MS = 30_000; // 30 seconds max
 
+    // Coinbase snapshot — the distribution that was actually used to build the latest coinbase.
+    // onBlockFound uses this instead of recalculating, so bookkeeping matches on-chain reality.
+    private coinbaseSnapshot: { distribution: PplnsPayoutEntry[]; blockRewardSats: number } | null = null;
+
     constructor(
         private readonly configService: ConfigService,
         @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
@@ -325,6 +329,9 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         this.cachedDistributionReward = blockRewardSats;
         this.cachedDistributionAt = Date.now();
 
+        // Save snapshot — onBlockFound will use this for bookkeeping
+        this.coinbaseSnapshot = { distribution: result, blockRewardSats };
+
         return result;
     }
 
@@ -342,7 +349,8 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
 
     /**
      * Called when a block is found on a PPLNS port.
-     * Updates pending balances for sub-dust miners and marks paid for others.
+     * Uses the coinbase snapshot (the distribution that was actually used to build the coinbase)
+     * so bookkeeping matches exactly what's on-chain.
      */
     async onBlockFound(blockHeight: number, blockRewardSats: number): Promise<void> {
         if (!this.redis || !this.enabled) return;
@@ -358,81 +366,134 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
 
         console.log(`[PPLNS] Block ${blockHeight} found! Processing payouts...`);
 
-        // Read current window
+        // Use the coinbase snapshot — this is the exact distribution that went into the block.
+        // If no snapshot exists (e.g. first block, or race condition), fall back to recalculating.
+        const snapshot = this.coinbaseSnapshot;
+        if (!snapshot || snapshot.distribution.length === 0) {
+            console.warn(`[PPLNS] No coinbase snapshot available for block ${blockHeight} — falling back to window recalculation`);
+            await this.onBlockFoundFromWindow(blockHeight, blockRewardSats);
+            return;
+        }
+
+        // Clear snapshot — it's been consumed
+        this.coinbaseSnapshot = null;
+
+        const reward = snapshot.blockRewardSats;
+
+        for (const entry of snapshot.distribution) {
+            if (entry.address === this.feeAddress) {
+                // Log pool fee
+                const feeSats = Math.floor((entry.percent / 100) * reward);
+                await this.payoutHistoryRepo.save(this.payoutHistoryRepo.create({
+                    blockHeight, address: entry.address, paidSats: feeSats, percent: entry.percent, inCoinbase: true,
+                }));
+                console.log(`[PPLNS]   ${entry.address}: ${feeSats} sats (pool fee, ${entry.percent.toFixed(2)}%)`);
+                continue;
+            }
+
+            const paidSats = Math.floor((entry.percent / 100) * reward);
+            const pending = await this.balanceService.getPending(entry.address);
+
+            // This address was in the coinbase — mark any pending as paid
+            if (pending > 0) {
+                await this.balanceService.markPaid(entry.address, pending);
+            }
+
+            await this.payoutHistoryRepo.save(this.payoutHistoryRepo.create({
+                blockHeight, address: entry.address, paidSats, percent: entry.percent, inCoinbase: true,
+            }));
+            console.log(`[PPLNS]   ${entry.address}: ${paidSats} sats (paid in coinbase, ${entry.percent.toFixed(2)}%)`);
+        }
+
+        // Handle miners NOT in the snapshot (sub-dust or trimmed by weight limit)
+        // Their share from the current window goes to pending
+        const snapshotAddresses = new Set(snapshot.distribution.map(d => d.address));
+        const entries = await this.redis.zRange(REDIS_KEY_SHARES, 0, -1);
+        if (entries && entries.length > 0) {
+            const addressDiff = new Map<string, number>();
+            let totalDiff = 0;
+            for (const e of entries) {
+                const parts = e.split(':');
+                const diff = parseFloat(parts[1]) || 0;
+                addressDiff.set(parts[0], (addressDiff.get(parts[0]) ?? 0) + diff);
+                totalDiff += diff;
+            }
+
+            const rewardForMiners = Math.floor(((100 - this.feePercent) / 100) * reward);
+            for (const [addr, diff] of addressDiff) {
+                if (snapshotAddresses.has(addr)) continue; // Already processed above
+                const sats = Math.floor((diff / totalDiff) * rewardForMiners);
+                if (sats > 0) {
+                    await this.balanceService.addPending(addr, sats);
+                    await this.payoutHistoryRepo.save(this.payoutHistoryRepo.create({
+                        blockHeight, address: addr, paidSats: sats, percent: (diff / totalDiff) * (100 - this.feePercent), inCoinbase: false,
+                    }));
+                    console.log(`[PPLNS]   ${addr}: ${sats} sats → pending (not in coinbase)`);
+                }
+            }
+        }
+
+        console.log(`[PPLNS] Block ${blockHeight} payouts processed (from coinbase snapshot)`);
+    }
+
+    /**
+     * Fallback: recalculate from current window when no snapshot is available.
+     */
+    private async onBlockFoundFromWindow(blockHeight: number, blockRewardSats: number): Promise<void> {
         const entries = await this.redis.zRange(REDIS_KEY_SHARES, 0, -1);
         if (!entries || entries.length === 0) return;
 
-        // Sum difficulty per address
         const addressDiff = new Map<string, number>();
         let totalDiff = 0;
-
         for (const entry of entries) {
             const parts = entry.split(':');
-            const addr = parts[0];
-            const diff = parseFloat(parts[1]) || 0;
-            addressDiff.set(addr, (addressDiff.get(addr) ?? 0) + diff);
-            totalDiff += diff;
+            addressDiff.set(parts[0], (addressDiff.get(parts[0]) ?? 0) + (parseFloat(parts[1]) || 0));
+            totalDiff += parseFloat(parts[1]) || 0;
         }
-
         if (totalDiff <= 0) return;
 
         const rewardForMiners = Math.floor(((100 - this.feePercent) / 100) * blockRewardSats);
-
-        // Track which pending addresses we've already processed
-        const processedAddresses = new Set<string>();
 
         for (const [addr, diff] of addressDiff) {
             const ratio = diff / totalDiff;
             const sats = Math.floor(ratio * rewardForMiners);
             const pending = await this.balanceService.getPending(addr);
             const totalSats = sats + pending;
-
-            const percent = (ratio * (100 - this.feePercent));
-            processedAddresses.add(addr);
+            const percent = ratio * (100 - this.feePercent);
 
             if (totalSats >= DUST_LIMIT_SATS) {
-                // Was included in coinbase — mark pending as paid
-                if (pending > 0) {
-                    await this.balanceService.markPaid(addr, pending);
-                }
+                if (pending > 0) await this.balanceService.markPaid(addr, pending);
                 await this.payoutHistoryRepo.save(this.payoutHistoryRepo.create({
                     blockHeight, address: addr, paidSats: totalSats, percent, inCoinbase: true,
                 }));
-                console.log(`[PPLNS]   ${addr}: ${totalSats} sats (paid in coinbase, ${percent.toFixed(2)}%)`);
             } else {
-                // Below dust — accumulate
-                await this.balanceService.addPending(addr, sats);
+                if (sats > 0) await this.balanceService.addPending(addr, sats);
                 await this.payoutHistoryRepo.save(this.payoutHistoryRepo.create({
                     blockHeight, address: addr, paidSats: sats, percent, inCoinbase: false,
                 }));
-                console.log(`[PPLNS]   ${addr}: ${sats} sats → pending (total: ${sats + pending})`);
             }
         }
 
-        // Process pending-only addresses (no current shares but pending >= dust was in coinbase)
+        // Pending-only addresses
         const pendingEntities = await this.balanceService.getAllWithPending();
+        const processed = new Set(addressDiff.keys());
         for (const entity of pendingEntities) {
-            if (processedAddresses.has(entity.address)) continue;
+            if (processed.has(entity.address)) continue;
             if (entity.pendingSats >= DUST_LIMIT_SATS) {
-                // This address was included in coinbase via getPayoutDistribution() — mark as paid
-                const paidAmount = entity.pendingSats;
-                await this.balanceService.markPaid(entity.address, paidAmount);
+                await this.balanceService.markPaid(entity.address, entity.pendingSats);
                 await this.payoutHistoryRepo.save(this.payoutHistoryRepo.create({
-                    blockHeight, address: entity.address, paidSats: paidAmount, percent: (paidAmount / blockRewardSats) * 100, inCoinbase: true,
+                    blockHeight, address: entity.address, paidSats: entity.pendingSats,
+                    percent: (entity.pendingSats / blockRewardSats) * 100, inCoinbase: true,
                 }));
-                console.log(`[PPLNS]   ${entity.address}: ${paidAmount} sats (pending-only, paid in coinbase)`);
             }
         }
 
-        // Log pool fee
         const feeSats = blockRewardSats - rewardForMiners;
         if (this.feeAddress) {
             await this.payoutHistoryRepo.save(this.payoutHistoryRepo.create({
                 blockHeight, address: this.feeAddress, paidSats: feeSats, percent: this.feePercent, inCoinbase: true,
             }));
         }
-
-        console.log(`[PPLNS] Block ${blockHeight} payouts processed for ${addressDiff.size} miners`);
     }
 
     // ── Stats ────────────────────────────────────────────────────
