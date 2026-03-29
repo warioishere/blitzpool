@@ -55,6 +55,14 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
     // onBlockFound uses this instead of recalculating, so bookkeeping matches on-chain reality.
     private coinbaseSnapshot: { distribution: PplnsPayoutEntry[]; blockRewardSats: number } | null = null;
 
+    // Block-found lock — prevents concurrent onBlockFound calls from double-processing
+    private blockFoundInProgress = false;
+
+    // NOTE: The PPLNS share window intentionally does NOT reset after a block is found.
+    // This is correct PPLNS behavior — shares within the window contribute to multiple
+    // blocks. A reset would be PROP (proportional) payout, not PPLNS. The sliding window
+    // protects against pool-hopping attacks.
+
     constructor(
         private readonly configService: ConfigService,
         @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
@@ -364,6 +372,14 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
             return;
         }
 
+        // Prevent concurrent block-found processing (multiple miners finding a block simultaneously)
+        if (this.blockFoundInProgress) {
+            console.warn(`[PPLNS] Block ${blockHeight} — skipping, another block-found is already being processed`);
+            return;
+        }
+        this.blockFoundInProgress = true;
+
+        try {
         console.log(`[PPLNS] Block ${blockHeight} found! Processing payouts...`);
 
         // Use the coinbase snapshot — this is the exact distribution that went into the block.
@@ -434,6 +450,9 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         }
 
         console.log(`[PPLNS] Block ${blockHeight} payouts processed (from coinbase snapshot)`);
+        } finally {
+            this.blockFoundInProgress = false;
+        }
     }
 
     /**
