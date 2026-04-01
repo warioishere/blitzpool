@@ -628,23 +628,33 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
 
       // Step 3: ONLY if database succeeds, atomically decrement deltas
       // CRITICAL: We decrement by the exact amount we flushed, preserving any shares that arrived during flush
-      for (const update of updates) {
-        try {
-          // Read current baseline before modifications
-          const data = await this.redisClient.hGetAll(update.key);
-          const currentBaseline = parseFloat(data.baseline) || 0;
-
-          // Atomically decrement delta by the amount we flushed
-          // This preserves any new shares that arrived during the flush window
-          // Example: If we flushed 100 but delta is now 150 (50 arrived), it becomes 50 (preserved!)
-          await this.redisClient.hIncrByFloat(update.key, 'delta', -update.shares);
-
-          // Move the flushed amount from delta to baseline
-          await this.redisClient.hSet(update.key, 'baseline', (currentBaseline + update.shares).toString());
-        } catch (error) {
-          console.error(`[StatisticsCoordinator] Failed to update Redis after successful DB flush for ${update.address}:`, error);
-          // Database has the data, so this is not critical - just log it
+      // Uses pipelined Redis calls (3 passes) instead of sequential per-key roundtrips
+      try {
+        // Pass 1: Read all baselines in one pipeline
+        const getBaselines = this.redisClient.multi();
+        for (const update of updates) {
+          getBaselines.hGetAll(update.key);
         }
+        const baselineResults = await getBaselines.exec();
+
+        // Pass 2: Decrement all deltas in one pipeline
+        const decrementDeltas = this.redisClient.multi();
+        for (const update of updates) {
+          decrementDeltas.hIncrByFloat(update.key, 'delta', -update.shares);
+        }
+        await decrementDeltas.exec();
+
+        // Pass 3: Update all baselines in one pipeline
+        const updateBaselines = this.redisClient.multi();
+        for (let i = 0; i < updates.length; i++) {
+          const data = baselineResults[i] as Record<string, string> | null;
+          const currentBaseline = parseFloat(data?.baseline ?? '0') || 0;
+          updateBaselines.hSet(updates[i].key, 'baseline', (currentBaseline + updates[i].shares).toString());
+        }
+        await updateBaselines.exec();
+      } catch (error) {
+        console.error(`[StatisticsCoordinator] Failed to update Redis after successful DB flush:`, error);
+        // Database has the data, so this is not critical - just log it
       }
     } catch (error) {
       console.error('[StatisticsCoordinator] Failed to flush address totals to database:', error);

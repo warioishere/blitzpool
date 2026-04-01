@@ -92,7 +92,7 @@ export class AddressSettingsService {
             let paramIndex = 1;
 
             updates.forEach((update) => {
-                caseWhenParts.push(`WHEN $${paramIndex} THEN $${paramIndex + 1}`);
+                caseWhenParts.push(`WHEN $${paramIndex} THEN $${paramIndex + 1}::double precision`);
                 parameters.push(update.address, update.shares);
                 paramIndex += 2;
             });
