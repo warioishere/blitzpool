@@ -58,18 +58,18 @@ export class AppController {
   private uptime = new Date();
   private readonly version: string;
 
-  // Configurable cache TTLs (in seconds)
+  // Configurable cache TTLs (env values in seconds, converted to ms for cache-manager)
   private readonly cacheTTL = {
-    siteInfo: parseInt(this.configService.get('API_CACHE_TTL_SITE_INFO') ?? '300'),
-    poolInfo: parseInt(this.configService.get('API_CACHE_TTL_POOL_INFO') ?? '600'),
-    coreInfo: parseInt(this.configService.get('API_CACHE_TTL_CORE_INFO') ?? '60'),
-    peerInfo: parseInt(this.configService.get('API_CACHE_TTL_PEER_INFO') ?? '60'),
-    chart: parseInt(this.configService.get('API_CACHE_TTL_CHART') ?? '10'), // Reduced to 10s for faster updates
-    liveChart: parseInt(this.configService.get('API_CACHE_TTL_LIVE_CHART') ?? '5'),
-    shares: parseInt(this.configService.get('API_CACHE_TTL_SHARES') ?? '60'), // Reduced from 600s to 60s for immediate slot updates
-    workers: parseInt(this.configService.get('API_CACHE_TTL_WORKERS') ?? '60'), // Reduced from 1800s to 60s for immediate slot updates
-    accepted: parseInt(this.configService.get('API_CACHE_TTL_ACCEPTED') ?? '60'), // Reduced from 300s to 60s for immediate slot updates
-    rejected: parseInt(this.configService.get('API_CACHE_TTL_REJECTED') ?? '60'), // Reduced from 300s to 60s for immediate slot updates
+    siteInfo: parseInt(this.configService.get('API_CACHE_TTL_SITE_INFO') ?? '300') * 1000,
+    poolInfo: parseInt(this.configService.get('API_CACHE_TTL_POOL_INFO') ?? '600') * 1000,
+    coreInfo: parseInt(this.configService.get('API_CACHE_TTL_CORE_INFO') ?? '60') * 1000,
+    peerInfo: parseInt(this.configService.get('API_CACHE_TTL_PEER_INFO') ?? '60') * 1000,
+    chart: parseInt(this.configService.get('API_CACHE_TTL_CHART') ?? '10') * 1000,
+    liveChart: parseInt(this.configService.get('API_CACHE_TTL_LIVE_CHART') ?? '5') * 1000,
+    shares: parseInt(this.configService.get('API_CACHE_TTL_SHARES') ?? '60') * 1000,
+    workers: parseInt(this.configService.get('API_CACHE_TTL_WORKERS') ?? '60') * 1000,
+    accepted: parseInt(this.configService.get('API_CACHE_TTL_ACCEPTED') ?? '60') * 1000,
+    rejected: parseInt(this.configService.get('API_CACHE_TTL_REJECTED') ?? '60') * 1000,
   };
 
   constructor(

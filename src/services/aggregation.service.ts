@@ -198,7 +198,7 @@ export class AggregationService implements OnModuleInit {
         _cachedAt: Date.now(),
       };
 
-      await this.cacheManager.set('SITE_INFO', data, 300); // 5 minute TTL
+      await this.cacheManager.set('SITE_INFO', data, 300000); // 5 minute TTL (ms)
 
       const elapsed = Date.now() - startTime;
       this.metricsService.recordAggregationJob('site_info', 'success', elapsed);
@@ -243,7 +243,7 @@ export class AggregationService implements OnModuleInit {
         _cachedAt: Date.now(),
       };
 
-      await this.cacheManager.set('POOL_SHARE_TOTALS', data, 600); // 10 minute TTL
+      await this.cacheManager.set('POOL_SHARE_TOTALS', data, 600000); // 10 minute TTL (ms)
 
       const elapsed = Date.now() - startTime;
       this.metricsService.recordAggregationJob('share_totals', 'success', elapsed);

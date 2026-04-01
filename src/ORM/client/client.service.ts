@@ -28,11 +28,22 @@ export class ClientService {
         const queueCopy = [...this.insertQueue];
         this.insertQueue = [];
 
-        const results = await this.clientRepository.insert(queueCopy.map(c => c.partialClient));
+        if (queueCopy.length === 0) return;
 
-        queueCopy.forEach((c, index) => {
-            c.result.next(results.generatedMaps[index]);
-        });
+        try {
+            const results = await this.clientRepository.insert(queueCopy.map(c => c.partialClient));
+
+            queueCopy.forEach((c, index) => {
+                c.result.next(results.generatedMaps[index]);
+            });
+        } catch (error) {
+            console.error(`insertClients failed for ${queueCopy.length} clients:`, error);
+            // Signal error to all waiting callers so they can handle it
+            // (firstValueFrom will reject, and the StratumClient will catch and close)
+            queueCopy.forEach(c => {
+                c.result.error(error);
+            });
+        }
     }
 
     public async killDeadClients() {

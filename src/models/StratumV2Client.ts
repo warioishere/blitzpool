@@ -2492,6 +2492,9 @@ export class StratumV2Client {
       this.difficultyCheckInterval = null;
     }
 
+    // Remove all socket listeners to prevent memory leaks
+    this.socket.removeAllListeners();
+
     console.log(`[SV2 ${this.sessionId}] Client disconnected (${this.address ?? 'unknown'})`);
   }
 }

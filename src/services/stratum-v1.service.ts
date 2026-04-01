@@ -125,6 +125,9 @@ export class StratumV1Service implements OnModuleInit {
         console.log(
           `Client ${client.sessionId} disconnected, hadError?:${hadError}`,
         );
+      } else {
+        // Client disconnected before completing handshake — clean up listeners
+        socket.removeAllListeners();
       }
     });
 

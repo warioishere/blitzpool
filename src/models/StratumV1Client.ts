@@ -224,6 +224,10 @@ export class StratumV1Client {
         if (this.initTimer) {
             clearTimeout(this.initTimer);
         }
+
+        // Remove all socket listeners to prevent memory leaks —
+        // closures capture `this` and keep the entire client object alive
+        this.socket.removeAllListeners();
     }
 
     private getRandomHexString() {

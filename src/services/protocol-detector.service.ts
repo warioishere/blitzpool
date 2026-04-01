@@ -10,6 +10,10 @@ import { JobDeclarationService } from './job-declaration.service';
 @Injectable()
 export class ProtocolDetectorService implements OnModuleInit {
 
+  // Per-IP connection rate limiting
+  private readonly connectionCounts = new Map<string, { count: number; resetAt: number; banned: boolean }>();
+  private readonly maxConnectionsPerMinute: number;
+
   constructor(
     private readonly configService: ConfigService,
     @Inject(forwardRef(() => StratumV1Service))
@@ -18,13 +22,28 @@ export class ProtocolDetectorService implements OnModuleInit {
     private readonly stratumV2Service: StratumV2Service,
     @Inject(forwardRef(() => JobDeclarationService))
     private readonly jobDeclarationService: JobDeclarationService,
-  ) {}
+  ) {
+    this.maxConnectionsPerMinute = parseInt(
+      this.configService.get<string>('STRATUM_MAX_CONNECTIONS_PER_MINUTE') ?? '20',
+      10,
+    );
+  }
 
   async onModuleInit(): Promise<void> {
     // Delay startup to let other services initialize (matches existing behavior)
     setTimeout(() => {
       this.startPorts();
     }, 1000 * 10);
+
+    // Periodically clean up stale rate-limit entries (every 5 minutes)
+    setInterval(() => {
+      const now = Date.now();
+      for (const [ip, entry] of this.connectionCounts) {
+        if (now > entry.resetAt) {
+          this.connectionCounts.delete(ip);
+        }
+      }
+    }, 5 * 60 * 1000);
   }
 
   private startPorts(): void {
@@ -79,9 +98,44 @@ export class ProtocolDetectorService implements OnModuleInit {
    * Start a unified server on a single port that auto-detects V1 vs V2 protocol.
    * Routes connections to the appropriate handler based on first byte analysis.
    */
+  private isRateLimited(ip: string): boolean {
+    const now = Date.now();
+    const entry = this.connectionCounts.get(ip);
+
+    // Already banned — reject immediately
+    if (entry && entry.banned && now < entry.resetAt) {
+      return true;
+    }
+
+    // New window or expired window
+    if (!entry || now > entry.resetAt) {
+      this.connectionCounts.set(ip, { count: 1, resetAt: now + 60000, banned: false });
+      return false;
+    }
+
+    entry.count++;
+
+    // Exceeded limit — ban for 1 hour
+    if (entry.count > this.maxConnectionsPerMinute) {
+      entry.banned = true;
+      entry.resetAt = now + 60 * 60 * 1000;
+      console.warn(`[RateLimit] ${ip} exceeded ${this.maxConnectionsPerMinute} connections/min — blocked for 1 hour`);
+      return true;
+    }
+
+    return false;
+  }
+
   private startUnifiedServer(portConfig: StratumPortConfig): void {
     const server = new Server((socket: Socket) => {
-      console.log(`[ProtocolDetector] TCP connection from ${socket.remoteAddress} on port ${portConfig.port}`);
+      const ip = socket.remoteAddress ?? 'unknown';
+
+      if (this.isRateLimited(ip)) {
+        socket.destroy();
+        return;
+      }
+
+      console.log(`[ProtocolDetector] TCP connection from ${ip} on port ${portConfig.port}`);
       socket.setNoDelay(true);
 
       // Set a short timeout for protocol detection (30 seconds)

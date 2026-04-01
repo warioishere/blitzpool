@@ -107,6 +107,10 @@ export class AppService implements OnModuleInit {
 
         if (isPrimaryInstance) {
 
+            // Clean up stale sessions immediately on startup (handles PM2 restart orphans)
+            console.log('Startup: killing dead clients');
+            await this.clientService.killDeadClients();
+
             setInterval(async () => {
                 await this.deleteOldStatistics();
             }, 1000 * 60 * 60);
@@ -114,7 +118,7 @@ export class AppService implements OnModuleInit {
             setInterval(async () => {
                 console.log('Killing dead clients');
                 await this.clientService.killDeadClients();
-            }, 1000 * 60 * 5);
+            }, 1000 * 60 * 2);
 
             setInterval(async () => {
                 console.log('Deleting Old Blocks');
