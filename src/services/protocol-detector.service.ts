@@ -209,6 +209,12 @@ export class ProtocolDetectorService implements OnModuleInit {
       return 'v1';
     }
 
+    // TLS ClientHello (0x16) — not a valid stratum protocol.
+    // Reject early to avoid creating expensive StratumV2Client objects.
+    if (firstByte === 0x16) {
+      return 'unknown';
+    }
+
     // SV2 binary protocol - Noise handshake starts with binary data.
     // Any non-JSON byte indicates SV2 binary protocol.
     return 'v2';

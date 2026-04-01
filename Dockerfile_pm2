@@ -33,4 +33,4 @@ COPY --from=build /build/package*.json ./
 RUN mkdir -p logs
 
 # Use shell form to allow environment variable substitution
-CMD pm2-runtime start dist/main.js -i ${PM2_INSTANCES:-4} --name blitzpool --max-memory-restart 1G
+CMD pm2-runtime start dist/main.js -i ${PM2_INSTANCES:-4} --name blitzpool --max-memory-restart ${PM2_MAX_MEMORY:-1280M}
