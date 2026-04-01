@@ -5,6 +5,7 @@ import * as crypto from 'crypto';
 import { Socket } from 'net';
 import { firstValueFrom, skip, Subscription } from 'rxjs';
 
+import { recordConnectionFailure } from '../services/protocol-detector.service';
 import { StratumPortConfig } from './interfaces/unified-stratum.interfaces';
 import { StratumV2ChannelState, ExtendedJobData } from './interfaces/stratum-v2-channel.interface';
 import { StratumV2Service } from '../services/stratum-v2.service';
@@ -255,6 +256,7 @@ export class StratumV2Client {
     // Start handshake
     this.performHandshake(firstChunk).catch((err) => {
       console.error(`[SV2 ${this.sessionId}] Handshake failed:`, err.message);
+      recordConnectionFailure(socket.remoteAddress);
       this.destroySocket();
     });
   }

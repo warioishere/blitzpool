@@ -8,6 +8,7 @@ import { Socket } from 'net';
 import { firstValueFrom, Subscription } from 'rxjs';
 import { clearInterval } from 'timers';
 
+import { recordConnectionFailure } from '../services/protocol-detector.service';
 import { AddressSettingsService } from '../ORM/address-settings/address-settings.service';
 import { BlocksService } from '../ORM/blocks/blocks.service';
 import { ClientStatisticsService } from '../ORM/client-statistics/client-statistics.service';
@@ -420,6 +421,7 @@ export class StratumV1Client {
                     getAddressInfo(authorizationMessage.address);
                 } catch (error) {
                     console.warn(`[StratumV1Client] Invalid Bitcoin address from ${this.socket.remoteAddress}: ${authorizationMessage.address}`);
+                    recordConnectionFailure(this.socket.remoteAddress);
                     const err = new StratumErrorMessage(
                         authorizationMessage.id,
                         eStratumErrorCode.OtherUnknown,

@@ -7,12 +7,44 @@ import { StratumV1Service } from './stratum-v1.service';
 import { StratumV2Service } from './stratum-v2.service';
 import { JobDeclarationService } from './job-declaration.service';
 
+// Shared fail-ban state (static, accessible without DI)
+const failCounts = new Map<string, { count: number; resetAt: number }>();
+const bannedIps = new Map<string, number>(); // ip → ban expires timestamp
+let banConfig = { maxFailures: 5, banDurationMs: 60 * 60 * 1000 };
+
+/**
+ * Record a connection failure for an IP (invalid address, auth failure, etc.)
+ * After exceeding threshold, the IP is banned.
+ * Call this from anywhere — no DI needed.
+ */
+export function recordConnectionFailure(ip: string): void {
+  if (!ip) return;
+  const now = Date.now();
+  let entry = failCounts.get(ip);
+  if (!entry || now > entry.resetAt) {
+    entry = { count: 0, resetAt: now + 60000 };
+    failCounts.set(ip, entry);
+  }
+  entry.count++;
+  if (entry.count > banConfig.maxFailures) {
+    bannedIps.set(ip, now + banConfig.banDurationMs);
+    failCounts.delete(ip);
+    console.warn(`[FailBan] ${ip} banned for ${banConfig.banDurationMs / 60000}min after ${entry.count} failures`);
+  }
+}
+
+export function isConnectionBanned(ip: string): boolean {
+  const expiresAt = bannedIps.get(ip);
+  if (!expiresAt) return false;
+  if (Date.now() > expiresAt) {
+    bannedIps.delete(ip);
+    return false;
+  }
+  return true;
+}
+
 @Injectable()
 export class ProtocolDetectorService implements OnModuleInit {
-
-  // Per-IP connection rate limiting
-  private readonly connectionCounts = new Map<string, { count: number; resetAt: number; banned: boolean }>();
-  private readonly maxConnectionsPerMinute: number;
 
   constructor(
     private readonly configService: ConfigService,
@@ -23,10 +55,11 @@ export class ProtocolDetectorService implements OnModuleInit {
     @Inject(forwardRef(() => JobDeclarationService))
     private readonly jobDeclarationService: JobDeclarationService,
   ) {
-    this.maxConnectionsPerMinute = parseInt(
-      this.configService.get<string>('STRATUM_MAX_CONNECTIONS_PER_MINUTE') ?? '20',
-      10,
-    );
+    // Configure shared ban settings from env
+    banConfig = {
+      maxFailures: parseInt(this.configService.get<string>('STRATUM_MAX_FAILURES_PER_MINUTE') ?? '5', 10),
+      banDurationMs: parseInt(this.configService.get<string>('STRATUM_BAN_DURATION_MINUTES') ?? '60', 10) * 60 * 1000,
+    };
   }
 
   async onModuleInit(): Promise<void> {
@@ -35,13 +68,14 @@ export class ProtocolDetectorService implements OnModuleInit {
       this.startPorts();
     }, 1000 * 10);
 
-    // Periodically clean up stale rate-limit entries (every 5 minutes)
+    // Periodically clean up expired entries (every 5 minutes)
     setInterval(() => {
       const now = Date.now();
-      for (const [ip, entry] of this.connectionCounts) {
-        if (now > entry.resetAt) {
-          this.connectionCounts.delete(ip);
-        }
+      for (const [ip, expiresAt] of bannedIps) {
+        if (now > expiresAt) bannedIps.delete(ip);
+      }
+      for (const [ip, entry] of failCounts) {
+        if (now > entry.resetAt) failCounts.delete(ip);
       }
     }, 5 * 60 * 1000);
   }
@@ -94,43 +128,11 @@ export class ProtocolDetectorService implements OnModuleInit {
     }
   }
 
-  /**
-   * Start a unified server on a single port that auto-detects V1 vs V2 protocol.
-   * Routes connections to the appropriate handler based on first byte analysis.
-   */
-  private isRateLimited(ip: string): boolean {
-    const now = Date.now();
-    const entry = this.connectionCounts.get(ip);
-
-    // Already banned — reject immediately
-    if (entry && entry.banned && now < entry.resetAt) {
-      return true;
-    }
-
-    // New window or expired window
-    if (!entry || now > entry.resetAt) {
-      this.connectionCounts.set(ip, { count: 1, resetAt: now + 60000, banned: false });
-      return false;
-    }
-
-    entry.count++;
-
-    // Exceeded limit — ban for 1 hour
-    if (entry.count > this.maxConnectionsPerMinute) {
-      entry.banned = true;
-      entry.resetAt = now + 60 * 60 * 1000;
-      console.warn(`[RateLimit] ${ip} exceeded ${this.maxConnectionsPerMinute} connections/min — blocked for 1 hour`);
-      return true;
-    }
-
-    return false;
-  }
-
   private startUnifiedServer(portConfig: StratumPortConfig): void {
     const server = new Server((socket: Socket) => {
       const ip = socket.remoteAddress ?? 'unknown';
 
-      if (this.isRateLimited(ip)) {
+      if (isConnectionBanned(ip)) {
         socket.destroy();
         return;
       }
