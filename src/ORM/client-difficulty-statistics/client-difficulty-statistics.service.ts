@@ -71,7 +71,7 @@ export class ClientDifficultyStatisticsService {
             maxDifficulty: params.difficulty,
           })
           .onConflict(
-            '("address", "clientName", "slotTime") DO UPDATE SET "maxDifficulty" = CASE WHEN EXCLUDED."maxDifficulty" > "maxDifficulty" THEN EXCLUDED."maxDifficulty" ELSE "maxDifficulty" END, "updatedAt" = :updatedAt',
+            '("address", "clientName", "slotTime") DO UPDATE SET "maxDifficulty" = CASE WHEN EXCLUDED."maxDifficulty" > "client_difficulty_statistics_entity"."maxDifficulty" THEN EXCLUDED."maxDifficulty" ELSE "client_difficulty_statistics_entity"."maxDifficulty" END, "updatedAt" = :updatedAt',
           )
           .setParameter('updatedAt', now)
           .execute();

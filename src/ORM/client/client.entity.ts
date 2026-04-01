@@ -33,7 +33,7 @@ export class ClientEntity extends TrackedEntity {
     @Column({ type: 'real', default: 0 })
     bestDifficulty: number
 
-    @Column({ default: 0 })
+    @Column({ type: 'double precision', default: 0 })
     hashRate: number;
 
     @Column({ type: 'real', nullable: true })

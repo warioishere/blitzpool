@@ -256,7 +256,7 @@ export class ClientService {
 
     public async getUserAgents(excludeAddresses?: string[]) {
         const qb = this.clientRepository.createQueryBuilder('client')
-            .select('client.userAgent as userAgent')
+            .select('client.userAgent', 'userAgent')
             .addSelect('COUNT(client.userAgent)', 'count')
             .addSelect('MAX(client.bestDifficulty)', 'bestDifficulty')
             .addSelect('SUM(client.hashRate)', 'totalHashRate');

@@ -8,7 +8,7 @@ export class BlocksEntity extends TrackedEntity {
     @PrimaryGeneratedColumn()
     id: number;
 
-    @Column()
+    @Column({ type: 'bigint', transformer: { to: (value: number) => value, from: (value: string) => parseInt(value, 10) } })
     height: number;
 
     @Column({ length: 62, type: 'varchar' })

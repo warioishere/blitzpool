@@ -8,7 +8,7 @@ export class BestDifficultyTrackerEntity extends TrackedEntity {
     @PrimaryColumn({ length: 62, type: 'varchar' })
     address: string;
 
-    @Column({ type: 'real' })
+    @Column({ type: 'double precision' })
     bestDifficulty: number;
 
     @Column({ type: 'bigint', transformer: { to: (value: number) => value, from: (value: string) => parseInt(value, 10) } })

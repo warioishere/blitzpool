@@ -12,7 +12,7 @@ export class TelegramSubscriptionsEntity extends TrackedEntity {
     @Column({ length: 62, type: 'varchar' })
     address: string;
 
-    @Column()
+    @Column({ type: 'bigint', transformer: { to: (value: number) => value, from: (value: string) => parseInt(value, 10) } })
     telegramChatId: number;
 
     @Column({ default: true }) // <--- genau das hier ist wichtig!

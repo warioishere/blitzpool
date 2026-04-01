@@ -31,7 +31,7 @@ export class RpcBlockService {
             .select('MAX(entity.blockHeight)', 'maxNumber')
             .getRawOne();
 
-        const newestBlock = result ? result.maxNumber : null;
+        const newestBlock = result?.maxNumber != null ? Number(result.maxNumber) : null;
 
         await this.rpcBlockRepository.createQueryBuilder()
             .delete()

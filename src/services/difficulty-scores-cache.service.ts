@@ -151,7 +151,7 @@ export class DifficultyScoresCacheService implements OnModuleInit {
 
     const bySlot = new Map<number, number>();
     for (const entry of rawEntries) {
-      bySlot.set(entry.slotTime, Number(entry.maxDifficulty) || 0);
+      bySlot.set(Number(entry.slotTime), Number(entry.maxDifficulty) || 0);
     }
 
     const slotData: DifficultyScoreSlot[] = [];

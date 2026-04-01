@@ -15,7 +15,7 @@ export class ExternalSharesService {
     }
 
     public async getTopDifficulties(): Promise<Array<{userAgent: string, time: number, externalPoolName: string, difficulty: number}>> {
-        return await this.externalSharesRepository
+        const results = await this.externalSharesRepository
             .createQueryBuilder('share')
             .select('share.userAgent', 'userAgent')
             .addSelect('share.time', 'time')
@@ -25,6 +25,7 @@ export class ExternalSharesService {
             .orderBy('MAX(share.difficulty)', 'DESC')
             .limit(10)
             .getRawMany();
+        return results.map(r => ({ ...r, time: Number(r.time), difficulty: Number(r.difficulty) }));
     }
 
     public async getAddressBestDifficulty(address: string): Promise<number> {
@@ -33,7 +34,7 @@ export class ExternalSharesService {
             .select('MAX(difficulty)', 'maxDifficulty')
             .where('address = :address', { address })
             .getRawOne();
-        return result?.maxDifficulty || 0;
+        return result?.maxDifficulty ? Number(result.maxDifficulty) : 0;
     }
 
     public async deleteOldShares() {

@@ -40,7 +40,7 @@ export class AddressSettingsService {
     }
 
     public async getHighScores() {
-        return await this.addressSettingsRepository
+        const results = await this.addressSettingsRepository
             .createQueryBuilder('settings')
             .select([
                 'settings.updatedAt AS "updatedAt"',
@@ -50,6 +50,7 @@ export class AddressSettingsService {
             .orderBy('settings.bestDifficulty', 'DESC')
             .limit(10)
             .getRawMany();
+        return results.map(r => ({ ...r, bestDifficulty: Number(r.bestDifficulty) }));
     }
 
     public async createNew(address: string) {

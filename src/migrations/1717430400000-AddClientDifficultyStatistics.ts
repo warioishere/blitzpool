@@ -16,7 +16,7 @@ export class AddClientDifficultyStatistics1717430400000 implements MigrationInte
                 "id" SERIAL NOT NULL,
                 "address" character varying(62) NOT NULL,
                 "clientName" character varying(64),
-                "slotTime" integer NOT NULL,
+                "slotTime" bigint NOT NULL,
                 "maxDifficulty" real NOT NULL DEFAULT '0',
                 CONSTRAINT "PK_client_difficulty_statistics_entity_id" PRIMARY KEY ("id")
             )
