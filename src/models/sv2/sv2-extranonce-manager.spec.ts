@@ -1,8 +1,5 @@
 import { Sv2ExtranonceManager } from './sv2-extranonce-manager';
 
-afterEach(() => {
-  delete process.env.NODE_APP_INSTANCE;
-});
 
 describe('Sv2ExtranonceManager', () => {
   it('allocates unique prefixes for different channels', () => {
@@ -114,55 +111,4 @@ describe('Sv2ExtranonceManager', () => {
     expect(mgr.allocatedCount).toBe(0);
   });
 
-  describe('PM2 cluster partitioning', () => {
-    it('worker 0 prefixes start with 0x00 top byte', () => {
-      process.env.NODE_APP_INSTANCE = '0';
-      const mgr = new Sv2ExtranonceManager();
-      const p = mgr.allocate(1);
-      expect(p[0]).toBe(0x00);
-      expect(p.readUInt32BE(0)).toBe(1); // 0x00000001
-    });
-
-    it('worker 1 prefixes start with 0x01 top byte', () => {
-      process.env.NODE_APP_INSTANCE = '1';
-      const mgr = new Sv2ExtranonceManager();
-      const p = mgr.allocate(1);
-      expect(p[0]).toBe(0x01);
-      expect(p.readUInt32BE(0)).toBe(0x01000001);
-    });
-
-    it('worker 3 prefixes start with 0x03 top byte', () => {
-      process.env.NODE_APP_INSTANCE = '3';
-      const mgr = new Sv2ExtranonceManager();
-      const p = mgr.allocate(1);
-      expect(p[0]).toBe(0x03);
-      expect(p.readUInt32BE(0)).toBe(0x03000001);
-    });
-
-    it('different workers never produce the same prefix', () => {
-      const allPrefixes = new Set<string>();
-
-      for (let workerId = 0; workerId < 4; workerId++) {
-        process.env.NODE_APP_INSTANCE = String(workerId);
-        const mgr = new Sv2ExtranonceManager();
-        for (let ch = 1; ch <= 100; ch++) {
-          const p = mgr.allocate(ch);
-          const hex = p.toString('hex');
-          expect(allPrefixes.has(hex)).toBe(false);
-          allPrefixes.add(hex);
-        }
-      }
-
-      expect(allPrefixes.size).toBe(400);
-    });
-
-    it('sequential prefixes stay within the worker partition', () => {
-      process.env.NODE_APP_INSTANCE = '2';
-      const mgr = new Sv2ExtranonceManager();
-      for (let ch = 1; ch <= 50; ch++) {
-        const p = mgr.allocate(ch);
-        expect(p[0]).toBe(0x02); // top byte always matches worker ID
-      }
-    });
-  });
 });

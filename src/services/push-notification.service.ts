@@ -15,7 +15,6 @@ const CHECK_INTERVAL_SECONDS = 60; // 60 seconds
 
 @Injectable()
 export class PushNotificationService implements OnModuleInit {
-    private isPrimaryInstance: boolean;
     private useVAPID: boolean;
 
     constructor(
@@ -26,15 +25,6 @@ export class PushNotificationService implements OnModuleInit {
         private readonly addressSettingsService: AddressSettingsService,
         private readonly fcmService: FcmService,
     ) {
-        // Only run on PM2 instance 0 (or when not in cluster mode)
-        // Check multiple PM2 environment variables (pm2-runtime uses pm_id, pm2 uses NODE_APP_INSTANCE)
-        const pm2InstanceId = process.env.NODE_APP_INSTANCE ?? process.env.pm_id ?? process.env.PM2_INSTANCE_ID;
-        const normalizedInstanceId = typeof pm2InstanceId === 'string' ? pm2InstanceId.trim() : undefined;
-
-        // If no PM2 instance ID is set, assume standalone (primary)
-        // If PM2 instance ID is set, only instance 0 is primary
-        this.isPrimaryInstance = !normalizedInstanceId || normalizedInstanceId === '0';
-
         // Initialize VAPID if keys are configured
         const vapidPublicKey = this.configService.get<string>('VAPID_PUBLIC_KEY');
         const vapidPrivateKey = this.configService.get<string>('VAPID_PRIVATE_KEY');
@@ -51,13 +41,7 @@ export class PushNotificationService implements OnModuleInit {
     }
 
     async onModuleInit(): Promise<void> {
-        if (!this.isPrimaryInstance) {
-            const instanceId = process.env.NODE_APP_INSTANCE ?? process.env.pm_id ?? process.env.PM2_INSTANCE_ID ?? 'unknown';
-            console.log('[PushNotification] Disabled on PM2 instance ' + instanceId + ' (only runs on instance 0)');
-            return;
-        }
-
-        console.log(`[PushNotification] Worker enabled on PM2 primary instance (0)`);
+        console.log(`[PushNotification] Worker enabled`);
         console.log(`[PushNotification] Check interval: ${CHECK_INTERVAL_SECONDS} seconds`);
     }
 
@@ -232,9 +216,6 @@ export class PushNotificationService implements OnModuleInit {
      */
     @Cron('*/60 * * * * *')
     async checkBestDifficulty(): Promise<void> {
-        if (!this.isPrimaryInstance) {
-            return;
-        }
 
         try {
             const addresses = await this.pushSubscriptionService.getAddressesWithSubscriptions();
@@ -586,9 +567,6 @@ export class PushNotificationService implements OnModuleInit {
      */
     @Cron('0 */10 * * * *')
     async checkNetworkDifficulty(): Promise<void> {
-        if (!this.isPrimaryInstance) {
-            return;
-        }
 
         try {
             const currentDifficulty = await this.fetchNetworkDifficulty();

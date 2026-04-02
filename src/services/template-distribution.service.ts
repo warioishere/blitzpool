@@ -24,9 +24,6 @@ export class TemplateDistributionService implements OnModuleInit {
   private templateIdCounter = 0n;
   private activeTemplates = new Map<bigint, StoredTemplate>();
   private subscription: Subscription | null = null;
-  private readonly isPrimaryWorker: boolean;
-
-
   private readonly newTemplateSubject = new ReplaySubject<Sv2TdpNewTemplate>(1);
   private readonly newPrevHashSubject = new ReplaySubject<Sv2TdpSetNewPrevHash>(1);
 
@@ -37,10 +34,7 @@ export class TemplateDistributionService implements OnModuleInit {
     private readonly stratumV1JobsService: StratumV1JobsService,
     private readonly bitcoinRpcService: BitcoinRpcService,
     private readonly configService: ConfigService,
-  ) {
-    const instanceId = process.env.NODE_APP_INSTANCE ?? process.env.pm_id ?? process.env.PM2_INSTANCE_ID;
-    this.isPrimaryWorker = !instanceId || instanceId === '0';
-  }
+  ) {}
 
   async onModuleInit(): Promise<void> {
     this.subscription = this.stratumV1JobsService.newMiningJob$.subscribe((jobTemplate) => {
@@ -84,7 +78,7 @@ export class TemplateDistributionService implements OnModuleInit {
             coinbasePrefix.subarray(0, 4),      // version (4 bytes)
             coinbasePrefix.subarray(6),          // rest after marker+flag
           ]);
-          if (this.isPrimaryWorker) console.log('[TDP] ✂️  Stripped BIP141 witness bytes from coinbase prefix');
+          console.log('[TDP] ✂️  Stripped BIP141 witness bytes from coinbase prefix');
         }
       }
 
@@ -158,15 +152,11 @@ export class TemplateDistributionService implements OnModuleInit {
 
     // Emit
     this.newTemplateSubject.next(template);
-    if (this.isPrimaryWorker) {
-      console.log(`[TDP] 📋 NewTemplate: id=${templateId}, version=0x${template.version.toString(16)}, coinbaseValue=${template.coinbaseTxValueRemaining.toString()}, outputs=${template.coinbaseTxOutputsCount}, merklePathLen=${merklePath.length}, futureTemplate=${isFutureTemplate}`);
-    }
+    console.log(`[TDP] 📋 NewTemplate: id=${templateId}, version=0x${template.version.toString(16)}, coinbaseValue=${template.coinbaseTxValueRemaining.toString()}, outputs=${template.coinbaseTxOutputsCount}, merklePathLen=${merklePath.length}, futureTemplate=${isFutureTemplate}`);
 
     if (jobTemplate.blockData.clearJobs) {
       this.newPrevHashSubject.next(tdpPrevHash);
-      if (this.isPrimaryWorker) {
-        console.log(`[TDP] 🔗 SetNewPrevHash: id=${templateId}, height=${jobTemplate.blockData.height}, prevHash=${prevHash.toString('hex').substring(0, 16)}..., nBits=0x${tdpPrevHash.nBits.toString(16)}`);
-      }
+      console.log(`[TDP] 🔗 SetNewPrevHash: id=${templateId}, height=${jobTemplate.blockData.height}, prevHash=${prevHash.toString('hex').substring(0, 16)}..., nBits=0x${tdpPrevHash.nBits.toString(16)}`);
     }
   }
 

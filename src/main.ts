@@ -12,7 +12,7 @@ async function bootstrap() {
 
   if (process.env.API_PORT == null) {
     console.error('It appears your environment is not configured, create and populate an .env file.');
-    return;
+    process.exit(1);
   }
 
   let options = {};
@@ -38,13 +38,15 @@ async function bootstrap() {
     }),
   );
 
-  process.on('SIGINT', () => {
-    console.log(`Stopping services`);
+  process.on('SIGINT', async () => {
+    console.log('Stopping services (SIGINT)');
+    await app.close();
     process.exit(0);
   });
 
-  process.on('SIGTERM', () => {
-    console.log(`Stopping services`);
+  process.on('SIGTERM', async () => {
+    console.log('Stopping services (SIGTERM)');
+    await app.close();
     process.exit(0);
   });
 

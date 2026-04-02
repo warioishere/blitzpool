@@ -14,46 +14,22 @@ export interface HashrateDataPoint {
 @Injectable()
 export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
   private collectionInterval: NodeJS.Timeout;
-  private aggregationInterval: NodeJS.Timeout;
   private redis: RedisClientType;
-  private instanceId: string;
-  private readonly isPrimaryInstance: boolean;
   private readonly COLLECTION_INTERVAL_MS = 60000; // 60 seconds
-  private readonly AGGREGATION_INTERVAL_MS = 180000; // 3 minutes (reduced from 30s to prevent CPU spikes)
   private readonly RETENTION_HOURS = 24;
   private readonly RETENTION_SECONDS = this.RETENTION_HOURS * 3600;
   private readonly POOL_PREFIX = 'livehash:pool';
   private readonly ADDR_PREFIX = 'livehash:addr';
-  private readonly INSTANCE_PREFIX = 'livehash:i';
-
-  // Aggregation tracking
-  private aggregationMetrics = {
-    totalAggregations: 0,
-    successfulAggregations: 0,
-    failedAggregations: 0,
-    droppedStaleInstances: 0,
-    deduplicatedAddresses: 0,
-    lastAggregationTime: 0,
-    lastError: '',
-  };
 
   constructor(
     private readonly stratumV1Service: StratumV1Service,
     private readonly stratumV2Service: StratumV2Service,
     private readonly configService: ConfigService,
     @Optional() @Inject(CACHE_MANAGER) private readonly cacheManager?: Cache,
-  ) {
-    // Check multiple PM2 environment variables (pm2-runtime uses pm_id, pm2 uses NODE_APP_INSTANCE)
-    const pm2InstanceId = process.env.NODE_APP_INSTANCE ?? process.env.pm_id ?? process.env.PM2_INSTANCE_ID;
-    this.instanceId = pm2InstanceId ?? '0';
-
-    const normalizedInstanceId = typeof pm2InstanceId === 'string' ? pm2InstanceId.trim() : undefined;
-    this.isPrimaryInstance = !normalizedInstanceId || normalizedInstanceId === '0';
-  }
+  ) {}
 
   /**
    * Scan Redis keys using cursor-based iteration (non-blocking)
-   * This is the production-safe alternative to KEYS command
    */
   private async scanKeys(pattern: string): Promise<string[]> {
     if (!this.redis) return [];
@@ -65,7 +41,7 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
       do {
         const result = await this.redis.scan(cursor, {
           MATCH: pattern,
-          COUNT: 100, // Scan in batches of 100
+          COUNT: 100,
         });
 
         cursor = result.cursor;
@@ -80,7 +56,6 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleInit() {
-    // Initialize Redis connection for live hashrate storage
     const redisHost = this.configService.get('REDIS_HOST');
     const redisPort = parseInt(this.configService.get('REDIS_PORT') ?? '6379');
     const redisPassword = this.configService.get('REDIS_PASSWORD');
@@ -99,259 +74,66 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
 
         await this.redis.connect();
         console.log('[LiveHashrate] Redis connection established');
+
+        // Clean up stale instance-specific keys from old multi-instance setup
+        await this.cleanupLegacyInstanceKeys();
       } catch (error) {
         console.error('[LiveHashrate] Failed to connect to Redis:', error);
-        // Don't throw - graceful degradation
       }
     } else {
       console.warn('[LiveHashrate] Redis not configured - live hashrate will not persist');
     }
 
-    // Start the background collection job
     this.collectionInterval = setInterval(
       () => this.collectAndStoreCurrentHashrate(),
       this.COLLECTION_INTERVAL_MS,
     );
 
-    // Start aggregation job to combine data from all instances (only on primary instance)
-    if (this.isPrimaryInstance) {
-      this.aggregationInterval = setInterval(
-        () => this.aggregateInstanceData(),
-        this.AGGREGATION_INTERVAL_MS,
-      );
-    }
-
-    // Collect immediately on startup, and aggregate if primary
+    // Collect immediately on startup
     try {
       await this.collectAndStoreCurrentHashrate();
-      if (this.isPrimaryInstance) {
-        await this.aggregateInstanceData();
-      }
     } catch (error) {
       console.error('[LiveHashrate] Error on initial startup:', error);
     }
 
-    console.log(`[LiveHashrate] Instance ${this.instanceId} initialized`);
+    console.log('[LiveHashrate] Initialized');
   }
 
   async onModuleDestroy() {
     if (this.collectionInterval) {
       clearInterval(this.collectionInterval);
     }
-    if (this.aggregationInterval) {
-      clearInterval(this.aggregationInterval);
-    }
 
     if (this.redis) {
       await this.redis.disconnect();
     }
 
-    console.log(`[LiveHashrate] Instance ${this.instanceId} shutdown`);
+    console.log('[LiveHashrate] Shutdown');
   }
 
-
-
   /**
-   * Aggregate data from all instances into final hashrate values
-   * Finds all timestamps with partial data and creates aggregated records
-   *
-   * OPTIMIZED: Single-pass SCAN with in-memory grouping to avoid nested SCAN loops
-   * Only instance 0 aggregates - no need for distributed locking
+   * Remove leftover livehash:i:* keys from the old multi-instance architecture.
+   * Runs once on startup — these keys have TTLs so this is just a fast cleanup.
    */
-  private async aggregateInstanceData(): Promise<void> {
-    // Only instance 0 aggregates - no need for distributed locking
-    if (!this.isPrimaryInstance) return;
-    if (!this.redis) return;
-
-    console.log(`[LiveHashrate] Instance ${this.instanceId} starting aggregation`);
-    this.aggregationMetrics.totalAggregations++;
-
+  private async cleanupLegacyInstanceKeys(): Promise<void> {
     try {
-      const now = Date.now();
-
-      // OPTIMIZATION: Single SCAN to get all partial keys
-      // Previously this caused nested SCAN loops (one scan per timestamp)
-      const allPartialKeys = await this.scanKeys(`${this.INSTANCE_PREFIX}:*:addr:*:*`);
-
-      // Group keys by timestamp IN MEMORY (no additional scans needed!)
-      const keysByTimestamp = new Map<number, string[]>();
-      for (const key of allPartialKeys) {
-        try {
-          // Parse key: livehash:i:0:addr:bc1qxyz:1702483260000
-          const parts = key.split(':');
-          if (parts.length >= 6) {
-            const timestamp = parseInt(parts[parts.length - 1], 10);
-            if (!Number.isNaN(timestamp) && now - timestamp < 3600000) {
-              // Only process last hour
-              if (!keysByTimestamp.has(timestamp)) {
-                keysByTimestamp.set(timestamp, []);
-              }
-              keysByTimestamp.get(timestamp)!.push(key);
-            }
-          }
-        } catch (err) {
-          // Skip malformed keys
+      const legacyKeys = await this.scanKeys('livehash:i:*');
+      if (legacyKeys.length > 0) {
+        // Delete in batches of 100
+        for (let i = 0; i < legacyKeys.length; i += 100) {
+          const batch = legacyKeys.slice(i, i + 100);
+          await this.redis.del(batch);
         }
+        console.log(`[LiveHashrate] Cleaned up ${legacyKeys.length} legacy instance keys`);
       }
-
-      // Aggregate for each timestamp using pre-grouped keys (no more scans!)
-      let aggregatedCount = 0;
-      for (const [timestamp, keys] of keysByTimestamp.entries()) {
-        const aggregated = await this.aggregateForTimestamp(timestamp, keys);
-        if (aggregated) {
-          aggregatedCount++;
-        }
-      }
-
-      this.aggregationMetrics.successfulAggregations++;
-      this.aggregationMetrics.lastAggregationTime = Date.now();
     } catch (error) {
-      this.aggregationMetrics.failedAggregations++;
-      this.logAggregationError(`Aggregation failed: ${error}`);
+      console.warn('[LiveHashrate] Failed to clean up legacy keys:', error);
     }
   }
 
   /**
-   * Aggregate data from all instances for a specific 1-minute timestamp
-   *
-   * Reads partial data stored by each instance:
-   *   livehash:i:{instanceId}:addr:{address}:{timestamp}
-   *
-   * Creates aggregated final data:
-   *   livehash:addr:{address}:{timestamp}
-   *   livehash:pool:{timestamp}
-   *
-   * This ensures:
-   * - No duplicates: each instance's data counted once
-   * - No gaps: only complete minutes are aggregated
-   * - No missing: sum all instances for each address
-   *
-   * OPTIMIZED: Accepts pre-filtered keys to avoid redundant SCAN operations
-   */
-  private async aggregateForTimestamp(
-    timestamp: number,
-    partialKeys: string[]
-  ): Promise<boolean> {
-    if (!this.redis) return false;
-
-    try {
-      const addressAggregates = new Map<string, {
-        totalHashrate: number;
-        instances: string[];
-      }>();
-
-      // OPTIMIZATION: Use pre-filtered keys from caller (no SCAN needed!)
-      // Previously: await this.scanKeys(`${this.INSTANCE_PREFIX}:*:addr:*:${timestamp}`)
-      const addressPartialKeys = partialKeys;
-
-      // Sum up hashrates by address across all instances
-      for (const partialKey of addressPartialKeys) {
-        try {
-          // Parse key: livehash:i:0:addr:bc1qxyz:1702483260000
-          const parts = partialKey.split(':');
-          if (parts.length < 6) continue;
-
-          const instanceId = parts[2];
-          const address = parts.slice(4, -1).join(':'); // Handle addresses with colons (shouldn't happen but be safe)
-
-          const data = await this.redis.get(partialKey);
-          if (!data) continue;
-
-          const parsed = JSON.parse(data);
-          const hashrate = parsed.hashrate ?? 0;
-
-          if (!addressAggregates.has(address)) {
-            addressAggregates.set(address, { totalHashrate: 0, instances: [] });
-          }
-
-          const agg = addressAggregates.get(address)!;
-          agg.totalHashrate += hashrate;
-          agg.instances.push(instanceId);
-        } catch (err) {
-          console.warn(`[LiveHashrate] Failed to parse partial key ${partialKey}:`, err);
-        }
-      }
-
-      // Calculate pool total
-      let poolTotalHashrate = 0;
-      for (const agg of addressAggregates.values()) {
-        poolTotalHashrate += agg.totalHashrate;
-      }
-
-      // Log addresses reported by multiple instances (expected for load-balanced addresses)
-      let multiInstanceAddresses = 0;
-      for (const [address, agg] of addressAggregates.entries()) {
-        if (agg.instances.length > 1) {
-          multiInstanceAddresses++;
-          this.aggregationMetrics.deduplicatedAddresses++;
-        }
-      }
-
-      // Write aggregated pool data
-      const poolKey = `${this.POOL_PREFIX}:${timestamp}`;
-      try {
-        await this.redis.setEx(
-          poolKey,
-          this.RETENTION_SECONDS,
-          JSON.stringify({
-            hashrate: poolTotalHashrate,
-            timestamp,
-            addressCount: addressAggregates.size,
-            aggregatedAt: Date.now(),
-            multiInstanceAddressCount: multiInstanceAddresses
-          }),
-        );
-      } catch (err) {
-        console.error(`[LiveHashrate] Failed to write aggregated pool key ${poolKey}:`, err);
-      }
-
-      // Write aggregated address data
-      for (const [address, agg] of addressAggregates.entries()) {
-        const addrKey = `${this.ADDR_PREFIX}:${address}:${timestamp}`;
-        try {
-          await this.redis.setEx(
-            addrKey,
-            this.RETENTION_SECONDS,
-            JSON.stringify({
-              hashrate: agg.totalHashrate,
-              timestamp,
-              connectedInstances: agg.instances,
-              instanceCount: agg.instances.length,
-              aggregatedAt: Date.now(),
-            }),
-          );
-        } catch (err) {
-          console.error(`[LiveHashrate] Failed to write aggregated address key ${addrKey}:`, err);
-        }
-      }
-
-      return true;
-    } catch (error) {
-      this.logAggregationError(`Failed to aggregate timestamp ${timestamp}: ${error}`);
-      return false;
-    }
-  }
-
-
-  /**
-   * Log aggregation errors and track them for monitoring
-   */
-  private logAggregationError(message: string): void {
-    console.error(`[LiveHashrate] ${message}`);
-    this.aggregationMetrics.lastError = message;
-  }
-
-  /**
-   * Get aggregation metrics for monitoring
-   */
-  public getAggregationMetrics(): typeof this.aggregationMetrics {
-    return { ...this.aggregationMetrics };
-  }
-
-  /**
-   * Collect hashrate for the PREVIOUS complete 1-minute slot
-   * This ensures we have all submissions for that minute
-   * Runs every 60 seconds, stores data with proper 1-minute boundary alignment
+   * Collect hashrate for the PREVIOUS complete 1-minute slot and store directly
+   * as final pool/address data. Runs every 60 seconds.
    */
   async collectAndStoreCurrentHashrate(): Promise<void> {
     if (!this.redis) {
@@ -362,13 +144,10 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
     try {
       const now = Date.now();
 
-      // Calculate the PREVIOUS complete minute (not the current one)
-      // e.g., if now is 1702483275300 (at 75.3 seconds), previous minute is 1702483200000-1702483260000
-      // We store with key for the END time: 1702483260000
-      const previousMinuteStart = (Math.floor(now / 60000) - 1) * 60000; // Start of previous minute
-      const previousMinuteEnd = previousMinuteStart + 60000; // End of previous minute (slot timestamp)
+      // Calculate the PREVIOUS complete minute
+      const previousMinuteStart = (Math.floor(now / 60000) - 1) * 60000;
+      const previousMinuteEnd = previousMinuteStart + 60000;
 
-      // Skip if we just started (would give us negative time)
       if (previousMinuteStart < 0) {
         console.log('[LiveHashrate] Skipping first minute collection');
         return;
@@ -379,94 +158,62 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
       const v2Addresses = this.stratumV2Service.getAllAddresses();
       const allAddresses = [...new Set([...v1Addresses, ...v2Addresses])];
 
-      // Collect hashrate for each address in the previous minute
-      const addressDifficulties = new Map<string, number>(); // Raw difficulty, not hashrate yet
+      // Collect difficulty for each address in the previous minute
       let poolTotalDifficulty = 0;
+      const startDate = new Date(previousMinuteStart);
+      const endDate = new Date(previousMinuteEnd);
+
+      const pipeline = this.redis.multi();
+      let addressCount = 0;
 
       for (const address of allAddresses) {
         let addressTotalDifficulty = 0;
-        const startDate = new Date(previousMinuteStart);
-        const endDate = new Date(previousMinuteEnd);
 
         // V1 clients
-        const v1Clients = this.stratumV1Service.getClientsForAddress(address);
-        for (const client of v1Clients) {
+        for (const client of this.stratumV1Service.getClientsForAddress(address)) {
           const submissions = client.getSubmissionCacheForInterval(startDate, endDate);
-          if (submissions.length > 0) {
-            const totalDifficulty = submissions.reduce(
-              (sum, sub) => sum + (sub.difficulty ?? 0),
-              0,
-            );
-            addressTotalDifficulty += totalDifficulty;
+          for (const sub of submissions) {
+            addressTotalDifficulty += sub.difficulty ?? 0;
           }
         }
 
         // V2 clients
-        const v2Clients = this.stratumV2Service.getClientsForAddress(address);
-        for (const client of v2Clients) {
+        for (const client of this.stratumV2Service.getClientsForAddress(address)) {
           const submissions = client.getSubmissionCacheForInterval(startDate, endDate);
-          if (submissions.length > 0) {
-            const totalDifficulty = submissions.reduce(
-              (sum, sub) => sum + (sub.difficulty ?? 0),
-              0,
-            );
-            addressTotalDifficulty += totalDifficulty;
+          for (const sub of submissions) {
+            addressTotalDifficulty += sub.difficulty ?? 0;
           }
         }
 
         if (addressTotalDifficulty > 0) {
-          addressDifficulties.set(address, addressTotalDifficulty);
+          const addressHashrate = (addressTotalDifficulty * 4294967296) / 60;
           poolTotalDifficulty += addressTotalDifficulty;
+          addressCount++;
+
+          pipeline.setEx(
+            `${this.ADDR_PREFIX}:${address}:${previousMinuteEnd}`,
+            this.RETENTION_SECONDS,
+            JSON.stringify({ hashrate: addressHashrate, timestamp: previousMinuteEnd }),
+          );
         }
       }
 
-      // Convert total difficulty to hashrate: hashrate = (difficulty * 2^32) / seconds
-      // With 60 seconds: hashrate = difficulty * 4294967296 / 60
+      // Store pool total
       const poolHashrate = (poolTotalDifficulty * 4294967296) / 60;
-
-      // Store PARTIAL data with this instance's ID (for later aggregation)
-      // This way we can track which instance contributed what
-      const instancePoolKey = `${this.INSTANCE_PREFIX}:${this.instanceId}:pool:${previousMinuteEnd}`;
-      await this.redis.setEx(
-        instancePoolKey,
+      pipeline.setEx(
+        `${this.POOL_PREFIX}:${previousMinuteEnd}`,
         this.RETENTION_SECONDS,
-        JSON.stringify({
-          hashrate: poolHashrate,
-          difficulty: poolTotalDifficulty,
-          timestamp: previousMinuteEnd,
-          instanceId: this.instanceId
-        }),
+        JSON.stringify({ hashrate: poolHashrate, timestamp: previousMinuteEnd, addressCount }),
       );
 
-      // Store per-address PARTIAL data
-      const addressHashrates: Record<string, number> = {};
-      for (const [address, difficulty] of addressDifficulties.entries()) {
-        const addressHashrate = (difficulty * 4294967296) / 60;
-        const instanceAddrKey = `${this.INSTANCE_PREFIX}:${this.instanceId}:addr:${address}:${previousMinuteEnd}`;
-
-        await this.redis.setEx(
-          instanceAddrKey,
-          this.RETENTION_SECONDS,
-          JSON.stringify({
-            hashrate: addressHashrate,
-            difficulty,
-            timestamp: previousMinuteEnd,
-            address,
-            instanceId: this.instanceId
-          }),
-        );
-
-        addressHashrates[address] = addressHashrate;
-      }
+      await pipeline.exec();
     } catch (error) {
       console.error('[LiveHashrate] Error during collection:', error);
-      this.logAggregationError(`Collection failed: ${error}`);
     }
   }
 
   /**
-   * Get aggregated pool-wide live hashrate for a time range
-   * Reads from final aggregated data: livehash:pool:{timestamp}
+   * Get pool-wide live hashrate for a time range
    */
   async getPoolLiveHashrate(lookbackHours: number = 1): Promise<HashrateDataPoint[]> {
     if (!this.redis) {
@@ -477,19 +224,14 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
       const now = Date.now();
       const lookbackMs = lookbackHours * 3600 * 1000;
 
-      // Align to 1-minute boundaries to match Redis key timestamps
-      // Exclude current incomplete slot by going back one minute
       const alignedNow = Math.floor(now / 60000) * 60000 - 60000;
       const alignedStartTime = alignedNow - lookbackMs;
 
-      // Get all aggregated pool keys within the time range
-      // Pattern: livehash:pool:{timestamp}
       const keys = await this.scanKeys(`${this.POOL_PREFIX}:*`);
       const dataPoints: Array<{ label: number; data: number }> = [];
 
       for (const key of keys) {
         try {
-          // Extract timestamp from key: livehash:pool:1702483260000
           const timestampStr = key.substring(this.POOL_PREFIX.length + 1);
           const timestamp = parseInt(timestampStr, 10);
 
@@ -508,10 +250,7 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
         }
       }
 
-      // Sort by timestamp
       dataPoints.sort((a, b) => a.label - b.label);
-
-      // Fill gaps with zeros for visualization
       return this.fillGaps(dataPoints, alignedStartTime, alignedNow, 60000);
     } catch (error) {
       console.error('[LiveHashrate] Error retrieving pool hashrate:', error);
@@ -520,8 +259,7 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Get aggregated address-specific live hashrate for a time range
-   * Reads from final aggregated data: livehash:addr:{address}:{timestamp}
+   * Get address-specific live hashrate for a time range
    */
   async getAddressLiveHashrate(
     address: string,
@@ -535,19 +273,14 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
       const now = Date.now();
       const lookbackMs = lookbackHours * 3600 * 1000;
 
-      // Align to 1-minute boundaries to match Redis key timestamps
-      // Exclude current incomplete slot by going back one minute
       const alignedNow = Math.floor(now / 60000) * 60000 - 60000;
       const alignedStartTime = alignedNow - lookbackMs;
 
-      // Get all aggregated address keys for this address
-      // Pattern: livehash:addr:{address}:{timestamp}
       const keys = await this.scanKeys(`${this.ADDR_PREFIX}:${address}:*`);
       const dataPoints: Array<{ label: number; data: number }> = [];
 
       for (const key of keys) {
         try {
-          // Extract timestamp from end of key
           const parts = key.split(':');
           if (parts.length >= 4) {
             const timestampStr = parts[parts.length - 1];
@@ -569,10 +302,7 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
         }
       }
 
-      // Sort by timestamp
       dataPoints.sort((a, b) => a.label - b.label);
-
-      // Fill gaps with zeros for visualization
       return this.fillGaps(dataPoints, alignedStartTime, alignedNow, 60000);
     } catch (error) {
       console.error(`[LiveHashrate] Error retrieving address ${address} hashrate:`, error);

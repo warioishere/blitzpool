@@ -39,16 +39,15 @@ describe('AppService.onModuleInit', () => {
     setIntervalSpy = jest
       .spyOn(global, 'setInterval')
       .mockReturnValue(null as unknown as NodeJS.Timeout);
-    delete process.env.NODE_APP_INSTANCE;
   });
 
   afterEach(() => {
     setIntervalSpy.mockRestore();
-    delete process.env.NODE_APP_INSTANCE;
   });
 
   function createService() {
     return new AppService(
+      {} as any, // cacheManager
       clientStatisticsService as any,
       clientDifficultyStatisticsService as any,
       clientService as any,
@@ -58,7 +57,7 @@ describe('AppService.onModuleInit', () => {
     );
   }
 
-  it('clears clients when running as a single instance', async () => {
+  it('clears clients on startup', async () => {
     const service = createService();
 
     await service.onModuleInit();
@@ -66,17 +65,7 @@ describe('AppService.onModuleInit', () => {
     expect(clientService.deleteAll).toHaveBeenCalledTimes(1);
   });
 
-  it('skips clearing clients when NODE_APP_INSTANCE is set', async () => {
-    process.env.NODE_APP_INSTANCE = '1';
-    const service = createService();
-
-    await service.onModuleInit();
-
-    expect(clientService.deleteAll).not.toHaveBeenCalled();
-  });
-
-  it('synchronizes the schema when enabled for postgres on the primary instance', async () => {
-    process.env.NODE_APP_INSTANCE = '0';
+  it('synchronizes the schema when enabled for postgres', async () => {
     dataSource.options = { type: 'postgres' };
     configService.get.mockImplementation((key: string) =>
       key === 'DB_AUTO_SYNCHRONIZE' ? 'true' : undefined,

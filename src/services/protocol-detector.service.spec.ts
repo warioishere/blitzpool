@@ -1,3 +1,5 @@
+jest.mock('node-telegram-bot-api', () => jest.fn());
+
 import { recordConnectionFailure, isConnectionBanned } from './protocol-detector.service';
 
 // Access the module-level Maps for cleanup between tests

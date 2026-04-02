@@ -1,3 +1,5 @@
+jest.mock('node-telegram-bot-api', () => jest.fn());
+
 import * as crypto from 'crypto';
 import { EventEmitter } from 'events';
 import { StratumV2Client } from './StratumV2Client';

@@ -41,24 +41,6 @@ export class NtfyService implements OnModuleInit {
     @Inject(forwardRef(() => StratumV2Service))
     private readonly stratumV2Service: StratumV2Service,
   ) {
-    const pm2InstanceId =
-      process.env.NODE_APP_INSTANCE ??
-      process.env.pm_id ??
-      process.env.PM2_INSTANCE_ID;
-    const normalizedInstanceId =
-      typeof pm2InstanceId === 'string' ? pm2InstanceId.trim() : undefined;
-    const isPm2Worker =
-      typeof normalizedInstanceId === 'string' &&
-      normalizedInstanceId.length > 0;
-
-    if (isPm2Worker && normalizedInstanceId !== '0') {
-      this.shouldInitialize = false;
-      console.log(
-        `Skipping NTFY init for PM2 instance ${normalizedInstanceId}`,
-      );
-      return;
-    }
-
     this.shouldInitialize = true;
 
     // Initialize timezone formatters

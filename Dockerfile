@@ -1,40 +1,31 @@
 ############################
 # Docker build environment #
 ############################
-
 FROM node:22.11.0-bookworm-slim AS build
 
-# Upgrade all packages and install dependencies
 RUN apt-get update \
-    && apt-get upgrade -y
-RUN DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        python3 \
-        build-essential \
-        cmake \
-        curl \
-        ca-certificates \
+    && apt-get upgrade -y \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        python3 build-essential cmake curl ca-certificates \
     && apt clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 WORKDIR /build
-
 COPY . .
-
-# Build Public Pool using NPM
-RUN npm i && npm run build
+RUN npm install && npm run build
 
 ############################
 # Docker final environment #
 ############################
-
 FROM node:22.11.0-bookworm-slim
 
-# Expose ports for Stratum (standard + high-diff) and Bitcoin RPC
-EXPOSE 3333 3334 3339 8332
+# Expose ports for Stratum (standard + high-diff), JDP, and API
+EXPOSE 3333 3334 3335 3339
 
 WORKDIR /public-pool
 
-# Copy built binaries into the final image
-COPY --from=build /build .
-#COPY .env.example .env
+# Copy production artifacts
+COPY --from=build /build/dist ./dist
+COPY --from=build /build/node_modules ./node_modules
+COPY --from=build /build/package*.json ./
 
 CMD ["/usr/local/bin/node", "dist/main"]

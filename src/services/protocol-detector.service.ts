@@ -63,10 +63,7 @@ export class ProtocolDetectorService implements OnModuleInit {
   }
 
   async onModuleInit(): Promise<void> {
-    // Delay startup to let other services initialize (matches existing behavior)
-    setTimeout(() => {
-      this.startPorts();
-    }, 1000 * 10);
+    this.startPorts();
 
     // Periodically clean up expired entries (every 5 minutes)
     setInterval(() => {

@@ -13,24 +13,19 @@ import { AddressSettingsService } from '../ORM/address-settings/address-settings
 import { TimeSlotHelper } from '../utils/time-slot.helper';
 
 /**
- * Statistics Coordinator Service - Simplified Architecture
+ * Statistics Coordinator Service
  *
- * Runs ONLY on PM2 instance 0 (primary coordinator).
  * Flushes all statistics from Redis to database every 60 seconds.
  *
- * This eliminates in-memory buffering that caused worker drops.
- * All instances write directly to Redis (atomic operations), and
- * only instance 0 performs database writes.
+ * All share submissions write directly to Redis (atomic operations),
+ * and this service performs periodic bulk database writes.
  *
  * Benefits:
  * - No data loss on crashes (all data in Redis immediately)
- * - Simplified coordination (only one instance writes to DB)
- * - Reduced Redis complexity (no Lua scripts, no hydration markers)
- * - Better performance (bulk operations, 80% less Redis ops)
+ * - Better performance (bulk operations, fewer DB round-trips)
  */
 @Injectable()
 export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestroy {
-  private readonly isPrimaryInstance: boolean;
   private redisClient: any = null;
   private currentTimeSlot: number | null = null;
   private isFlushing: boolean = false;
@@ -48,30 +43,14 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
     @InjectDataSource()
     private readonly dataSource: DataSource,
     private readonly addressSettingsService: AddressSettingsService,
-  ) {
-    // Only run on PM2 instance 0 (or when not in cluster mode)
-    // Check multiple PM2 environment variables (pm2-runtime uses pm_id, pm2 uses NODE_APP_INSTANCE)
-    const pm2InstanceId = process.env.NODE_APP_INSTANCE ?? process.env.pm_id ?? process.env.PM2_INSTANCE_ID;
-    const normalizedInstanceId = typeof pm2InstanceId === 'string' ? pm2InstanceId.trim() : undefined;
-
-    // If no PM2 instance ID is set, assume standalone (primary)
-    // If PM2 instance ID is set, only instance 0 is primary
-    this.isPrimaryInstance = !normalizedInstanceId || normalizedInstanceId === '0';
-  }
+  ) {}
 
   async onModuleInit(): Promise<void> {
-    if (!this.isPrimaryInstance) {
-      const instanceId = process.env.NODE_APP_INSTANCE ?? process.env.pm_id ?? process.env.PM2_INSTANCE_ID ?? 'unknown';
-      console.log('[StatisticsCoordinator] Disabled on PM2 instance ' + instanceId + ' (only runs on instance 0)');
-      return;
-    }
-
     try {
       const store: any = this.cacheManager.store;
       if (store && store.client) {
         this.redisClient = store.client;
-        console.log('[StatisticsCoordinator] Enabled on PM2 primary instance (0)');
-        console.log('[StatisticsCoordinator] Using Redis for statistics coordination');
+        console.log('[StatisticsCoordinator] Initialized, using Redis for statistics coordination');
         console.log('[StatisticsCoordinator] Flush interval: every 60 seconds');
 
         // Check Redis persistence configuration (AOF/RDB)
@@ -180,7 +159,6 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
   }
 
   async onModuleDestroy(): Promise<void> {
-    if (!this.isPrimaryInstance) return;
 
     console.log('[StatisticsCoordinator] Flushing all pending statistics before shutdown...');
     try {
@@ -221,7 +199,7 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
    */
   @Interval(60000)
   async flushAllStatistics(): Promise<void> {
-    if (!this.isPrimaryInstance || !this.redisClient) return;
+    if (!this.redisClient) return;
 
     // Prevent concurrent flushes (race condition protection)
     if (this.isFlushing) {

@@ -18,36 +18,18 @@ import { UseTimestamptzForDates1707352800000 } from '../migrations/1707352800000
 import { AddClientDifficultyStatistics1717430400000 } from '../migrations/1717430400000-AddClientDifficultyStatistics';
 import { AddDeviceNotificationsToTelegramSubscriptions1718000000000 } from '../migrations/1718000000000-AddDeviceNotificationsToTelegramSubscriptions';
 import { AddCurrentDifficultyToClients1719000000000 } from '../migrations/1719000000000-AddCurrentDifficultyToClients';
-import { MigrationInterface, QueryRunner } from 'typeorm';
+import { CreateNtfySubscriptions1732060800000 } from '../migrations/1732060800000-CreateNtfySubscriptions';
+import { CreatePushNotifications1734192000000 } from '../migrations/1734192000000-CreatePushNotifications';
+import { AddFcmSupportToPushSubscriptions1735000000000 } from '../migrations/1735000000000-AddFcmSupportToPushSubscriptions';
+import { AddNetworkDifficultyNotifications1735200000000 } from '../migrations/1735200000000-AddNetworkDifficultyNotifications';
+import { FixPushNotificationDefaults1736780400000 } from '../migrations/1736780400000-FixPushNotificationDefaults';
+import { AddHourlyStatsToTelegramSubscriptions1770000000000 } from '../migrations/1770000000000-AddHourlyStatsToTelegramSubscriptions'
 import {
     MIGRATION_ENTITIES,
     MigrationLogger,
     migrateSqliteToPostgres,
     runAutomaticSqliteToPostgresMigration,
 } from '../migration/sqlite-to-postgres';
-
-/**
- * Inline migration: adds hourlyStatsEnabled and hourlyWorkersEnabled columns
- * to telegram_subscriptions_entity.  The entity defines them but no production
- * migration creates them on this table, so the pg-mem schema needs them.
- */
-class AddHourlyColumnsToTelegramSubscriptions1719500000000 implements MigrationInterface {
-    name = 'AddHourlyColumnsToTelegramSubscriptions1719500000000';
-
-    public async up(queryRunner: QueryRunner): Promise<void> {
-        if (queryRunner.connection.options.type !== 'postgres') return;
-        await queryRunner.query(`
-            ALTER TABLE "telegram_subscriptions_entity"
-            ADD "hourlyStatsEnabled" boolean NOT NULL DEFAULT false
-        `);
-        await queryRunner.query(`
-            ALTER TABLE "telegram_subscriptions_entity"
-            ADD "hourlyWorkersEnabled" boolean NOT NULL DEFAULT false
-        `);
-    }
-
-    public async down(): Promise<void> { /* noop */ }
-}
 import { promises as fs } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -124,7 +106,12 @@ describe('migrateSqliteToPostgres', () => {
                 AddClientDifficultyStatistics1717430400000,
                 AddDeviceNotificationsToTelegramSubscriptions1718000000000,
                 AddCurrentDifficultyToClients1719000000000,
-                AddHourlyColumnsToTelegramSubscriptions1719500000000,
+                CreateNtfySubscriptions1732060800000,
+                CreatePushNotifications1734192000000,
+                AddFcmSupportToPushSubscriptions1735000000000,
+                AddNetworkDifficultyNotifications1735200000000,
+                FixPushNotificationDefaults1736780400000,
+                AddHourlyStatsToTelegramSubscriptions1770000000000,
             ],
             synchronize: false,
         });

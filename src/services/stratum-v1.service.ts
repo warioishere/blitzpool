@@ -1,4 +1,4 @@
-import { Injectable, OnModuleInit, Inject, forwardRef } from '@nestjs/common';
+import { Injectable, OnModuleInit, Inject } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
@@ -21,7 +21,6 @@ import { ClientDifficultyStatisticsService } from '../ORM/client-difficulty-stat
 import { ShareTotalsCacheService } from './share-totals-cache.service';
 import { AddressSettingsCacheService } from './address-settings-cache.service';
 import { DifficultyScoresCacheService } from './difficulty-scores-cache.service';
-import { WorkerResetBroadcastService } from './worker-reset-broadcast.service';
 
 @Injectable()
 export class StratumV1Service implements OnModuleInit {
@@ -46,8 +45,6 @@ export class StratumV1Service implements OnModuleInit {
     private readonly clientDifficultyStatisticsService: ClientDifficultyStatisticsService,
     private readonly shareTotalsCacheService: ShareTotalsCacheService,
     @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
-    @Inject(forwardRef(() => WorkerResetBroadcastService))
-    private readonly workerResetBroadcastService: WorkerResetBroadcastService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -61,15 +58,6 @@ export class StratumV1Service implements OnModuleInit {
     } catch (error) {
       console.warn('[StratumV1Service] Failed to access Redis client:', error);
     }
-
-    if (process.env.NODE_APP_INSTANCE === undefined) {
-      await this.clientService.deleteAll();
-    }
-
-    // Register handler for reset broadcasts from other PM2 instances
-    this.workerResetBroadcastService.onReset((address: string) => {
-      this.handleLocalReset(address);
-    });
 
     // NOTE: Server startup has been moved to ProtocolDetectorService.
     // This service now only handles V1 client management and business logic.
@@ -196,40 +184,21 @@ export class StratumV1Service implements OnModuleInit {
   }
 
   /**
-   * Reset in-memory bestDifficulty for all workers of an address on THIS PM2 instance only.
-   * Called when receiving a reset broadcast from another PM2 instance.
-   */
-  private handleLocalReset(address: string): void {
-    const clients = this.clientsByAddress.get(address);
-    if (!clients || clients.size === 0) {
-      return;
-    }
-
-    const pm2Instance = process.env.NODE_APP_INSTANCE ?? process.env.pm_id ?? process.env.PM2_INSTANCE_ID ?? 'unknown';
-    console.log(`[StratumV1Service] Instance ${pm2Instance} resetting ${clients.size} in-memory workers for address ${address}`);
-
-    for (const client of clients) {
-      client.resetBestDifficulty();
-    }
-  }
-
-  /**
    * Reset bestDifficulty for all workers of an address.
-   * Updates database, resets local in-memory workers, and broadcasts to other PM2 instances.
+   * Updates database, clears caches, and resets in-memory workers.
    */
   async resetBestDifficultyForAddress(address: string): Promise<void> {
-    // 1. Update database first
     await this.clientService.resetBestDifficultyForAddress(address);
-
-    // 2. Clear Redis caches to ensure fresh data
     await this.addressSettingsCacheService.clear(address);
     await this.difficultyScoresCacheService.clearCache(address);
 
-    // 3. Reset in-memory workers on this PM2 instance
-    this.handleLocalReset(address);
-
-    // 4. Broadcast reset event to all other PM2 instances via Redis
-    await this.workerResetBroadcastService.broadcastReset(address);
+    const clients = this.clientsByAddress.get(address);
+    if (clients && clients.size > 0) {
+      console.log(`[StratumV1Service] Resetting ${clients.size} in-memory workers for address ${address}`);
+      for (const client of clients) {
+        client.resetBestDifficulty();
+      }
+    }
   }
 
   resetClientsForAddress(address: string) {

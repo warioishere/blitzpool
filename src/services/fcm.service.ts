@@ -20,11 +20,8 @@ export class FcmService implements OnModuleInit {
                     fs.readFileSync(serviceAccountPath, 'utf8')
                 );
 
-                // Get PM2 instance number (or -1 if not in PM2 cluster mode)
-                const instanceId = process.env.NODE_APP_INSTANCE || '-1';
-                const appName = `firebase-blitzpool-${instanceId}`;
+                const appName = 'firebase-blitzpool';
 
-                // Check if this instance's app is already initialized
                 const existingApp = admin.apps?.find(app => app.name === appName);
                 if (!existingApp) {
                     admin.initializeApp({
@@ -33,8 +30,7 @@ export class FcmService implements OnModuleInit {
                 }
 
                 this.fcmInitialized = true;
-                const pmInfo = process.env.NODE_APP_INSTANCE ? `PM2 instance ${instanceId}` : 'standalone';
-                console.log(`[FCM] Initialized successfully on ${pmInfo}`);
+                console.log('[FCM] Initialized successfully');
             } else {
                 console.log('[FCM] Not configured, running in mock mode');
             }
@@ -47,13 +43,8 @@ export class FcmService implements OnModuleInit {
         }
     }
 
-    /**
-     * Get the Firebase app instance for this process (handles PM2 instances)
-     */
     private getFirebaseApp() {
-        const instanceId = process.env.NODE_APP_INSTANCE || '-1';
-        const appName = `firebase-blitzpool-${instanceId}`;
-        return admin.app(appName);
+        return admin.app('firebase-blitzpool');
     }
 
     /**

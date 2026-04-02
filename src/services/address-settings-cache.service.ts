@@ -28,7 +28,7 @@ export class AddressSettingsCacheService implements OnModuleInit {
       if (store && store.client) {
         this.redisClient = store.client;
         this.useRedis = true;
-        console.log('[AddressSettingsCacheService] Using Redis for shared cache across PM2 workers');
+        console.log('[AddressSettingsCacheService] Using Redis cache');
       } else {
         console.log('[AddressSettingsCacheService] Redis not available, using in-memory cache');
       }

@@ -39,7 +39,6 @@ import { ClientRejectedStatisticsService } from '../ORM/client-rejected-statisti
 import { ExternalSharesService } from './external-shares.service';
 import { ClientDifficultyStatisticsService } from '../ORM/client-difficulty-statistics/client-difficulty-statistics.service';
 import { ShareTotalsCacheService } from './share-totals-cache.service';
-import { WorkerResetBroadcastService } from './worker-reset-broadcast.service';
 import { DifficultyScoresCacheService } from './difficulty-scores-cache.service';
 
 interface GroupChannel {
@@ -90,8 +89,6 @@ export class StratumV2Service implements OnModuleInit, IProtocolHandler {
     private readonly externalSharesService: ExternalSharesService,
     private readonly clientDifficultyStatisticsService: ClientDifficultyStatisticsService,
     private readonly shareTotalsCacheService: ShareTotalsCacheService,
-    @Inject(forwardRef(() => WorkerResetBroadcastService))
-    private readonly workerResetBroadcastService: WorkerResetBroadcastService,
     private readonly difficultyScoresCacheService: DifficultyScoresCacheService,
     private readonly templateDistributionService: TemplateDistributionService,
     @Inject(forwardRef(() => JobDeclarationService))
@@ -103,11 +100,6 @@ export class StratumV2Service implements OnModuleInit, IProtocolHandler {
     this.initEd25519AuthorityKey();
     await this.initServerKeypair();
     this.initX25519Keypair();
-
-    // Register handler for reset broadcasts from other PM2 instances
-    this.workerResetBroadcastService.onReset((address: string) => {
-      this.handleLocalReset(address);
-    });
 
     console.log('[StratumV2Service] Initialized - authority pubkey:', this.authorityPubKeyXOnly.toString('hex'));
   }
@@ -331,40 +323,21 @@ export class StratumV2Service implements OnModuleInit, IProtocolHandler {
   }
 
   /**
-   * Reset in-memory bestDifficulty for all V2 workers of an address on THIS PM2 instance only.
-   * Called when receiving a reset broadcast from another PM2 instance.
-   */
-  private handleLocalReset(address: string): void {
-    const clients = this.clientsByAddress.get(address);
-    if (!clients || clients.size === 0) {
-      return;
-    }
-
-    const pm2Instance = process.env.NODE_APP_INSTANCE ?? process.env.pm_id ?? process.env.PM2_INSTANCE_ID ?? 'unknown';
-    console.log(`[StratumV2Service] Instance ${pm2Instance} resetting ${clients.size} in-memory V2 workers for address ${address}`);
-
-    for (const client of clients) {
-      client.resetBestDifficulty();
-    }
-  }
-
-  /**
    * Reset bestDifficulty for all V2 workers of an address.
-   * Updates database, resets local in-memory workers, and broadcasts to other PM2 instances.
+   * Updates database, clears caches, and resets in-memory workers.
    */
   async resetBestDifficultyForAddress(address: string): Promise<void> {
-    // 1. Update database
     await this.clientService.resetBestDifficultyForAddress(address);
-
-    // 2. Clear Redis caches
     await this.addressSettingsCacheService.clear(address);
     await this.difficultyScoresCacheService.clearCache(address);
 
-    // 3. Reset in-memory workers on this PM2 instance
-    this.handleLocalReset(address);
-
-    // 4. Broadcast reset event to all other PM2 instances via Redis
-    await this.workerResetBroadcastService.broadcastReset(address);
+    const clients = this.clientsByAddress.get(address);
+    if (clients && clients.size > 0) {
+      console.log(`[StratumV2Service] Resetting ${clients.size} in-memory V2 workers for address ${address}`);
+      for (const client of clients) {
+        client.resetBestDifficulty();
+      }
+    }
   }
 
   // ── Group Channel Management ──────────────────────────────────────

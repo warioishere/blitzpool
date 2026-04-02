@@ -82,9 +82,13 @@ services:
     container_name: public-pool
     build:
       context: ..
-      dockerfile: Dockerfile_pm2
+      dockerfile: Dockerfile
     restart: unless-stopped
     stop_grace_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 2048M
     networks:
       - bitcoin
     depends_on:
@@ -107,6 +111,8 @@ services:
       - "./data/mainnet/public-pool/public-pool.sqlite:/public-pool/DB/public-pool.sqlite:ro"
     environment:
       - NODE_ENV=production
+      # glibc malloc tuning — reduce arena fragmentation under PG connection churn
+      - MALLOC_ARENA_MAX=2
       # Database - PostgreSQL
       - DB_TYPE=postgres
       - PG_HOST=postgres
@@ -117,19 +123,17 @@ services:
       - PG_SSL=false
       - DB_RUN_MIGRATIONS=true
       - DB_MIGRATE_SQLITE_ON_BOOT=true
-      # PostgreSQL connection pooling (per PM2 instance)
-      - PG_POOL_SIZE=23
+      # PostgreSQL connection pooling
+      - PG_POOL_SIZE=10
       - PG_MAX_QUERY_TIME=30000
       - PG_ACQUIRE_TIMEOUT=60000
-      - PG_IDLE_TIMEOUT=10000
+      - PG_IDLE_TIMEOUT=300000
       # Redis configuration
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD:-}
       - REDIS_DB=0
       - REDIS_TTL=600
-      # PM2 configuration
-      - PM2_INSTANCES=${PM2_INSTANCES:-4}
       # Firebase Cloud Messaging (FCM) - Optional
       - FCM_SERVICE_ACCOUNT_PATH=/app/fcm-key.json
 

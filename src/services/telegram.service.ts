@@ -168,24 +168,14 @@ export class TelegramService implements OnModuleInit {
         }
 
         const token: string | null = this.configService.get('TELEGRAM_BOT_TOKEN');
-        const pm2InstanceId = process.env.NODE_APP_INSTANCE ?? process.env.pm_id ?? process.env.PM2_INSTANCE_ID;
-        const normalizedInstanceId = typeof pm2InstanceId === 'string' ? pm2InstanceId.trim() : undefined;
-        const isPm2Worker = typeof normalizedInstanceId === 'string' && normalizedInstanceId.length > 0;
 
         if (!token || token.length < 1) {
             return;
         }
 
-        this.shouldRegisterHandlers = !isPm2Worker || normalizedInstanceId === '0';
-        const polling = this.shouldRegisterHandlers;
-
-        this.bot = new TelegramBot(token, { polling });
-
-        if (this.shouldRegisterHandlers) {
-            console.log('Telegram bot init');
-        } else {
-            console.log(`Telegram bot init (polling disabled) for PM2 instance ${normalizedInstanceId}`);
-        }
+        this.shouldRegisterHandlers = true;
+        this.bot = new TelegramBot(token, { polling: true });
+        console.log('Telegram bot init');
 
     }
 

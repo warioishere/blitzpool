@@ -21,9 +21,8 @@ import { DataSource } from 'typeorm';
  *   - client_rejected_statistics_entity
  * - Older data is not migrated (not displayed in UI, will be cleaned up later)
  * - Clears stale Redis keys (pool:rejected:*, pool:shares:*) BEFORE database migration
- * - Uses distributed locking to prevent multiple PM2 instances from running simultaneously
+ * - Uses distributed locking to prevent concurrent runs
  * - Runs once on startup, tracks completion via migration flag in database
- * - Safe to run with multiple PM2 workers - only one instance will perform migration
  */
 @Injectable()
 export class TimeslotMigrationService implements OnModuleInit {
@@ -56,7 +55,7 @@ export class TimeslotMigrationService implements OnModuleInit {
       return;
     }
 
-    // Try to acquire distributed lock (prevents multiple PM2 instances from migrating)
+    // Try to acquire distributed lock (prevents concurrent migration runs)
     const lockAcquired = await this.acquireMigrationLock();
     if (!lockAcquired) {
       console.log('[TimeslotMigration] Another instance is running migration, waiting for completion...');
@@ -266,7 +265,7 @@ export class TimeslotMigrationService implements OnModuleInit {
       }
 
       const redisClient = store.client;
-      const instanceId = process.env.pm_id || `node-${process.pid}`;
+      const instanceId = `node-${process.pid}`;
 
       // SET key value NX EX seconds - atomic operation
       // NX: Only set if key doesn't exist

@@ -1,11 +1,6 @@
 // ── SV2 Extranonce Manager ──────────────────────────────────────────
 // Manages extranonce prefix allocation for extended mining channels.
 // Ensures no two channels share the same prefix to prevent hash collisions.
-//
-// PM2 cluster safety: when running with PM2 -i N, each worker gets its own
-// instance. The top byte of the prefix is set to the PM2 worker ID so that
-// prefix ranges never overlap across workers. Each worker can allocate up to
-// 2^((prefixSize-1)*8) unique prefixes (16M+ for 4-byte prefixes).
 
 export class Sv2ExtranonceManager {
   private nextPrefix: number;
@@ -24,9 +19,8 @@ export class Sv2ExtranonceManager {
     this.prefixSize = prefixSize;
     this.totalExtranonceSize = totalExtranonceSize;
 
-    // Partition prefix space by PM2 worker ID to prevent collisions across instances
-    const workerId = parseInt(process.env.NODE_APP_INSTANCE || '0', 10) & 0xff;
-    const bitsPerWorker = (prefixSize - 1) * 8; // reserve top byte for worker ID
+    const workerId = 0;
+    const bitsPerWorker = (prefixSize - 1) * 8;
     this.workerOffset = workerId * Math.pow(2, bitsPerWorker);
     this.maxPrefix = Math.pow(2, bitsPerWorker) - 1; // max within this worker's slice
     this.nextPrefix = 1;

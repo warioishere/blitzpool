@@ -76,13 +76,6 @@ export class AppService implements OnModuleInit {
     }
 
     async onModuleInit() {
-        // if (process.env.NODE_APP_INSTANCE == '0') {
-        //     await this.dataSource.query(`VACUUM;`);
-        // }
-
-        //https://phiresky.github.io/blog/2020/sqlite-performance-tuning/
-        // //500 MB DB cache
-        // await this.dataSource.query(`PRAGMA cache_size = -500000;`);
         //Normal is still completely corruption safe in WAL mode, and means only WAL checkpoints have to wait for FSYNC.
         const dataSourceType = (this.dataSource.options as { type?: string } | undefined)?.type;
         if (dataSourceType === 'sqlite') {
@@ -91,43 +84,29 @@ export class AppService implements OnModuleInit {
 
         await this.runAutomaticSqliteMigrationIfNeeded();
 
-        const nodeInstance = process.env.NODE_APP_INSTANCE;
-        const isPrimaryInstance = nodeInstance == null || nodeInstance === '0';
-
-        if (isPrimaryInstance && dataSourceType === 'postgres' && this.autoSynchronize) {
+        if (dataSourceType === 'postgres' && this.autoSynchronize) {
             await this.dataSource.synchronize();
         }
 
-        // //6Gb
-        // await this.dataSource.query(`PRAGMA mmap_size = 6000000000;`);
+        await this.clientService.deleteAll();
 
-        if (nodeInstance === undefined) {
-            await this.clientService.deleteAll();
-        }
+        // Clean up stale sessions immediately on startup
+        console.log('Startup: killing dead clients');
+        await this.clientService.killDeadClients();
 
-        if (isPrimaryInstance) {
+        setInterval(async () => {
+            await this.deleteOldStatistics();
+        }, 1000 * 60 * 60);
 
-            // Clean up stale sessions immediately on startup (handles PM2 restart orphans)
-            console.log('Startup: killing dead clients');
+        setInterval(async () => {
+            console.log('Killing dead clients');
             await this.clientService.killDeadClients();
+        }, 1000 * 60 * 2);
 
-            setInterval(async () => {
-                await this.deleteOldStatistics();
-            }, 1000 * 60 * 60);
-
-            setInterval(async () => {
-                console.log('Killing dead clients');
-                await this.clientService.killDeadClients();
-            }, 1000 * 60 * 2);
-
-            setInterval(async () => {
-                console.log('Deleting Old Blocks');
-                await this.rpcBlockService.deleteOldBlocks();
-            }, 1000 * 60 * 60 * 24);
-
-
-
-        }
+        setInterval(async () => {
+            console.log('Deleting Old Blocks');
+            await this.rpcBlockService.deleteOldBlocks();
+        }, 1000 * 60 * 60 * 24);
 
     }
 
@@ -163,11 +142,6 @@ export class AppService implements OnModuleInit {
     }
 
     private async runAutomaticSqliteMigrationIfNeeded(): Promise<void> {
-        const nodeInstance = process.env.NODE_APP_INSTANCE;
-        if (nodeInstance !== undefined && nodeInstance !== '0') {
-            return;
-        }
-
         const dataSourceType = (this.dataSource.options as { type?: string } | undefined)?.type;
         if (dataSourceType !== 'postgres') {
             return;

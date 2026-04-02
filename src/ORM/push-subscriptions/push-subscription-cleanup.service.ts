@@ -8,7 +8,6 @@ import { PushSubscriptionEntity } from './push-subscription.entity';
 
 @Injectable()
 export class PushSubscriptionCleanupService implements OnModuleInit {
-    private isPrimaryInstance: boolean;
     private cleanupEnabled: boolean;
     private staleThresholdDays: number;
 
@@ -17,31 +16,17 @@ export class PushSubscriptionCleanupService implements OnModuleInit {
         private pushSubscriptionRepository: Repository<PushSubscriptionEntity>,
         private readonly configService: ConfigService,
     ) {
-        // Only run on PM2 instance 0 (or when not in cluster mode)
-        // Check multiple PM2 environment variables (pm2-runtime uses pm_id, pm2 uses NODE_APP_INSTANCE)
-        const pm2InstanceId = process.env.NODE_APP_INSTANCE ?? process.env.pm_id ?? process.env.PM2_INSTANCE_ID;
-        const normalizedInstanceId = typeof pm2InstanceId === 'string' ? pm2InstanceId.trim() : undefined;
-
-        // If no PM2 instance ID is set, assume standalone (primary)
-        // If PM2 instance ID is set, only instance 0 is primary
-        this.isPrimaryInstance = !normalizedInstanceId || normalizedInstanceId === '0';
         this.cleanupEnabled = (this.configService.get('PUSH_SUBSCRIPTION_CLEANUP_ENABLED')?.toLowerCase() === 'true') ?? true;
         this.staleThresholdDays = Number(this.configService.get('PUSH_SUBSCRIPTION_STALE_DAYS')) || 90;
     }
 
     async onModuleInit(): Promise<void> {
-        if (!this.isPrimaryInstance) {
-            const instanceId = process.env.NODE_APP_INSTANCE ?? process.env.pm_id ?? process.env.PM2_INSTANCE_ID ?? 'unknown';
-            console.log('[PushSubscriptionCleanup] Disabled on PM2 instance ' + instanceId + ' (only runs on instance 0)');
-            return;
-        }
-
         if (!this.cleanupEnabled) {
             console.log('[PushSubscriptionCleanup] Disabled via PUSH_SUBSCRIPTION_CLEANUP_ENABLED config');
             return;
         }
 
-        console.log(`[PushSubscriptionCleanup] Enabled on PM2 primary instance (0)`);
+        console.log(`[PushSubscriptionCleanup] Enabled`);
         console.log(`[PushSubscriptionCleanup] Stale threshold: ${this.staleThresholdDays} days`);
     }
 
@@ -51,7 +36,7 @@ export class PushSubscriptionCleanupService implements OnModuleInit {
      */
     @Cron('0 2 * * 0')
     async cleanupStaleSubscriptions(): Promise<void> {
-        if (!this.isPrimaryInstance || !this.cleanupEnabled) {
+        if (!this.cleanupEnabled) {
             return;
         }
 

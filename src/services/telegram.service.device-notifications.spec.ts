@@ -15,7 +15,7 @@ jest.mock('node-telegram-bot-api', () => {
     }));
 });
 
-describe('TelegramService device notifications without polling', () => {
+describe('TelegramService device notifications', () => {
     const configServiceGetMock = jest.fn();
     const configService = {
         get: configServiceGetMock,
@@ -47,14 +47,9 @@ describe('TelegramService device notifications without polling', () => {
             if (key === 'TELEGRAM_DIFF_NOTIFICATIONS') return null;
             return null;
         });
-        process.env.NODE_APP_INSTANCE = '1';
     });
 
-    afterEach(() => {
-        delete process.env.NODE_APP_INSTANCE;
-    });
-
-    it('instantiates the bot without polling and still delivers device notifications', async () => {
+    it('instantiates the bot and delivers device notifications', async () => {
         const TelegramBot = require('node-telegram-bot-api');
         const service = new TelegramService(
             configService,
@@ -68,11 +63,10 @@ describe('TelegramService device notifications without polling', () => {
             ntfyService as any,
         );
 
-        expect(TelegramBot).toHaveBeenCalledWith('token', { polling: false });
-        expect((service as any).shouldRegisterHandlers).toBe(false);
+        expect(TelegramBot).toHaveBeenCalledWith('token', { polling: true });
+        expect((service as any).shouldRegisterHandlers).toBe(true);
 
         await service.onModuleInit();
-        expect(setMyCommandsMock).not.toHaveBeenCalled();
 
         (service as any).chatLanguages.set(123, 'en');
 

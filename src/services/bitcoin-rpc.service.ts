@@ -93,51 +93,15 @@ export class BitcoinRpcService implements OnModuleInit {
         }
     }
 
-    private async waitForBlock(blockHeight: number): Promise<IBlockTemplate> {
-        while (true) {
-            await new Promise(r => setTimeout(r, 100));
-
-            const block = await this.rpcBlockService.getBlock(blockHeight);
-            if (block != null && block.data != null) {
-                console.log(`promise loop resolved, block height ${blockHeight}`);
-                return Promise.resolve(JSON.parse(block.data));
-            }
-            console.log(`promise loop, block height ${blockHeight}`);
-        }
-    }
-
     public async getBlockTemplate(blockHeight: number): Promise<IBlockTemplate> {
-        let result: IBlockTemplate;
         try {
-            const block = await this.rpcBlockService.getBlock(blockHeight);
-            const completeBlock = block?.data != null;
-
-            // If the block has already been loaded, and the same instance is fetching the template again, we just need to refresh it.
-            if (completeBlock && block.lockedBy == process.env.NODE_APP_INSTANCE) {
-                result = await this.loadBlockTemplate(blockHeight);
-            }
-            else if (completeBlock) {
-                return Promise.resolve(JSON.parse(block.data));
-            } else if (!completeBlock) {
-                if (process.env.NODE_APP_INSTANCE != null) {
-                    // There is a unique constraint on the block height so if another process tries to lock, it'll throw
-                    try {
-                        await this.rpcBlockService.lockBlock(blockHeight, process.env.NODE_APP_INSTANCE);
-                    } catch (e) {
-                        result = await this.waitForBlock(blockHeight);
-                    }
-                }
-                result = await this.loadBlockTemplate(blockHeight);
-            } else {
-                //wait for block
-                result = await this.waitForBlock(blockHeight);
-            }
+            const result = await this.loadBlockTemplate(blockHeight);
+            console.log(`getblocktemplate tx count: ${result.transactions.length}`);
+            return result;
         } catch (e) {
             console.error('Error getblocktemplate:', e.message);
             throw new Error('Error getblocktemplate');
         }
-        console.log(`getblocktemplate tx count: ${result.transactions.length}`);
-        return result;
     }
 
     private async loadBlockTemplate(blockHeight: number) {

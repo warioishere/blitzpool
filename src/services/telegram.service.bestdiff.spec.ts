@@ -215,7 +215,7 @@ describe('TelegramService best diff commands', () => {
         expect(sendMessageMock).toHaveBeenCalledWith(99, 'Ungültige Adresse.');
     });
 
-    it('emits fresh best diff notifications across PM2 workers after a reset', async () => {
+    it('emits fresh best diff notifications after a reset', async () => {
         configServiceGetMock.mockImplementation((key: string) => {
             if (key === 'TELEGRAM_BOT_TOKEN') return 'token';
             if (key === 'TELEGRAM_TIMEZONE') return 'Europe/Berlin';

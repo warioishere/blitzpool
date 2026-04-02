@@ -319,11 +319,6 @@ export class AppController {
     return chartData;
   }
 
-  @Get('info/chart/live/metrics')
-  public infoChartLiveMetrics() {
-    return this.liveHashrateService.getAggregationMetrics();
-  }
-
   @Get('info/shares')
   public async infoShares() {
 

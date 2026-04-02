@@ -10,7 +10,7 @@ import { ClientStatisticsService } from '../ORM/client-statistics/client-statist
  * Uses direct atomic Redis increments (no in-memory buffering or baseline+delta pattern).
  * StatisticsCoordinator handles persistence to the database.
  *
- * Redis-backed implementation ensures consistency across PM2 cluster mode workers.
+ * Redis-backed for persistence across restarts.
  */
 @Injectable()
 export class ShareTotalsCacheService implements OnModuleInit {

@@ -12,12 +12,10 @@ describe('StratumV1Service.onModuleInit', () => {
     setTimeoutSpy = jest
       .spyOn(global, 'setTimeout')
       .mockReturnValue(null as unknown as NodeJS.Timeout);
-    delete process.env.NODE_APP_INSTANCE;
   });
 
   afterEach(() => {
     setTimeoutSpy.mockRestore();
-    delete process.env.NODE_APP_INSTANCE;
   });
 
   function createService() {
@@ -39,24 +37,12 @@ describe('StratumV1Service.onModuleInit', () => {
       {} as any,
       {} as unknown as ShareTotalsCacheService,
       { store: {} } as any,
-      { onReset: jest.fn() } as any,
     );
   }
 
-  it('clears clients when running as a single instance', async () => {
+  it('initializes without errors', async () => {
     const service = createService();
-
     await service.onModuleInit();
-
-    expect(clientService.deleteAll).toHaveBeenCalledTimes(1);
-  });
-
-  it('skips clearing clients when NODE_APP_INSTANCE is set', async () => {
-    process.env.NODE_APP_INSTANCE = '1';
-    const service = createService();
-
-    await service.onModuleInit();
-
-    expect(clientService.deleteAll).not.toHaveBeenCalled();
+    // deleteAll is handled by AppService, not StratumV1Service
   });
 });

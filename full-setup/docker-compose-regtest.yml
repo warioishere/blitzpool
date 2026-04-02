@@ -46,7 +46,7 @@ services:
     container_name: public-pool-regtest
     build:
       context: ..
-      dockerfile: Dockerfile_pm2_regtest
+      dockerfile: Dockerfile
     restart: unless-stopped
     stop_grace_period: 30s
     depends_on:
@@ -74,8 +74,6 @@ services:
       - REDIS_PASSWORD=${REDIS_PASSWORD:-}
       - REDIS_DB=0
       - REDIS_TTL=600
-      # PM2 configuration
-      - PM2_INSTANCES=4
       # Firebase Cloud Messaging (FCM) - Optional
       - FCM_SERVICE_ACCOUNT_PATH=/app/fcm-key.json
 

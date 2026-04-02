@@ -1,3 +1,5 @@
+jest.mock('node-telegram-bot-api', () => jest.fn());
+
 import { Subscription } from 'rxjs';
 import * as net from 'net';
 import { StratumV1Client } from './StratumV1Client';

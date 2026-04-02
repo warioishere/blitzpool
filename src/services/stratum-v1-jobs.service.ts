@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import * as bitcoinjs from 'bitcoinjs-lib';
 import * as merkle from 'merkle-lib';
 import * as merkleProof from 'merkle-lib/proof';
-import { combineLatest, delay, filter, from, interval, map, Observable, shareReplay, startWith, switchMap, tap } from 'rxjs';
+import { combineLatest, filter, from, interval, map, Observable, shareReplay, startWith, switchMap, tap } from 'rxjs';
 
 import { MiningJob } from '../models/MiningJob';
 import { BitcoinRpcService } from './bitcoin-rpc.service';
@@ -35,9 +35,6 @@ export class StratumV1JobsService {
 
     public blocks: { [id: number]: IJobTemplate } = {};
 
-    // offset the interval so that all the cluster processes don't try and refresh at the same time.
-    private delay = process.env.NODE_APP_INSTANCE == null ? 0 : parseInt(process.env.NODE_APP_INSTANCE) * 5000;
-
     private block_template_interval: number =
       parseInt(process.env.BLOCK_TEMPLATE_INTERVAL) || 60000;
 
@@ -48,7 +45,7 @@ export class StratumV1JobsService {
         private readonly bitcoinRpcService: BitcoinRpcService
     ) {
 
-        this.newMiningJob$ = combineLatest([this.bitcoinRpcService.newBlock$, interval(this.block_template_interval).pipe(delay(this.delay), startWith(-1))]).pipe(
+        this.newMiningJob$ = combineLatest([this.bitcoinRpcService.newBlock$, interval(this.block_template_interval).pipe(startWith(-1))]).pipe(
             switchMap(([miningInfo, interval]) => {
                 return from(this.bitcoinRpcService.getBlockTemplate(miningInfo.blocks)).pipe(
                     map((blockTemplate) => {

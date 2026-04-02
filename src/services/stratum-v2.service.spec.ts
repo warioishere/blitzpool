@@ -41,11 +41,6 @@ function createService(envOverrides: Record<string, string> = {}) {
     clear: jest.fn().mockResolvedValue(undefined),
   };
 
-  const workerResetBroadcastService = {
-    onReset: jest.fn(),
-    broadcastReset: jest.fn().mockResolvedValue(undefined),
-  };
-
   const difficultyScoresCacheService = {
     clearCache: jest.fn().mockResolvedValue(undefined),
   };
@@ -66,13 +61,12 @@ function createService(envOverrides: Record<string, string> = {}) {
     {} as any, // externalSharesService
     {} as any, // clientDifficultyStatisticsService
     {} as any, // shareTotalsCacheService
-    workerResetBroadcastService as any, // workerResetBroadcastService
     difficultyScoresCacheService as any, // difficultyScoresCacheService
     {} as any, // templateDistributionService
     {} as any, // jobDeclarationService
   );
 
-  return { service, configService, clientService, addressSettingsCacheService, workerResetBroadcastService, difficultyScoresCacheService };
+  return { service, configService, clientService, addressSettingsCacheService, difficultyScoresCacheService };
 }
 
 describe('StratumV2Service', () => {
@@ -306,16 +300,6 @@ describe('StratumV2Service', () => {
     });
   });
 
-  describe('onModuleInit reset handler', () => {
-    it('should register a reset handler with WorkerResetBroadcastService', async () => {
-      const { service, workerResetBroadcastService } = createService();
-      await service.onModuleInit();
-
-      expect(workerResetBroadcastService.onReset).toHaveBeenCalledTimes(1);
-      expect(typeof workerResetBroadcastService.onReset.mock.calls[0][0]).toBe('function');
-    });
-  });
-
   describe('getCurrentDifficulties', () => {
     it('should return empty map for unknown address', async () => {
       const { service } = createService();
@@ -364,8 +348,8 @@ describe('StratumV2Service', () => {
   });
 
   describe('resetBestDifficultyForAddress', () => {
-    it('should reset DB, clear caches, reset local workers, and broadcast', async () => {
-      const { service, clientService, addressSettingsCacheService, difficultyScoresCacheService, workerResetBroadcastService } = createService();
+    it('should reset DB, clear caches, and reset local workers', async () => {
+      const { service, clientService, addressSettingsCacheService, difficultyScoresCacheService } = createService();
       await service.onModuleInit();
 
       const client1 = { sessionId: 'sess1', resetBestDifficulty: jest.fn() } as any;
@@ -380,17 +364,15 @@ describe('StratumV2Service', () => {
       expect(difficultyScoresCacheService.clearCache).toHaveBeenCalledWith('bc1qtest');
       expect(client1.resetBestDifficulty).toHaveBeenCalled();
       expect(client2.resetBestDifficulty).toHaveBeenCalled();
-      expect(workerResetBroadcastService.broadcastReset).toHaveBeenCalledWith('bc1qtest');
     });
 
     it('should work even if no local clients exist', async () => {
-      const { service, clientService, workerResetBroadcastService } = createService();
+      const { service, clientService } = createService();
       await service.onModuleInit();
 
       await service.resetBestDifficultyForAddress('no-clients-addr');
 
       expect(clientService.resetBestDifficultyForAddress).toHaveBeenCalledWith('no-clients-addr');
-      expect(workerResetBroadcastService.broadcastReset).toHaveBeenCalledWith('no-clients-addr');
     });
   });
 
@@ -464,27 +446,4 @@ describe('StratumV2Service', () => {
     });
   });
 
-  describe('handleLocalReset via broadcast', () => {
-    it('should reset in-memory clients when broadcast handler is invoked', async () => {
-      const { service, workerResetBroadcastService } = createService();
-      await service.onModuleInit();
-
-      const client1 = { sessionId: 'sess1', resetBestDifficulty: jest.fn() } as any;
-      service.registerClient('bc1qtest', client1);
-
-      // Invoke the handler that was registered with onReset
-      const handler = workerResetBroadcastService.onReset.mock.calls[0][0];
-      handler('bc1qtest');
-
-      expect(client1.resetBestDifficulty).toHaveBeenCalled();
-    });
-
-    it('should not throw when broadcast handler is called for unknown address', async () => {
-      const { service, workerResetBroadcastService } = createService();
-      await service.onModuleInit();
-
-      const handler = workerResetBroadcastService.onReset.mock.calls[0][0];
-      expect(() => handler('unknown-addr')).not.toThrow();
-    });
-  });
 });

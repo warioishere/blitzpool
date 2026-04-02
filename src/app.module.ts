@@ -46,7 +46,6 @@ import { LiveHashrateService } from './services/live-hashrate.service';
 import { DifficultyScoresCacheService } from './services/difficulty-scores-cache.service';
 import { PushNotificationService } from './services/push-notification.service';
 import { FcmService } from './services/fcm.service';
-import { WorkerResetBroadcastService } from './services/worker-reset-broadcast.service';
 import { TemplateDistributionService } from './services/template-distribution.service';
 import { DownstreamReportService } from './services/downstream-report.service';
 import { JobDeclarationService } from './services/job-declaration.service';
@@ -141,7 +140,6 @@ const ORMModules = [
         // TimeslotMigrationService, // Disabled - migration incomplete, leaving data in mixed state
         DiscordService,
         AppService,
-        WorkerResetBroadcastService,
         StratumV1Service,
         TelegramService,
         NtfyService,
