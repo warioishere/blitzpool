@@ -416,6 +416,9 @@ export class StratumV1Client {
                     parsedMessage,
                 );
 
+                // Trim whitespace from address (common copy-paste error)
+                authorizationMessage.address = authorizationMessage.address?.trim();
+
                 // Validate Bitcoin address before accepting authorization
                 try {
                     getAddressInfo(authorizationMessage.address);

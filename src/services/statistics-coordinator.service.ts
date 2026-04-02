@@ -10,6 +10,7 @@ import { PoolRejectedStatisticsEntity } from '../ORM/pool-rejected-statistics/po
 import { ClientStatisticsEntity } from '../ORM/client-statistics/client-statistics.entity';
 import { ClientRejectedStatisticsEntity } from '../ORM/client-rejected-statistics/client-rejected-statistics.entity';
 import { AddressSettingsService } from '../ORM/address-settings/address-settings.service';
+import { WorkerSharesService } from '../ORM/worker-shares/worker-shares.service';
 import { TimeSlotHelper } from '../utils/time-slot.helper';
 
 /**
@@ -43,6 +44,7 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
     @InjectDataSource()
     private readonly dataSource: DataSource,
     private readonly addressSettingsService: AddressSettingsService,
+    private readonly workerSharesService: WorkerSharesService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -58,6 +60,9 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
 
         // Ensure UNIQUE constraint exists for upsert logic
         await this.ensureUniqueConstraint();
+
+        // Seed worker_shares_entity from client_statistics on first deploy
+        await this.workerSharesService.seedIfEmpty();
       } else {
         console.error('[StatisticsCoordinator] Redis not available - coordinator cannot function without Redis');
         throw new Error('Redis required for StatisticsCoordinator');
@@ -222,6 +227,7 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
         this.flushPoolRejectedStatistics(),
         this.flushClientRejectedStatistics(),
         this.flushAddressTotals(),
+        this.flushWorkerTotals(),
       ]);
 
       const duration = Date.now() - startTime;
@@ -638,6 +644,78 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
       console.error('[StatisticsCoordinator] Failed to flush address totals to database:', error);
       // DO NOT modify Redis - deltas remain intact for retry on next flush
       // This prevents share loss: any shares that arrived during this attempt are preserved
+    }
+  }
+
+  /**
+   * Flush worker totals from Redis to database
+   * Pattern: shares:worker:{address}:{clientName} -> HASH {baseline, delta}
+   * Same approach as flushAddressTotals but per-worker.
+   */
+  private async flushWorkerTotals(): Promise<void> {
+    const pattern = 'shares:worker:*';
+    const keys = await this.scanKeys(pattern);
+
+    if (keys.length === 0) return;
+
+    const updates: Array<{ address: string; clientName: string; key: string; shares: number }> = [];
+
+    for (const key of keys) {
+      try {
+        // Skip non-data keys
+        if (key.endsWith(':hydrated') || key.endsWith(':lock')) continue;
+
+        const data = await this.redisClient.hGetAll(key);
+        if (!data || !data.delta) continue;
+
+        const delta = parseFloat(data.delta);
+        if (delta <= 0) continue;
+
+        // Parse key: shares:worker:{address}:{clientName}
+        const parts = key.split(':');
+        if (parts.length < 4) continue;
+        const address = parts[2];
+        const clientName = parts.slice(3).join(':');
+
+        updates.push({ address, clientName, key, shares: delta });
+      } catch (error) {
+        console.error(`[StatisticsCoordinator] Failed to extract worker total from ${key}:`, error);
+      }
+    }
+
+    if (updates.length === 0) return;
+
+    try {
+      await this.workerSharesService.addSharesBulk(
+        updates.map(u => ({ address: u.address, clientName: u.clientName, shares: u.shares }))
+      );
+
+      // Decrement deltas and update baselines (pipelined)
+      try {
+        const getBaselines = this.redisClient.multi();
+        for (const update of updates) {
+          getBaselines.hGetAll(update.key);
+        }
+        const baselineResults = await getBaselines.exec();
+
+        const decrementDeltas = this.redisClient.multi();
+        for (const update of updates) {
+          decrementDeltas.hIncrByFloat(update.key, 'delta', -update.shares);
+        }
+        await decrementDeltas.exec();
+
+        const updateBaselines = this.redisClient.multi();
+        for (let i = 0; i < updates.length; i++) {
+          const data = baselineResults[i] as Record<string, string> | null;
+          const currentBaseline = parseFloat(data?.baseline ?? '0') || 0;
+          updateBaselines.hSet(updates[i].key, 'baseline', (currentBaseline + updates[i].shares).toString());
+        }
+        await updateBaselines.exec();
+      } catch (error) {
+        console.error('[StatisticsCoordinator] Failed to update Redis after worker totals flush:', error);
+      }
+    } catch (error) {
+      console.error('[StatisticsCoordinator] Failed to flush worker totals to database:', error);
     }
   }
 

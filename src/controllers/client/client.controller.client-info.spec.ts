@@ -17,6 +17,7 @@ import { ShareTotalsCacheService } from '../../services/share-totals-cache.servi
 import { LiveHashrateService } from '../../services/live-hashrate.service';
 import { DifficultyScoresCacheService } from '../../services/difficulty-scores-cache.service';
 import { BestDifficultyTrackerService } from '../../ORM/best-difficulty-tracker/best-difficulty-tracker.service';
+import { WorkerSharesService } from '../../ORM/worker-shares/worker-shares.service';
 
 describe('ClientController getClientInfo', () => {
   let app: NestFastifyApplication;
@@ -84,6 +85,7 @@ describe('ClientController getClientInfo', () => {
         { provide: LiveHashrateService, useValue: {} },
         { provide: DifficultyScoresCacheService, useValue: {} },
         { provide: BestDifficultyTrackerService, useValue: {} },
+        { provide: WorkerSharesService, useValue: {} },
       ],
     }).compile();
 

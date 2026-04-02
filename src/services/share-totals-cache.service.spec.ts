@@ -1,10 +1,18 @@
 import { ClientStatisticsService } from '../ORM/client-statistics/client-statistics.service';
+import { AddressSettingsService } from '../ORM/address-settings/address-settings.service';
+import { WorkerSharesService } from '../ORM/worker-shares/worker-shares.service';
 import { ShareTotalsCacheService } from './share-totals-cache.service';
 
 describe('ShareTotalsCacheService', () => {
   let clientStatisticsService: {
     getTotalSharesForAddress: jest.Mock;
     getTotalSharesForWorkers: jest.Mock;
+  };
+  let addressSettingsService: {
+    getSettings: jest.Mock;
+  };
+  let workerSharesService: {
+    getWorkerTotals: jest.Mock;
   };
   let cacheManager: any;
   let service: ShareTotalsCacheService;
@@ -18,6 +26,17 @@ describe('ShareTotalsCacheService', () => {
       ]),
     };
 
+    addressSettingsService = {
+      getSettings: jest.fn().mockResolvedValue({ shares: 100 }),
+    };
+
+    workerSharesService = {
+      getWorkerTotals: jest.fn().mockResolvedValue([
+        { clientName: 'worker-1', shares: 60 },
+        { clientName: 'worker-2', shares: 40 },
+      ]),
+    };
+
     // Mock cache manager without Redis (fallback mode)
     cacheManager = {
       store: {},
@@ -26,6 +45,8 @@ describe('ShareTotalsCacheService', () => {
     service = new ShareTotalsCacheService(
       cacheManager,
       clientStatisticsService as unknown as ClientStatisticsService,
+      addressSettingsService as unknown as AddressSettingsService,
+      workerSharesService as unknown as WorkerSharesService,
     );
   });
 
@@ -34,19 +55,19 @@ describe('ShareTotalsCacheService', () => {
       await service.onModuleInit();
     });
 
-    it('falls back to database queries when Redis is not available', async () => {
+    it('falls back to address_settings when Redis is not available', async () => {
       const total = await service.getAddressTotal('addr1');
       expect(total).toBe(100);
-      expect(clientStatisticsService.getTotalSharesForAddress).toHaveBeenCalledWith('addr1');
+      expect(addressSettingsService.getSettings).toHaveBeenCalledWith('addr1', false);
     });
 
-    it('returns worker totals from database when Redis is not available', async () => {
+    it('returns worker totals from worker_shares_entity when Redis is not available', async () => {
       const workerTotals = await service.getWorkerTotals('addr1');
       expect(workerTotals).toEqual([
         { workerName: 'worker-1', total: 60 },
         { workerName: 'worker-2', total: 40 },
       ]);
-      expect(clientStatisticsService.getTotalSharesForWorkers).toHaveBeenCalledWith('addr1');
+      expect(workerSharesService.getWorkerTotals).toHaveBeenCalledWith('addr1');
     });
 
     it('silently skips increment when Redis is not available', () => {
@@ -76,6 +97,8 @@ describe('ShareTotalsCacheService', () => {
       service = new ShareTotalsCacheService(
         cacheManager,
         clientStatisticsService as unknown as ClientStatisticsService,
+        addressSettingsService as unknown as AddressSettingsService,
+        workerSharesService as unknown as WorkerSharesService,
       );
 
       await service.onModuleInit();
@@ -119,50 +142,53 @@ describe('ShareTotalsCacheService', () => {
 
     it('returns 0 when address not found in Redis and database is empty', async () => {
       mockRedisClient.hGetAll.mockResolvedValue({});
-      clientStatisticsService.getTotalSharesForAddress.mockResolvedValueOnce(0);
+      addressSettingsService.getSettings.mockResolvedValueOnce(null);
 
       const total = await service.getAddressTotal('addr1');
       expect(total).toBe(0);
     });
 
-    it('returns worker totals from Redis', async () => {
+    it('returns worker totals from DB + unflushed Redis deltas', async () => {
       mockRedisClient.keys.mockResolvedValue([
         'shares:worker:addr1:worker-1',
         'shares:worker:addr1:worker-2',
       ]);
 
       mockRedisClient.hGetAll
-        .mockResolvedValueOnce({ baseline: '60', delta: '5' })
-        .mockResolvedValueOnce({ baseline: '40', delta: '10' });
+        .mockResolvedValueOnce({ delta: '5' })
+        .mockResolvedValueOnce({ delta: '10' });
 
       const workerTotals = await service.getWorkerTotals('addr1');
-      expect(workerTotals).toEqual([
+      // DB has worker-1=60, worker-2=40 + Redis deltas 5, 10
+      expect(workerTotals).toEqual(expect.arrayContaining([
         { workerName: 'worker-1', total: 65 },
         { workerName: 'worker-2', total: 50 },
-      ]);
+      ]));
     });
 
-    it('returns empty array when no workers found in Redis and database is empty', async () => {
+    it('returns empty array when no workers in DB and no Redis deltas', async () => {
       mockRedisClient.keys.mockResolvedValue([]);
-      clientStatisticsService.getTotalSharesForWorkers.mockResolvedValueOnce([]);
+      workerSharesService.getWorkerTotals.mockResolvedValueOnce([]);
 
       const workerTotals = await service.getWorkerTotals('addr1');
       expect(workerTotals).toEqual([]);
     });
 
-    it('filters out hydration markers and lock keys', async () => {
+    it('filters out hydration markers and lock keys from Redis', async () => {
       mockRedisClient.keys.mockResolvedValue([
         'shares:worker:addr1:worker-1',
         'shares:worker:addr1:worker-2:hydrated',
         'shares:worker:addr1:worker-3:lock',
       ]);
 
-      mockRedisClient.hGetAll.mockResolvedValueOnce({ baseline: '60', delta: '5' });
+      mockRedisClient.hGetAll.mockResolvedValueOnce({ delta: '5' });
 
       const workerTotals = await service.getWorkerTotals('addr1');
-      expect(workerTotals).toEqual([
+      // DB has worker-1=60 + delta 5 = 65, worker-2=40 (no delta)
+      expect(workerTotals).toEqual(expect.arrayContaining([
         { workerName: 'worker-1', total: 65 },
-      ]);
+        { workerName: 'worker-2', total: 40 },
+      ]));
     });
 
     it('skips increment when difficulty is invalid', () => {

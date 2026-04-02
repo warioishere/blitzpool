@@ -13,6 +13,7 @@ import { eStratumErrorCode } from '../../models/enums/eStratumErrorCode';
 import { StratumV1Service } from '../../services/stratum-v1.service';
 import { StratumV2Service } from '../../services/stratum-v2.service';
 import { ShareTotalsCacheService } from '../../services/share-totals-cache.service';
+import { WorkerSharesService } from '../../ORM/worker-shares/worker-shares.service';
 import { LiveHashrateService } from '../../services/live-hashrate.service';
 import { DifficultyScoresCacheService } from '../../services/difficulty-scores-cache.service';
 import { generateFormattedTimeSlots } from '../../utils/timeslot.utils';
@@ -49,6 +50,7 @@ export class ClientController {
         private readonly liveHashrateService: LiveHashrateService,
         private readonly difficultyScoresCacheService: DifficultyScoresCacheService,
         private readonly trackerService: BestDifficultyTrackerService,
+        private readonly workerSharesService: WorkerSharesService,
     ) { }
 
 
@@ -190,7 +192,8 @@ export class ClientController {
         await this.clientStatisticsService.clearRedisKeysForAddress(address);
         await this.clientRejectedStatisticsService.clearRedisKeysForAddress(address);
         await this.shareTotalsCacheService.clearAddressData(address);
-        console.log(`[ClientController] Redis keys cleared for ${address}`);
+        await this.workerSharesService.deleteForAddress(address);
+        console.log(`[ClientController] Redis keys and worker totals cleared for ${address}`);
 
         // Delete statistics from database
         await this.clientStatisticsService.deleteForAddress(address);

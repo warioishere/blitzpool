@@ -2,6 +2,8 @@ import { Injectable, Inject, OnModuleInit } from '@nestjs/common';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
 
+import { AddressSettingsService } from '../ORM/address-settings/address-settings.service';
+import { WorkerSharesService } from '../ORM/worker-shares/worker-shares.service';
 import { ClientStatisticsService } from '../ORM/client-statistics/client-statistics.service';
 
 /**
@@ -20,6 +22,8 @@ export class ShareTotalsCacheService implements OnModuleInit {
   constructor(
     @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
     private readonly clientStatisticsService: ClientStatisticsService,
+    private readonly addressSettingsService: AddressSettingsService,
+    private readonly workerSharesService: WorkerSharesService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -88,8 +92,9 @@ export class ShareTotalsCacheService implements OnModuleInit {
    */
   public async getAddressTotal(address: string): Promise<number> {
     if (!this.useRedis || !this.redisClient) {
-      // Fallback to database query if Redis not available
-      return this.clientStatisticsService.getTotalSharesForAddress(address);
+      // Fallback: read cumulative total from address_settings (all-time, not affected by old-stats cleanup)
+      const settings = await this.addressSettingsService.getSettings(address, false);
+      return settings?.shares ?? 0;
     }
 
     const addressKey = this.getAddressKey(address);
@@ -102,8 +107,9 @@ export class ShareTotalsCacheService implements OnModuleInit {
       return baseline + delta;
     }
 
-    // Redis is empty (e.g., after restart) - lazy load from database
-    const dbTotal = await this.clientStatisticsService.getTotalSharesForAddress(address);
+    // Redis is empty (e.g., after restart) - lazy load from address_settings (cumulative all-time total)
+    const settings = await this.addressSettingsService.getSettings(address, false);
+    const dbTotal = settings?.shares ?? 0;
 
     // Hydrate Redis cache with database value as baseline
     if (dbTotal > 0) {
@@ -119,80 +125,38 @@ export class ShareTotalsCacheService implements OnModuleInit {
   }
 
   /**
-   * Get total shares for all workers of an address from Redis.
-   * Lazy-loads from database if Redis is empty (e.g., after restart).
+   * Get total shares for all workers of an address.
+   * Reads cumulative totals from worker_shares_entity + unflushed Redis deltas.
    */
   public async getWorkerTotals(
     address: string,
   ): Promise<Array<{ workerName: string; total: number }>> {
-    if (!this.useRedis || !this.redisClient) {
-      // Fallback to database query if Redis not available
-      const totals = await this.clientStatisticsService.getTotalSharesForWorkers(address);
-      return totals.map((entry) => ({
-        workerName: entry.clientName,
-        total: entry.total,
-      }));
-    }
+    // Read cumulative totals from worker_shares_entity
+    const dbTotals = await this.workerSharesService.getWorkerTotals(address);
+    const totalsMap = new Map(dbTotals.map(e => [e.clientName, e.shares]));
 
-    const pattern = `shares:worker:${address}:*`;
-    const allKeys = await this.redisClient.keys(pattern);
-
-    const result: Array<{ workerName: string; total: number }> = [];
-
-    // If Redis has worker data, use it
-    if (allKeys && allKeys.length > 0) {
-      // Filter out non-data keys (hydration markers and locks)
-      const dataKeys = allKeys.filter(key => !key.endsWith(':hydrated') && !key.endsWith(':lock'));
+    // Add unflushed Redis deltas if available
+    if (this.useRedis && this.redisClient) {
+      const pattern = `shares:worker:${address}:*`;
+      const allKeys = await this.redisClient.keys(pattern);
       const prefix = `shares:worker:${address}:`;
 
-      for (const key of dataKeys) {
-        // Extract worker name by removing the prefix
+      for (const key of (allKeys || [])) {
+        if (key.endsWith(':hydrated') || key.endsWith(':lock')) continue;
         const workerName = key.startsWith(prefix) ? key.substring(prefix.length) : key.split(':').pop() || '';
-
-        if (!workerName) {
-          continue;
-        }
+        if (!workerName) continue;
 
         const data = await this.redisClient.hGetAll(key);
-
-        if (!data || (data.baseline === undefined && data.delta === undefined)) {
-          continue;
+        const delta = parseFloat(data?.delta) || 0;
+        if (delta > 0) {
+          totalsMap.set(workerName, (totalsMap.get(workerName) || 0) + delta);
         }
-
-        const baseline = parseFloat(data.baseline) || 0;
-        const delta = parseFloat(data.delta) || 0;
-        const total = baseline + delta;
-
-        if (total > 0) {
-          result.push({ workerName, total });
-        }
-      }
-
-      return result;
-    }
-
-    // Redis is empty (e.g., after restart) - lazy load from database
-    const dbTotals = await this.clientStatisticsService.getTotalSharesForWorkers(address);
-
-    // Hydrate Redis cache with database values as baselines
-    for (const entry of dbTotals) {
-      if (entry.total > 0) {
-        const workerKey = this.getWorkerKey(address, entry.clientName);
-        await this.redisClient.hSet(workerKey, {
-          baseline: entry.total.toString(),
-          delta: '0',
-        }).catch(err => {
-          console.error(`[ShareTotalsCacheService] Failed to hydrate worker ${address}:${entry.clientName}:`, err);
-        });
-
-        result.push({
-          workerName: entry.clientName,
-          total: entry.total,
-        });
       }
     }
 
-    return result;
+    return Array.from(totalsMap.entries())
+      .filter(([_, total]) => total > 0)
+      .map(([workerName, total]) => ({ workerName, total }));
   }
 
   /**

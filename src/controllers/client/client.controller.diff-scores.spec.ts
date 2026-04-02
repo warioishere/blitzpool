@@ -17,6 +17,7 @@ import { ClientDifficultyStatisticsService } from '../../ORM/client-difficulty-s
 import { LiveHashrateService } from '../../services/live-hashrate.service';
 import { DifficultyScoresCacheService } from '../../services/difficulty-scores-cache.service';
 import { BestDifficultyTrackerService } from '../../ORM/best-difficulty-tracker/best-difficulty-tracker.service';
+import { WorkerSharesService } from '../../ORM/worker-shares/worker-shares.service';
 
 describe('ClientController difficulty scores', () => {
   let app: NestFastifyApplication;
@@ -52,6 +53,7 @@ describe('ClientController difficulty scores', () => {
         { provide: LiveHashrateService, useValue: {} },
         { provide: DifficultyScoresCacheService, useValue: difficultyScoresCacheService },
         { provide: BestDifficultyTrackerService, useValue: {} },
+        { provide: WorkerSharesService, useValue: {} },
       ],
     }).compile();
 

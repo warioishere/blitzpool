@@ -12,6 +12,7 @@ import { ClientController } from './controllers/client/client.controller';
 import { InfoController } from './controllers/info/info.controller';
 import { BitcoinAddressValidator } from './models/validators/bitcoin-address.validator';
 import { AddressSettingsModule } from './ORM/address-settings/address-settings.module';
+import { WorkerSharesModule } from './ORM/worker-shares/worker-shares.module';
 import { BlocksModule } from './ORM/blocks/blocks.module';
 import { ClientStatisticsModule } from './ORM/client-statistics/client-statistics.module';
 import { ClientModule } from './ORM/client/client.module';
@@ -63,6 +64,7 @@ const ORMModules = [
     ClientStatisticsModule,
     ClientModule,
     AddressSettingsModule,
+    WorkerSharesModule,
     TelegramSubscriptionsModule,
     NtfySubscriptionsModule,
     PushSubscriptionModule,
