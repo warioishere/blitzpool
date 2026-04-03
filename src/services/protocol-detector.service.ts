@@ -202,8 +202,6 @@ export class ProtocolDetectorService implements OnModuleInit {
     }
 
     // Some V1 implementations may send whitespace or newline before JSON
-    // Note: 0x09 (tab) is intentionally excluded — BraiinsOS sends a cipher
-    // negotiation message starting with 0x09 that must route to V2.
     if (firstByte === 0x20 || firstByte === 0x0A || firstByte === 0x0D) {
       return 'v1';
     }

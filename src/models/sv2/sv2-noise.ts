@@ -8,154 +8,19 @@ import * as ecc from 'tiny-secp256k1';
 import {
   SV2_NOISE_PROTOCOL_NAME,
   SV2_NOISE_PROTOCOL_NAME_AESGCM,
-  SV2_NOISE_PROTOCOL_NAME_X25519_AESGCM,
-  SV2_NOISE_PROTOCOL_NAME_X25519_CHACHA,
-  SV2_NOISE_PROTOCOL_NAME_X25519_AESGCM_BLAKE2S,
   SV2_ELLSWIFT_KEY_SIZE,
-  SV2_X25519_KEY_SIZE,
   SV2_MAC_SIZE,
   SV2_SIGNATURE_NOISE_MSG_SIZE,
-  SV2_SIGNATURE_NOISE_MSG_SIZE_BRAIINS,
 } from './sv2-constants';
 
 // ── Cipher Algorithm Type ───────────────────────────────────────────
 
 export type Sv2CipherAlgorithm = 'chacha20-poly1305' | 'aes-256-gcm';
 
-export type Sv2NoiseDhMode = 'ellswift' | 'x25519';
-
-export type Sv2NoiseHashAlgorithm = 'sha256' | 'blake2s256';
-
-export interface Sv2X25519Keypair {
-  privateKey: Buffer; // 32-byte X25519 private key
-  publicKey: Buffer;  // 32-byte X25519 public key
-}
-
-export function generateX25519Keypair(): Sv2X25519Keypair {
-  const kp = crypto.generateKeyPairSync('x25519');
-  const pubJwk = kp.publicKey.export({ format: 'jwk' });
-  const privJwk = kp.privateKey.export({ format: 'jwk' });
-  return {
-    publicKey: Buffer.from(pubJwk.x!, 'base64url'),
-    privateKey: Buffer.from(privJwk.d!, 'base64url'),
-  };
-}
-
-function x25519Ecdh(ourPrivRaw: Buffer, ourPubRaw: Buffer, theirPubRaw: Buffer): Buffer {
-  const privKey = crypto.createPrivateKey({
-    key: {
-      crv: 'X25519',
-      d: ourPrivRaw.toString('base64url'),
-      x: ourPubRaw.toString('base64url'),
-      kty: 'OKP',
-    },
-    format: 'jwk',
-  });
-  const pubKey = crypto.createPublicKey({
-    key: {
-      crv: 'X25519',
-      x: theirPubRaw.toString('base64url'),
-      kty: 'OKP',
-    },
-    format: 'jwk',
-  });
-  return crypto.diffieHellman({ publicKey: pubKey, privateKey: privKey });
-}
-
-// ── Ed25519 Helpers (BraiinsOS certificate signing) ──────────────
-
-export interface Sv2Ed25519Keypair {
-  privateKeyRaw: Buffer; // 32-byte Ed25519 seed
-  publicKeyRaw: Buffer;  // 32-byte Ed25519 public key
-}
-
-export function generateEd25519Keypair(): Sv2Ed25519Keypair {
-  const kp = crypto.generateKeyPairSync('ed25519');
-  const pubJwk = kp.publicKey.export({ format: 'jwk' });
-  const privJwk = kp.privateKey.export({ format: 'jwk' });
-  return {
-    publicKeyRaw: Buffer.from(pubJwk.x!, 'base64url'),
-    privateKeyRaw: Buffer.from(privJwk.d!, 'base64url'),
-  };
-}
-
-function ed25519PrivateKeyObject(seed: Buffer, pub: Buffer): crypto.KeyObject {
-  return crypto.createPrivateKey({
-    key: { crv: 'Ed25519', d: seed.toString('base64url'), x: pub.toString('base64url'), kty: 'OKP' },
-    format: 'jwk',
-  });
-}
-
-function ed25519PublicKeyObject(pub: Buffer): crypto.KeyObject {
-  return crypto.createPublicKey({
-    key: { crv: 'Ed25519', x: pub.toString('base64url'), kty: 'OKP' },
-    format: 'jwk',
-  });
-}
-
-/**
- * Encode an Ed25519 public key in BraiinsOS base58check format.
- * Format: base58check(32-byte pubkey + 4-byte SHA256d checksum) — no version prefix.
- * This is the format used in BraiinsOS pool URLs:
- *   stratum2+tcp://pool.example.com:3336/ENCODED_KEY_HERE
- */
-export function encodeEd25519PubKeyBase58Check(pubKeyRaw: Buffer): string {
-  const checksum = sha256(sha256(pubKeyRaw)).subarray(0, 4);
-  return base58Encode(Buffer.concat([pubKeyRaw, checksum]));
-}
-
-// Minimal base58 encoder (Bitcoin alphabet)
-const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
-
-function base58Encode(buffer: Buffer): string {
-  const digits = [0];
-  for (let i = 0; i < buffer.length; i++) {
-    let carry = buffer[i];
-    for (let j = 0; j < digits.length; j++) {
-      carry += digits[j] << 8;
-      digits[j] = carry % 58;
-      carry = (carry / 58) | 0;
-    }
-    while (carry > 0) {
-      digits.push(carry % 58);
-      carry = (carry / 58) | 0;
-    }
-  }
-  // Leading zeros
-  let result = '';
-  for (let i = 0; i < buffer.length && buffer[i] === 0; i++) {
-    result += BASE58_ALPHABET[0];
-  }
-  for (let i = digits.length - 1; i >= 0; i--) {
-    result += BASE58_ALPHABET[digits[i]];
-  }
-  return result;
-}
-
-function getNoiseProtocolName(dhMode: Sv2NoiseDhMode, cipher: Sv2CipherAlgorithm): string {
-  // Allow overriding protocol name via env var for debugging BraiinsOS compatibility
-  const override = process.env.SV2_X25519_PROTOCOL_NAME;
-  if (dhMode === 'x25519' && override) {
-    return override;
-  }
-  if (dhMode === 'x25519') {
-    // BraiinsOS legacy firmware uses Noise_NX_25519_AESGCM_BLAKE2s
-    return SV2_NOISE_PROTOCOL_NAME_X25519_AESGCM_BLAKE2S;
-  }
+function getNoiseProtocolName(cipher: Sv2CipherAlgorithm): string {
   return cipher === 'aes-256-gcm'
     ? SV2_NOISE_PROTOCOL_NAME_AESGCM
     : SV2_NOISE_PROTOCOL_NAME;
-}
-
-/**
- * Determine the hash algorithm from the Noise protocol name.
- * Protocol names ending in _BLAKE2s use BLAKE2s; otherwise SHA-256.
- */
-function getHashAlgorithm(protocolName: string): Sv2NoiseHashAlgorithm {
-  if (protocolName.endsWith('BLAKE2s')) {
-    return 'blake2s256';
-  }
-  return 'sha256';
 }
 
 // ── EllSwift Loader (ESM dynamic import) ────────────────────────────
@@ -205,23 +70,9 @@ export function sha256(data: Buffer): Buffer {
  * output2 = HMAC(temp_key, output1 || 0x02)
  */
 export function hkdf2(chainingKey: Buffer, ikm: Buffer): [Buffer, Buffer] {
-  return noiseHkdf2(chainingKey, ikm, 'sha256');
-}
-
-// ── Parameterized Hash Primitives (for BLAKE2s support) ──────────
-
-function noiseHash(data: Buffer, algo: Sv2NoiseHashAlgorithm): Buffer {
-  return crypto.createHash(algo).update(data).digest();
-}
-
-function noiseHmac(key: Buffer, data: Buffer, algo: Sv2NoiseHashAlgorithm): Buffer {
-  return crypto.createHmac(algo, key).update(data).digest();
-}
-
-function noiseHkdf2(chainingKey: Buffer, ikm: Buffer, algo: Sv2NoiseHashAlgorithm): [Buffer, Buffer] {
-  const tempKey = noiseHmac(chainingKey, ikm, algo);
-  const out1 = noiseHmac(tempKey, Buffer.from([0x01]), algo);
-  const out2 = noiseHmac(tempKey, Buffer.concat([out1, Buffer.from([0x02])]), algo);
+  const tempKey = hmacHash(chainingKey, ikm);
+  const out1 = hmacHash(tempKey, Buffer.from([0x01]));
+  const out2 = hmacHash(tempKey, Buffer.concat([out1, Buffer.from([0x02])]));
   return [out1, out2];
 }
 
@@ -371,140 +222,6 @@ export function createSignatureNoiseMessage(
   };
 }
 
-// ── BraiinsOS Certificate Format (76 bytes, Ed25519) ────────────────
-
-/**
- * Serialize a SignatureNoiseMessage to BraiinsOS format (76 bytes).
- * Format: version(U16) + validFrom(U32) + notValidAfter(U32) + sig_len(U16) + signature(64)
- * The sig_len field is the V2 serializer's Bytes/Vec<u8> length prefix.
- */
-export function serializeSignatureNoiseMessageBraiins(msg: Sv2SignatureNoiseMessage): Buffer {
-  const buf = Buffer.alloc(SV2_SIGNATURE_NOISE_MSG_SIZE_BRAIINS);
-  buf.writeUInt16LE(msg.version, 0);
-  buf.writeUInt32LE(msg.validFrom, 2);
-  buf.writeUInt32LE(msg.notValidAfter, 6);
-  buf.writeUInt16LE(msg.signature.length, 10); // U16 LE length prefix (64 = 0x40, 0x00)
-  msg.signature.copy(buf, 12);
-  return buf;
-}
-
-/**
- * Deserialize a 76-byte BraiinsOS SignatureNoiseMessage.
- */
-export function deserializeSignatureNoiseMessageBraiins(buf: Buffer): Sv2SignatureNoiseMessage {
-  if (buf.length < SV2_SIGNATURE_NOISE_MSG_SIZE_BRAIINS) {
-    throw new Error(`BraiinsOS SignatureNoiseMessage requires ${SV2_SIGNATURE_NOISE_MSG_SIZE_BRAIINS} bytes, got ${buf.length}`);
-  }
-  const sigLen = buf.readUInt16LE(10);
-  return {
-    version: buf.readUInt16LE(0),
-    validFrom: buf.readUInt32LE(2),
-    notValidAfter: buf.readUInt32LE(6),
-    signature: Buffer.from(buf.subarray(12, 12 + sigLen)),
-  };
-}
-
-/**
- * Create a SignatureNoiseMessage using Ed25519 (BraiinsOS format).
- * SignedPart: version(U16) + validFrom(U32) + notValidAfter(U32)
- *   + U16_LE(pubkey.length) + noise_static_pubkey + authority_ed25519_pubkey(32)
- * The signature is Ed25519 over the raw SignedPart bytes (no pre-hashing).
- */
-/**
- * Build the Ed25519 signed part bytes for BraiinsOS certificate signing/verification.
- * The format is configurable via SV2_CERT_SIGNED_PART env var to handle firmware variations:
- *   "78" (default) — header(10) + U16(32) + static_key(32) + U16(32) + authority_key(32)
- *   "74"           — header(10) + static_key(32) + authority_key(32) (no length prefixes)
- *   "42"           — header(10) + static_key(32) (no authority key, no prefixes)
- */
-export function buildEd25519SignedPart(
-  version: number,
-  validFrom: number,
-  notValidAfter: number,
-  staticPubKey: Buffer,
-  authorityPubKey: Buffer,
-): Buffer {
-  const format = process.env.SV2_CERT_SIGNED_PART ?? '78';
-
-  let signedPart: Buffer;
-  let offset = 0;
-
-  if (format === '42') {
-    // header(10) + static_key(32) = 42 bytes (no authority key, no length prefixes)
-    signedPart = Buffer.alloc(42);
-    signedPart.writeUInt16LE(version, offset); offset += 2;
-    signedPart.writeUInt32LE(validFrom, offset); offset += 4;
-    signedPart.writeUInt32LE(notValidAfter, offset); offset += 4;
-    staticPubKey.copy(signedPart, offset);
-  } else if (format === '74') {
-    // header(10) + static_key(32) + authority_key(32) = 74 bytes (no length prefixes)
-    signedPart = Buffer.alloc(74);
-    signedPart.writeUInt16LE(version, offset); offset += 2;
-    signedPart.writeUInt32LE(validFrom, offset); offset += 4;
-    signedPart.writeUInt32LE(notValidAfter, offset); offset += 4;
-    staticPubKey.copy(signedPart, offset); offset += staticPubKey.length;
-    authorityPubKey.copy(signedPart, offset);
-  } else {
-    // "78" (default): header(10) + U16(32) + static_key(32) + U16(32) + authority_key(32)
-    signedPart = Buffer.alloc(78);
-    signedPart.writeUInt16LE(version, offset); offset += 2;
-    signedPart.writeUInt32LE(validFrom, offset); offset += 4;
-    signedPart.writeUInt32LE(notValidAfter, offset); offset += 4;
-    signedPart.writeUInt16LE(staticPubKey.length, offset); offset += 2;
-    staticPubKey.copy(signedPart, offset); offset += staticPubKey.length;
-    signedPart.writeUInt16LE(authorityPubKey.length, offset); offset += 2;
-    authorityPubKey.copy(signedPart, offset);
-  }
-
-  return signedPart;
-}
-
-export function createSignatureNoiseMessageEd25519(
-  authorityKeypair: Sv2Ed25519Keypair,
-  staticPubKey: Buffer,
-  validFrom: number,
-  notValidAfter: number,
-): Sv2SignatureNoiseMessage {
-  const version = 0;
-
-  const signedPart = buildEd25519SignedPart(
-    version, validFrom, notValidAfter,
-    staticPubKey, authorityKeypair.publicKeyRaw,
-  );
-
-  // Ed25519 sign (no pre-hashing, Ed25519 handles its own hashing internally)
-  const privKeyObj = ed25519PrivateKeyObject(authorityKeypair.privateKeyRaw, authorityKeypair.publicKeyRaw);
-  const signature = crypto.sign(null, signedPart, privKeyObj);
-
-  const format = process.env.SV2_CERT_SIGNED_PART ?? '78';
-  if (process.env.SV2_NOISE_DEBUG === 'true') {
-    console.log(`[Ed25519] Cert signed with format=${format} (${signedPart.length} bytes), sig=${Buffer.from(signature).subarray(0, 8).toString('hex')}...`);
-  }
-
-  return {
-    version,
-    validFrom,
-    notValidAfter,
-    signature: Buffer.from(signature),
-  };
-}
-
-/**
- * Validate a BraiinsOS Ed25519 SignatureNoiseMessage against an authority public key.
- */
-export function validateSignatureNoiseMessageEd25519(
-  msg: Sv2SignatureNoiseMessage,
-  authorityPubKeyRaw: Buffer,
-  staticPubKey: Buffer,
-): boolean {
-  const signedPart = buildEd25519SignedPart(
-    msg.version, msg.validFrom, msg.notValidAfter,
-    staticPubKey, authorityPubKeyRaw,
-  );
-  const pubKeyObj = ed25519PublicKeyObject(authorityPubKeyRaw);
-  return crypto.verify(null, signedPart, pubKeyObj, msg.signature);
-}
-
 /**
  * Validate a SignatureNoiseMessage against an authority public key.
  */
@@ -555,10 +272,6 @@ export interface Sv2NoiseConfig {
   staticKeypair: Sv2ServerKeypair;
   /** Pre-computed certificate message (signed by authority). */
   certificateMessage: Sv2SignatureNoiseMessage;
-  /** X25519 static keypair (32-byte keys) for BraiinsOS mode. */
-  x25519StaticKeypair?: Sv2X25519Keypair;
-  /** Certificate for the X25519 static key. */
-  x25519CertificateMessage?: Sv2SignatureNoiseMessage;
 }
 
 export class Sv2NoiseSession {
@@ -570,9 +283,6 @@ export class Sv2NoiseSession {
   private handshakeComplete = false;
   private ellSwift!: EllSwiftApi;
   private readonly cipherAlgorithm: Sv2CipherAlgorithm;
-  private readonly handshakeCipherAlgorithm: Sv2CipherAlgorithm;
-  private readonly dhMode: Sv2NoiseDhMode;
-  private readonly hashAlgorithm: Sv2NoiseHashAlgorithm;
 
   private serverEphemeralPriv!: Buffer;
   private serverEphemeralPub!: Buffer;
@@ -580,21 +290,13 @@ export class Sv2NoiseSession {
   constructor(
     private readonly config: Sv2NoiseConfig,
     cipherAlgorithm: Sv2CipherAlgorithm = 'chacha20-poly1305',
-    dhMode: Sv2NoiseDhMode = 'ellswift',
     prologue: Buffer = Buffer.alloc(0),
-    handshakeCipherOverride?: Sv2CipherAlgorithm,
   ) {
     this.cipherAlgorithm = cipherAlgorithm;
-    this.dhMode = dhMode;
 
-    const protocolNameStr = getNoiseProtocolName(dhMode, cipherAlgorithm);
-    this.hashAlgorithm = getHashAlgorithm(protocolNameStr);
+    const protocolNameStr = getNoiseProtocolName(cipherAlgorithm);
 
-    // For X25519+BLAKE2s (BraiinsOS): both handshake and transport use AES-GCM
-    // Can be overridden via handshakeCipherOverride parameter
-    this.handshakeCipherAlgorithm = handshakeCipherOverride
-      ?? (dhMode === 'x25519' ? 'aes-256-gcm' : cipherAlgorithm);
-    this.tempCipher = new Sv2CipherState(this.handshakeCipherAlgorithm);
+    this.tempCipher = new Sv2CipherState(cipherAlgorithm);
     this.sendCipher = new Sv2CipherState(cipherAlgorithm);
     this.recvCipher = new Sv2CipherState(cipherAlgorithm);
 
@@ -604,24 +306,24 @@ export class Sv2NoiseSession {
       this.h = Buffer.alloc(32);
       protocolName.copy(this.h);
     } else {
-      this.h = noiseHash(protocolName, this.hashAlgorithm);
+      this.h = sha256(protocolName);
     }
     // ck = h
     this.ck = Buffer.from(this.h);
     // MixHash(prologue) per Noise spec: h = HASH(h || prologue)
-    this.h = noiseHash(Buffer.concat([this.h, prologue]), this.hashAlgorithm);
+    this.h = sha256(Buffer.concat([this.h, prologue]));
   }
 
   // ── Noise Symmetric State Helpers ─────────────────────────────────
 
   private mixHash(data: Buffer): void {
-    this.h = noiseHash(Buffer.concat([this.h, data]), this.hashAlgorithm);
+    this.h = sha256(Buffer.concat([this.h, data]));
   }
 
   private mixKey(ikm: Buffer): void {
-    const [newCk, tempK] = noiseHkdf2(this.ck, ikm, this.hashAlgorithm);
+    const [newCk, tempK] = hkdf2(this.ck, ikm);
     this.ck = newCk;
-    this.tempCipher = new Sv2CipherState(this.handshakeCipherAlgorithm);
+    this.tempCipher = new Sv2CipherState(this.cipherAlgorithm);
     this.tempCipher.initializeKey(tempK);
   }
 
@@ -641,14 +343,10 @@ export class Sv2NoiseSession {
 
   /**
    * Compute BIP-324 EllSwift ECDH.
-   * Rust secp256k1's ElligatorSwift::shared_secret uses BIP-324 by default.
    * @param localPriv - Our private key (32 bytes)
    * @param localPub - Our EllSwift public key (64 bytes)
    * @param remotePub - Their EllSwift public key (64 bytes)
    * @param weAreInitiator - Party bit: true for initiator, false for responder
-   */
-  /**
-   * Compute BIP-324 EllSwift ECDH.
    */
   private ecdh(localPriv: Buffer, localPub: Buffer, remotePub: Buffer, weAreInitiator: boolean): Buffer {
     const secret = this.ellSwift.getSharedSecretBip324(
@@ -664,17 +362,9 @@ export class Sv2NoiseSession {
 
   /**
    * Process the initiator's Act 1 ephemeral key and produce Act 2.
-   * EllSwift mode: 64-byte Act 1 → 234-byte Act 2
-   * X25519 mode: 32-byte Act 1 → 172-byte Act 2 (BraiinsOS 76-byte cert)
+   * EllSwift mode: 64-byte Act 1 -> 234-byte Act 2
    */
   async processAct1(act1: Buffer): Promise<Buffer> {
-    if (this.dhMode === 'x25519') {
-      return this.processAct1X25519(act1);
-    }
-    return this.processAct1EllSwift(act1);
-  }
-
-  private async processAct1EllSwift(act1: Buffer): Promise<Buffer> {
     if (act1.length !== SV2_ELLSWIFT_KEY_SIZE) {
       throw new Error(`Act 1 must be ${SV2_ELLSWIFT_KEY_SIZE} bytes, got ${act1.length}`);
     }
@@ -682,30 +372,30 @@ export class Sv2NoiseSession {
     const debug = process.env.SV2_NOISE_DEBUG === 'true';
 
     if (debug) {
-      const protocolNameStr = getNoiseProtocolName('ellswift', this.cipherAlgorithm);
-      console.log(`[NOISE-ELLSWIFT] Protocol name: "${protocolNameStr}" (${protocolNameStr.length} bytes)`);
-      console.log(`[NOISE-ELLSWIFT] Hash: ${this.hashAlgorithm}, Handshake cipher: ${this.handshakeCipherAlgorithm}, Transport cipher: ${this.cipherAlgorithm}`);
-      console.log(`[NOISE-ELLSWIFT] Init ck=${this.ck.toString('hex')}`);
-      console.log(`[NOISE-ELLSWIFT] Init h=${this.h.toString('hex')}`);
+      const protocolNameStr = getNoiseProtocolName(this.cipherAlgorithm);
+      console.log(`[NOISE] Protocol name: "${protocolNameStr}" (${protocolNameStr.length} bytes)`);
+      console.log(`[NOISE] Cipher: ${this.cipherAlgorithm}`);
+      console.log(`[NOISE] Init ck=${this.ck.toString('hex')}`);
+      console.log(`[NOISE] Init h=${this.h.toString('hex')}`);
     }
 
     this.ellSwift = await loadEllSwift();
 
     const remoteEphemeral = act1;
     this.mixHash(remoteEphemeral);
-    if (debug) console.log(`[NOISE-ELLSWIFT] After MixHash(re): h=${this.h.toString('hex')}`);
+    if (debug) console.log(`[NOISE] After MixHash(re): h=${this.h.toString('hex')}`);
 
     this.decryptAndHash(Buffer.alloc(0));
-    if (debug) console.log(`[NOISE-ELLSWIFT] After DecryptAndHash(empty): h=${this.h.toString('hex')}`);
+    if (debug) console.log(`[NOISE] After DecryptAndHash(empty): h=${this.h.toString('hex')}`);
 
     const serverEph = this.ellSwift.keygen();
     this.serverEphemeralPriv = Buffer.from(serverEph.privateKey);
     this.serverEphemeralPub = Buffer.from(serverEph.publicKey);
 
-    if (debug) console.log(`[NOISE-ELLSWIFT] Server eph pub: ${this.serverEphemeralPub.toString('hex')}`);
+    if (debug) console.log(`[NOISE] Server eph pub: ${this.serverEphemeralPub.toString('hex')}`);
 
     this.mixHash(this.serverEphemeralPub);
-    if (debug) console.log(`[NOISE-ELLSWIFT] After MixHash(se): h=${this.h.toString('hex')}`);
+    if (debug) console.log(`[NOISE] After MixHash(se): h=${this.h.toString('hex')}`);
 
     const eeDH = this.ecdh(
       this.serverEphemeralPriv,
@@ -713,19 +403,19 @@ export class Sv2NoiseSession {
       remoteEphemeral,
       false,
     );
-    if (debug) console.log(`[NOISE-ELLSWIFT] ee DH shared secret: ${eeDH.toString('hex')}`);
+    if (debug) console.log(`[NOISE] ee DH shared secret: ${eeDH.toString('hex')}`);
 
     this.mixKey(eeDH);
-    if (debug) console.log(`[NOISE-ELLSWIFT] After MixKey(ee): ck=${this.ck.toString('hex')}`);
+    if (debug) console.log(`[NOISE] After MixKey(ee): ck=${this.ck.toString('hex')}`);
 
     const staticPubKey = this.config.staticKeypair.publicKey;
     if (debug) {
-      console.log(`[NOISE-ELLSWIFT] h (AD for encrypt static): ${this.h.toString('hex')}`);
-      console.log(`[NOISE-ELLSWIFT] Static pub (plaintext): ${staticPubKey.toString('hex')}`);
+      console.log(`[NOISE] h (AD for encrypt static): ${this.h.toString('hex')}`);
+      console.log(`[NOISE] Static pub (plaintext): ${staticPubKey.toString('hex')}`);
     }
 
     const encryptedStatic = this.encryptAndHash(staticPubKey);
-    if (debug) console.log(`[NOISE-ELLSWIFT] Encrypted static (${encryptedStatic.length} bytes): ${encryptedStatic.toString('hex')}`);
+    if (debug) console.log(`[NOISE] Encrypted static (${encryptedStatic.length} bytes): ${encryptedStatic.toString('hex')}`);
 
     const esDH = this.ecdh(
       this.config.staticKeypair.privateKey,
@@ -733,101 +423,26 @@ export class Sv2NoiseSession {
       remoteEphemeral,
       false,
     );
-    if (debug) console.log(`[NOISE-ELLSWIFT] es DH shared secret: ${esDH.toString('hex')}`);
+    if (debug) console.log(`[NOISE] es DH shared secret: ${esDH.toString('hex')}`);
 
     this.mixKey(esDH);
-    if (debug) console.log(`[NOISE-ELLSWIFT] After MixKey(es): ck=${this.ck.toString('hex')}`);
+    if (debug) console.log(`[NOISE] After MixKey(es): ck=${this.ck.toString('hex')}`);
 
     const certPayload = serializeSignatureNoiseMessage(this.config.certificateMessage);
-    if (debug) console.log(`[NOISE-ELLSWIFT] h (AD for encrypt cert): ${this.h.toString('hex')}`);
-    if (debug) console.log(`[NOISE-ELLSWIFT] Cert payload (${certPayload.length} bytes): ${certPayload.toString('hex')}`);
+    if (debug) console.log(`[NOISE] h (AD for encrypt cert): ${this.h.toString('hex')}`);
+    if (debug) console.log(`[NOISE] Cert payload (${certPayload.length} bytes): ${certPayload.toString('hex')}`);
 
     const encryptedCert = this.encryptAndHash(certPayload);
-    if (debug) console.log(`[NOISE-ELLSWIFT] Encrypted cert (${encryptedCert.length} bytes)`);
+    if (debug) console.log(`[NOISE] Encrypted cert (${encryptedCert.length} bytes)`);
 
-    const [k1, k2] = noiseHkdf2(this.ck, Buffer.alloc(0), this.hashAlgorithm);
+    const [k1, k2] = hkdf2(this.ck, Buffer.alloc(0));
     this.recvCipher.initializeKey(k1);
     this.sendCipher.initializeKey(k2);
     this.handshakeComplete = true;
 
     const act2 = Buffer.concat([this.serverEphemeralPub, encryptedStatic, encryptedCert]);
-    if (debug) console.log(`[NOISE-ELLSWIFT] Act 2 total: ${act2.length} bytes`);
+    if (debug) console.log(`[NOISE] Act 2 total: ${act2.length} bytes`);
 
-    return act2;
-  }
-
-  private async processAct1X25519(act1: Buffer): Promise<Buffer> {
-    if (act1.length !== SV2_X25519_KEY_SIZE) {
-      throw new Error(`Act 1 (X25519) must be ${SV2_X25519_KEY_SIZE} bytes, got ${act1.length}`);
-    }
-    if (!this.config.x25519StaticKeypair || !this.config.x25519CertificateMessage) {
-      throw new Error('X25519 static keypair and certificate required for X25519 DH mode');
-    }
-
-    const debug = process.env.SV2_NOISE_DEBUG === 'true';
-
-    const remoteEphemeral = act1;
-    if (debug) {
-      const protocolNameStr = getNoiseProtocolName(this.dhMode, this.cipherAlgorithm);
-      console.log(`[NOISE-X25519] Protocol name: "${protocolNameStr}" (${protocolNameStr.length} bytes)`);
-      console.log(`[NOISE-X25519] Hash: ${this.hashAlgorithm}, Handshake cipher: ${this.handshakeCipherAlgorithm}, Transport cipher: ${this.cipherAlgorithm}`);
-      console.log(`[NOISE-X25519] Init ck=${this.ck.toString('hex')}`);
-      console.log(`[NOISE-X25519] Init h=${this.h.toString('hex')}`);
-    }
-    this.mixHash(remoteEphemeral);
-    if (debug) console.log(`[NOISE-X25519] After MixHash(re): h=${this.h.toString('hex')}`);
-    this.decryptAndHash(Buffer.alloc(0));
-    if (debug) console.log(`[NOISE-X25519] After DecryptAndHash(empty): h=${this.h.toString('hex')}`);
-
-    // Generate X25519 ephemeral keypair
-    const serverEph = generateX25519Keypair();
-    this.serverEphemeralPriv = serverEph.privateKey;
-    this.serverEphemeralPub = serverEph.publicKey;
-
-    if (debug) console.log(`[NOISE-X25519] Server eph pub: ${this.serverEphemeralPub.toString('hex')}`);
-    this.mixHash(this.serverEphemeralPub);
-    if (debug) console.log(`[NOISE-X25519] After MixHash(se): h=${this.h.toString('hex')}`);
-
-    // ee DH: X25519 is symmetric, no party bit
-    const eeDH = x25519Ecdh(this.serverEphemeralPriv, this.serverEphemeralPub, remoteEphemeral);
-    if (debug) console.log(`[NOISE-X25519] ee DH shared secret: ${eeDH.toString('hex')}`);
-    this.mixKey(eeDH);
-    if (debug) console.log(`[NOISE-X25519] After MixKey(ee): ck=${this.ck.toString('hex')}`);
-
-    // EncryptAndHash(static pubkey) — 32 bytes for X25519
-    const staticPubKey = this.config.x25519StaticKeypair.publicKey;
-    if (debug) {
-      console.log(`[NOISE-X25519] h (AD for encrypt static): ${this.h.toString('hex')}`);
-      console.log(`[NOISE-X25519] Static pub (plaintext): ${staticPubKey.toString('hex')}`);
-    }
-    const encryptedStatic = this.encryptAndHash(staticPubKey); // 32 + 16 = 48 bytes
-    if (debug) console.log(`[NOISE-X25519] Encrypted static (${encryptedStatic.length} bytes): ${encryptedStatic.toString('hex')}`);
-
-    // es DH
-    const esDH = x25519Ecdh(
-      this.config.x25519StaticKeypair.privateKey,
-      this.config.x25519StaticKeypair.publicKey,
-      remoteEphemeral,
-    );
-    if (debug) console.log(`[NOISE-X25519] es DH shared secret: ${esDH.toString('hex')}`);
-    this.mixKey(esDH);
-    if (debug) console.log(`[NOISE-X25519] After MixKey(es): ck=${this.ck.toString('hex')}`);
-
-    // EncryptAndHash(certificate) — BraiinsOS 76-byte format with U16 sig_len prefix
-    const certPayload = serializeSignatureNoiseMessageBraiins(this.config.x25519CertificateMessage);
-    if (debug) console.log(`[NOISE-X25519] h (AD for encrypt cert): ${this.h.toString('hex')}`);
-    if (debug) console.log(`[NOISE-X25519] Cert payload (${certPayload.length} bytes): ${certPayload.toString('hex')}`);
-    const encryptedCert = this.encryptAndHash(certPayload); // 76 + 16 = 92 bytes
-    if (debug) console.log(`[NOISE-X25519] Encrypted cert (${encryptedCert.length} bytes)`);
-
-    const [k1, k2] = noiseHkdf2(this.ck, Buffer.alloc(0), this.hashAlgorithm);
-    this.recvCipher.initializeKey(k1);
-    this.sendCipher.initializeKey(k2);
-    this.handshakeComplete = true;
-
-    // Act 2 = server_eph(32) + enc_static(48) + enc_cert(92) = 172 bytes
-    const act2 = Buffer.concat([this.serverEphemeralPub, encryptedStatic, encryptedCert]);
-    if (debug) console.log(`[NOISE-X25519] Act 2 total: ${act2.length} bytes`);
     return act2;
   }
 
@@ -859,27 +474,19 @@ export class Sv2NoiseInitiator {
   private handshakeComplete = false;
   private ellSwift!: EllSwiftApi;
   private readonly cipherAlgorithm: Sv2CipherAlgorithm;
-  private readonly handshakeCipherAlgorithm: Sv2CipherAlgorithm;
-  private readonly dhMode: Sv2NoiseDhMode;
-  private readonly hashAlgorithm: Sv2NoiseHashAlgorithm;
 
   private ephemeralPriv!: Buffer;
   private ephemeralPub!: Buffer;
 
   constructor(
     cipherAlgorithm: Sv2CipherAlgorithm = 'chacha20-poly1305',
-    dhMode: Sv2NoiseDhMode = 'ellswift',
     prologue: Buffer = Buffer.alloc(0),
   ) {
     this.cipherAlgorithm = cipherAlgorithm;
-    this.dhMode = dhMode;
 
-    const protocolNameStr = getNoiseProtocolName(dhMode, cipherAlgorithm);
-    this.hashAlgorithm = getHashAlgorithm(protocolNameStr);
+    const protocolNameStr = getNoiseProtocolName(cipherAlgorithm);
 
-    // For X25519+BLAKE2s (BraiinsOS): both handshake and transport use AES-GCM
-    this.handshakeCipherAlgorithm = dhMode === 'x25519' ? 'aes-256-gcm' : cipherAlgorithm;
-    this.tempCipher = new Sv2CipherState(this.handshakeCipherAlgorithm);
+    this.tempCipher = new Sv2CipherState(cipherAlgorithm);
     this.sendCipher = new Sv2CipherState(cipherAlgorithm);
     this.recvCipher = new Sv2CipherState(cipherAlgorithm);
 
@@ -888,21 +495,21 @@ export class Sv2NoiseInitiator {
       this.h = Buffer.alloc(32);
       protocolName.copy(this.h);
     } else {
-      this.h = noiseHash(protocolName, this.hashAlgorithm);
+      this.h = sha256(protocolName);
     }
     this.ck = Buffer.from(this.h);
     // MixHash(prologue) per Noise spec: h = HASH(h || prologue)
-    this.h = noiseHash(Buffer.concat([this.h, prologue]), this.hashAlgorithm);
+    this.h = sha256(Buffer.concat([this.h, prologue]));
   }
 
   private mixHash(data: Buffer): void {
-    this.h = noiseHash(Buffer.concat([this.h, data]), this.hashAlgorithm);
+    this.h = sha256(Buffer.concat([this.h, data]));
   }
 
   private mixKey(ikm: Buffer): void {
-    const [newCk, tempK] = noiseHkdf2(this.ck, ikm, this.hashAlgorithm);
+    const [newCk, tempK] = hkdf2(this.ck, ikm);
     this.ck = newCk;
-    this.tempCipher = new Sv2CipherState(this.handshakeCipherAlgorithm);
+    this.tempCipher = new Sv2CipherState(this.cipherAlgorithm);
     this.tempCipher.initializeKey(tempK);
   }
 
@@ -922,18 +529,12 @@ export class Sv2NoiseInitiator {
     return Buffer.from(secret);
   }
 
-  /** Generate Act 1: 64-byte (EllSwift) or 32-byte (X25519) ephemeral key. */
+  /** Generate Act 1: 64-byte EllSwift ephemeral key. */
   async generateAct1(): Promise<Buffer> {
-    if (this.dhMode === 'x25519') {
-      const kp = generateX25519Keypair();
-      this.ephemeralPriv = kp.privateKey;
-      this.ephemeralPub = kp.publicKey;
-    } else {
-      this.ellSwift = await loadEllSwift();
-      const kp = this.ellSwift.keygen();
-      this.ephemeralPriv = Buffer.from(kp.privateKey);
-      this.ephemeralPub = Buffer.from(kp.publicKey);
-    }
+    this.ellSwift = await loadEllSwift();
+    const kp = this.ellSwift.keygen();
+    this.ephemeralPriv = Buffer.from(kp.privateKey);
+    this.ephemeralPub = Buffer.from(kp.publicKey);
 
     this.mixHash(this.ephemeralPub);
     this.mixHash(Buffer.alloc(0));
@@ -942,16 +543,6 @@ export class Sv2NoiseInitiator {
 
   /** Process Act 2 from responder, returns the decrypted server static key and cert. */
   processAct2(act2: Buffer): {
-    serverStaticKey: Buffer;
-    certificate: Sv2SignatureNoiseMessage;
-  } {
-    if (this.dhMode === 'x25519') {
-      return this.processAct2X25519(act2);
-    }
-    return this.processAct2EllSwift(act2);
-  }
-
-  private processAct2EllSwift(act2: Buffer): {
     serverStaticKey: Buffer;
     certificate: Sv2SignatureNoiseMessage;
   } {
@@ -986,45 +577,7 @@ export class Sv2NoiseInitiator {
     const certPayload = this.decryptAndHash(Buffer.from(encryptedCert));
     const certificate = deserializeSignatureNoiseMessage(certPayload);
 
-    const [k1, k2] = noiseHkdf2(this.ck, Buffer.alloc(0), this.hashAlgorithm);
-    this.sendCipher.initializeKey(k1);
-    this.recvCipher.initializeKey(k2);
-    this.handshakeComplete = true;
-
-    return { serverStaticKey, certificate };
-  }
-
-  private processAct2X25519(act2: Buffer): {
-    serverStaticKey: Buffer;
-    certificate: Sv2SignatureNoiseMessage;
-  } {
-    // Act 2: server_eph(32) + enc_static(48) + enc_cert(92) = 172 bytes
-    if (act2.length !== 172) {
-      throw new Error(`Act 2 (X25519) must be 172 bytes, got ${act2.length}`);
-    }
-
-    const serverEphemeral = act2.subarray(0, 32);
-    const encryptedStatic = act2.subarray(32, 80);  // 32 + 16 MAC = 48
-    const encryptedCert = act2.subarray(80, 172);   // 76 + 16 MAC = 92
-
-    this.mixHash(Buffer.from(serverEphemeral));
-
-    // ee DH (X25519 — symmetric, no party bit)
-    const eeDH = x25519Ecdh(this.ephemeralPriv, this.ephemeralPub, Buffer.from(serverEphemeral));
-    this.mixKey(eeDH);
-
-    // Decrypt static key (32 bytes)
-    const serverStaticKey = this.decryptAndHash(Buffer.from(encryptedStatic));
-
-    // es DH
-    const esDH = x25519Ecdh(this.ephemeralPriv, this.ephemeralPub, serverStaticKey);
-    this.mixKey(esDH);
-
-    // Decrypt certificate (BraiinsOS 76-byte format with U16 sig_len prefix)
-    const certPayload = this.decryptAndHash(Buffer.from(encryptedCert));
-    const certificate = deserializeSignatureNoiseMessageBraiins(certPayload);
-
-    const [k1, k2] = noiseHkdf2(this.ck, Buffer.alloc(0), this.hashAlgorithm);
+    const [k1, k2] = hkdf2(this.ck, Buffer.alloc(0));
     this.sendCipher.initializeKey(k1);
     this.recvCipher.initializeKey(k2);
     this.handshakeComplete = true;

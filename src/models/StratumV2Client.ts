@@ -28,7 +28,7 @@ import { MiningJob } from './MiningJob';
 import { StratumV1ClientStatistics } from './StratumV1ClientStatistics';
 import { DifficultyUtils } from '../utils/difficulty.utils';
 
-import { Sv2NoiseSession, Sv2CipherAlgorithm, Sv2NoiseDhMode } from './sv2/sv2-noise';
+import { Sv2NoiseSession } from './sv2/sv2-noise';
 import { Sv2FrameReader, Sv2FrameWriter } from './sv2/sv2-frame';
 import { BufferReader } from './sv2/sv2-binary-codec';
 import {
@@ -37,7 +37,6 @@ import {
   Sv2MiningSetupSuccessFlags,
   Sv2Protocol,
   SV2_NOISE_ACT1_SIZE,
-  SV2_X25519_KEY_SIZE,
   SV2_CHANNEL_MSG_FLAG,
 } from './sv2/sv2-constants';
 import {
@@ -266,106 +265,13 @@ export class StratumV2Client {
   private async performHandshake(firstChunk: Buffer): Promise<void> {
     console.log(`[SV2 ${this.sessionId}] New connection from ${this.socket.remoteAddress}`);
 
-    // Detect STR2 cipher negotiation preamble (BraiinsOS)
-    // Format: [0x09, 0x00, 'S', 'T', 'R', '2', version, cipher[4]]
-    const STR2_MAGIC = Buffer.from([0x09, 0x00, 0x53, 0x54, 0x52, 0x32]);
-    let act1Chunk = firstChunk;
-    let dhMode: Sv2NoiseDhMode = 'ellswift';
-    let isStr2 = false;
-
     const debug = process.env.SV2_NOISE_DEBUG === 'true';
+    const act1Chunk = firstChunk;
 
-    if (firstChunk.length >= 6 && firstChunk.subarray(0, 6).equals(STR2_MAGIC)) {
-      isStr2 = true;
-      if (debug) console.log(`[SV2 ${this.sessionId}] 🔧 Detected BraiinsOS STR2 protocol`);
-      if (debug) console.log(`[SV2 ${this.sessionId}] STR2 raw: ${firstChunk.subarray(0, Math.min(firstChunk.length, 20)).toString('hex')}`);
-      // Parse cipher negotiation
-      const cipherStr = firstChunk.subarray(7, 11).toString('ascii');
+    if (debug) console.log(`[SV2 ${this.sessionId}] Standard SV2 miner (EllSwift DH mode)`);
+    if (debug) console.log(`[SV2 ${this.sessionId}] First chunk (${firstChunk.length} bytes): ${firstChunk.subarray(0, Math.min(firstChunk.length, 20)).toString('hex')}...`);
 
-      let selectedCipher: Sv2CipherAlgorithm = 'chacha20-poly1305';
-      if (cipherStr === 'AESG') {
-        selectedCipher = 'aes-256-gcm';
-      }
-
-      dhMode = 'x25519';
-
-      console.log(`[SV2 ${this.sessionId}] STR2 cipher negotiation: cipher=${cipherStr} -> ${selectedCipher}, DH=x25519`);
-
-      // Respond with same negotiation message (echo back to accept)
-      const negotiationMsg = firstChunk.subarray(0, 11);
-      await this.writeRaw(negotiationMsg);
-
-      // Construct BraiinsOS-compatible Noise prologue.
-      // BraiinsOS serializes: Prologue { initiator_msg: None, responder_msg: Some(NegotiationMessage) }
-      // Format: 0x00 (None) + 0x01 (Some) + NegotiationMessage (without 2-byte length prefix)
-      // Both initiator and responder use this same prologue (BraiinsOS quirk: initiator_msg is always None).
-      const responderPayload = negotiationMsg.subarray(2); // Strip 2-byte LE length prefix
-      let prologue = Buffer.concat([
-        Buffer.from([0x00]),           // initiator_msg = None
-        Buffer.from([0x01]),           // responder_msg = Some
-        Buffer.from(responderPayload), // NegotiationMessage: "STR2" + count + cipher
-      ]);
-
-      // Override prologue via SV2_STR2_PROLOGUE env var (for debugging):
-      //   empty       — no prologue (0 bytes)
-      //   negotiation — client's full STR2 message (11 bytes with length prefix)
-      //   payload     — STR2 payload only (9 bytes without length prefix)
-      //   full        — client + server STR2 messages (22 bytes)
-      const prologueMode = process.env.SV2_STR2_PROLOGUE;
-      if (prologueMode === 'empty') {
-        prologue = Buffer.alloc(0);
-      } else if (prologueMode === 'negotiation') {
-        prologue = Buffer.from(negotiationMsg);
-      } else if (prologueMode === 'payload') {
-        prologue = Buffer.from(responderPayload);
-      } else if (prologueMode === 'full') {
-        prologue = Buffer.concat([Buffer.from(negotiationMsg), Buffer.from(negotiationMsg)]);
-      }
-
-      if (debug) console.log(`[SV2 ${this.sessionId}] Prologue (${prologue.length} bytes): ${prologue.toString('hex')}`);
-
-      // Handshake cipher override (SV2_HANDSHAKE_CIPHER env var):
-      //   Default for x25519+BLAKE2s: AES-256-GCM (matching protocol name)
-      //   chacha — force ChaCha20-Poly1305 for handshake
-      //   aesgcm — force AES-256-GCM for handshake
-      let handshakeCipherOverride: 'chacha20-poly1305' | 'aes-256-gcm' | undefined;
-      const hsCipherEnv = process.env.SV2_HANDSHAKE_CIPHER;
-      if (hsCipherEnv === 'aesgcm') {
-        handshakeCipherOverride = 'aes-256-gcm';
-      } else if (hsCipherEnv === 'chacha') {
-        handshakeCipherOverride = 'chacha20-poly1305';
-      }
-
-      this.noiseSession = new Sv2NoiseSession(
-        this.stratumV2Service.getNoiseConfig(),
-        selectedCipher,
-        dhMode,
-        prologue,
-        handshakeCipherOverride,
-      );
-
-      // After cipher negotiation, handshake messages are length-prefixed:
-      // [2-byte LE length][payload]
-      const headerBuf = await this.waitForData(2);
-      const payloadLen = headerBuf.readUInt16LE(0);
-
-      // Read the remaining payload bytes (may already be partially in headerBuf)
-      const headerExtra = headerBuf.subarray(2);
-      if (headerExtra.length >= payloadLen) {
-        act1Chunk = headerExtra.subarray(0, payloadLen);
-      } else {
-        const remaining = await this.waitForData(payloadLen - headerExtra.length);
-        act1Chunk = Buffer.concat([headerExtra, remaining]).subarray(0, payloadLen);
-      }
-    } else {
-      // Standard SV2 miner (EllSwift mode)
-      if (debug) console.log(`[SV2 ${this.sessionId}] 🔧 Standard SV2 miner detected (EllSwift DH mode)`);
-      if (debug) console.log(`[SV2 ${this.sessionId}] First chunk (${firstChunk.length} bytes): ${firstChunk.subarray(0, Math.min(firstChunk.length, 20)).toString('hex')}...`);
-      if (debug) console.log(`[SV2 ${this.sessionId}] Using default Noise config: cipher=chacha20-poly1305, DH=ellswift, prologue=empty`);
-    }
-
-    // Act 1 size depends on DH mode
-    const expectedAct1Size = dhMode === 'x25519' ? SV2_X25519_KEY_SIZE : SV2_NOISE_ACT1_SIZE;
+    const expectedAct1Size = SV2_NOISE_ACT1_SIZE;
 
     if (act1Chunk.length < expectedAct1Size) {
       throw new Error(`First chunk too short for Act 1: ${act1Chunk.length} bytes (expected ${expectedAct1Size})`);
@@ -374,7 +280,7 @@ export class StratumV2Client {
     const act1 = act1Chunk.subarray(0, expectedAct1Size);
     const remainder = act1Chunk.subarray(expectedAct1Size);
 
-    console.log(`[SV2 ${this.sessionId}] Noise Act 1 received (${act1.length} bytes, DH=${dhMode})`);
+    console.log(`[SV2 ${this.sessionId}] Noise Act 1 received (${act1.length} bytes)`);
     if (debug) console.log(`[SV2 ${this.sessionId}] Act 1 hex: ${act1.toString('hex')}`);
 
     // Process Act 1 -> produce Act 2
@@ -383,19 +289,7 @@ export class StratumV2Client {
     console.log(`[SV2 ${this.sessionId}] Noise Act 2 produced (${act2.length} bytes)`);
     if (debug) console.log(`[SV2 ${this.sessionId}] Act 2 hex: ${act2.toString('hex')}`);
 
-    // For STR2 clients, wrap Act 2 in 2-byte LE length prefix
-    // Set SV2_ACT2_RAW=true to skip the length prefix (for testing)
-    if (isStr2 && process.env.SV2_ACT2_RAW !== 'true') {
-      const framedAct2 = Buffer.alloc(2 + act2.length);
-      framedAct2.writeUInt16LE(act2.length, 0);
-      act2.copy(framedAct2, 2);
-      if (debug) console.log(`[SV2 ${this.sessionId}] Sending Act 2 with 2-byte LE length prefix (${framedAct2.length} total)`);
-      await this.writeRaw(framedAct2);
-    } else {
-      if (debug && isStr2) console.log(`[SV2 ${this.sessionId}] Sending Act 2 RAW (no length prefix)`);
-      if (debug && !isStr2) console.log(`[SV2 ${this.sessionId}] Sending Act 2 (standard format, ${act2.length} bytes)`);
-      await this.writeRaw(act2);
-    }
+    await this.writeRaw(act2);
 
     // Switch to encrypted framing
     this.frameReader.setDecryptFn(this.noiseSession.decrypt.bind(this.noiseSession));
@@ -427,7 +321,7 @@ export class StratumV2Client {
       }
     }
 
-    console.log(`[SV2 ${this.sessionId}] Noise handshake complete, transport encrypted (DH=${dhMode})`);
+    console.log(`[SV2 ${this.sessionId}] Noise handshake complete, transport encrypted`);
     if (debug) console.log(`[SV2 ${this.sessionId}] ✅ Encrypted channel established, ready for SV2 protocol messages`);
   }
 

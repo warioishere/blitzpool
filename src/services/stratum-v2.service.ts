@@ -8,15 +8,9 @@ import { IProtocolHandler, StratumPortConfig } from '../models/interfaces/unifie
 import { StratumV2Client } from '../models/StratumV2Client';
 import {
   generateServerKeypair,
-  generateX25519Keypair,
-  generateEd25519Keypair,
   xOnlyPubKeyFromPriv,
   createSignatureNoiseMessage,
-  createSignatureNoiseMessageEd25519,
-  encodeEd25519PubKeyBase58Check,
   Sv2ServerKeypair,
-  Sv2X25519Keypair,
-  Sv2Ed25519Keypair,
   Sv2SignatureNoiseMessage,
   Sv2NoiseConfig,
 } from '../models/sv2/sv2-noise';
@@ -65,12 +59,6 @@ export class StratumV2Service implements OnModuleInit, IProtocolHandler {
   private serverKeypair!: Sv2ServerKeypair;
   private certificate!: Sv2SignatureNoiseMessage;
 
-  // Ed25519 authority keypair (BraiinsOS certificate signing)
-  private ed25519AuthorityKeypair!: Sv2Ed25519Keypair;
-
-  // X25519 static keypair + certificate (BraiinsOS mode)
-  private x25519Keypair!: Sv2X25519Keypair;
-  private x25519Certificate!: Sv2SignatureNoiseMessage;
 
   constructor(
     private readonly configService: ConfigService,
@@ -97,9 +85,7 @@ export class StratumV2Service implements OnModuleInit, IProtocolHandler {
 
   async onModuleInit(): Promise<void> {
     await this.initAuthorityKey();
-    this.initEd25519AuthorityKey();
     await this.initServerKeypair();
-    this.initX25519Keypair();
 
     console.log('[StratumV2Service] Initialized - authority pubkey:', this.authorityPubKeyXOnly.toString('hex'));
   }
@@ -114,36 +100,6 @@ export class StratumV2Service implements OnModuleInit, IProtocolHandler {
     }
     this.authorityPubKeyXOnly = xOnlyPubKeyFromPriv(this.authorityPrivKey);
     console.log('[StratumV2Service] Authority public key (x-only):', this.authorityPubKeyXOnly.toString('hex'));
-  }
-
-  private initEd25519AuthorityKey(): void {
-    const envSeed = this.configService.get<string>('SV2_ED25519_AUTHORITY_SEED');
-    if (envSeed && envSeed.length === 64) {
-      // Deterministic: derive Ed25519 keypair from configured seed via PKCS8 DER import
-      const seed = Buffer.from(envSeed, 'hex');
-      // Ed25519 PKCS8 DER: SEQUENCE { version(0), OID(1.3.101.112), OCTET STRING { OCTET STRING { seed } } }
-      const pkcs8Prefix = Buffer.from('302e020100300506032b657004220420', 'hex');
-      const pkcs8Der = Buffer.concat([pkcs8Prefix, seed]);
-      const privKey = crypto.createPrivateKey({ key: pkcs8Der, format: 'der', type: 'pkcs8' });
-      const pubKey = crypto.createPublicKey(privKey);
-      const pubJwk = pubKey.export({ format: 'jwk' });
-      const privJwk = privKey.export({ format: 'jwk' });
-      this.ed25519AuthorityKeypair = {
-        privateKeyRaw: Buffer.from(privJwk.d!, 'base64url'),
-        publicKeyRaw: Buffer.from(pubJwk.x!, 'base64url'),
-      };
-    } else {
-      this.ed25519AuthorityKeypair = generateEd25519Keypair();
-      if (!envSeed) {
-        console.warn('[StratumV2Service] SV2_ED25519_AUTHORITY_SEED not set - generated random Ed25519 authority key (not persistent across restarts!)');
-      }
-    }
-
-    const pubHex = this.ed25519AuthorityKeypair.publicKeyRaw.toString('hex');
-    const pubBase58 = encodeEd25519PubKeyBase58Check(this.ed25519AuthorityKeypair.publicKeyRaw);
-    console.log('[StratumV2Service] Ed25519 authority pubkey (hex):', pubHex);
-    console.log('[StratumV2Service] Ed25519 authority pubkey (base58check):', pubBase58);
-    console.log('[StratumV2Service] BraiinsOS pool URL format: stratum2+tcp://YOUR_HOST:PORT/' + pubBase58);
   }
 
   private async initServerKeypair(): Promise<void> {
@@ -164,30 +120,11 @@ export class StratumV2Service implements OnModuleInit, IProtocolHandler {
     );
   }
 
-  private initX25519Keypair(): void {
-    this.x25519Keypair = generateX25519Keypair();
-    this.regenerateX25519Certificate();
-  }
-
-  private regenerateX25519Certificate(): void {
-    const now = Math.floor(Date.now() / 1000);
-    const validFrom = now - 3600;
-    const notValidAfter = now + 86400;
-    // Sign the X25519 public key (32 bytes) with Ed25519 authority key (BraiinsOS format)
-    this.x25519Certificate = createSignatureNoiseMessageEd25519(
-      this.ed25519AuthorityKeypair,
-      this.x25519Keypair.publicKey,
-      validFrom,
-      notValidAfter,
-    );
-  }
-
   /** Rotate certificate every 12 hours */
   @Interval(12 * 60 * 60 * 1000)
   handleCertificateRotation(): void {
     this.regenerateCertificate();
-    this.regenerateX25519Certificate();
-    console.log('[StratumV2Service] Certificates rotated');
+    console.log('[StratumV2Service] Certificate rotated');
   }
 
   /** Get the current Noise config for new connections */
@@ -195,8 +132,6 @@ export class StratumV2Service implements OnModuleInit, IProtocolHandler {
     return {
       staticKeypair: this.serverKeypair,
       certificateMessage: this.certificate,
-      x25519StaticKeypair: this.x25519Keypair,
-      x25519CertificateMessage: this.x25519Certificate,
     };
   }
 

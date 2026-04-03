@@ -29,26 +29,8 @@ export const SV2_PROTOCOL_NAME = 'MiningProtocol';
 /** Noise NX protocol name used to initialize h (ChaCha20-Poly1305) */
 export const SV2_NOISE_PROTOCOL_NAME = 'Noise_NX_Secp256k1+EllSwift_ChaChaPoly_SHA256';
 
-/** Noise NX protocol name for AES-256-GCM cipher (BraiinsOS negotiation) */
+/** Noise NX protocol name for AES-256-GCM cipher */
 export const SV2_NOISE_PROTOCOL_NAME_AESGCM = 'Noise_NX_Secp256k1+EllSwift_AESGCM_SHA256';
-
-/** Noise NX protocol name for X25519 + AES-GCM (BraiinsOS negotiated mode) */
-export const SV2_NOISE_PROTOCOL_NAME_X25519_AESGCM = 'Noise_NX_25519_AESGCM_SHA256';
-
-/** Noise NX protocol name for X25519 + ChaCha20-Poly1305 (handshake cipher for BraiinsOS) */
-export const SV2_NOISE_PROTOCOL_NAME_X25519_CHACHA = 'Noise_NX_25519_ChaChaPoly_SHA256';
-
-/** Noise NX protocol name for X25519 + AES-GCM + BLAKE2s (BraiinsOS legacy firmware) */
-export const SV2_NOISE_PROTOCOL_NAME_X25519_AESGCM_BLAKE2S = 'Noise_NX_25519_AESGCM_BLAKE2s';
-
-/** X25519 public key size (32 bytes) */
-export const SV2_X25519_KEY_SIZE = 32;
-
-/** Noise NX Act 2 size with X25519: 32 + 48 + 92 = 172 bytes (BraiinsOS 76-byte cert + MAC) */
-export const SV2_NOISE_ACT2_SIZE_X25519 = 172;
-
-/** BraiinsOS SIGNATURE_NOISE_MESSAGE size: version(2) + validFrom(4) + notValidAfter(4) + sigLen(2) + signature(64) = 76 */
-export const SV2_SIGNATURE_NOISE_MSG_SIZE_BRAIINS = 76;
 
 /** Noise NX Act 1 size: 64-byte initiator ephemeral EllSwift key */
 export const SV2_NOISE_ACT1_SIZE = 64;
