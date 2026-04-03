@@ -64,11 +64,11 @@ export class ClientController {
             return cachedResult;
         }
 
-        const workers = await this.clientService.getByAddress(address);
-
-        const addressSettings = await this.addressSettingsService.getSettings(address, false);
-
-        const totalShares = await this.shareTotalsCacheService.getAddressTotal(address);
+        const [workers, addressSettings, totalShares] = await Promise.all([
+            this.clientService.getByAddress(address),
+            this.addressSettingsService.getSettings(address, false),
+            this.shareTotalsCacheService.getAddressTotal(address),
+        ]);
         const totalHashrate = workers.reduce((sum, w) => sum + (w.hashRate ?? 0), 0);
         const v1Difficulties = this.stratumV1Service.getCurrentDifficulties(address);
         const v2Difficulties = this.stratumV2Service.getCurrentDifficulties(address);
@@ -282,11 +282,13 @@ export class ClientController {
             return cachedResult;
         }
 
-        const workerShares = await this.shareTotalsCacheService.getWorkerTotals(address);
-        const workerRejected = await this.clientStatisticsService.getTotalRejectedForWorkers(address);
+        const [workerShares, dbWorkerTotals] = await Promise.all([
+            this.shareTotalsCacheService.getWorkerTotals(address),
+            this.workerSharesService.getWorkerTotals(address),
+        ]);
 
-        // Create a map for quick lookup of rejected counts
-        const rejectedMap = new Map(workerRejected.map(wr => [wr.clientName, wr.totalRejected]));
+        // Create a map for quick lookup of rejected counts (PK lookup, no full scan)
+        const rejectedMap = new Map(dbWorkerTotals.map(w => [w.clientName, w.rejectedShares]));
 
         const result = workerShares.map(ws => ({
             workerName: ws.workerName,

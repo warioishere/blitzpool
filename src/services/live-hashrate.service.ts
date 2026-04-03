@@ -41,7 +41,7 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
       do {
         const result = await this.redis.scan(cursor, {
           MATCH: pattern,
-          COUNT: 100,
+          COUNT: 1000,
         });
 
         cursor = result.cursor;
@@ -230,23 +230,28 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
       const keys = await this.scanKeys(`${this.POOL_PREFIX}:*`);
       const dataPoints: Array<{ label: number; data: number }> = [];
 
+      const validKeys: string[] = [];
+      const validTimestamps: number[] = [];
       for (const key of keys) {
-        try {
-          const timestampStr = key.substring(this.POOL_PREFIX.length + 1);
-          const timestamp = parseInt(timestampStr, 10);
+        const timestampStr = key.substring(this.POOL_PREFIX.length + 1);
+        const timestamp = parseInt(timestampStr, 10);
+        if (!Number.isNaN(timestamp) && timestamp >= alignedStartTime && timestamp <= alignedNow) {
+          validKeys.push(key);
+          validTimestamps.push(timestamp);
+        }
+      }
 
-          if (!Number.isNaN(timestamp) && timestamp >= alignedStartTime && timestamp <= alignedNow) {
-            const data = await this.redis.get(key);
-            if (data) {
-              const parsed = JSON.parse(data);
-              dataPoints.push({
-                label: timestamp,
-                data: parsed.hashrate ?? 0,
-              });
+      if (validKeys.length > 0) {
+        const values = await this.redis.mGet(validKeys);
+        for (let i = 0; i < validKeys.length; i++) {
+          try {
+            if (values[i]) {
+              const parsed = JSON.parse(values[i]);
+              dataPoints.push({ label: validTimestamps[i], data: parsed.hashrate ?? 0 });
             }
+          } catch (error) {
+            console.warn(`[LiveHashrate] Error parsing pool key ${validKeys[i]}:`, error);
           }
-        } catch (error) {
-          console.warn(`[LiveHashrate] Error parsing pool key ${key}:`, error);
         }
       }
 
@@ -279,26 +284,30 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
       const keys = await this.scanKeys(`${this.ADDR_PREFIX}:${address}:*`);
       const dataPoints: Array<{ label: number; data: number }> = [];
 
+      const validKeys: string[] = [];
+      const validTimestamps: number[] = [];
       for (const key of keys) {
-        try {
-          const parts = key.split(':');
-          if (parts.length >= 4) {
-            const timestampStr = parts[parts.length - 1];
-            const timestamp = parseInt(timestampStr, 10);
-
-            if (!Number.isNaN(timestamp) && timestamp >= alignedStartTime && timestamp <= alignedNow) {
-              const data = await this.redis.get(key);
-              if (data) {
-                const parsed = JSON.parse(data);
-                dataPoints.push({
-                  label: timestamp,
-                  data: parsed.hashrate ?? 0,
-                });
-              }
-            }
+        const parts = key.split(':');
+        if (parts.length >= 4) {
+          const timestamp = parseInt(parts[parts.length - 1], 10);
+          if (!Number.isNaN(timestamp) && timestamp >= alignedStartTime && timestamp <= alignedNow) {
+            validKeys.push(key);
+            validTimestamps.push(timestamp);
           }
-        } catch (error) {
-          console.warn(`[LiveHashrate] Error parsing address key for ${address}:`, error);
+        }
+      }
+
+      if (validKeys.length > 0) {
+        const values = await this.redis.mGet(validKeys);
+        for (let i = 0; i < validKeys.length; i++) {
+          try {
+            if (values[i]) {
+              const parsed = JSON.parse(values[i]);
+              dataPoints.push({ label: validTimestamps[i], data: parsed.hashrate ?? 0 });
+            }
+          } catch (error) {
+            console.warn(`[LiveHashrate] Error parsing address key for ${address}:`, error);
+          }
         }
       }
 

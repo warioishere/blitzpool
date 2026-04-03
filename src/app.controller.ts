@@ -64,8 +64,8 @@ export class AppController {
     poolInfo: parseInt(this.configService.get('API_CACHE_TTL_POOL_INFO') ?? '600') * 1000,
     coreInfo: parseInt(this.configService.get('API_CACHE_TTL_CORE_INFO') ?? '60') * 1000,
     peerInfo: parseInt(this.configService.get('API_CACHE_TTL_PEER_INFO') ?? '60') * 1000,
-    chart: parseInt(this.configService.get('API_CACHE_TTL_CHART') ?? '10') * 1000,
-    liveChart: parseInt(this.configService.get('API_CACHE_TTL_LIVE_CHART') ?? '5') * 1000,
+    chart: parseInt(this.configService.get('API_CACHE_TTL_CHART') ?? '60') * 1000,
+    liveChart: parseInt(this.configService.get('API_CACHE_TTL_LIVE_CHART') ?? '15') * 1000,
     shares: parseInt(this.configService.get('API_CACHE_TTL_SHARES') ?? '60') * 1000,
     workers: parseInt(this.configService.get('API_CACHE_TTL_WORKERS') ?? '60') * 1000,
     accepted: parseInt(this.configService.get('API_CACHE_TTL_ACCEPTED') ?? '60') * 1000,
@@ -331,12 +331,14 @@ export class AppController {
 
     const now = Date.now();
     const oneDay = 24 * 60 * 60 * 1000;
-    const latestBlock = await this.blocksService.getLatestBlock();
-    const sinceBlock = latestBlock?.createdAt ? latestBlock.createdAt.getTime() : 0;
 
-    const totals1d = await this.poolShareStatisticsService.getTotalsSince(now - oneDay);
-    const totals14d = await this.poolShareStatisticsService.getTotalsSince(now - oneDay * 14);
-    const totals30d = await this.poolShareStatisticsService.getTotalsSince(now - oneDay * 30);
+    const [latestBlock, totals1d, totals14d, totals30d] = await Promise.all([
+      this.blocksService.getLatestBlock(),
+      this.poolShareStatisticsService.getTotalsSince(now - oneDay),
+      this.poolShareStatisticsService.getTotalsSince(now - oneDay * 14),
+      this.poolShareStatisticsService.getTotalsSince(now - oneDay * 30),
+    ]);
+    const sinceBlock = latestBlock?.createdAt ? latestBlock.createdAt.getTime() : 0;
     const totalsSinceBlock = await this.poolShareStatisticsService.getTotalsSince(sinceBlock);
 
     const data = {

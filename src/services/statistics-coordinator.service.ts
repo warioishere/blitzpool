@@ -379,6 +379,7 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
     const BATCH_SIZE = 1000;
     let flushed = 0;
     const successfulKeys: string[] = [];
+    const rejectedByWorker = new Map<string, { address: string; clientName: string; rejectedShares: number }>();
 
     for (let i = 0; i < records.length; i += BATCH_SIZE) {
       const batch = records.slice(i, i + BATCH_SIZE);
@@ -389,6 +390,21 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
         flushed += batch.length;
         // Track successfully flushed keys
         successfulKeys.push(...batchKeys);
+
+        // Accumulate per-worker rejected totals for successfully persisted records
+        for (const record of batch) {
+          const mapKey = `${record.address}|${record.clientName}`;
+          const entry = rejectedByWorker.get(mapKey) ?? {
+            address: record.address as string,
+            clientName: record.clientName as string,
+            rejectedShares: 0,
+          };
+          entry.rejectedShares +=
+            (record.rejectedJobNotFoundDiff1 as number || 0) +
+            (record.rejectedDuplicateShareDiff1 as number || 0) +
+            (record.rejectedLowDifficultyShareDiff1 as number || 0);
+          rejectedByWorker.set(mapKey, entry);
+        }
       } catch (error) {
         console.error(`[StatisticsCoordinator] Failed to flush client statistics batch:`, error);
         // Don't add to successfulKeys - these will remain in Redis for retry
@@ -401,6 +417,16 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
         await this.redisClient.del(successfulKeys);
       } catch (error) {
         console.error(`[StatisticsCoordinator] Failed to delete Redis keys:`, error);
+      }
+    }
+
+    // Persist rejected totals into worker_shares_entity (running totals, PK lookup)
+    const rejectedUpdates = [...rejectedByWorker.values()].filter(u => u.rejectedShares > 0);
+    if (rejectedUpdates.length > 0) {
+      try {
+        await this.workerSharesService.addRejectedBulk(rejectedUpdates);
+      } catch (error) {
+        console.error('[StatisticsCoordinator] Failed to flush rejected worker totals:', error);
       }
     }
 

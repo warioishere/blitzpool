@@ -12,7 +12,7 @@ export class WorkerSharesService {
         private readonly dataSource: DataSource,
     ) {}
 
-    public async getWorkerTotals(address: string): Promise<Array<{ clientName: string; shares: number }>> {
+    public async getWorkerTotals(address: string): Promise<Array<{ clientName: string; shares: number; rejectedShares: number }>> {
         return this.repo.find({ where: { address } });
     }
 
@@ -28,16 +28,20 @@ export class WorkerSharesService {
 
         if (this.dataSource.options.type === 'postgres') {
             await this.dataSource.query(`
-                INSERT INTO worker_shares_entity (address, "clientName", shares)
-                SELECT address, "clientName", SUM(shares) as shares
+                INSERT INTO worker_shares_entity (address, "clientName", shares, "rejectedShares")
+                SELECT address, "clientName",
+                    SUM(shares),
+                    SUM(COALESCE("rejectedJobNotFoundDiff1", 0) + COALESCE("rejectedDuplicateShareDiff1", 0) + COALESCE("rejectedLowDifficultyShareDiff1", 0))
                 FROM client_statistics_entity
                 GROUP BY address, "clientName"
                 HAVING SUM(shares) > 0
             `);
         } else {
             await this.dataSource.query(`
-                INSERT INTO worker_shares_entity (address, clientName, shares)
-                SELECT address, clientName, SUM(shares) as shares
+                INSERT INTO worker_shares_entity (address, clientName, shares, rejectedShares)
+                SELECT address, clientName,
+                    SUM(shares),
+                    SUM(COALESCE(rejectedJobNotFoundDiff1, 0) + COALESCE(rejectedDuplicateShareDiff1, 0) + COALESCE(rejectedLowDifficultyShareDiff1, 0))
                 FROM client_statistics_entity
                 GROUP BY address, clientName
                 HAVING SUM(shares) > 0
@@ -87,6 +91,49 @@ export class WorkerSharesService {
                     await this.repo.save(existing);
                 } else {
                     await this.repo.save({ address: u.address, clientName: u.clientName, shares: u.shares });
+                }
+            }
+        }
+    }
+
+    /**
+     * Increment rejected share totals per worker in bulk.
+     * Called by StatisticsCoordinator after each successful client-statistics flush.
+     */
+    public async addRejectedBulk(
+        updates: Array<{ address: string; clientName: string; rejectedShares: number }>,
+    ): Promise<void> {
+        if (updates.length === 0) return;
+
+        const dataSource = this.repo.manager.connection;
+
+        if (dataSource.options.type === 'postgres') {
+            const BATCH_SIZE = 1000;
+            for (let i = 0; i < updates.length; i += BATCH_SIZE) {
+                const batch = updates.slice(i, i + BATCH_SIZE);
+                const values = batch
+                    .map((_, j) => `($${j * 4 + 1}, $${j * 4 + 2}, $${j * 4 + 3}::double precision, $${j * 4 + 4}::double precision)`)
+                    .join(', ');
+                const params = batch.flatMap(u => [u.address, u.clientName, 0, u.rejectedShares]);
+
+                await dataSource.query(
+                    `INSERT INTO worker_shares_entity (address, "clientName", shares, "rejectedShares")
+                     VALUES ${values}
+                     ON CONFLICT (address, "clientName") DO UPDATE SET
+                       "rejectedShares" = worker_shares_entity."rejectedShares" + EXCLUDED."rejectedShares"`,
+                    params,
+                );
+            }
+        } else {
+            for (const u of updates) {
+                const existing = await this.repo.findOne({
+                    where: { address: u.address, clientName: u.clientName },
+                });
+                if (existing) {
+                    existing.rejectedShares += u.rejectedShares;
+                    await this.repo.save(existing);
+                } else {
+                    await this.repo.save({ address: u.address, clientName: u.clientName, shares: 0, rejectedShares: u.rejectedShares });
                 }
             }
         }

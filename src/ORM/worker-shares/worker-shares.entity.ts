@@ -16,4 +16,7 @@ export class WorkerSharesEntity {
 
     @Column({ type: 'double precision', default: 0 })
     shares: number;
+
+    @Column({ type: 'double precision', default: 0 })
+    rejectedShares: number;
 }
