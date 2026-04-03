@@ -85,7 +85,8 @@ describe('ShareTotalsCacheService', () => {
         hIncrByFloat: jest.fn().mockResolvedValue(undefined),
         hGetAll: jest.fn().mockResolvedValue({}),
         hSet: jest.fn().mockResolvedValue(undefined),
-        keys: jest.fn().mockResolvedValue([]),
+        scan: jest.fn().mockResolvedValue({ cursor: 0, keys: [] }),
+        del: jest.fn().mockResolvedValue(undefined),
       };
 
       cacheManager = {
@@ -149,10 +150,10 @@ describe('ShareTotalsCacheService', () => {
     });
 
     it('returns worker totals from DB + unflushed Redis deltas', async () => {
-      mockRedisClient.keys.mockResolvedValue([
-        'shares:worker:addr1:worker-1',
-        'shares:worker:addr1:worker-2',
-      ]);
+      mockRedisClient.scan.mockResolvedValueOnce({
+        cursor: 0,
+        keys: ['shares:worker:addr1:worker-1', 'shares:worker:addr1:worker-2'],
+      });
 
       mockRedisClient.hGetAll
         .mockResolvedValueOnce({ delta: '5' })
@@ -166,8 +167,20 @@ describe('ShareTotalsCacheService', () => {
       ]));
     });
 
+    it('uses SCAN instead of KEYS to find worker keys', async () => {
+      mockRedisClient.scan.mockResolvedValueOnce({ cursor: 0, keys: [] });
+
+      await service.getWorkerTotals('addr1');
+
+      expect(mockRedisClient.scan).toHaveBeenCalledWith('0', {
+        MATCH: 'shares:worker:addr1:*',
+        COUNT: 100,
+      });
+      expect(mockRedisClient).not.toHaveProperty('keys');
+    });
+
     it('returns empty array when no workers in DB and no Redis deltas', async () => {
-      mockRedisClient.keys.mockResolvedValue([]);
+      mockRedisClient.scan.mockResolvedValueOnce({ cursor: 0, keys: [] });
       workerSharesService.getWorkerTotals.mockResolvedValueOnce([]);
 
       const workerTotals = await service.getWorkerTotals('addr1');
@@ -175,11 +188,14 @@ describe('ShareTotalsCacheService', () => {
     });
 
     it('filters out hydration markers and lock keys from Redis', async () => {
-      mockRedisClient.keys.mockResolvedValue([
-        'shares:worker:addr1:worker-1',
-        'shares:worker:addr1:worker-2:hydrated',
-        'shares:worker:addr1:worker-3:lock',
-      ]);
+      mockRedisClient.scan.mockResolvedValueOnce({
+        cursor: 0,
+        keys: [
+          'shares:worker:addr1:worker-1',
+          'shares:worker:addr1:worker-2:hydrated',
+          'shares:worker:addr1:worker-3:lock',
+        ],
+      });
 
       mockRedisClient.hGetAll.mockResolvedValueOnce({ delta: '5' });
 

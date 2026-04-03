@@ -137,19 +137,21 @@ export class ShareTotalsCacheService implements OnModuleInit {
 
     // Add unflushed Redis deltas if available
     if (this.useRedis && this.redisClient) {
-      const pattern = `shares:worker:${address}:*`;
-      const allKeys = await this.redisClient.keys(pattern);
       const prefix = `shares:worker:${address}:`;
+      const allKeys = await this.scanWorkerKeys(address);
+      const validKeys = allKeys.filter(k => !k.endsWith(':hydrated') && !k.endsWith(':lock'));
 
-      for (const key of (allKeys || [])) {
-        if (key.endsWith(':hydrated') || key.endsWith(':lock')) continue;
-        const workerName = key.startsWith(prefix) ? key.substring(prefix.length) : key.split(':').pop() || '';
-        if (!workerName) continue;
-
-        const data = await this.redisClient.hGetAll(key);
-        const delta = parseFloat(data?.delta) || 0;
-        if (delta > 0) {
-          totalsMap.set(workerName, (totalsMap.get(workerName) || 0) + delta);
+      if (validKeys.length > 0) {
+        const hashes = await Promise.all(validKeys.map(k => this.redisClient.hGetAll(k)));
+        for (let i = 0; i < validKeys.length; i++) {
+          const workerName = validKeys[i].startsWith(prefix)
+            ? validKeys[i].substring(prefix.length)
+            : '';
+          if (!workerName) continue;
+          const delta = parseFloat(hashes[i]?.delta) || 0;
+          if (delta > 0) {
+            totalsMap.set(workerName, (totalsMap.get(workerName) || 0) + delta);
+          }
         }
       }
     }
@@ -168,19 +170,33 @@ export class ShareTotalsCacheService implements OnModuleInit {
     }
 
     try {
-      // Delete address total key
       const addressKey = this.getAddressKey(address);
       await this.redisClient.del(addressKey);
 
-      // Delete all worker keys for this address
-      const workerPattern = `shares:worker:${address}:*`;
-      const workerKeys = await this.redisClient.keys(workerPattern);
-
-      if (workerKeys && workerKeys.length > 0) {
-        await this.redisClient.del(...workerKeys);
+      const workerKeys = await this.scanWorkerKeys(address);
+      if (workerKeys.length > 0) {
+        await this.redisClient.del(workerKeys);
       }
     } catch (error) {
       console.error(`[ShareTotalsCacheService] Failed to clear data for address ${address}:`, error);
     }
+  }
+
+  /**
+   * Iterate Redis keyspace with SCAN to find all worker keys for an address.
+   * SCAN is non-blocking (unlike KEYS) and safe to use in production.
+   */
+  private async scanWorkerKeys(address: string): Promise<string[]> {
+    const pattern = `shares:worker:${address}:*`;
+    const keys: string[] = [];
+    let cursor = '0';
+    do {
+      const result = await this.redisClient.scan(cursor, { MATCH: pattern, COUNT: 100 });
+      cursor = result.cursor.toString();
+      if (result.keys?.length) {
+        keys.push(...result.keys);
+      }
+    } while (cursor !== '0');
+    return keys;
   }
 }
