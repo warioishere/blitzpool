@@ -18,6 +18,16 @@ RUN npm install && npm run build
 ############################
 FROM node:22.11.0-bookworm-slim
 
+# Install jemalloc to replace glibc malloc — prevents RSS growth from
+# memory fragmentation caused by frequent small alloc/free cycles
+# (pg driver query buffers, 600+ stratum connection buffers)
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        libjemalloc2 \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+ENV LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
+
 # Expose ports for Stratum (standard + high-diff), JDP, and API
 EXPOSE 3333 3334 3335 3339
 
