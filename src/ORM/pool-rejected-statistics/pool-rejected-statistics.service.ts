@@ -132,10 +132,10 @@ export class PoolRejectedStatisticsService implements OnModuleInit {
 
       // Atomically increment count for this reason in Redis
       const key = `pool:rejected:${timeSlot}`;
-      await this.redisClient.hIncrByFloat(key, reason, diff);
-
-      // Set expiry on key (24 hours)
-      await this.redisClient.expire(key, 86400);
+      await Promise.all([
+        this.redisClient.hIncrByFloat(key, reason, diff),
+        this.redisClient.expire(key, 86400),
+      ]);
 
       return true;
     });

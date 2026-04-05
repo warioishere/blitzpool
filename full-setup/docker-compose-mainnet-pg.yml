@@ -6,6 +6,11 @@ services:
     image: my-bitcoin-image:latest
     restart: unless-stopped
     stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     networks:
       - bitcoin
     ports:
@@ -23,6 +28,11 @@ services:
     image: postgres:18-alpine
     restart: unless-stopped
     stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     networks:
       - bitcoin
     healthcheck:
@@ -60,6 +70,11 @@ services:
     image: valkey/valkey:8-alpine
     restart: unless-stopped
     stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     networks:
       - bitcoin
     healthcheck:
@@ -85,6 +100,11 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     deploy:
       resources:
         limits:

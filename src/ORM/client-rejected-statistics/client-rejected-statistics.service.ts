@@ -47,11 +47,11 @@ export class ClientRejectedStatisticsService implements OnModuleInit {
 
     // Atomically increment count and shares for this reason
     // shares = sum of (diff - 1) values
-    await this.redisClient.hIncrBy(key, `${reason}:count`, 1);
-    await this.redisClient.hIncrByFloat(key, `${reason}:shares`, Math.max(0, diff - 1));
-
-    // Set expiry on key (24 hours)
-    await this.redisClient.expire(key, 86400);
+    await Promise.all([
+      this.redisClient.hIncrBy(key, `${reason}:count`, 1),
+      this.redisClient.hIncrByFloat(key, `${reason}:shares`, Math.max(0, diff - 1)),
+      this.redisClient.expire(key, 86400),
+    ]);
   }
 
   public async getTotalsSince(
@@ -100,11 +100,14 @@ export class ClientRejectedStatisticsService implements OnModuleInit {
     try {
       // Delete all client rejected share keys for this address
       const pattern = `client:rejected:${address}:*`;
-      const keys = await this.redisClient.keys(pattern);
-
-      if (keys && keys.length > 0) {
-        await this.redisClient.del(...keys);
-      }
+      let cursor = '0';
+      do {
+        const result = await this.redisClient.scan(cursor, { MATCH: pattern, COUNT: 100 });
+        cursor = result.cursor.toString();
+        if (result.keys.length > 0) {
+          await this.redisClient.del(result.keys);
+        }
+      } while (cursor !== '0');
     } catch (error) {
       console.error(`[ClientRejectedStatisticsService] Failed to clear Redis keys for address ${address}:`, error);
     }

@@ -185,10 +185,14 @@ export class DifficultyScoresCacheService implements OnModuleInit {
           pattern = `diffscores:*`;
         }
 
-        const keys = await this.redisClient.keys(pattern);
-        if (keys && keys.length > 0) {
-          await this.redisClient.del(keys);
-        }
+        let cursor = '0';
+        do {
+          const result = await this.redisClient.scan(cursor, { MATCH: pattern, COUNT: 100 });
+          cursor = result.cursor.toString();
+          if (result.keys.length > 0) {
+            await this.redisClient.del(result.keys);
+          }
+        } while (cursor !== '0');
       } catch (error) {
         // Silently fail
       }

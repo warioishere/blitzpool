@@ -58,12 +58,13 @@ export class AddressSettingsCacheService implements OnModuleInit {
     if (this.useRedis && this.redisClient) {
       // Redis-backed implementation
       const key = `address:settings:${address}`;
-      await this.redisClient.hSet(key, {
-        bestDifficulty: bestDifficulty.toString(),
-        bestDifficultyUserAgent: bestDifficultyUserAgent || '',
-      });
-      // Cache for 1 hour
-      await this.redisClient.expire(key, 3600);
+      await Promise.all([
+        this.redisClient.hSet(key, {
+          bestDifficulty: bestDifficulty.toString(),
+          bestDifficultyUserAgent: bestDifficultyUserAgent || '',
+        }),
+        this.redisClient.expire(key, 3600),
+      ]);
     } else {
       // Fallback in-memory implementation
       this.cache.set(address, {
@@ -81,10 +82,14 @@ export class AddressSettingsCacheService implements OnModuleInit {
         await this.redisClient.del(key);
       } else {
         const pattern = 'address:settings:*';
-        const keys = await this.redisClient.keys(pattern);
-        if (keys && keys.length > 0) {
-          await this.redisClient.del(keys);
-        }
+        let cursor = '0';
+        do {
+          const result = await this.redisClient.scan(cursor, { MATCH: pattern, COUNT: 100 });
+          cursor = result.cursor.toString();
+          if (result.keys.length > 0) {
+            await this.redisClient.del(result.keys);
+          }
+        } while (cursor !== '0');
       }
     } else {
       // Fallback in-memory implementation
@@ -120,11 +125,13 @@ export class AddressSettingsCacheService implements OnModuleInit {
       };
 
       // Store in Redis
-      await this.redisClient.hSet(key, {
-        bestDifficulty: snapshot.bestDifficulty.toString(),
-        bestDifficultyUserAgent: snapshot.bestDifficultyUserAgent || '',
-      });
-      await this.redisClient.expire(key, 3600); // 1 hour
+      await Promise.all([
+        this.redisClient.hSet(key, {
+          bestDifficulty: snapshot.bestDifficulty.toString(),
+          bestDifficultyUserAgent: snapshot.bestDifficultyUserAgent || '',
+        }),
+        this.redisClient.expire(key, 3600),
+      ]);
 
       return snapshot;
     } else {

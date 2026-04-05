@@ -22,7 +22,7 @@ export class NetworkDifficultyTrackerService {
     }
 
     /**
-     * Update or create tracker (upsert)
+     * Update or create tracker (upsert via INSERT ... ON CONFLICT)
      * @param currentDifficulty - The current network difficulty
      * @param difficultyChanged - Whether the difficulty has changed from the previous check
      */
@@ -30,30 +30,36 @@ export class NetworkDifficultyTrackerService {
         currentDifficulty: number,
         difficultyChanged: boolean = false
     ): Promise<void> {
-        const existing = await this.trackerRepository.findOne({
-            where: { id: 1 }
-        });
-
         const now = Date.now();
 
-        if (existing) {
-            if (difficultyChanged) {
-                existing.previousDifficulty = existing.currentDifficulty;
-                existing.currentDifficulty = currentDifficulty;
-                existing.lastChangedAt = now;
-            }
-            existing.lastCheckedAt = now;
-            await this.trackerRepository.save(existing);
+        if (difficultyChanged) {
+            // When difficulty changed: shift current→previous, update all fields
+            // Use raw query to reference the existing row's currentDifficulty
+            await this.trackerRepository.query(
+                `INSERT INTO network_difficulty_tracker_entity ("id", "currentDifficulty", "previousDifficulty", "lastCheckedAt", "lastChangedAt")
+                 VALUES (1, $1, NULL, $2, $2)
+                 ON CONFLICT ("id") DO UPDATE SET
+                   "previousDifficulty" = network_difficulty_tracker_entity."currentDifficulty",
+                   "currentDifficulty" = $1,
+                   "lastCheckedAt" = $2,
+                   "lastChangedAt" = $2`,
+                [currentDifficulty, now],
+            );
         } else {
-            // First initialization
-            const newTracker = this.trackerRepository.create({
-                id: 1,
-                currentDifficulty,
-                previousDifficulty: null,
-                lastCheckedAt: now,
-                lastChangedAt: null
-            });
-            await this.trackerRepository.save(newTracker);
+            // No change: just update lastCheckedAt, insert if first run
+            await this.trackerRepository
+                .createQueryBuilder()
+                .insert()
+                .into(NetworkDifficultyTrackerEntity)
+                .values({
+                    id: 1,
+                    currentDifficulty,
+                    previousDifficulty: null,
+                    lastCheckedAt: now,
+                    lastChangedAt: null,
+                })
+                .orUpdate(['lastCheckedAt'], ['id'])
+                .execute();
         }
     }
 }

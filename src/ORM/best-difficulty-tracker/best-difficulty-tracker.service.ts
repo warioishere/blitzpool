@@ -22,25 +22,17 @@ export class BestDifficultyTrackerService {
     }
 
     /**
-     * Update or create tracker (upsert)
+     * Update or create tracker (upsert via INSERT ... ON CONFLICT)
      */
     public async updateTracker(address: string, bestDifficulty: number): Promise<void> {
-        const existing = await this.trackerRepository.findOne({
-            where: { address }
-        });
-
-        if (existing) {
-            existing.bestDifficulty = bestDifficulty;
-            existing.lastCheckedAt = Date.now();
-            await this.trackerRepository.save(existing);
-        } else {
-            const newTracker = this.trackerRepository.create({
-                address,
-                bestDifficulty,
-                lastCheckedAt: Date.now()
-            });
-            await this.trackerRepository.save(newTracker);
-        }
+        const now = Date.now();
+        await this.trackerRepository
+            .createQueryBuilder()
+            .insert()
+            .into(BestDifficultyTrackerEntity)
+            .values({ address, bestDifficulty, lastCheckedAt: now })
+            .orUpdate(['bestDifficulty', 'lastCheckedAt'], ['address'])
+            .execute();
     }
 
     /**
@@ -54,15 +46,10 @@ export class BestDifficultyTrackerService {
      * Reset tracker for address
      */
     public async resetTracker(address: string): Promise<void> {
-        const existing = await this.trackerRepository.findOne({
-            where: { address }
+        await this.trackerRepository.update({ address }, {
+            bestDifficulty: 0,
+            lastCheckedAt: Date.now(),
         });
-
-        if (existing) {
-            existing.bestDifficulty = 0;
-            existing.lastCheckedAt = Date.now();
-            await this.trackerRepository.save(existing);
-        }
     }
 
     /**

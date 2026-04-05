@@ -21,15 +21,18 @@ export class AddressSettingsService {
             .getOne();
 
         if (createIfNotFound === true && settings == null) {
-            // It's possible to have a race condition here so if we get a PK violation, fetch it
-            try {
-                settings = await this.createNew(address);
-            } catch (e) {
-                settings = await this.addressSettingsRepository
-                    .createQueryBuilder('settings')
-                    .where('settings.address = :address', { address })
-                    .getOne();
-            }
+            // Atomic upsert — no race condition
+            await this.addressSettingsRepository
+                .createQueryBuilder()
+                .insert()
+                .into(AddressSettingsEntity)
+                .values({ address })
+                .orIgnore()
+                .execute();
+            settings = await this.addressSettingsRepository
+                .createQueryBuilder('settings')
+                .where('settings.address = :address', { address })
+                .getOne();
         }
 
         return settings;

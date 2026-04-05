@@ -49,15 +49,15 @@ export class PoolShareStatisticsService implements OnModuleInit {
     const key = `pool:shares:${timeSlot}`;
 
     // Atomically increment accepted/rejected shares
+    const promises: Promise<any>[] = [];
     if (accepted > 0) {
-      await this.redisClient.hIncrByFloat(key, 'accepted', accepted);
+      promises.push(this.redisClient.hIncrByFloat(key, 'accepted', accepted));
     }
     if (rejected > 0) {
-      await this.redisClient.hIncrByFloat(key, 'rejected', rejected);
+      promises.push(this.redisClient.hIncrByFloat(key, 'rejected', rejected));
     }
-
-    // Set expiry on key (24 hours)
-    await this.redisClient.expire(key, REDIS_STATISTICS_TTL);
+    promises.push(this.redisClient.expire(key, REDIS_STATISTICS_TTL));
+    await Promise.all(promises);
   }
 
   private async addShares(accepted: number, rejected: number) {

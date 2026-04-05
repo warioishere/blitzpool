@@ -56,9 +56,11 @@ export class ClientStatisticsService implements OnModuleInit {
     const key = `client:shares:${client.address}:${client.clientName}:${client.sessionId}:${timeSlot}`;
 
     // Atomically increment accepted shares - INCREMENTAL, not accumulated!
-    await this.redisClient.hIncrByFloat(key, 'shares', difficulty);
-    await this.redisClient.hIncrBy(key, 'acceptedCount', 1);
-    await this.redisClient.expire(key, REDIS_STATISTICS_TTL);
+    await Promise.all([
+      this.redisClient.hIncrByFloat(key, 'shares', difficulty),
+      this.redisClient.hIncrBy(key, 'acceptedCount', 1),
+      this.redisClient.expire(key, REDIS_STATISTICS_TTL),
+    ]);
   }
 
   /**
@@ -857,11 +859,14 @@ export class ClientStatisticsService implements OnModuleInit {
     try {
       // Delete all client share keys for this address
       const pattern = `client:shares:${address}:*`;
-      const keys = await this.redisClient.keys(pattern);
-
-      if (keys && keys.length > 0) {
-        await this.redisClient.del(...keys);
-      }
+      let cursor = '0';
+      do {
+        const result = await this.redisClient.scan(cursor, { MATCH: pattern, COUNT: 100 });
+        cursor = result.cursor.toString();
+        if (result.keys.length > 0) {
+          await this.redisClient.del(result.keys);
+        }
+      } while (cursor !== '0');
     } catch (error) {
       console.error(`[ClientStatisticsService] Failed to clear Redis keys for address ${address}:`, error);
     }

@@ -45,6 +45,28 @@ describe('PoolShareStatisticsService', () => {
     );
   });
 
+  it('sends hIncrByFloat and expire in parallel via Promise.all', async () => {
+    const callOrder: string[] = [];
+    mockRedisClient.hIncrByFloat.mockImplementation(() => { callOrder.push('hIncrByFloat'); return Promise.resolve(); });
+    mockRedisClient.expire.mockImplementation(() => { callOrder.push('expire'); return Promise.resolve(); });
+
+    await service.addAcceptedShare(5);
+
+    // Both should be called (hIncrByFloat + expire)
+    expect(callOrder).toContain('hIncrByFloat');
+    expect(callOrder).toContain('expire');
+    expect(mockRedisClient.hIncrByFloat).toHaveBeenCalledTimes(1);
+    expect(mockRedisClient.expire).toHaveBeenCalledTimes(1);
+  });
+
+  it('batches both accepted and rejected increments with expire', async () => {
+    await (service as any).handleShare(3, 2);
+
+    // 2x hIncrByFloat (accepted + rejected) + 1x expire
+    expect(mockRedisClient.hIncrByFloat).toHaveBeenCalledTimes(2);
+    expect(mockRedisClient.expire).toHaveBeenCalledTimes(1);
+  });
+
   it('does not track when Redis is not available', async () => {
     const serviceNoRedis = new PoolShareStatisticsService({} as any, { store: {} } as any);
     await serviceNoRedis.onModuleInit();
