@@ -5,6 +5,7 @@ import { ConfigService } from '@nestjs/config';
 import { DataSource } from 'typeorm';
 
 import { ClientDifficultyStatisticsService } from '../ORM/client-difficulty-statistics/client-difficulty-statistics.service';
+import { ClientRejectedStatisticsService } from '../ORM/client-rejected-statistics/client-rejected-statistics.service';
 import { ClientStatisticsService } from '../ORM/client-statistics/client-statistics.service';
 import { ClientService } from '../ORM/client/client.service';
 import { RpcBlockService } from '../ORM/rpc-block/rpc-block.service';
@@ -66,6 +67,7 @@ export class AppService implements OnModuleInit {
         @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
         private readonly clientStatisticsService: ClientStatisticsService,
         private readonly clientDifficultyStatisticsService: ClientDifficultyStatisticsService,
+        private readonly clientRejectedStatisticsService: ClientRejectedStatisticsService,
         private readonly clientService: ClientService,
         private readonly dataSource: DataSource,
         private readonly rpcBlockService: RpcBlockService,
@@ -118,6 +120,13 @@ export class AppService implements OnModuleInit {
             (Date.now() - 30 * 24 * 60 * 60 * 1000) / (60 * 60 * 1000),
         ) * (60 * 60 * 1000);
         await this.clientDifficultyStatisticsService.deleteOlderThan(cutoff);
+
+        // Clean up per-client rejected chart data older than 30 days
+        // (only used for 1d/3d/7d address charts, not for pool-wide sinceBlock totals)
+        const rejectedCutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
+        await this.clientRejectedStatisticsService.deleteOlderThan(rejectedCutoff);
+        // Note: pool_rejected_statistics is NOT cleaned — used for rejectedSinceBlock totals
+
         console.log('Deleted old statistics');
         const deletedClients = await this.clientService.deleteOldClients();
         console.log(`Deleted ${deletedClients.affected} old clients`);

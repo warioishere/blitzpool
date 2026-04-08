@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { Interval } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import { BehaviorSubject, firstValueFrom } from 'rxjs';
-import { ObjectLiteral, Repository } from 'typeorm';
+import { IsNull, ObjectLiteral, Repository } from 'typeorm';
 import { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 
 import { ClientEntity } from './client.entity';
@@ -173,7 +173,7 @@ export class ClientService {
             .execute();
     }
     public async connectedClientCount(): Promise<number> {
-        return await this.clientRepository.count();
+        return await this.clientRepository.count({ where: { deletedAt: IsNull() } });
     }
 
     public async getActiveWorkerCounts(): Promise<{ addresses: number; workers: number }> {

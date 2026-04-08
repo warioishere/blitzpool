@@ -157,6 +157,14 @@ export class PoolRejectedStatisticsService implements OnModuleInit {
     return totals;
   }
 
+  public async deleteOlderThan(cutoff: number) {
+    return this.poolRejectedStatisticsRepository
+      .createQueryBuilder()
+      .delete()
+      .where('time < :cutoff', { cutoff })
+      .execute();
+  }
+
   public async getEntriesSince(time: number): Promise<PoolRejectedStatisticsEntity[]> {
     return this.poolRejectedStatisticsRepository.find({
       where: { time: MoreThan(time) },

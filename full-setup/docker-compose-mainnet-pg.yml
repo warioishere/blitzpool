@@ -43,10 +43,10 @@ services:
     command: >
       postgres
       -c max_connections=120
-      -c shared_buffers=256MB
-      -c effective_cache_size=1GB
-      -c work_mem=16MB
-      -c maintenance_work_mem=128MB
+      -c shared_buffers=3GB
+      -c effective_cache_size=6GB
+      -c work_mem=32MB
+      -c maintenance_work_mem=256MB
       -c wal_buffers=16MB
       -c max_wal_size=2GB
       -c min_wal_size=1GB
@@ -58,6 +58,9 @@ services:
       -c autovacuum_vacuum_cost_delay=2ms
       -c idle_in_transaction_session_timeout=30000
       -c log_min_duration_statement=2000
+      -c shared_preload_libraries=pg_stat_statements
+      -c pg_stat_statements.track=all
+      -c statement_timeout=30000
     environment:
       POSTGRES_DB: ${PG_DATABASE:-public_pool}
       POSTGRES_USER: ${PG_USER:-postgres}

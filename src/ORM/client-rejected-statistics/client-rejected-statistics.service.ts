@@ -1,6 +1,6 @@
 import { Injectable, Inject, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, MoreThan } from 'typeorm';
+import { Repository, MoreThan, LessThan } from 'typeorm';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
 
@@ -83,6 +83,10 @@ export class ClientRejectedStatisticsService implements OnModuleInit {
       where: { address, time: MoreThan(time) },
       order: { time: 'ASC' },
     });
+  }
+
+  public async deleteOlderThan(cutoff: number) {
+    return await this.clientRejectedStatisticsRepository.delete({ time: LessThan(cutoff) });
   }
 
   public async deleteForAddress(address: string) {

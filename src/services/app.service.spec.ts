@@ -9,6 +9,7 @@ describe('AppService.onModuleInit', () => {
   };
   let clientStatisticsService: { deleteOldStatistics: jest.Mock };
   let clientDifficultyStatisticsService: { deleteOlderThan: jest.Mock };
+  let clientRejectedStatisticsService: { deleteOlderThan: jest.Mock };
   let rpcBlockService: { deleteOldBlocks: jest.Mock };
   let configService: { get: jest.Mock };
   let setIntervalSpy: jest.SpyInstance;
@@ -28,6 +29,9 @@ describe('AppService.onModuleInit', () => {
       deleteOldStatistics: jest.fn().mockResolvedValue(undefined),
     };
     clientDifficultyStatisticsService = {
+      deleteOlderThan: jest.fn().mockResolvedValue(undefined),
+    };
+    clientRejectedStatisticsService = {
       deleteOlderThan: jest.fn().mockResolvedValue(undefined),
     };
     rpcBlockService = {
@@ -50,6 +54,7 @@ describe('AppService.onModuleInit', () => {
       {} as any, // cacheManager
       clientStatisticsService as any,
       clientDifficultyStatisticsService as any,
+      clientRejectedStatisticsService as any,
       clientService as any,
       dataSource as any,
       rpcBlockService as any,
