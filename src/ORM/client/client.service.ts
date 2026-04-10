@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { Interval } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import { BehaviorSubject, firstValueFrom } from 'rxjs';
@@ -7,13 +7,23 @@ import { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity
 
 import { ClientEntity } from './client.entity';
 
-
+interface BufferedHeartbeat {
+    address: string;
+    clientName: string;
+    sessionId: string;
+    hashRate: number;
+    updatedAt: Date;
+    currentDifficulty?: number | null;
+}
 
 @Injectable()
-export class ClientService {
+export class ClientService implements OnModuleDestroy {
 
 
     public insertQueue: { result: BehaviorSubject<ObjectLiteral | null>, partialClient: Partial<ClientEntity> }[] = [];
+
+    /** Heartbeat buffer: sessionId → latest heartbeat data */
+    private heartbeatBuffer = new Map<string, BufferedHeartbeat>();
 
 
     constructor(
@@ -58,6 +68,14 @@ export class ClientService {
             .execute();
     }
 
+    async onModuleDestroy(): Promise<void> {
+        await this.flushHeartbeats();
+    }
+
+    /**
+     * Buffer a heartbeat — only the latest per sessionId is kept.
+     * Flushed as batch UPDATE every 30 seconds.
+     */
     public async heartbeat(
         address: string,
         clientName: string,
@@ -66,17 +84,48 @@ export class ClientService {
         updatedAt: Date,
         currentDifficulty?: number | null,
     ) {
-        const update: QueryDeepPartialEntity<ClientEntity> = {
-            hashRate,
-            deletedAt: null,
-            updatedAt,
-        };
+        this.heartbeatBuffer.set(sessionId, {
+            address, clientName, sessionId, hashRate, updatedAt, currentDifficulty,
+        });
+    }
 
-        if (currentDifficulty !== undefined) {
-            update.currentDifficulty = currentDifficulty;
+    /**
+     * Flush buffered heartbeats as individual UPDATEs in a single transaction.
+     */
+    @Interval(30_000)
+    public async flushHeartbeats(): Promise<void> {
+        if (this.heartbeatBuffer.size === 0) return;
+
+        const snapshot = this.heartbeatBuffer;
+        this.heartbeatBuffer = new Map();
+
+        try {
+            await this.clientRepository.manager.transaction(async (manager) => {
+                const repo = manager.getRepository(ClientEntity);
+                for (const hb of snapshot.values()) {
+                    const update: QueryDeepPartialEntity<ClientEntity> = {
+                        hashRate: hb.hashRate,
+                        deletedAt: null,
+                        updatedAt: hb.updatedAt,
+                    };
+                    if (hb.currentDifficulty !== undefined) {
+                        update.currentDifficulty = hb.currentDifficulty;
+                    }
+                    await repo.update(
+                        { address: hb.address, clientName: hb.clientName, sessionId: hb.sessionId },
+                        update,
+                    );
+                }
+            });
+        } catch (error) {
+            // Re-buffer on failure (keep newer values if buffer already has entries)
+            for (const [sid, hb] of snapshot) {
+                if (!this.heartbeatBuffer.has(sid)) {
+                    this.heartbeatBuffer.set(sid, hb);
+                }
+            }
+            console.error(`[ClientService] flushHeartbeats failed for ${snapshot.size} clients:`, error);
         }
-
-        return await this.clientRepository.update({ address, clientName, sessionId }, update);
     }
 
     // public async save(client: Partial<ClientEntity>) {
