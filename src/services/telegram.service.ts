@@ -175,6 +175,14 @@ export class TelegramService implements OnModuleInit {
 
         this.shouldRegisterHandlers = true;
         this.bot = new TelegramBot(token, { polling: true });
+
+        this.bot.on('polling_error', (error) => {
+            console.error('[Telegram] Polling error (non-fatal):', error.message);
+        });
+        this.bot.on('error', (error) => {
+            console.error('[Telegram] Bot error (non-fatal):', error.message);
+        });
+
         console.log('Telegram bot init');
 
     }

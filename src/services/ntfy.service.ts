@@ -652,7 +652,11 @@ export class NtfyService implements OnModuleInit {
     if (this.accessToken) {
       headers['Authorization'] = `Bearer ${this.accessToken}`;
     }
-    await axios.post(url, message, { headers });
+    try {
+      await axios.post(url, message, { headers, timeout: 10000 });
+    } catch (error) {
+      console.error(`[Ntfy] Failed to publish to ${address}:`, error.message);
+    }
   }
 
   public async notify(address: string, message: string) {

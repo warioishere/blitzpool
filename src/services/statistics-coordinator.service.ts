@@ -221,14 +221,17 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
       const startTime = Date.now();
 
       // Flush all statistics in parallel for better performance
+      // Note: flushWorkerTotals writes shares to worker_shares_entity,
+      // and flushClientStatistics writes rejectedShares to the same table.
+      // Running them in parallel causes deadlocks, so worker totals run first.
       await Promise.all([
         this.flushPoolShares(),
         this.flushClientStatistics(),
         this.flushPoolRejectedStatistics(),
         this.flushClientRejectedStatistics(),
         this.flushAddressTotals(),
-        this.flushWorkerTotals(),
       ]);
+      await this.flushWorkerTotals();
 
       const duration = Date.now() - startTime;
       if (duration > 1000) {

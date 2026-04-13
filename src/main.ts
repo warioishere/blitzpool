@@ -38,6 +38,14 @@ async function bootstrap() {
     }),
   );
 
+  process.on('unhandledRejection', (reason, promise) => {
+    console.error('[FATAL] Unhandled rejection — NOT crashing:', reason);
+  });
+
+  process.on('uncaughtException', (error) => {
+    console.error('[FATAL] Uncaught exception — NOT crashing:', error);
+  });
+
   process.on('SIGINT', async () => {
     console.log('Stopping services (SIGINT)');
     await app.close();
