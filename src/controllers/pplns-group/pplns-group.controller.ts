@@ -1,6 +1,7 @@
 import { Body, Controller, Delete, Get, Headers, HttpException, HttpStatus, Param, Post, Query } from '@nestjs/common';
 import { GroupService, GroupServiceError } from '../../services/group.service';
 import { GroupSoloService } from '../../services/group-solo.service';
+import { ClientService } from '../../ORM/client/client.service';
 
 interface CreateGroupDto {
     name?: string;
@@ -21,7 +22,14 @@ export class PplnsGroupController {
     constructor(
         private readonly groupService: GroupService,
         private readonly groupSoloService: GroupSoloService,
+        private readonly clientService: ClientService,
     ) {}
+
+    /** Sum of live hashrates across all workers of an address. Matches /api/client/:address. */
+    private async addressHashrate(address: string): Promise<number> {
+        const workers = await this.clientService.getByAddress(address);
+        return workers.reduce((sum, w) => sum + (w.hashRate ?? 0), 0);
+    }
 
     // ── Public endpoints ─────────────────────────────────────────
 
@@ -36,9 +44,33 @@ export class PplnsGroupController {
         const group = await this.groupService.getGroup(id);
         if (!group || group.dissolvedAt) throw new HttpException({ code: 'not-found' }, HttpStatus.NOT_FOUND);
         const members = await this.groupService.listMembers(id);
+        const membersWithHashrate = await Promise.all(members.map(async m => ({
+            address: m.address,
+            role: m.role,
+            joinedAt: m.joinedAt,
+            hashrate: await this.addressHashrate(m.address),
+        })));
+        const totalHashrate = membersWithHashrate.reduce((sum, m) => sum + m.hashrate, 0);
         return {
             ...this.publicGroupView(group),
-            members: members.map(m => ({ address: m.address, role: m.role, joinedAt: m.joinedAt })),
+            totalHashrate,
+            members: membersWithHashrate,
+        };
+    }
+
+    @Get(':id/hashrate')
+    async hashrate(@Param('id') id: string) {
+        const group = await this.groupService.getGroup(id);
+        if (!group || group.dissolvedAt) throw new HttpException({ code: 'not-found' }, HttpStatus.NOT_FOUND);
+        const members = await this.groupService.listMembers(id);
+        const memberRates = await Promise.all(members.map(async m => ({
+            address: m.address,
+            hashrate: await this.addressHashrate(m.address),
+        })));
+        return {
+            groupId: id,
+            totalHashrate: memberRates.reduce((sum, m) => sum + m.hashrate, 0),
+            members: memberRates,
         };
     }
 
