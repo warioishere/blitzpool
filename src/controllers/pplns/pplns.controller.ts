@@ -1,13 +1,13 @@
 import { Controller, Get, Param, Query } from '@nestjs/common';
 import { PplnsService } from '../../services/pplns.service';
-import { GroupService } from '../../services/group.service';
+import { MiningModeService } from '../../services/mining-mode.service';
 
 @Controller('pplns')
 export class PplnsController {
 
     constructor(
         private readonly pplnsService: PplnsService,
-        private readonly groupService: GroupService,
+        private readonly miningModeService: MiningModeService,
     ) {}
 
     /**
@@ -21,16 +21,7 @@ export class PplnsController {
      */
     @Get('mode/:address')
     async getMiningMode(@Param('address') address: string) {
-        const group = this.groupService.getGroupForAddress(address);
-        if (group && group.active) {
-            return { mode: 'group-solo', groupId: group.groupId };
-        }
-        const distribution = await this.pplnsService.getCurrentDistribution();
-        const inPplns = distribution.some(d => d.address === address);
-        if (inPplns) {
-            return { mode: 'pplns' };
-        }
-        return { mode: 'solo' };
+        return this.miningModeService.getMode(address);
     }
 
     /**

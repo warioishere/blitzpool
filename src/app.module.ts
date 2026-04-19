@@ -56,6 +56,7 @@ import { PplnsPayoutHistoryEntity } from './ORM/pplns-balance/pplns-payout-histo
 import { PplnsController } from './controllers/pplns/pplns.controller';
 import { GroupSoloService } from './services/group-solo.service';
 import { GroupService } from './services/group.service';
+import { MiningModeService } from './services/mining-mode.service';
 import { PplnsGroupEntity } from './ORM/pplns-group/pplns-group.entity';
 import { PplnsGroupMemberEntity } from './ORM/pplns-group/pplns-group-member.entity';
 import { PplnsGroupBlockHistoryEntity } from './ORM/pplns-group/pplns-group-block-history.entity';
@@ -192,6 +193,7 @@ const ORMModules = [
         PplnsBalanceService,
         GroupSoloService,
         GroupService,
+        MiningModeService,
     ],
 })
 export class AppModule {
