@@ -235,6 +235,56 @@ describe('GroupSoloService', () => {
         expect(tinyBalance2.totalPaidSats).toBeGreaterThanOrEqual(pendingAfterRound1);
     });
 
+    it('late-arriving shares (post-snapshot) are logged but NOT credited to pending — prevents double-counting', async () => {
+        // Scenario: pool builds a job, snapshot captures only Alice (Bob had no shares yet).
+        // Between snapshot-build and block-found, Bob submits shares.
+        // Alice then finds the block. The coinbase pays Alice via the snapshot.
+        // Bob's shares arrived too late for THIS block's coinbase → PROP rules: lost.
+        //
+        // The old code was crediting Bob to pending based on Bob.diff / (Alice.diff + Bob.diff) × rewardForMiners,
+        // which meant rewardForMiners was effectively paid out TWICE (once to Alice via coinbase,
+        // once to Bob via pending). This test locks in the PROP behavior: Bob gets 0 sats pending,
+        // but gets an audit history row so his submitted shares are visible.
+        const { service, balanceRepo, historyRepo, groupService } = makeService();
+        const BLOCK_REWARD = 100_000_000;
+        groupService._setMembership('bc1qalice', 'g1', true);
+        groupService._setMembership('bc1qbob', 'g1', true);
+
+        // Stage 1: only Alice has shares. Build snapshot.
+        await service.recordShare('bc1qalice', 1000);
+        await service.getPayoutDistribution('g1', BLOCK_REWARD);
+
+        // Stage 2: Bob arrives AFTER snapshot was built.
+        await service.recordShare('bc1qbob', 2000);
+
+        // Stage 3: Alice finds the block. Snapshot-based bookkeeping runs.
+        await service.onBlockFound(900_000, BLOCK_REWARD, 'bc1qalice');
+
+        // Bob's balance must NOT have been credited anything — the coinbase already
+        // claimed 100% of the miner cut via Alice's snapshot entry.
+        const bobBalance = await balanceRepo.findOneBy({ address: 'bc1qbob' });
+        expect(bobBalance?.pendingSats ?? 0).toBe(0);
+
+        // But Bob should have an audit history row showing his shares with paidSats=0
+        const bobRows = (historyRepo._rows as any[]).filter(r => r.address === 'bc1qbob');
+        expect(bobRows).toHaveLength(1);
+        expect(bobRows[0].paidSats).toBe(0);
+        expect(bobRows[0].inCoinbase).toBe(false);
+        expect(bobRows[0].sharesInRound).toBe(2000);
+
+        // Total paid via coinbase (fee + Alice) should not exceed BLOCK_REWARD
+        const coinbasePaid = (historyRepo._rows as any[])
+            .filter(r => r.inCoinbase === true)
+            .reduce((sum, r) => sum + r.paidSats, 0);
+        expect(coinbasePaid).toBeLessThanOrEqual(BLOCK_REWARD);
+        // And miner-cut portion (non-fee) should not exceed rewardForMiners
+        const minerCoinbasePaid = (historyRepo._rows as any[])
+            .filter(r => r.inCoinbase === true && r.address !== 'bc1qfee')
+            .reduce((sum, r) => sum + r.paidSats, 0);
+        const rewardForMiners = Math.floor(0.98 * BLOCK_REWARD);
+        expect(minerCoinbasePaid).toBeLessThanOrEqual(rewardForMiners);
+    });
+
     it('getRoundStats returns current round snapshot', async () => {
         const { service, groupService } = makeService();
         groupService._setMembership('bc1qalice', 'g1', true);

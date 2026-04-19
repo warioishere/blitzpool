@@ -138,6 +138,7 @@ export class GroupService implements OnModuleInit {
 
         const adminToken = this.generateToken();
         const group = await this.groupRepo.save(this.groupRepo.create({
+            id: crypto.randomUUID(),
             name: trimmedName,
             creatorAddress,
             adminTokenHash: this.hashToken(adminToken),

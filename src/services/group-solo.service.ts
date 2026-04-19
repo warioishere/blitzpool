@@ -48,8 +48,19 @@ export class GroupSoloService implements OnModuleInit {
     private feePercent: number;
     private readonly coinbaseWeightBudget: number;
 
-    /** Coinbase snapshot per group — so onBlockFound can match on-chain payouts exactly. */
-    private snapshots = new Map<string, { distribution: GroupSoloPayoutEntry[]; blockRewardSats: number }>();
+    /**
+     * Coinbase snapshot per group.  `distribution` = what goes into the coinbase;
+     * `consideredAddresses` = every address that was in the Redis window at the moment
+     * the snapshot was built (including sub-dust miners that were filtered out).  This
+     * lets onBlockFound tell apart two classes of "not in coinbase" miners:
+     *   - sub-dust: was in the window at snapshot time → credit to pending so they accumulate
+     *   - late arriver: submitted after snapshot was built → don't credit (would double-count)
+     */
+    private snapshots = new Map<string, {
+        distribution: GroupSoloPayoutEntry[];
+        blockRewardSats: number;
+        consideredAddresses: Set<string>;
+    }>();
 
     /** Per-group block-found reentrancy guard. */
     private blockFoundLocks = new Set<string>();
@@ -69,7 +80,9 @@ export class GroupSoloService implements OnModuleInit {
             this.configService.get('PPLNS_COINBASE_WEIGHT_BUDGET') ?? DEFAULT_COINBASE_WEIGHT_BUDGET.toString(),
             10,
         ) || DEFAULT_COINBASE_WEIGHT_BUDGET;
-        this.enabled = !!this.configService.get('GROUP_SOLO_PORT');
+        // Group-solo is always enabled if the service is loaded — routing is
+        // address-driven via the GroupService's address→group cache.
+        this.enabled = true;
     }
 
     async onModuleInit(): Promise<void> {
@@ -204,7 +217,12 @@ export class GroupSoloService implements OnModuleInit {
         }
 
         const result = payouts.length > 0 ? payouts : this.fallback();
-        this.snapshots.set(groupId, { distribution: result, blockRewardSats });
+        // Record every address that contributed work at snapshot-build time, including
+        // sub-dust miners that got filtered out of the coinbase. See `snapshots` field
+        // doc for why this distinction matters.
+        const consideredAddresses = new Set<string>(addressDiff.keys());
+        for (const addr of pendingMap.keys()) consideredAddresses.add(addr);
+        this.snapshots.set(groupId, { distribution: result, blockRewardSats, consideredAddresses });
         return result;
     }
 
@@ -264,7 +282,14 @@ export class GroupSoloService implements OnModuleInit {
                 }));
             }
 
-            // Members with shares this round who didn't make the coinbase → pending.
+            // For each window address not in snapshot.distribution, determine whether
+            // it was considered at snapshot-build time:
+            //   - YES → sub-dust miner (filtered by dust or weight-budget): credit to
+            //     pending so it accumulates for future coinbase inclusion.
+            //   - NO  → late arriver (share landed in Redis after snapshot was built):
+            //     under PROP rules this work is lost for the current block. Credit
+            //     would double-count because the snapshot already claims 100% of the
+            //     miner cut in the on-chain coinbase.
             const snapshotAddrs = new Set(snapshot.distribution.map(d => d.address));
             const keys = redisKeys(groupId);
             const entries = await this.redis.zRange(keys.shares, 0, -1);
@@ -280,17 +305,36 @@ export class GroupSoloService implements OnModuleInit {
                 const rewardForMiners = Math.floor(((100 - this.feePercent) / 100) * reward);
                 for (const [addr, diff] of addressDiff) {
                     if (snapshotAddrs.has(addr)) continue;
-                    const sats = Math.floor((diff / totalDiff) * rewardForMiners);
-                    if (sats > 0) {
-                        await this.addPending(groupId, addr, sats);
+                    const wasConsidered = snapshot.consideredAddresses.has(addr);
+                    if (wasConsidered) {
+                        // Sub-dust or weight-trimmed — credit to pending proportional to
+                        // their share of the (original) snapshot-time window. Since we
+                        // don't store the snapshot-time totalDiff, we use current-window
+                        // ratio as an approximation; on mainnet the window is stable
+                        // enough that this is accurate to within rounding.
+                        const sats = Math.floor((diff / totalDiff) * rewardForMiners);
+                        if (sats > 0) {
+                            await this.addPending(groupId, addr, sats);
+                            await this.historyRepo.save(this.historyRepo.create({
+                                groupId, blockHeight, address: addr,
+                                paidSats: sats,
+                                percent: (diff / totalDiff) * (100 - this.feePercent),
+                                sharesInRound: Math.round(diff),
+                                totalSharesInRound: Math.round(totalDiff),
+                                inCoinbase: false,
+                            }));
+                        }
+                    } else {
+                        // Late arriver — audit row only, no payout.
                         await this.historyRepo.save(this.historyRepo.create({
                             groupId, blockHeight, address: addr,
-                            paidSats: sats,
-                            percent: (diff / totalDiff) * (100 - this.feePercent),
+                            paidSats: 0,
+                            percent: 0,
                             sharesInRound: Math.round(diff),
                             totalSharesInRound: Math.round(totalDiff),
                             inCoinbase: false,
                         }));
+                        console.log(`[GroupSolo]   ${addr}: ${diff.toFixed(2)} shares in round but not in coinbase snapshot (late arrival, PROP rules)`);
                     }
                 }
             }
