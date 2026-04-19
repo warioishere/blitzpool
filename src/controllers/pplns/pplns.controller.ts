@@ -1,10 +1,37 @@
 import { Controller, Get, Param, Query } from '@nestjs/common';
 import { PplnsService } from '../../services/pplns.service';
+import { GroupService } from '../../services/group.service';
 
 @Controller('pplns')
 export class PplnsController {
 
-    constructor(private readonly pplnsService: PplnsService) {}
+    constructor(
+        private readonly pplnsService: PplnsService,
+        private readonly groupService: GroupService,
+    ) {}
+
+    /**
+     * GET /pplns/mode/:address
+     * Returns the mining mode the given BTC address is currently operating in.
+     *   - 'group-solo' if the address is in an active group
+     *   - 'pplns' otherwise, if the address has shares in the PPLNS window
+     *   - 'solo' otherwise
+     * The UI uses this for mode-aware dashboard rendering (hiding solo-only
+     * widgets, showing PPLNS/group panels).
+     */
+    @Get('mode/:address')
+    async getMiningMode(@Param('address') address: string) {
+        const group = this.groupService.getGroupForAddress(address);
+        if (group && group.active) {
+            return { mode: 'group-solo', groupId: group.groupId };
+        }
+        const distribution = await this.pplnsService.getCurrentDistribution();
+        const inPplns = distribution.some(d => d.address === address);
+        if (inPplns) {
+            return { mode: 'pplns' };
+        }
+        return { mode: 'solo' };
+    }
 
     /**
      * GET /pplns/status
