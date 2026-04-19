@@ -34,6 +34,7 @@ import { ExternalSharesService } from './external-shares.service';
 import { ClientDifficultyStatisticsService } from '../ORM/client-difficulty-statistics/client-difficulty-statistics.service';
 import { ShareTotalsCacheService } from './share-totals-cache.service';
 import { PplnsService } from './pplns.service';
+import { GroupSoloService } from './group-solo.service';
 import { DifficultyScoresCacheService } from './difficulty-scores-cache.service';
 
 interface GroupChannel {
@@ -83,6 +84,7 @@ export class StratumV2Service implements OnModuleInit, IProtocolHandler {
     @Inject(forwardRef(() => JobDeclarationService))
     private readonly jobDeclarationService: JobDeclarationService,
     private readonly pplnsService: PplnsService,
+    private readonly groupSoloService: GroupSoloService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -184,6 +186,7 @@ export class StratumV2Service implements OnModuleInit, IProtocolHandler {
       this.extranonceManager,
       this.templateDistributionService,
       this.pplnsService,
+      this.groupSoloService,
     );
 
     // Client self-registers when channel is opened and self-unregisters on close.

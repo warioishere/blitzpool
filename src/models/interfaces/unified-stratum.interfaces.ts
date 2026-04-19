@@ -9,8 +9,9 @@ export type ProtocolVersion = 'v1' | 'v2';
  * Payout mode for a stratum port.
  * - 'solo': Each miner gets their own coinbase (existing behavior)
  * - 'pplns': Shared coinbase with proportional payouts based on PPLNS window
+ * - 'group-solo': Per-group shared coinbase, PROP-style (window resets on block)
  */
-export type PayoutMode = 'solo' | 'pplns';
+export type PayoutMode = 'solo' | 'pplns' | 'group-solo';
 
 /**
  * Configuration passed when starting a stratum port.

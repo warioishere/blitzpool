@@ -39,6 +39,7 @@ import { ClientDifficultyStatisticsService } from '../ORM/client-difficulty-stat
 import { ShareTotalsCacheService } from '../services/share-totals-cache.service';
 import { AddressSettingsCacheService } from '../services/address-settings-cache.service';
 import { PplnsService } from '../services/pplns.service';
+import { GroupSoloService } from '../services/group-solo.service';
 import { PayoutMode } from './interfaces/unified-stratum.interfaces';
 
 
@@ -59,6 +60,8 @@ export class StratumV1Client {
     private pendingSessionDifficulty: number | null = null;
     private deviceOnlineNotified = false;
     private deviceOfflineNotified = false;
+    /** Set during authorize if the address belongs to an active group. Activates group-solo mode for this session. */
+    private groupSoloGroupId: string | null = null;
 
     private entity: ClientEntity;
     private creatingEntity: Promise<void>;
@@ -116,6 +119,7 @@ export class StratumV1Client {
         private readonly redisClient?: any,
         private readonly payoutMode: PayoutMode = 'solo',
         private readonly pplnsService?: PplnsService,
+        private readonly groupSoloService?: GroupSoloService,
     ) {
         this.initialDifficulty = Number.isFinite(initialDifficulty)
             ? initialDifficulty
@@ -439,6 +443,16 @@ export class StratumV1Client {
                     return;
                 }
 
+                // Group-solo detection: if this address is in an active group,
+                // switch this session into group-solo payout regardless of the port mode.
+                if (this.groupSoloService?.isEnabled()) {
+                    const groupEntry = this.groupSoloService.getGroupForAddress(authorizationMessage.address);
+                    if (groupEntry?.active) {
+                        this.groupSoloGroupId = groupEntry.groupId;
+                        console.log(`[StratumV1Client] Address ${authorizationMessage.address} is in active group ${groupEntry.groupId} — enabling group-solo payout`);
+                    }
+                }
+
                 {
                     this.clientAuthorization = authorizationMessage;
 
@@ -730,7 +744,15 @@ export class StratumV1Client {
             this.hashRate = this.statistics.hashRate;
         }
 
-        if (this.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
+        if (this.groupSoloGroupId && this.groupSoloService?.isEnabled()) {
+            // Group-solo takes precedence: per-group shared coinbase, PROP-style
+            payoutInformation = await this.groupSoloService.getPayoutDistribution(
+                this.groupSoloGroupId,
+                jobTemplate.blockData.coinbasevalue,
+            );
+            this.noFee = false;
+            if (!payoutInformation || payoutInformation.length === 0) return;
+        } else if (this.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
             // PPLNS: Shared coinbase with proportional payouts
             // Network difficulty is synced centrally via PplnsService's job subscription
             payoutInformation = await this.pplnsService.getPayoutDistribution(jobTemplate.blockData.coinbasevalue);
@@ -989,8 +1011,15 @@ export class StratumV1Client {
                     await this.addressSettingsService.resetBestDifficultyAndShares();
                     await this.addressSettingsCacheService.clear();
 
-                    // Process PPLNS payouts (update pending balances)
-                    if (this.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
+                    // Process group-solo payouts (finder's group gets the coinbase, round resets)
+                    if (this.groupSoloGroupId && this.groupSoloService?.isEnabled() && this.clientAuthorization) {
+                        await this.groupSoloService.onBlockFound(
+                            jobTemplate.blockData.height,
+                            jobTemplate.blockData.coinbasevalue,
+                            this.clientAuthorization.address,
+                        );
+                    } else if (this.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
+                        // Process PPLNS payouts (update pending balances)
                         await this.pplnsService.onBlockFound(
                             jobTemplate.blockData.height,
                             jobTemplate.blockData.coinbasevalue,
@@ -1005,8 +1034,13 @@ export class StratumV1Client {
                 // Persist to Redis atomically (stateless service)
                 await this.clientStatisticsService.addAcceptedShare(this.entity, this.sessionDifficulty);
 
-                // Record share in PPLNS window if on PPLNS port
-                if (this.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
+                // Record share — group-solo takes precedence over port's payoutMode
+                if (this.groupSoloGroupId && this.groupSoloService?.isEnabled()) {
+                    await this.groupSoloService.recordShare(
+                        this.clientAuthorization.address,
+                        this.sessionDifficulty,
+                    );
+                } else if (this.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
                     await this.pplnsService.recordShare(
                         this.clientAuthorization.address,
                         this.sessionDifficulty,

@@ -148,6 +148,10 @@ export class ProtocolDetectorService implements OnModuleInit {
         console.log(`[ProtocolDetector] PPLNS port configured: ${pplnsPort}`);
       }
     }
+
+    // Group-solo mining is not port-bound — membership is looked up per-address.
+    // Any miner whose address is in an active group is automatically routed into
+    // group-solo payout on whatever port they connect to (typically the solo port).
   }
 
   private startUnifiedServer(portConfig: StratumPortConfig): void {

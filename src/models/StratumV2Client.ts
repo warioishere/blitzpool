@@ -24,6 +24,7 @@ import { ExternalSharesService } from '../services/external-shares.service';
 import { ClientDifficultyStatisticsService } from '../ORM/client-difficulty-statistics/client-difficulty-statistics.service';
 import { ShareTotalsCacheService } from '../services/share-totals-cache.service';
 import { PplnsService } from '../services/pplns.service';
+import { GroupSoloService } from '../services/group-solo.service';
 import { ClientEntity } from '../ORM/client/client.entity';
 import { MiningJob } from './MiningJob';
 import { StratumV1ClientStatistics } from './StratumV1ClientStatistics';
@@ -149,6 +150,8 @@ export class StratumV2Client {
 
   // Connection-level state
   private address: string | null = null;
+  /** Set during channel-open if the address belongs to an active group. Activates group-solo mode for this session. */
+  private groupSoloGroupId: string | null = null;
   private workerName: string = 'default';
   private userAgent: string = '';
   private vendorInfo: string = '';
@@ -212,6 +215,7 @@ export class StratumV2Client {
     private readonly extranonceManager?: Sv2ExtranonceManager,
     private readonly templateDistributionService?: TemplateDistributionService,
     private readonly pplnsService?: PplnsService,
+    private readonly groupSoloService?: GroupSoloService,
   ) {
     this.sessionId = this.generateSessionId();
     this.sessionStart = new Date();
@@ -515,6 +519,8 @@ export class StratumV2Client {
       return;
     }
 
+    this.detectGroupSoloMembership(rawAddress);
+
     // Multi-channel: subsequent channels must use same address
     if (this.address && this.address !== rawAddress) {
       const errorPayload = serializeOpenMiningChannelError({
@@ -651,6 +657,8 @@ export class StratumV2Client {
       this.destroySocket();
       return;
     }
+
+    this.detectGroupSoloMembership(rawAddress);
 
     // Multi-channel: subsequent channels must use same address
     if (this.address && this.address !== rawAddress) {
@@ -1451,8 +1459,15 @@ export class StratumV2Client {
         await this.addressSettingsService.resetBestDifficultyAndShares();
         await this.addressSettingsCacheService.clear();
 
-        // Process PPLNS payouts (update pending balances)
-        if (this.portConfig.payoutMode === 'pplns' && this.pplnsService?.isEnabled() && jobTemplate) {
+        // Group-solo takes precedence — finder's group gets the coinbase, round resets
+        if (this.groupSoloGroupId && this.groupSoloService?.isEnabled() && jobTemplate && this.address) {
+          await this.groupSoloService.onBlockFound(
+            jobTemplate.blockData.height,
+            jobTemplate.blockData.coinbasevalue,
+            this.address,
+          );
+        } else if (this.portConfig.payoutMode === 'pplns' && this.pplnsService?.isEnabled() && jobTemplate) {
+          // Process PPLNS payouts (update pending balances)
           await this.pplnsService.onBlockFound(
             jobTemplate.blockData.height,
             jobTemplate.blockData.coinbasevalue,
@@ -1466,8 +1481,10 @@ export class StratumV2Client {
       this.hashRate = this.statistics.hashRate;
       await this.clientStatisticsService.addAcceptedShare(this.entity!, jobDifficulty);
 
-      // Record share in PPLNS window if on PPLNS port
-      if (this.portConfig.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
+      // Record share — group-solo takes precedence over port's payoutMode
+      if (this.groupSoloGroupId && this.groupSoloService?.isEnabled()) {
+        await this.groupSoloService.recordShare(this.address!, jobDifficulty);
+      } else if (this.portConfig.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
         await this.pplnsService.recordShare(this.address!, jobDifficulty);
       }
 
@@ -1711,6 +1728,12 @@ export class StratumV2Client {
       return null; // Signal caller to use async path
     }
 
+    // Group-solo mode: per-group shared coinbase — also async
+    if (this.groupSoloGroupId && this.groupSoloService?.isEnabled() && blockRewardSats) {
+      this.noFee = false;
+      return null;
+    }
+
     // Solo mode: existing behavior
     const devFeeAddress = this.configService.get('DEV_FEE_ADDRESS');
     const devFeePercent = parseFloat(this.configService.get('DEV_FEE_PERCENT') ?? '1.5');
@@ -1732,6 +1755,14 @@ export class StratumV2Client {
   }
 
   private async buildPayoutInformationAsync(blockRewardSats: number): Promise<{ address: string; percent: number }[] | null> {
+    // Group-solo takes precedence over PPLNS.
+    if (this.groupSoloGroupId && this.groupSoloService?.isEnabled()) {
+      const distribution = await this.groupSoloService.getPayoutDistribution(this.groupSoloGroupId, blockRewardSats);
+      if (distribution && distribution.length > 0) {
+        this.noFee = false;
+        return distribution;
+      }
+    }
     if (this.portConfig.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
       const distribution = await this.pplnsService.getPayoutDistribution(blockRewardSats);
       if (distribution && distribution.length > 0) {
@@ -1740,6 +1771,19 @@ export class StratumV2Client {
       }
     }
     return this.buildPayoutInformation();
+  }
+
+  /**
+   * If the address is in an active group, switch this session into group-solo payout.
+   * Otherwise fall back to the port's configured payoutMode (solo/pplns).
+   */
+  private detectGroupSoloMembership(address: string): void {
+    if (!this.groupSoloService?.isEnabled()) return;
+    const entry = this.groupSoloService.getGroupForAddress(address);
+    if (entry?.active) {
+      this.groupSoloGroupId = entry.groupId;
+      console.log(`[SV2 ${this.sessionId}] Address ${address} is in active group ${entry.groupId} — enabling group-solo payout`);
+    }
   }
 
   private async sendNewMiningJob(jobTemplate: IJobTemplate, sendPrevHash: boolean, channelId?: number): Promise<void> {

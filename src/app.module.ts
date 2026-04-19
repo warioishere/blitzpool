@@ -54,6 +54,13 @@ import { PplnsBalanceService } from './ORM/pplns-balance/pplns-balance.service';
 import { PplnsBalanceEntity } from './ORM/pplns-balance/pplns-balance.entity';
 import { PplnsPayoutHistoryEntity } from './ORM/pplns-balance/pplns-payout-history.entity';
 import { PplnsController } from './controllers/pplns/pplns.controller';
+import { GroupSoloService } from './services/group-solo.service';
+import { GroupService } from './services/group.service';
+import { PplnsGroupEntity } from './ORM/pplns-group/pplns-group.entity';
+import { PplnsGroupMemberEntity } from './ORM/pplns-group/pplns-group-member.entity';
+import { PplnsGroupBlockHistoryEntity } from './ORM/pplns-group/pplns-group-block-history.entity';
+import { PplnsGroupBalanceEntity } from './ORM/pplns-group/pplns-group-balance.entity';
+import { PplnsGroupController } from './controllers/pplns-group/pplns-group.controller';
 import { DownstreamReportController } from './controllers/downstream-report/downstream-report.controller';
 import { ExternalShareController } from './controllers/external-share/external-share.controller';
 import { PushController } from './controllers/push/push.controller';
@@ -131,7 +138,14 @@ const ORMModules = [
         }),
         ScheduleModule.forRoot(),
         HttpModule,
-        TypeOrmModule.forFeature([PplnsBalanceEntity, PplnsPayoutHistoryEntity]),
+        TypeOrmModule.forFeature([
+            PplnsBalanceEntity,
+            PplnsPayoutHistoryEntity,
+            PplnsGroupEntity,
+            PplnsGroupMemberEntity,
+            PplnsGroupBlockHistoryEntity,
+            PplnsGroupBalanceEntity,
+        ]),
         ...ORMModules
     ],
     controllers: [
@@ -142,7 +156,8 @@ const ORMModules = [
         ExternalShareController,
         PushController,
         InfoController,
-        PplnsController
+        PplnsController,
+        PplnsGroupController,
     ],
     providers: [
         // TimeslotMigrationService, // Disabled - migration incomplete, leaving data in mixed state
@@ -175,6 +190,8 @@ const ORMModules = [
         JobDeclarationService,
         PplnsService,
         PplnsBalanceService,
+        GroupSoloService,
+        GroupService,
     ],
 })
 export class AppModule {
