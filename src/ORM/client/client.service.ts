@@ -332,6 +332,20 @@ export class ClientService implements OnModuleDestroy {
         return result;
     }
 
+    /** Same aggregation as `getUserAgents` but restricted to a specific set of addresses. */
+    public async getUserAgentsForAddresses(addresses: string[]) {
+        if (!addresses || addresses.length === 0) return [];
+        return await this.clientRepository.createQueryBuilder('client')
+            .select('client.userAgent', 'userAgent')
+            .addSelect('COUNT(client.userAgent)', 'count')
+            .addSelect('MAX(client.bestDifficulty)', 'bestDifficulty')
+            .addSelect('SUM(client.hashRate)', 'totalHashRate')
+            .where('client.address IN (:...addresses)', { addresses })
+            .groupBy('client.userAgent')
+            .orderBy('count', 'DESC')
+            .getRawMany();
+    }
+
     public async getAllAddresses(): Promise<string[]> {
         const rows = await this.clientRepository
             .createQueryBuilder('client')

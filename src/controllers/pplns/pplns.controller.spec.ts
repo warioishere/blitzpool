@@ -7,21 +7,75 @@ describe('PplnsController', () => {
     function setup(opts: {
         distribution: { address: string; difficulty: number; percent: number }[];
         chartByAddress?: Record<string, { label: string; data: number }[]>;
+        userAgents?: any[];
+        enabled?: boolean;
+        windowStats?: any;
     }) {
         const pplnsService = {
             getCurrentDistribution: jest.fn().mockResolvedValue(opts.distribution),
+            isEnabled: jest.fn().mockReturnValue(opts.enabled ?? true),
+            getWindowStats: jest.fn().mockResolvedValue(opts.windowStats ?? {
+                totalDifficulty: 0, windowSize: 0, shareCount: 0, minerCount: 0,
+            }),
         };
         const clientStatisticsService = {
             getChartDataForAddress: jest.fn(async (address: string) =>
                 opts.chartByAddress?.[address] ?? [],
             ),
         };
+        const clientService = {
+            getUserAgentsForAddresses: jest.fn(async () => opts.userAgents ?? []),
+        };
         const controller = new PplnsController(
             pplnsService as any,
             clientStatisticsService as any,
+            clientService as any,
         );
-        return { controller, pplnsService, clientStatisticsService };
+        return { controller, pplnsService, clientStatisticsService, clientService };
     }
+
+    describe('info', () => {
+        it('returns enabled flag, window stats, and user agents limited to PPLNS addresses', async () => {
+            const { controller, clientService } = setup({
+                distribution: [
+                    { address: 'bc1qalice', difficulty: 800, percent: 80 },
+                    { address: 'bc1qbob',   difficulty: 200, percent: 20 },
+                ],
+                userAgents: [
+                    { userAgent: 'Bitaxe/2.1.15', count: '2', bestDifficulty: '8192', totalHashRate: '1000000000000' },
+                ],
+                enabled: true,
+                windowStats: { totalDifficulty: 1000, windowSize: 4000, shareCount: 2, minerCount: 2 },
+            });
+
+            const res = await controller.info();
+
+            expect(clientService.getUserAgentsForAddresses).toHaveBeenCalledWith(['bc1qalice', 'bc1qbob']);
+            expect(res).toEqual({
+                enabled: true,
+                totalDifficulty: 1000,
+                windowSize: 4000,
+                shareCount: 2,
+                minerCount: 2,
+                userAgents: [
+                    { userAgent: 'Bitaxe/2.1.15', count: '2', bestDifficulty: '8192', totalHashRate: '1000000000000' },
+                ],
+            });
+        });
+
+        it('returns empty userAgents when window is empty', async () => {
+            const { controller } = setup({
+                distribution: [],
+                userAgents: [],
+                enabled: false,
+            });
+
+            const res = await controller.info();
+
+            expect(res.userAgents).toEqual([]);
+            expect(res.enabled).toBe(false);
+        });
+    });
 
     describe('getChart', () => {
         it('sums per-address time-series into one aggregated chart (same label → added data)', async () => {

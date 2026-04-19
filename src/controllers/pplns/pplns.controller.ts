@@ -1,6 +1,7 @@
 import { Controller, Get, Param, Query } from '@nestjs/common';
 import { PplnsService } from '../../services/pplns.service';
 import { ClientStatisticsService } from '../../ORM/client-statistics/client-statistics.service';
+import { ClientService } from '../../ORM/client/client.service';
 
 @Controller('pplns')
 export class PplnsController {
@@ -8,7 +9,29 @@ export class PplnsController {
     constructor(
         private readonly pplnsService: PplnsService,
         private readonly clientStatisticsService: ClientStatisticsService,
+        private readonly clientService: ClientService,
     ) {}
+
+    /**
+     * GET /pplns
+     * Pool-wide PPLNS info — mirrors /api/info but filtered to PPLNS participants.
+     * Returns the window stats plus a `userAgents` breakdown so dashboards can
+     * show which devices are currently contributing to the PPLNS pool.
+     */
+    @Get()
+    async info() {
+        const distribution = await this.pplnsService.getCurrentDistribution();
+        const addresses = distribution.map(d => d.address);
+        const [windowStats, userAgents] = await Promise.all([
+            this.pplnsService.getWindowStats(),
+            this.clientService.getUserAgentsForAddresses(addresses),
+        ]);
+        return {
+            enabled: this.pplnsService.isEnabled(),
+            ...windowStats,
+            userAgents,
+        };
+    }
 
     /**
      * GET /pplns/status

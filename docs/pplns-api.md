@@ -10,6 +10,44 @@ All responses are JSON. No authentication.
 
 ---
 
+## `GET /api/pplns`
+
+Pool-wide PPLNS info — mirrors `/api/info` but filtered to addresses currently contributing to the PPLNS window. Designed for a "who's mining on the PPLNS pool right now" dashboard tile.
+
+### Response
+
+```json
+{
+  "enabled": true,
+  "totalDifficulty": 12345678.9,
+  "windowSize": 400000000,
+  "shareCount": 1523,
+  "minerCount": 42,
+  "userAgents": [
+    { "userAgent": "Bitaxe/2.1.15", "count": 28, "bestDifficulty": 524288, "totalHashRate": 18000000000000 },
+    { "userAgent": "cpuminer-opt/3.22.2", "count": 14, "bestDifficulty": 2048, "totalHashRate": 300000000 }
+  ]
+}
+```
+
+### Fields
+
+| Field | Type | Meaning |
+|---|---|---|
+| `enabled`, `totalDifficulty`, `windowSize`, `shareCount`, `minerCount` | — | Identical to `/api/pplns/status`. |
+| `userAgents[]` | array | Per-user-agent aggregation, **restricted to addresses currently in the PPLNS window**. Ordered by `count` descending. |
+| `userAgents[].userAgent` | string | Raw `user_agent` string as reported by the miner. |
+| `userAgents[].count` | number | Number of active worker sessions running this firmware. |
+| `userAgents[].bestDifficulty` | number | Highest best-diff any session with this user-agent has hit. |
+| `userAgents[].totalHashRate` | number | Sum of live hashrate across all sessions with this user-agent. |
+
+### Notes
+
+- Only addresses with shares in the current window are included. Addresses that disconnected and whose shares already rolled off the window are not shown.
+- The user-agent aggregation is taken from `ClientEntity` — same source as `/api/info.userAgents`, same fields.
+
+---
+
 ## `GET /api/pplns/status`
 
 Pool-wide PPLNS status: window size, total work in the window, and whether PPLNS is enabled at all.
