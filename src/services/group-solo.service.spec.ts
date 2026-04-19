@@ -195,6 +195,46 @@ describe('GroupSoloService', () => {
         expect(bigRows.some(r => r.inCoinbase === true)).toBe(true);
     });
 
+    it('pending balances accumulate across rounds until they cross dust, then are paid in coinbase', async () => {
+        const { service, balanceRepo, historyRepo, groupService } = makeService();
+        // Block reward chosen so Charlie's 1-of-1000 share is ~100 sats (well below 546 dust)
+        const BLOCK_REWARD = 10_000; // 10k sats
+        groupService._setMembership('bc1qbig', 'g1', true);
+        groupService._setMembership('bc1qtiny', 'g1', true);
+
+        // ── Round 1 ────────────────────────────────────────────────
+        await service.recordShare('bc1qbig', 999);
+        await service.recordShare('bc1qtiny', 1);
+        await service.getPayoutDistribution('g1', BLOCK_REWARD);
+        await service.onBlockFound(900_001, BLOCK_REWARD, 'bc1qbig');
+
+        // Charlie's round-1 sats went to pending (sub-dust); Alice was paid via coinbase
+        const round1Rows = historyRepo._rows as any[];
+        const tinyRound1 = round1Rows.find(r => r.address === 'bc1qtiny' && r.blockHeight === 900_001);
+        expect(tinyRound1.inCoinbase).toBe(false);
+        const tinyBalance1 = await balanceRepo.findOneBy({ address: 'bc1qtiny' });
+        expect(tinyBalance1.pendingSats).toBeGreaterThan(0);
+        const pendingAfterRound1: number = tinyBalance1.pendingSats;
+
+        // ── Round 2 ────────────────────────────────────────────────
+        // Now give Charlie a much bigger share so his new earnings + pending clearly exceed dust
+        await service.recordShare('bc1qbig', 100);
+        await service.recordShare('bc1qtiny', 900);
+        await service.getPayoutDistribution('g1', BLOCK_REWARD);
+        await service.onBlockFound(900_002, BLOCK_REWARD, 'bc1qbig');
+
+        // Charlie should now appear in round-2's coinbase and his pending should be cleared
+        const tinyRound2 = (historyRepo._rows as any[])
+            .filter(r => r.address === 'bc1qtiny' && r.blockHeight === 900_002);
+        expect(tinyRound2.length).toBeGreaterThan(0);
+        expect(tinyRound2.some(r => r.inCoinbase === true)).toBe(true);
+
+        const tinyBalance2 = await balanceRepo.findOneBy({ address: 'bc1qtiny' });
+        expect(tinyBalance2.pendingSats).toBe(0);
+        // Previous pending sats have moved to totalPaidSats
+        expect(tinyBalance2.totalPaidSats).toBeGreaterThanOrEqual(pendingAfterRound1);
+    });
+
     it('getRoundStats returns current round snapshot', async () => {
         const { service, groupService } = makeService();
         groupService._setMembership('bc1qalice', 'g1', true);
