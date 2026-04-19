@@ -2,6 +2,7 @@ import { Body, Controller, Delete, Get, Headers, HttpException, HttpStatus, Para
 import { GroupService, GroupServiceError } from '../../services/group.service';
 import { GroupSoloService } from '../../services/group-solo.service';
 import { ClientService } from '../../ORM/client/client.service';
+import { ClientStatisticsService } from '../../ORM/client-statistics/client-statistics.service';
 
 interface CreateGroupDto {
     name?: string;
@@ -23,6 +24,7 @@ export class PplnsGroupController {
         private readonly groupService: GroupService,
         private readonly groupSoloService: GroupSoloService,
         private readonly clientService: ClientService,
+        private readonly clientStatisticsService: ClientStatisticsService,
     ) {}
 
     /** Sum of live hashrates across all workers of an address. Matches /api/client/:address. */
@@ -72,6 +74,39 @@ export class PplnsGroupController {
             totalHashrate: memberRates.reduce((sum, m) => sum + m.hashrate, 0),
             members: memberRates,
         };
+    }
+
+    /**
+     * GET /pplns/groups/:id/chart?range=1d|3d|7d
+     * Historical hashrate time-series for a payout group — drop-in compatible
+     * with /api/info/chart and /api/pplns/chart. Each data point is the sum of
+     * each member's per-address hashrate at that 10-minute slot. Ordered by label.
+     */
+    @Get(':id/chart')
+    async chart(
+        @Param('id') id: string,
+        @Query('range') range: '1d' | '3d' | '7d' = '1d',
+    ) {
+        const group = await this.groupService.getGroup(id);
+        if (!group || group.dissolvedAt) throw new HttpException({ code: 'not-found' }, HttpStatus.NOT_FOUND);
+        const validRange: '1d' | '3d' | '7d' =
+            range === '3d' ? '3d' : range === '7d' ? '7d' : '1d';
+
+        const members = await this.groupService.listMembers(id);
+        if (members.length === 0) return [];
+
+        const perAddressSeries = await Promise.all(
+            members.map(m => this.clientStatisticsService.getChartDataForAddress(m.address, validRange)),
+        );
+        const sumByLabel = new Map<string, number>();
+        for (const series of perAddressSeries) {
+            for (const point of series) {
+                sumByLabel.set(point.label, (sumByLabel.get(point.label) ?? 0) + point.data);
+            }
+        }
+        return Array.from(sumByLabel.entries())
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([label, data]) => ({ label, data }));
     }
 
     @Get(':id/distribution')
