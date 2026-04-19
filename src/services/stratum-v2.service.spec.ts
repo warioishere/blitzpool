@@ -297,6 +297,7 @@ describe('StratumV2Service', () => {
         expect.anything(), // shareTotalsCacheService
         expect.anything(), // extranonceManager
         expect.anything(), // templateDistributionService
+        expect.anything(), // pplnsService
       );
     });
   });

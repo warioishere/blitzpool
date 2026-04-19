@@ -42,7 +42,6 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
     private feePercent: number;
     private networkDifficulty = 0;
     private jobSubscription: Subscription | null = null;
-    private readonly isPrimaryInstance: boolean;
     private readonly coinbaseWeightBudget: number;
 
     // Distribution cache — avoids re-reading entire Redis sorted set on every job
@@ -75,11 +74,6 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         this.feePercent = parseFloat(this.configService.get('PPLNS_FEE_PERCENT') ?? '2');
         this.coinbaseWeightBudget = parseInt(this.configService.get('PPLNS_COINBASE_WEIGHT_BUDGET') ?? DEFAULT_COINBASE_WEIGHT_BUDGET.toString(), 10) || DEFAULT_COINBASE_WEIGHT_BUDGET;
         this.enabled = !!this.configService.get('PPLNS_PORT');
-
-        // PM2 cluster safety: only primary instance processes block payouts
-        const pm2InstanceId = process.env.NODE_APP_INSTANCE ?? process.env.pm_id ?? process.env.PM2_INSTANCE_ID;
-        const normalized = typeof pm2InstanceId === 'string' ? pm2InstanceId.trim() : undefined;
-        this.isPrimaryInstance = !normalized || normalized === '0';
     }
 
     async onModuleInit(): Promise<void> {
@@ -365,12 +359,6 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
 
         // Invalidate cache — pending balances are about to change
         this.cachedDistribution = null;
-
-        // PM2 cluster: only primary instance processes payouts to avoid double-crediting
-        if (!this.isPrimaryInstance) {
-            console.log(`[PPLNS] Block ${blockHeight} found — skipping payout processing (non-primary PM2 instance)`);
-            return;
-        }
 
         // Prevent concurrent block-found processing (multiple miners finding a block simultaneously)
         if (this.blockFoundInProgress) {
