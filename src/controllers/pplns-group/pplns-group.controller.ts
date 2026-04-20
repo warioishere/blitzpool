@@ -3,6 +3,9 @@ import { GroupService, GroupServiceError } from '../../services/group.service';
 import { GroupSoloService } from '../../services/group-solo.service';
 import { ClientService } from '../../ORM/client/client.service';
 import { ClientStatisticsService } from '../../ORM/client-statistics/client-statistics.service';
+import { ClientRejectedStatisticsService } from '../../ORM/client-rejected-statistics/client-rejected-statistics.service';
+import { eStratumErrorCode } from '../../models/enums/eStratumErrorCode';
+import { generateFormattedTimeSlots } from '../../utils/timeslot.utils';
 
 interface CreateGroupDto {
     name?: string;
@@ -25,6 +28,7 @@ export class PplnsGroupController {
         private readonly groupSoloService: GroupSoloService,
         private readonly clientService: ClientService,
         private readonly clientStatisticsService: ClientStatisticsService,
+        private readonly clientRejectedStatisticsService: ClientRejectedStatisticsService,
     ) {}
 
     /** Sum of live hashrates across all workers of an address. Matches /api/client/:address. */
@@ -125,6 +129,95 @@ export class PplnsGroupController {
         return Array.from(sumByLabel.entries())
             .sort(([a], [b]) => a.localeCompare(b))
             .map(([label, data]) => ({ label, data }));
+    }
+
+    /**
+     * GET /pplns/groups/:id/accepted?range=1d|3d|7d
+     * Pool-side aggregate of accepted shares across all group members.
+     * Same shape as /api/client/:address/accepted so the UI can plug it
+     * into the existing accepted-chart rendering without transformation.
+     */
+    @Get(':id/accepted')
+    async accepted(
+        @Param('id') id: string,
+        @Query('range') range: '1d' | '3d' | '7d' = '1d',
+    ) {
+        const group = await this.groupService.getGroup(id);
+        if (!group || group.dissolvedAt) throw new HttpException({ code: 'not-found' }, HttpStatus.NOT_FOUND);
+        const validRange: '1d' | '3d' | '7d' =
+            range === '3d' ? '3d' : range === '7d' ? '7d' : '1d';
+
+        const members = await this.groupService.listMembers(id);
+        if (members.length === 0) return { slotData: [] };
+
+        const now = Date.now();
+        const oneDay = 24 * 60 * 60 * 1000;
+        const days = validRange === '7d' ? 7 : validRange === '3d' ? 3 : 1;
+        const sinceTime = now - days * oneDay;
+
+        const perMember = await Promise.all(
+            members.map((m) => this.clientStatisticsService.getAcceptedEntriesSince(m.address, sinceTime)),
+        );
+        const slotMap = new Map<number, number>();
+        for (const entries of perMember) {
+            for (const entry of entries) {
+                slotMap.set(entry.time, (slotMap.get(entry.time) ?? 0) + entry.shares);
+            }
+        }
+
+        const slotData = generateFormattedTimeSlots(sinceTime, now, (t) => ({
+            counts: { accepted: slotMap.get(t) || 0 },
+        }));
+        return { slotData };
+    }
+
+    /**
+     * GET /pplns/groups/:id/rejected?range=1d|3d|7d
+     * Aggregated rejected share counts per reason, across group members.
+     */
+    @Get(':id/rejected')
+    async rejected(
+        @Param('id') id: string,
+        @Query('range') range: '1d' | '3d' | '7d' = '1d',
+    ) {
+        const group = await this.groupService.getGroup(id);
+        if (!group || group.dissolvedAt) throw new HttpException({ code: 'not-found' }, HttpStatus.NOT_FOUND);
+        const validRange: '1d' | '3d' | '7d' =
+            range === '3d' ? '3d' : range === '7d' ? '7d' : '1d';
+
+        const members = await this.groupService.listMembers(id);
+        if (members.length === 0) return { slotData: [] };
+
+        const now = Date.now();
+        const oneDay = 24 * 60 * 60 * 1000;
+        const days = validRange === '7d' ? 7 : validRange === '3d' ? 3 : 1;
+        const sinceTime = now - days * oneDay;
+
+        const perMember = await Promise.all(
+            members.map((m) => this.clientRejectedStatisticsService.getEntriesSince(m.address, sinceTime)),
+        );
+        const slotMap = new Map<number, Record<string, { count: number; diffMinusOne: number }>>();
+        for (const entries of perMember) {
+            for (const entry of entries) {
+                if (!slotMap.has(entry.time)) slotMap.set(entry.time, {});
+                const slot = slotMap.get(entry.time)!;
+                const existing = slot[entry.reason] ?? { count: 0, diffMinusOne: 0 };
+                slot[entry.reason] = {
+                    count: existing.count + entry.count,
+                    diffMinusOne: existing.diffMinusOne + entry.shares,
+                };
+            }
+        }
+
+        const allReasons = Object.keys(eStratumErrorCode).filter((k) => isNaN(Number(k)));
+        const slotData = generateFormattedTimeSlots(sinceTime, now, (t) => {
+            const counts: Record<string, { count: number; diffMinusOne: number }> = {};
+            for (const reason of allReasons) {
+                counts[reason] = slotMap.get(t)?.[reason] ?? { count: 0, diffMinusOne: 0 };
+            }
+            return { counts };
+        });
+        return { slotData };
     }
 
     @Get(':id/distribution')

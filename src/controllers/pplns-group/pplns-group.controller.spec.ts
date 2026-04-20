@@ -21,11 +21,13 @@ describe('PplnsGroupController.chart', () => {
                 opts.chartByAddress?.[address] ?? [],
             ),
         };
+        const clientRejectedStatisticsService = {} as any;
         const controller = new PplnsGroupController(
             groupService as any,
             groupSoloService,
             clientService,
             clientStatisticsService as any,
+            clientRejectedStatisticsService,
         );
         return { controller, groupService, clientStatisticsService };
     }
