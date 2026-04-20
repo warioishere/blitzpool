@@ -16,6 +16,10 @@ interface AddMemberDto {
     address?: string;
 }
 
+interface AddMembersBatchDto {
+    addresses?: string[];
+}
+
 interface TransferDto {
     toAddress?: string;
 }
@@ -260,6 +264,25 @@ export class PplnsGroupController {
         try {
             const member = await this.groupService.addMember(id, body.address ?? '', token);
             return { address: member.address, role: member.role, joinedAt: member.joinedAt };
+        } catch (e) {
+            throw this.toHttpError(e);
+        }
+    }
+
+    /**
+     * POST /pplns/groups/:id/members/batch
+     * Adds multiple addresses in a single token check + single cache
+     * rebuild. Benign per-address failures land in `skipped`; token
+     * failures still throw (they're auth issues, not per-address).
+     */
+    @Post(':id/members/batch')
+    async addMembersBatch(
+        @Param('id') id: string,
+        @Body() body: AddMembersBatchDto,
+        @Headers('x-admin-token') token?: string,
+    ) {
+        try {
+            return await this.groupService.addMembersBatch(id, body.addresses ?? [], token);
         } catch (e) {
             throw this.toHttpError(e);
         }

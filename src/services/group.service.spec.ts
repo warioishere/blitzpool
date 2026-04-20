@@ -210,4 +210,61 @@ describe('GroupService', () => {
         // New token works
         await expect(service.requireAdminToken(group.id, newToken)).resolves.toBeDefined();
     });
+
+    // ── Batch add ────────────────────────────────────────────────
+
+    it('addMembersBatch adds multiple valid addresses in one call', async () => {
+        const { group, adminToken } = await service.createGroup('group-one', 'bc1qalice');
+        const result = await service.addMembersBatch(
+            group.id,
+            ['bc1qbob', 'bc1qcharlie', 'bc1qdan'],
+            adminToken,
+        );
+        expect(result.added.length).toBe(3);
+        expect(result.skipped.length).toBe(0);
+        expect(result.added.map(m => m.address)).toEqual(['bc1qbob', 'bc1qcharlie', 'bc1qdan']);
+    });
+
+    it('addMembersBatch skips already-member and continues with the rest', async () => {
+        const { group, adminToken } = await service.createGroup('group-one', 'bc1qalice');
+        await service.addMember(group.id, 'bc1qbob', adminToken);
+        const result = await service.addMembersBatch(
+            group.id,
+            ['bc1qbob', 'bc1qcharlie'],
+            adminToken,
+        );
+        expect(result.added.length).toBe(1);
+        expect(result.added[0].address).toBe('bc1qcharlie');
+        expect(result.skipped.length).toBe(1);
+        expect(result.skipped[0]).toMatchObject({ address: 'bc1qbob', reason: 'already-member' });
+    });
+
+    it('addMembersBatch skips address already in a different group', async () => {
+        const { group: g1, adminToken: t1 } = await service.createGroup('group-alpha', 'bc1qalice');
+        await service.addMember(g1.id, 'bc1qbob', t1);
+        const { group: g2, adminToken: t2 } = await service.createGroup('group-beta', 'bc1qcharlie');
+        const result = await service.addMembersBatch(g2.id, ['bc1qbob', 'bc1qdan'], t2);
+        expect(result.added.map(m => m.address)).toEqual(['bc1qdan']);
+        expect(result.skipped).toEqual([{ address: 'bc1qbob', reason: 'address-in-group' }]);
+    });
+
+    it('addMembersBatch collapses duplicates in the same submission', async () => {
+        const { group, adminToken } = await service.createGroup('group-one', 'bc1qalice');
+        const result = await service.addMembersBatch(
+            group.id,
+            ['bc1qbob', 'bc1qbob', 'bc1qcharlie'],
+            adminToken,
+        );
+        expect(result.added.map(m => m.address)).toEqual(['bc1qbob', 'bc1qcharlie']);
+        expect(result.skipped).toEqual([{ address: 'bc1qbob', reason: 'duplicate-in-batch' }]);
+    });
+
+    it('addMembersBatch rejects invalid admin token without adding anything', async () => {
+        const { group } = await service.createGroup('group-one', 'bc1qalice');
+        await expect(
+            service.addMembersBatch(group.id, ['bc1qbob'], 'GRP-wrong'),
+        ).rejects.toMatchObject({ code: 'invalid-token' });
+        const members = Array.from(memberRepo._rows.values()) as any[];
+        expect(members.length).toBe(1); // creator only
+    });
 });

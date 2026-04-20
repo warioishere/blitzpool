@@ -181,6 +181,65 @@ export class GroupService implements OnModuleInit {
         return member;
     }
 
+    /**
+     * Adds multiple members in a single token check + single cache rebuild.
+     * Benign per-address failures (already-member, address-in-group, empty
+     * address) are collected into `skipped` instead of aborting the batch.
+     * Token failures still throw and abort — they're not a per-address
+     * issue but a missing/invalid auth credential.
+     */
+    async addMembersBatch(
+        groupId: string,
+        addresses: string[],
+        token: string | undefined,
+    ): Promise<{
+        added: { address: string; role: 'member'; joinedAt: Date }[];
+        skipped: { address: string; reason: 'already-member' | 'address-in-group' | 'invalid-address' | 'duplicate-in-batch' }[];
+    }> {
+        await this.requireAdminToken(groupId, token);
+
+        const added: { address: string; role: 'member'; joinedAt: Date }[] = [];
+        const skipped: { address: string; reason: 'already-member' | 'address-in-group' | 'invalid-address' | 'duplicate-in-batch' }[] = [];
+        const seen = new Set<string>();
+        let anyAdded = false;
+
+        for (const raw of addresses) {
+            const address = (raw ?? '').trim();
+            if (!address) {
+                skipped.push({ address: raw, reason: 'invalid-address' });
+                continue;
+            }
+            if (seen.has(address)) {
+                skipped.push({ address, reason: 'duplicate-in-batch' });
+                continue;
+            }
+            seen.add(address);
+
+            const existing = await this.memberRepo.findOneBy({ address });
+            if (existing) {
+                skipped.push({
+                    address,
+                    reason: existing.groupId === groupId ? 'already-member' : 'address-in-group',
+                });
+                continue;
+            }
+
+            const saved = await this.memberRepo.save(this.memberRepo.create({
+                groupId,
+                address,
+                role: 'member',
+            }));
+            added.push({ address: saved.address, role: 'member', joinedAt: saved.joinedAt });
+            anyAdded = true;
+        }
+
+        if (anyAdded) {
+            await this.recomputeActive(groupId);
+            await this.rebuildCache();
+        }
+        return { added, skipped };
+    }
+
     async removeMember(groupId: string, address: string, token: string | undefined): Promise<void> {
         await this.requireAdminToken(groupId, token);
         await this.internalRemove(groupId, address, /*fromCreator*/ true);
