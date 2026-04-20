@@ -43,6 +43,24 @@ export class PplnsGroupController {
 
     @Get(':id')
     async details(@Param('id') id: string) {
+        return this.detailsForGroupId(id);
+    }
+
+    /**
+     * GET /pplns/groups/by-address/:address
+     * Returns the (non-dissolved) group an address is a member of, if any.
+     * Unlike /api/pplns/mode/:address this intentionally returns inactive
+     * groups too — so a creator of a freshly-made 1-member group can still
+     * open their group dashboard before the 2nd member joins.
+     */
+    @Get('by-address/:address')
+    async byAddress(@Param('address') address: string) {
+        const entry = this.groupService.getGroupForAddress(address);
+        if (!entry) throw new HttpException({ code: 'not-found' }, HttpStatus.NOT_FOUND);
+        return this.detailsForGroupId(entry.groupId);
+    }
+
+    private async detailsForGroupId(id: string) {
         const group = await this.groupService.getGroup(id);
         if (!group || group.dissolvedAt) throw new HttpException({ code: 'not-found' }, HttpStatus.NOT_FOUND);
         const members = await this.groupService.listMembers(id);
