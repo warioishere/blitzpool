@@ -38,6 +38,19 @@ export class PplnsController {
     }
 
     /**
+     * GET /pplns/fees
+     * Pool-side fee configuration shared by PPLNS and group-solo payout paths.
+     * The UI reads this to render current fees on the groups-landing page
+     * without having to re-deploy when fees change. `feePercent` is a human
+     * percentage (e.g. 2 for 2%), `feeAddress` is the BTC address where the
+     * pool fee output lands in the coinbase transaction.
+     */
+    @Get('fees')
+    getFees() {
+        return this.pplnsService.getFeeConfig();
+    }
+
+    /**
      * GET /pplns/distribution
      * Current share distribution across all miners in the PPLNS window.
      */

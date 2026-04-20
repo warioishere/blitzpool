@@ -109,6 +109,19 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
     }
 
     /**
+     * Pool fee config exposed to the UI so the landing pages can show current
+     * fees dynamically without hard-coding them. Same config is reused by the
+     * group-solo path, so one endpoint covers both modes.
+     */
+    getFeeConfig(): { feePercent: number; feeAddress: string; coinbaseWeightBudget: number } {
+        return {
+            feePercent: this.feePercent,
+            feeAddress: this.feeAddress,
+            coinbaseWeightBudget: this.coinbaseWeightBudget,
+        };
+    }
+
+    /**
      * Update network difficulty (called when new block template arrives).
      */
     setNetworkDifficulty(difficulty: number): void {
