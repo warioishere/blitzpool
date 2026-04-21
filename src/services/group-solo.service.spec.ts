@@ -7,9 +7,14 @@ import { GroupSoloService } from './group-solo.service';
 function createMockRedis() {
     const store = new Map<string, string>();
     const zsets = new Map<string, { score: number; value: string }[]>();
+    const hashes = new Map<string, Map<string, string>>();
     const getZ = (key: string) => {
         if (!zsets.has(key)) zsets.set(key, []);
         return zsets.get(key)!;
+    };
+    const getH = (key: string) => {
+        if (!hashes.has(key)) hashes.set(key, new Map());
+        return hashes.get(key)!;
     };
 
     return {
@@ -20,7 +25,7 @@ function createMockRedis() {
         }),
         get: jest.fn(async (key: string) => store.get(key) ?? null),
         set: jest.fn(async (key: string, value: string) => { store.set(key, value); }),
-        del: jest.fn(async (key: string) => { store.delete(key); zsets.delete(key); }),
+        del: jest.fn(async (key: string) => { store.delete(key); zsets.delete(key); hashes.delete(key); }),
         incrByFloat: jest.fn(async (key: string, amount: number) => {
             const val = parseFloat(store.get(key) ?? '0') + amount;
             store.set(key, val.toString());
@@ -37,8 +42,26 @@ function createMockRedis() {
             return z.slice(start, e + 1).map(x => x.value);
         }),
         zCard: jest.fn(async (key: string) => getZ(key).length),
+        hIncrByFloat: jest.fn(async (key: string, field: string, amount: number) => {
+            const h = getH(key);
+            const val = parseFloat(h.get(field) ?? '0') + amount;
+            h.set(field, val.toString());
+            return val;
+        }),
+        hIncrBy: jest.fn(async (key: string, field: string, amount: number) => {
+            const h = getH(key);
+            const val = parseInt(h.get(field) ?? '0', 10) + amount;
+            h.set(field, val.toString());
+            return val;
+        }),
+        hGetAll: jest.fn(async (key: string) => {
+            const h = hashes.get(key);
+            if (!h) return {};
+            return Object.fromEntries(h.entries());
+        }),
         _store: store,
         _zsets: zsets,
+        _hashes: hashes,
     };
 }
 
@@ -297,5 +320,56 @@ describe('GroupSoloService', () => {
         expect(stats.perAddress).toHaveLength(1);
         expect(stats.perAddress[0].address).toBe('bc1qalice');
         expect(stats.perAddress[0].percent).toBe(100);
+        expect(stats.totalRejectedDifficulty).toBe(0);
+        expect(stats.rejectedShareCount).toBe(0);
+        expect(stats.perAddress[0].rejectedDifficulty).toBe(0);
+        expect(stats.perAddress[0].rejectedShareCount).toBe(0);
+    });
+
+    it('recordReject rejects addresses not in an active group', async () => {
+        const { service, groupService } = makeService();
+        const ok = await service.recordReject('bc1qstranger', 100);
+        expect(ok).toBe(false);
+        groupService._setMembership('bc1qalice', 'g1', false);
+        const ok2 = await service.recordReject('bc1qalice', 100);
+        expect(ok2).toBe(false);
+    });
+
+    it('recordReject aggregates per-address and getRoundStats exposes it', async () => {
+        const { service, groupService } = makeService();
+        groupService._setMembership('bc1qalice', 'g1', true);
+        groupService._setMembership('bc1qbob', 'g1', true);
+        await service.recordShare('bc1qalice', 100);
+        await service.recordReject('bc1qalice', 50);
+        await service.recordReject('bc1qalice', 50);
+        await service.recordReject('bc1qbob', 200);
+
+        const stats = await service.getRoundStats('g1');
+        expect(stats.totalRejectedDifficulty).toBe(300);
+        expect(stats.rejectedShareCount).toBe(3);
+
+        const alice = stats.perAddress.find(p => p.address === 'bc1qalice')!;
+        expect(alice.rejectedDifficulty).toBe(100);
+        expect(alice.rejectedShareCount).toBe(2);
+        const bob = stats.perAddress.find(p => p.address === 'bc1qbob')!;
+        expect(bob.rejectedDifficulty).toBe(200);
+        expect(bob.rejectedShareCount).toBe(1);
+        // Bob had no accepted shares but still shows up because of rejects
+        expect(bob.difficulty).toBe(0);
+    });
+
+    it('onBlockFound also clears rejected counters', async () => {
+        const { service, redis, groupService } = makeService();
+        groupService._setMembership('bc1qalice', 'g1', true);
+        await service.recordShare('bc1qalice', 100);
+        await service.recordReject('bc1qalice', 50);
+        await service.getPayoutDistribution('g1', 100_000_000);
+
+        await service.onBlockFound(900_000, 100_000_000, 'bc1qalice');
+
+        expect(redis._hashes.size).toBe(0);
+        const stats = await service.getRoundStats('g1');
+        expect(stats.rejectedShareCount).toBe(0);
+        expect(stats.totalRejectedDifficulty).toBe(0);
     });
 });

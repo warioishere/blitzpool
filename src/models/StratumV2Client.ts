@@ -150,8 +150,6 @@ export class StratumV2Client {
 
   // Connection-level state
   private address: string | null = null;
-  /** Set during channel-open if the address belongs to an active group. Activates group-solo mode for this session. */
-  private groupSoloGroupId: string | null = null;
   private workerName: string = 'default';
   private userAgent: string = '';
   private vendorInfo: string = '';
@@ -519,8 +517,6 @@ export class StratumV2Client {
       return;
     }
 
-    this.detectGroupSoloMembership(rawAddress);
-
     // Multi-channel: subsequent channels must use same address
     if (this.address && this.address !== rawAddress) {
       const errorPayload = serializeOpenMiningChannelError({
@@ -657,8 +653,6 @@ export class StratumV2Client {
       this.destroySocket();
       return;
     }
-
-    this.detectGroupSoloMembership(rawAddress);
 
     // Multi-channel: subsequent channels must use same address
     if (this.address && this.address !== rawAddress) {
@@ -1460,11 +1454,12 @@ export class StratumV2Client {
         await this.addressSettingsCacheService.clear();
 
         // Group-solo takes precedence — finder's group gets the coinbase, round resets
-        if (this.groupSoloGroupId && this.groupSoloService?.isEnabled() && jobTemplate && this.address) {
-          await this.groupSoloService.onBlockFound(
+        const foundGroupId = this.activeGroupId();
+        if (foundGroupId && jobTemplate) {
+          await this.groupSoloService!.onBlockFound(
             jobTemplate.blockData.height,
             jobTemplate.blockData.coinbasevalue,
-            this.address,
+            this.address!,
           );
         } else if (this.portConfig.payoutMode === 'pplns' && this.pplnsService?.isEnabled() && jobTemplate) {
           // Process PPLNS payouts (update pending balances)
@@ -1482,8 +1477,9 @@ export class StratumV2Client {
       await this.clientStatisticsService.addAcceptedShare(this.entity!, jobDifficulty);
 
       // Record share — group-solo takes precedence over port's payoutMode
-      if (this.groupSoloGroupId && this.groupSoloService?.isEnabled()) {
-        await this.groupSoloService.recordShare(this.address!, jobDifficulty);
+      const shareGroupId = this.activeGroupId();
+      if (shareGroupId) {
+        await this.groupSoloService!.recordShare(this.address!, jobDifficulty);
       } else if (this.portConfig.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
         await this.pplnsService.recordShare(this.address!, jobDifficulty);
       }
@@ -1729,7 +1725,7 @@ export class StratumV2Client {
     }
 
     // Group-solo mode: per-group shared coinbase — also async
-    if (this.groupSoloGroupId && this.groupSoloService?.isEnabled() && blockRewardSats) {
+    if (blockRewardSats && this.activeGroupId()) {
       this.noFee = false;
       return null;
     }
@@ -1756,8 +1752,9 @@ export class StratumV2Client {
 
   private async buildPayoutInformationAsync(blockRewardSats: number): Promise<{ address: string; percent: number }[] | null> {
     // Group-solo takes precedence over PPLNS.
-    if (this.groupSoloGroupId && this.groupSoloService?.isEnabled()) {
-      const distribution = await this.groupSoloService.getPayoutDistribution(this.groupSoloGroupId, blockRewardSats);
+    const asyncGroupId = this.activeGroupId();
+    if (asyncGroupId) {
+      const distribution = await this.groupSoloService!.getPayoutDistribution(asyncGroupId, blockRewardSats);
       if (distribution && distribution.length > 0) {
         this.noFee = false;
         return distribution;
@@ -1774,16 +1771,16 @@ export class StratumV2Client {
   }
 
   /**
-   * If the address is in an active group, switch this session into group-solo payout.
-   * Otherwise fall back to the port's configured payoutMode (solo/pplns).
+   * Live lookup of the active group-id for this session's address. Returns null
+   * if group-solo isn't enabled, no address is set yet, or the address isn't in
+   * an active group. Called per-share/per-job because membership can change
+   * after channel-open (miner added to group while connected).
    */
-  private detectGroupSoloMembership(address: string): void {
-    if (!this.groupSoloService?.isEnabled()) return;
-    const entry = this.groupSoloService.getGroupForAddress(address);
-    if (entry?.active) {
-      this.groupSoloGroupId = entry.groupId;
-      console.log(`[SV2 ${this.sessionId}] Address ${address} is in active group ${entry.groupId} — enabling group-solo payout`);
-    }
+  private activeGroupId(): string | null {
+    if (!this.groupSoloService?.isEnabled()) return null;
+    if (!this.address) return null;
+    const entry = this.groupSoloService.getGroupForAddress(this.address);
+    return entry?.active ? entry.groupId : null;
   }
 
   private async sendNewMiningJob(jobTemplate: IJobTemplate, sendPrevHash: boolean, channelId?: number): Promise<void> {
@@ -2089,6 +2086,13 @@ export class StratumV2Client {
         errorType,
         diff,
       );
+    }
+    // Group-solo: record against the group's round counters if this miner is
+    // currently a member of an active group (live lookup — membership can
+    // change after channel-open).
+    const rejGroupId = this.activeGroupId();
+    if (rejGroupId && this.address) {
+      await this.groupSoloService!.recordReject(this.address, diff);
     }
   }
 

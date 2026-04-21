@@ -60,8 +60,6 @@ export class StratumV1Client {
     private pendingSessionDifficulty: number | null = null;
     private deviceOnlineNotified = false;
     private deviceOfflineNotified = false;
-    /** Set during authorize if the address belongs to an active group. Activates group-solo mode for this session. */
-    private groupSoloGroupId: string | null = null;
 
     private entity: ClientEntity;
     private creatingEntity: Promise<void>;
@@ -443,16 +441,6 @@ export class StratumV1Client {
                     return;
                 }
 
-                // Group-solo detection: if this address is in an active group,
-                // switch this session into group-solo payout regardless of the port mode.
-                if (this.groupSoloService?.isEnabled()) {
-                    const groupEntry = this.groupSoloService.getGroupForAddress(authorizationMessage.address);
-                    if (groupEntry?.active) {
-                        this.groupSoloGroupId = groupEntry.groupId;
-                        console.log(`[StratumV1Client] Address ${authorizationMessage.address} is in active group ${groupEntry.groupId} — enabling group-solo payout`);
-                    }
-                }
-
                 {
                     this.clientAuthorization = authorizationMessage;
 
@@ -730,6 +718,29 @@ export class StratumV1Client {
         );
     }
 
+    /**
+     * Live lookup of the active group-id for this session's address. Returns null
+     * if group-solo isn't enabled, the address hasn't been authorized yet, or the
+     * address isn't a member of an active group. Called per-share/per-job because
+     * membership can change after connect (miner added to group while connected).
+     */
+    private activeGroupId(): string | null {
+        if (!this.groupSoloService?.isEnabled()) return null;
+        const address = this.clientAuthorization?.address;
+        if (!address) return null;
+        const entry = this.groupSoloService.getGroupForAddress(address);
+        return entry?.active ? entry.groupId : null;
+    }
+
+    /** Dispatch a rejected share to group-solo if the miner is currently in an active group. */
+    private async dispatchGroupReject(): Promise<void> {
+        if (!this.activeGroupId()) return;
+        await this.groupSoloService!.recordReject(
+            this.clientAuthorization.address,
+            this.sessionDifficulty,
+        );
+    }
+
     private async sendNewMiningJob(jobTemplate: IJobTemplate) {
         const jobStartTime = Date.now();
 
@@ -744,10 +755,11 @@ export class StratumV1Client {
             this.hashRate = this.statistics.hashRate;
         }
 
-        if (this.groupSoloGroupId && this.groupSoloService?.isEnabled()) {
+        const jobGroupId = this.activeGroupId();
+        if (jobGroupId) {
             // Group-solo takes precedence: per-group shared coinbase, PROP-style
-            payoutInformation = await this.groupSoloService.getPayoutDistribution(
-                this.groupSoloGroupId,
+            payoutInformation = await this.groupSoloService!.getPayoutDistribution(
+                jobGroupId,
                 jobTemplate.blockData.coinbasevalue,
             );
             this.noFee = false;
@@ -887,6 +899,7 @@ export class StratumV1Client {
                 eStratumErrorCode[eStratumErrorCode.DuplicateShare],
                 this.sessionDifficulty,
             );
+            await this.dispatchGroupReject();
             const err = new StratumErrorMessage(
                 submission.id,
                 eStratumErrorCode.DuplicateShare,
@@ -922,6 +935,7 @@ export class StratumV1Client {
                 eStratumErrorCode[eStratumErrorCode.JobNotFound],
                 this.sessionDifficulty,
             );
+            await this.dispatchGroupReject();
             const err = new StratumErrorMessage(
                 submission.id,
                 eStratumErrorCode.JobNotFound,
@@ -954,6 +968,7 @@ export class StratumV1Client {
                 eStratumErrorCode[eStratumErrorCode.JobNotFound],
                 this.sessionDifficulty,
             );
+            await this.dispatchGroupReject();
             console.warn(`Job template ${job.jobTemplateId} not found for job ${submission.jobId}`);
             delete this.stratumV1JobsService.jobs[submission.jobId];
             const err = new StratumErrorMessage(
@@ -1012,8 +1027,9 @@ export class StratumV1Client {
                     await this.addressSettingsCacheService.clear();
 
                     // Process group-solo payouts (finder's group gets the coinbase, round resets)
-                    if (this.groupSoloGroupId && this.groupSoloService?.isEnabled() && this.clientAuthorization) {
-                        await this.groupSoloService.onBlockFound(
+                    const foundGroupId = this.activeGroupId();
+                    if (foundGroupId) {
+                        await this.groupSoloService!.onBlockFound(
                             jobTemplate.blockData.height,
                             jobTemplate.blockData.coinbasevalue,
                             this.clientAuthorization.address,
@@ -1035,8 +1051,9 @@ export class StratumV1Client {
                 await this.clientStatisticsService.addAcceptedShare(this.entity, this.sessionDifficulty);
 
                 // Record share — group-solo takes precedence over port's payoutMode
-                if (this.groupSoloGroupId && this.groupSoloService?.isEnabled()) {
-                    await this.groupSoloService.recordShare(
+                const shareGroupId = this.activeGroupId();
+                if (shareGroupId) {
+                    await this.groupSoloService!.recordShare(
                         this.clientAuthorization.address,
                         this.sessionDifficulty,
                     );
@@ -1134,6 +1151,7 @@ export class StratumV1Client {
                 eStratumErrorCode[eStratumErrorCode.LowDifficultyShare],
                 this.sessionDifficulty,
             );
+            await this.dispatchGroupReject();
             const err = new StratumErrorMessage(
                 submission.id,
                 eStratumErrorCode.LowDifficultyShare,

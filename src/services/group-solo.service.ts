@@ -31,6 +31,8 @@ function redisKeys(groupId: string) {
         shares: `groupsolo:${groupId}:shares`,
         counter: `groupsolo:${groupId}:counter`,
         total: `groupsolo:${groupId}:total`,
+        rejectedDiff: `groupsolo:${groupId}:rejected-diff`,
+        rejectedCount: `groupsolo:${groupId}:rejected-count`,
     };
 }
 
@@ -123,6 +125,22 @@ export class GroupSoloService implements OnModuleInit {
         const payload = `${address}:${difficulty}:${Date.now()}`;
         await this.redis.zAdd(keys.shares, { score: counter, value: payload });
         await this.redis.incrByFloat(keys.total, difficulty);
+        return true;
+    }
+
+    /**
+     * Record a rejected share. Aggregated per-address into two hashes so the
+     * distribution endpoint can show rejected stats per member. Reset with the
+     * rest of the round on block-found.
+     */
+    async recordReject(address: string, difficulty: number): Promise<boolean> {
+        if (!this.isEnabled()) return false;
+        const entry = this.groupService.getGroupForAddress(address);
+        if (!entry || !entry.active) return false;
+
+        const keys = redisKeys(entry.groupId);
+        await this.redis.hIncrByFloat(keys.rejectedDiff, address, difficulty);
+        await this.redis.hIncrBy(keys.rejectedCount, address, 1);
         return true;
     }
 
@@ -435,6 +453,8 @@ export class GroupSoloService implements OnModuleInit {
         await this.redis.del(keys.shares);
         await this.redis.del(keys.counter);
         await this.redis.del(keys.total);
+        await this.redis.del(keys.rejectedDiff);
+        await this.redis.del(keys.rejectedCount);
     }
 
     // ── Stats (for API) ──────────────────────────────────────────
@@ -442,10 +462,24 @@ export class GroupSoloService implements OnModuleInit {
     async getRoundStats(groupId: string): Promise<{
         totalDifficulty: number;
         shareCount: number;
-        perAddress: { address: string; difficulty: number; percent: number }[];
+        totalRejectedDifficulty: number;
+        rejectedShareCount: number;
+        perAddress: {
+            address: string;
+            difficulty: number;
+            percent: number;
+            rejectedDifficulty: number;
+            rejectedShareCount: number;
+        }[];
     }> {
         if (!this.isEnabled()) {
-            return { totalDifficulty: 0, shareCount: 0, perAddress: [] };
+            return {
+                totalDifficulty: 0,
+                shareCount: 0,
+                totalRejectedDifficulty: 0,
+                rejectedShareCount: 0,
+                perAddress: [],
+            };
         }
         const keys = redisKeys(groupId);
         const entries = await this.redis.zRange(keys.shares, 0, -1);
@@ -457,17 +491,45 @@ export class GroupSoloService implements OnModuleInit {
             addressDiff.set(addr, (addressDiff.get(addr) ?? 0) + diff);
             totalDiff += diff;
         }
-        const perAddress = Array.from(addressDiff.entries())
-            .map(([address, difficulty]) => ({
+
+        const rejectedDiffMap = (await this.redis.hGetAll(keys.rejectedDiff)) ?? {};
+        const rejectedCountMap = (await this.redis.hGetAll(keys.rejectedCount)) ?? {};
+        const addressRejDiff = new Map<string, number>();
+        const addressRejCount = new Map<string, number>();
+        let totalRejDiff = 0;
+        let totalRejCount = 0;
+        for (const [addr, v] of Object.entries(rejectedDiffMap)) {
+            const d = parseFloat(v as string) || 0;
+            addressRejDiff.set(addr, d);
+            totalRejDiff += d;
+        }
+        for (const [addr, v] of Object.entries(rejectedCountMap)) {
+            const c = parseInt(v as string, 10) || 0;
+            addressRejCount.set(addr, c);
+            totalRejCount += c;
+        }
+
+        const allAddresses = new Set<string>([
+            ...addressDiff.keys(),
+            ...addressRejDiff.keys(),
+            ...addressRejCount.keys(),
+        ]);
+        const perAddress = Array.from(allAddresses).map((address) => {
+            const difficulty = addressDiff.get(address) ?? 0;
+            return {
                 address,
                 difficulty,
                 percent: totalDiff > 0 ? (difficulty / totalDiff) * 100 : 0,
-            }))
-            .sort((a, b) => b.percent - a.percent);
+                rejectedDifficulty: addressRejDiff.get(address) ?? 0,
+                rejectedShareCount: addressRejCount.get(address) ?? 0,
+            };
+        }).sort((a, b) => b.percent - a.percent);
 
         return {
             totalDifficulty: totalDiff,
             shareCount: (entries ?? []).length,
+            totalRejectedDifficulty: totalRejDiff,
+            rejectedShareCount: totalRejCount,
             perAddress,
         };
     }
