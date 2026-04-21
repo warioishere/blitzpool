@@ -697,14 +697,21 @@ export class StratumV2Client {
     // field `rollable_extranonce_size`). Total extranonce bytes is always
     // computed explicitly as `prefix.length + channel.extranonceSize`.
     //
-    // Cap rollable portion at (12 - prefixLength) so total coinbase extranonce
-    // stays ≤ 12 bytes, safe within Bitcoin script limits.
+    // Honor `min_extranonce_size` from the miner literally. SRI's reference
+    // pool (pool-apps/pool) passes `msg.min_extranonce_size` directly to the
+    // extranonce factory without upscaling to a pool-side default — if we
+    // advertise a larger rollable size than the miner asked for, some
+    // firmwares (Bitaxe, NerdQAxe) ignore our response and keep submitting
+    // their originally-requested size, producing "Extranonce size mismatch"
+    // warnings and suppressing block submission. Cap only at the upper end
+    // (12 − prefixLength) so total coinbase extranonce stays ≤ 12 bytes.
     const defaultRollable = this.extranonceManager
       ? this.extranonceManager.minerExtranonceSize
       : Math.max(0, 8 - extranoncePrefix.length);
     const maxRollable = 12 - extranoncePrefix.length;
-    const requestedRollable = Math.min(msg.minExtranonceSize, maxRollable);
-    const rollableExtranonceSize = Math.max(defaultRollable, requestedRollable);
+    const rollableExtranonceSize = msg.minExtranonceSize > 0
+      ? Math.min(msg.minExtranonceSize, maxRollable)
+      : defaultRollable;
 
     // Check if this is a JD client (has corresponding JDP connection)
     const isJdClient = this.stratumV2Service.hasJdpConnectionFromIp(this.getRemoteAddress());
@@ -782,7 +789,7 @@ export class StratumV2Client {
     await this.sendFrame(Sv2MsgType.OPEN_EXTENDED_MINING_CHANNEL_SUCCESS, successPayload, 0);
 
     const totalExtranonceBytes = extranoncePrefix.length + rollableExtranonceSize;
-    console.log(`[SV2 ${this.sessionId}] 🔧 OpenExtendedChannel ${channelId}: address=${this.address}.${this.workerName}, nominalHashRate=${msg.nominalHashRate}, difficulty=${channelState.sessionDifficulty.toFixed(4)}, extranonceSize=${rollableExtranonceSize} (rollable, miner portion), prefix=${extranoncePrefix.length} bytes, total=${totalExtranonceBytes} bytes in coinbase, prefixHex=${extranoncePrefix.toString('hex')}`);
+    console.log(`[SV2 ${this.sessionId}] 🔧 OpenExtendedChannel ${channelId}: address=${this.address}.${this.workerName}, nominalHashRate=${msg.nominalHashRate}, difficulty=${channelState.sessionDifficulty.toFixed(4)}, minExtranonceSize(requested)=${msg.minExtranonceSize}, extranonceSize(granted)=${rollableExtranonceSize}, prefix=${extranoncePrefix.length} bytes, total=${totalExtranonceBytes} bytes in coinbase, prefixHex=${extranoncePrefix.toString('hex')}`);
 
     if (isFirstChannel) {
       if (isJdClient || this.workSelectionEnabled) {
