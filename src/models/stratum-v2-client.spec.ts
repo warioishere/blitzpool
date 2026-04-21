@@ -1315,6 +1315,163 @@ describe('StratumV2Client', () => {
       socket.destroy();
     });
 
+    // SV2 spec regression — extranonce_size is the MINER ROLLABLE portion
+    // only, NOT prefix + rollable. The on-wire value the pool sends in
+    // OpenExtendedMiningChannel.Success.extranonce_size must equal what the
+    // miner submits as SubmitSharesExtended.extranonce.length (byte-for-byte).
+    // `channel.extranonceSize` internally must hold the same rollable-only
+    // value, matching SRI's `rollable_extranonce_size`.
+    //
+    // Full coinbase = coinbase_tx_prefix + extranonce_prefix + extranonce +
+    // coinbase_tx_suffix; total extranonce bytes = prefix.length + rollable.
+    it('stores extranonce_size as rollable-only per SV2 spec, wire matches SubmitSharesExtended.extranonce length', async () => {
+      const { socket, initiator, jobSubject, client } = await setupExtendedHandshakenClient();
+
+      const setupPayload = serializeSetupConnection({
+        protocol: 0,
+        minVersion: 2,
+        maxVersion: 2,
+        flags: Sv2MiningSetupFlags.REQUIRES_WORK_SELECTION,
+        endpoint_host: 'localhost',
+        endpoint_port: 3333,
+        vendor: 'TestMiner',
+        hardwareVersion: '1.0',
+        firmwareVersion: '2.0',
+        deviceId: 'test-id',
+      });
+      sendEncryptedFrame(socket, initiator, Sv2MsgType.SETUP_CONNECTION, setupPayload);
+      await new Promise(resolve => setTimeout(resolve, 100));
+      readEncryptedFrames(socket.drainWritten(), initiator);
+
+      const mockJobTemplate: any = {
+        id: 'test-job',
+        prevhash: '0000000000000000000000000000000000000000000000000000000000000001',
+        coinbase_prefix_hex: '01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0f' +
+          '00000000',
+        coinbase_suffix_hex: '00000000',
+        merkle_branch: [],
+        version: 0x20000000,
+        nbits: 0x1d00ffff,
+        ntime: 1700000000,
+        height: 100,
+        witness_commitment: Buffer.alloc(32),
+        block: {
+          timestamp: 1700000000,
+          toHex: () => '',
+        },
+        blockData: {
+          height: 100,
+          clearJobs: false,
+          networkDifficulty: 1e15,
+          coinbasevalue: 625000000,
+        },
+      };
+
+      // Ask for rollable=6 via minExtranonceSize — pool's default allocator is
+      // prefix=4 + rollable=4 (total 8). With minExtranonceSize=6 we expect
+      // the pool to bump the rollable portion up to 6 (total becomes 10 bytes).
+      const openPayload = serializeOpenExtendedMiningChannel({
+        requestId: 17,
+        userIdentity: 'bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080.extra',
+        nominalHashRate: 100e12,
+        maxTarget: Buffer.alloc(32, 0xff),
+        minExtranonceSize: 6,
+      });
+      setTimeout(() => jobSubject.next(mockJobTemplate), 50);
+      sendEncryptedFrame(socket, initiator, Sv2MsgType.OPEN_EXTENDED_MINING_CHANNEL, openPayload);
+      await new Promise(resolve => setTimeout(resolve, 300));
+
+      const frames = readEncryptedFrames(socket.drainWritten(), initiator);
+      const successFrame = frames.find(f => f.header.msgType === Sv2MsgType.OPEN_EXTENDED_MINING_CHANNEL_SUCCESS);
+      expect(successFrame).toBeDefined();
+
+      const success = deserializeOpenExtendedMiningChannelSuccess(new BufferReader(successFrame!.payload));
+      const wireRollable = success.extranonceSize;
+      const wirePrefixLen = success.extranoncePrefix.length;
+
+      // The wire extranonce_size must be AT LEAST the requested 6 (rollable only).
+      expect(wireRollable).toBeGreaterThanOrEqual(6);
+
+      // Internal state must store the SAME rollable-only value on the channel,
+      // not the total — otherwise share validation derives the wrong expected
+      // length and would either reject valid submissions or accept malformed
+      // ones. This is the concrete behavior covered by the recent fix.
+      const channel = (client as any).channels.get(success.channelId);
+      expect(channel).toBeDefined();
+      expect(channel.extranonceSize).toBe(wireRollable);
+
+      // Guardrail: the prefix length on the channel matches what was sent
+      // on the wire — together they give total coinbase extranonce bytes,
+      // which is what patchCoinbasePrefixVarint/SetCustomMiningJob should
+      // use for varint patching and scriptSig-length computation.
+      expect(channel.extranoncePrefix.length).toBe(wirePrefixLen);
+      const totalExtranonceBytes = channel.extranoncePrefix.length + channel.extranonceSize;
+      expect(totalExtranonceBytes).toBe(wirePrefixLen + wireRollable);
+
+      // Install a mock extended job so share submission gets past the
+      // job-lookup step and hits the extranonce-size validation branch.
+      const fakePrevHash = Buffer.alloc(32);
+      const fakeCoinbasePrefix = Buffer.concat([
+        Buffer.from('01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff', 'hex'),
+        Buffer.from([0x00]), // scriptSig length varint (filled in by patch logic in prod)
+      ]);
+      const fakeCoinbaseSuffix = Buffer.from('00000000', 'hex');
+      channel.extendedJobs.set(0x01, {
+        channelId: success.channelId,
+        jobId: 0x01,
+        coinbasePrefix: fakeCoinbasePrefix,
+        coinbaseSuffix: fakeCoinbaseSuffix,
+        merklePath: [],
+        prevHash: fakePrevHash,
+        nBits: 0x1d00ffff,
+        versionRollingAllowed: true,
+        jobTemplate: mockJobTemplate,
+      });
+      channel.jobIdToDifficulty.set(0x01, 1);
+
+      // Case A: miner sends exactly `channel.extranonceSize` bytes → validation passes.
+      // Case B: miner sends wrong length → mismatch warning.
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const correctShare = serializeSubmitSharesExtended({
+          channelId: success.channelId,
+          sequenceNumber: 1,
+          jobId: 1,
+          nonce: 0x11111111,
+          ntime: 1700000000,
+          version: 0x20000000,
+          extranonce: Buffer.alloc(wireRollable, 0xaa),
+        });
+        sendEncryptedFrame(socket, initiator, Sv2MsgType.SUBMIT_SHARES_EXTENDED, correctShare);
+        await new Promise(resolve => setTimeout(resolve, 150));
+        readEncryptedFrames(socket.drainWritten(), initiator);
+
+        const mismatchesBefore = warnSpy.mock.calls.filter(c => String(c[0]).includes('Extranonce size mismatch')).length;
+
+        const badShare = serializeSubmitSharesExtended({
+          channelId: success.channelId,
+          sequenceNumber: 2,
+          jobId: 1,
+          nonce: 0x22222222,
+          ntime: 1700000001,
+          version: 0x20000000,
+          // Wrong length: send prefix+rollable bytes (the old-bug TOTAL size).
+          // Pool must reject this as mismatched per spec.
+          extranonce: Buffer.alloc(wirePrefixLen + wireRollable, 0xbb),
+        });
+        sendEncryptedFrame(socket, initiator, Sv2MsgType.SUBMIT_SHARES_EXTENDED, badShare);
+        await new Promise(resolve => setTimeout(resolve, 150));
+        readEncryptedFrames(socket.drainWritten(), initiator);
+
+        const mismatchesAfter = warnSpy.mock.calls.filter(c => String(c[0]).includes('Extranonce size mismatch')).length;
+        expect(mismatchesAfter - mismatchesBefore).toBe(1);
+      } finally {
+        warnSpy.mockRestore();
+      }
+
+      socket.destroy();
+    });
+
     it('should reject extended share for unknown job ID', async () => {
       const { socket, initiator, services, jobSubject, client } = await setupExtendedHandshakenClient();
 
