@@ -1315,6 +1315,9 @@ export class StratumV2Client {
     const extranonceValid = submission.extranonce.length === expectedMinerExtranonceSize;
     if (!extranonceValid) {
       console.warn(`[SV2 ${this.sessionId}] ⚠️  Extranonce size mismatch: got=${submission.extranonce.length}, expected=${expectedMinerExtranonceSize} (block submission will be skipped)`);
+    } else if (!channel.firstShareLogged) {
+      channel.firstShareLogged = true;
+      console.log(`[SV2 ${this.sessionId}] ✅ First extended share: extranonce length ok, got=${submission.extranonce.length} bytes (matches negotiated ${expectedMinerExtranonceSize})`);
     }
 
     // 1. Reconstruct coinbase transaction (non-witness serialization)
