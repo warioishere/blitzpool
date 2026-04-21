@@ -173,9 +173,9 @@ export function deserializeProvideMissingTransactionsSuccess(reader: BufferReade
   };
 }
 
-// ── SubmitSolutionJd (0x60) ────────────────────────────────────────
+// ── PushSolution (0x60) ────────────────────────────────────────
 
-export interface Sv2SubmitSolutionJd {
+export interface Sv2PushSolution {
   extranonce: Buffer;  // B0_32
   prevHash: Buffer;    // U256
   nonce: number;       // U32
@@ -184,7 +184,7 @@ export interface Sv2SubmitSolutionJd {
   version: number;     // U32
 }
 
-export function serializeSubmitSolutionJd(msg: Sv2SubmitSolutionJd): Buffer {
+export function serializePushSolution(msg: Sv2PushSolution): Buffer {
   const w = new BufferWriter();
   w.writeB0_32(msg.extranonce);
   w.writeU256(msg.prevHash);
@@ -195,7 +195,7 @@ export function serializeSubmitSolutionJd(msg: Sv2SubmitSolutionJd): Buffer {
   return w.toBuffer();
 }
 
-export function deserializeSubmitSolutionJd(reader: BufferReader): Sv2SubmitSolutionJd {
+export function deserializePushSolution(reader: BufferReader): Sv2PushSolution {
   return {
     extranonce: reader.readB0_32(),
     prevHash: reader.readU256(),

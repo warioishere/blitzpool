@@ -144,7 +144,7 @@ export class JobDeclarationService implements OnModuleInit, JobDeclarationServic
 
   /**
    * Get full miner info (address, worker, sessionId) from the mining connection by IP.
-   * Used by JDP SubmitSolutionJd to populate the Found Block list consistently
+   * Used by JDP PushSolution to populate the Found Block list consistently
    * with SV1/SV2 standard/extended channel blocks.
    */
   getMinerInfoByIp(remoteIp: string): { address: string; worker: string; sessionId: string } | null {
@@ -252,7 +252,7 @@ export class JobDeclarationService implements OnModuleInit, JobDeclarationServic
   /**
    * Get raw transaction data from the current template, keyed by wtxid hex.
    * Used by JobDeclarationClient to collect raw tx data for known transactions
-   * during job declaration, enabling block reconstruction via SubmitSolutionJd.
+   * during job declaration, enabling block reconstruction via PushSolution.
    */
   getTemplateTransactions(): Map<string, Buffer> {
     const templateData = this.templateDistributionService.getLatestTemplate();
@@ -297,7 +297,7 @@ export class JobDeclarationService implements OnModuleInit, JobDeclarationServic
 
   /**
    * Submit a serialized block to Bitcoin Core.
-   * Called by JobDeclarationClient when SubmitSolutionJd is received.
+   * Called by JobDeclarationClient when PushSolution is received.
    */
   async submitBlock(blockHex: string): Promise<string> {
     return this.bitcoinRpcService.SUBMIT_BLOCK(blockHex);

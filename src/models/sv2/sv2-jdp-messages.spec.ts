@@ -30,9 +30,9 @@ import {
   Sv2SetCustomMiningJobError,
   serializeSetCustomMiningJobError,
   deserializeSetCustomMiningJobError,
-  Sv2SubmitSolutionJd,
-  serializeSubmitSolutionJd,
-  deserializeSubmitSolutionJd,
+  Sv2PushSolution,
+  serializePushSolution,
+  deserializePushSolution,
 } from './sv2-jdp-messages';
 
 function roundTrip<T>(
@@ -241,8 +241,8 @@ describe('SV2 JDP Messages', () => {
     expect(buf.length).toBe(18);
   });
 
-  it('SubmitSolutionJd round-trips', () => {
-    const msg: Sv2SubmitSolutionJd = {
+  it('PushSolution round-trips', () => {
+    const msg: Sv2PushSolution = {
       extranonce: Buffer.from('aabbccdd', 'hex'),
       prevHash: Buffer.alloc(32, 0x11),
       nonce: 0xdeadbeef,
@@ -250,7 +250,7 @@ describe('SV2 JDP Messages', () => {
       nBits: 0x1d00ffff,
       version: 0x20000000,
     };
-    const result = roundTrip(msg, serializeSubmitSolutionJd, deserializeSubmitSolutionJd);
+    const result = roundTrip(msg, serializePushSolution, deserializePushSolution);
     expect(result.extranonce).toEqual(msg.extranonce);
     expect(result.prevHash).toEqual(msg.prevHash);
     expect(result.nonce).toBe(msg.nonce);
@@ -259,8 +259,8 @@ describe('SV2 JDP Messages', () => {
     expect(result.version).toBe(msg.version);
   });
 
-  it('SubmitSolutionJd with empty extranonce', () => {
-    const msg: Sv2SubmitSolutionJd = {
+  it('PushSolution with empty extranonce', () => {
+    const msg: Sv2PushSolution = {
       extranonce: Buffer.alloc(0),
       prevHash: Buffer.alloc(32, 0xff),
       nonce: 0,
@@ -268,13 +268,13 @@ describe('SV2 JDP Messages', () => {
       nBits: 0,
       version: 0,
     };
-    const result = roundTrip(msg, serializeSubmitSolutionJd, deserializeSubmitSolutionJd);
+    const result = roundTrip(msg, serializePushSolution, deserializePushSolution);
     expect(result.extranonce.length).toBe(0);
     expect(result.prevHash).toEqual(msg.prevHash);
   });
 
-  it('serialized SubmitSolutionJd has correct size', () => {
-    const msg: Sv2SubmitSolutionJd = {
+  it('serialized PushSolution has correct size', () => {
+    const msg: Sv2PushSolution = {
       extranonce: Buffer.alloc(8),
       prevHash: Buffer.alloc(32),
       nonce: 0,
@@ -282,7 +282,7 @@ describe('SV2 JDP Messages', () => {
       nBits: 0,
       version: 0,
     };
-    const buf = serializeSubmitSolutionJd(msg);
+    const buf = serializePushSolution(msg);
     // B0_32(1+8) + U256(32) + U32(4) + U32(4) + U32(4) + U32(4) = 57
     expect(buf.length).toBe(57);
   });

@@ -27,7 +27,7 @@ import {
   serializeDeclareMiningJobError,
   serializeProvideMissingTransactions,
   deserializeProvideMissingTransactionsSuccess,
-  deserializeSubmitSolutionJd,
+  deserializePushSolution,
   Sv2DeclareMiningJob,
 } from './sv2/sv2-jdp-messages';
 import { DifficultyUtils } from '../utils/difficulty.utils';
@@ -172,8 +172,8 @@ export class JobDeclarationClient {
       case Sv2MsgType.JDP_PROVIDE_MISSING_TRANSACTIONS_SUCCESS:
         await this.handleProvideMissingTransactionsSuccess(payload);
         break;
-      case Sv2MsgType.JDP_SUBMIT_SOLUTION:
-        await this.handleSubmitSolutionJd(payload);
+      case Sv2MsgType.JDP_PUSH_SOLUTION:
+        await this.handlePushSolution(payload);
         break;
       default:
         console.warn(`[JDP ${this.clientId}] Unknown message type: 0x${msgType.toString(16)}`);
@@ -449,7 +449,7 @@ export class JobDeclarationClient {
 
     // Keep only the most recent 3 declared jobs to prevent memory bloat.
     // Each job stores ~1-2 MB of raw transaction data, and new declarations
-    // arrive every ~5 seconds. SubmitSolutionJd will always target a recent job.
+    // arrive every ~5 seconds. PushSolution will always target a recent job.
     const MAX_DECLARED_JOBS = 3;
     if (this.declaredJobs.size > MAX_DECLARED_JOBS) {
       // Map iteration order is insertion order — delete oldest entries
@@ -470,9 +470,9 @@ export class JobDeclarationClient {
     this.service.onJobDeclared(this.clientId, job, newToken);
   }
 
-  private async handleSubmitSolutionJd(payload: Buffer): Promise<void> {
+  private async handlePushSolution(payload: Buffer): Promise<void> {
     const reader = new BufferReader(payload);
-    const solution = deserializeSubmitSolutionJd(reader);
+    const solution = deserializePushSolution(reader);
 
     console.log(`[JDP ${this.clientId}] 📤 PushSolution: version=0x${solution.version.toString(16)}, nonce=0x${solution.nonce.toString(16).padStart(8, '0')}, ntime=${solution.ntime}, prevHash=${solution.prevHash.toString('hex').substring(0, 16)}..., extranonce=${solution.extranonce.toString('hex')}`);
 
@@ -512,7 +512,7 @@ export class JobDeclarationClient {
     }
 
     if (!matchedJob) {
-      console.warn(`[JDP ${this.clientId}] ❌ SubmitSolutionJd rejected: no declared jobs stored`);
+      console.warn(`[JDP ${this.clientId}] ❌ PushSolution rejected: no declared jobs stored`);
       return;
     }
 
@@ -530,7 +530,7 @@ export class JobDeclarationClient {
       try {
         coinbaseTx = bitcoinjs.Transaction.fromBuffer(coinbaseRaw);
       } catch (e) {
-        console.error(`[JDP ${this.clientId}] ❌ SubmitSolutionJd: invalid coinbase reconstruction: ${(e as Error).message}`);
+        console.error(`[JDP ${this.clientId}] ❌ PushSolution: invalid coinbase reconstruction: ${(e as Error).message}`);
         return;
       }
 
@@ -539,13 +539,13 @@ export class JobDeclarationClient {
       for (let i = 0; i < job.wtxidList.length; i++) {
         const rawTx = rawTransactions.get(i);
         if (!rawTx) {
-          console.error(`[JDP ${this.clientId}] ❌ SubmitSolutionJd: missing raw tx data at position ${i}, cannot reconstruct block`);
+          console.error(`[JDP ${this.clientId}] ❌ PushSolution: missing raw tx data at position ${i}, cannot reconstruct block`);
           return;
         }
         try {
           transactions.push(bitcoinjs.Transaction.fromBuffer(rawTx));
         } catch (e) {
-          console.error(`[JDP ${this.clientId}] ❌ SubmitSolutionJd: invalid transaction at position ${i}: ${(e as Error).message}`);
+          console.error(`[JDP ${this.clientId}] ❌ PushSolution: invalid transaction at position ${i}: ${(e as Error).message}`);
           return;
         }
       }
@@ -566,12 +566,12 @@ export class JobDeclarationClient {
       const header = block.toBuffer(true);
       const { submissionDifficulty, submissionHash } = DifficultyUtils.calculateDifficulty(header);
 
-      console.log(`[JDP ${this.clientId}] 🎯 SubmitSolutionJd difficulty: ${submissionDifficulty.toFixed(2)}, hash=${submissionHash.substring(0, 32)}...`);
+      console.log(`[JDP ${this.clientId}] 🎯 PushSolution difficulty: ${submissionDifficulty.toFixed(2)}, hash=${submissionHash.substring(0, 32)}...`);
 
       // 6. Submit block to Bitcoin Core (redundant safety net — JDC also submits via TP)
       const blockHex = block.toHex(false);
       const blockHeight = this.service.getBlockHeight();
-      console.log(`[JDP ${this.clientId}] 🎉🎉🎉 BLOCK FOUND via JDP SubmitSolutionJd!!! Height: ${blockHeight}, Submitting... (${transactions.length} txs, ${blockHex.length / 2} bytes)`);
+      console.log(`[JDP ${this.clientId}] 🎉🎉🎉 BLOCK FOUND via JDP PushSolution!!! Height: ${blockHeight}, Submitting... (${transactions.length} txs, ${blockHex.length / 2} bytes)`);
 
       const result = await this.service.submitBlock(blockHex);
 
@@ -596,7 +596,7 @@ export class JobDeclarationClient {
         console.warn(`[JDP ${this.clientId}] ❌ Block rejected by Bitcoin Core: ${result}`);
       }
     } catch (e) {
-      console.error(`[JDP ${this.clientId}] ❌ SubmitSolutionJd block reconstruction failed:`, (e as Error).message);
+      console.error(`[JDP ${this.clientId}] ❌ PushSolution block reconstruction failed:`, (e as Error).message);
     }
   }
 
