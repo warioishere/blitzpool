@@ -20,8 +20,8 @@ describe('Fail-Ban Rate Limiting', () => {
   describe('recordConnectionFailure', () => {
     it('should not ban after fewer failures than threshold', () => {
       const ip = uniqueIp();
-      // Default threshold is 5
-      for (let i = 0; i < 4; i++) {
+      // Default threshold is 10 (in-memory fallback path)
+      for (let i = 0; i < 9; i++) {
         recordConnectionFailure(ip);
       }
       expect(isConnectionBanned(ip)).toBe(false);
@@ -29,7 +29,7 @@ describe('Fail-Ban Rate Limiting', () => {
 
     it('should ban after exceeding failure threshold', () => {
       const ip = uniqueIp();
-      for (let i = 0; i < 6; i++) {
+      for (let i = 0; i < 11; i++) {
         recordConnectionFailure(ip);
       }
       expect(isConnectionBanned(ip)).toBe(true);
@@ -37,7 +37,7 @@ describe('Fail-Ban Rate Limiting', () => {
 
     it('should ban exactly at threshold + 1', () => {
       const ip = uniqueIp();
-      for (let i = 0; i < 5; i++) {
+      for (let i = 0; i < 10; i++) {
         recordConnectionFailure(ip);
       }
       expect(isConnectionBanned(ip)).toBe(false);
@@ -50,7 +50,7 @@ describe('Fail-Ban Rate Limiting', () => {
       const badIp = uniqueIp();
       const goodIp = uniqueIp();
 
-      for (let i = 0; i < 10; i++) {
+      for (let i = 0; i < 15; i++) {
         recordConnectionFailure(badIp);
       }
 
@@ -73,7 +73,7 @@ describe('Fail-Ban Rate Limiting', () => {
 
     it('should return true for banned IP', () => {
       const ip = uniqueIp();
-      for (let i = 0; i < 10; i++) {
+      for (let i = 0; i < 15; i++) {
         recordConnectionFailure(ip);
       }
       expect(isConnectionBanned(ip)).toBe(true);
@@ -81,7 +81,7 @@ describe('Fail-Ban Rate Limiting', () => {
 
     it('banned IP should stay banned on repeated checks', () => {
       const ip = uniqueIp();
-      for (let i = 0; i < 10; i++) {
+      for (let i = 0; i < 15; i++) {
         recordConnectionFailure(ip);
       }
       // Multiple checks should all return true

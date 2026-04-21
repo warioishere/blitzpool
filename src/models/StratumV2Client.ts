@@ -1250,7 +1250,7 @@ export class StratumV2Client {
     const reader = new BufferReader(payload);
     const submission = deserializeSubmitSharesExtended(reader);
 
-    console.log(`[SV2 ${this.sessionId}] 📤 SubmitSharesExtended: channel=${submission.channelId}, jobId=${submission.jobId}, nonce=0x${submission.nonce.toString(16).padStart(8, '0')}, extranonce=${submission.extranonce.toString('hex')}`);
+    if (this.debugMessages) console.log(`[SV2 ${this.sessionId}] 📤 SubmitSharesExtended: channel=${submission.channelId}, jobId=${submission.jobId}, nonce=0x${submission.nonce.toString(16).padStart(8, '0')}, extranonce=${submission.extranonce.toString('hex')}`);
 
     // Look up channel
     const channel = this.channels.get(submission.channelId);
@@ -1327,7 +1327,7 @@ export class StratumV2Client {
     // 5. Calculate difficulty
     const { submissionDifficulty } = DifficultyUtils.calculateDifficulty(header);
 
-    console.log(`[SV2 ${this.sessionId}] 🎯 Extended share difficulty: ${submissionDifficulty.toFixed(2)} (target: ${jobDifficulty.toFixed(2)})`);
+    if (this.debugMessages) console.log(`[SV2 ${this.sessionId}] 🎯 Extended share difficulty: ${submissionDifficulty.toFixed(2)} (target: ${jobDifficulty.toFixed(2)})`);
 
     if (submissionDifficulty >= jobDifficulty) {
       // Only reconstruct full block when the share actually meets network difficulty
@@ -1419,7 +1419,7 @@ export class StratumV2Client {
     this.sendFrame(Sv2MsgType.SUBMIT_SHARES_SUCCESS, successPayload, SV2_CHANNEL_MSG_FLAG).catch(err =>
       console.error(`[SV2 ${this.sessionId}] Failed to send share success:`, err)
     );
-    console.log(`[SV2 ${this.sessionId}] ✅ Extended share accepted: seq=${submission.sequenceNumber}, totalAccepted=${channel.acceptedShareCount}, totalDiff=${channel.acceptedShareDifficultySum.toString()}`);
+    if (this.debugMessages) console.log(`[SV2 ${this.sessionId}] ✅ Extended share accepted: seq=${submission.sequenceNumber}, totalAccepted=${channel.acceptedShareCount}, totalDiff=${channel.acceptedShareDifficultySum.toString()}`);
 
     // Accounting and block submission below — all fully awaited, nothing skipped
     await this.poolShareStatisticsService.addAcceptedShare(jobDifficulty);
@@ -1784,7 +1784,7 @@ export class StratumV2Client {
     const reader = new BufferReader(payload);
     const submission = deserializeSubmitSharesStandard(reader);
 
-    console.log(`[SV2 ${this.sessionId}] 📤 SubmitSharesStandard: channel=${submission.channelId}, jobId=0x${submission.jobId.toString(16)}, nonce=0x${submission.nonce.toString(16).padStart(8, '0')}, version=0x${submission.version.toString(16).padStart(8, '0')}`);
+    if (this.debugMessages) console.log(`[SV2 ${this.sessionId}] 📤 SubmitSharesStandard: channel=${submission.channelId}, jobId=0x${submission.jobId.toString(16)}, nonce=0x${submission.nonce.toString(16).padStart(8, '0')}, version=0x${submission.version.toString(16).padStart(8, '0')}`);
 
     // Look up channel
     const channel = this.channels.get(submission.channelId);
@@ -1846,7 +1846,7 @@ export class StratumV2Client {
     // Look up job-specific difficulty (SV2 spec: validate against target from when job was sent)
     const jobDifficulty = channel.jobIdToDifficulty.get(submission.jobId) ?? channel.sessionDifficulty;
 
-    console.log(`[SV2 ${this.sessionId}] 🎯 Share difficulty: ${submissionDifficulty.toFixed(2)} (target: ${jobDifficulty.toFixed(2)})`);
+    if (this.debugMessages) console.log(`[SV2 ${this.sessionId}] 🎯 Share difficulty: ${submissionDifficulty.toFixed(2)} (target: ${jobDifficulty.toFixed(2)})`);
 
     if (submissionDifficulty >= jobDifficulty) {
       await this.handleValidShare(submission, submissionDifficulty, jobTemplate, updatedJobBlock, header, channel, jobDifficulty);
