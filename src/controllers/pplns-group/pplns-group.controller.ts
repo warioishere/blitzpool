@@ -1,6 +1,7 @@
 import { Body, Controller, Delete, Get, Headers, HttpException, HttpStatus, Param, Post, Query } from '@nestjs/common';
 import { GroupService, GroupServiceError } from '../../services/group.service';
 import { GroupSoloService } from '../../services/group-solo.service';
+import { InvitationServiceError, PplnsGroupInvitationService } from '../../services/pplns-group-invitation.service';
 import { ClientService } from '../../ORM/client/client.service';
 import { ClientStatisticsService } from '../../ORM/client-statistics/client-statistics.service';
 import { ClientRejectedStatisticsService } from '../../ORM/client-rejected-statistics/client-rejected-statistics.service';
@@ -30,6 +31,7 @@ export class PplnsGroupController {
     constructor(
         private readonly groupService: GroupService,
         private readonly groupSoloService: GroupSoloService,
+        private readonly invitationService: PplnsGroupInvitationService,
         private readonly clientService: ClientService,
         private readonly clientStatisticsService: ClientStatisticsService,
         private readonly clientRejectedStatisticsService: ClientRejectedStatisticsService,
@@ -268,34 +270,114 @@ export class PplnsGroupController {
         }
     }
 
-    @Post(':id/members')
-    async addMember(
+    /**
+     * POST /pplns/groups/:id/invitations
+     * Create + send a single invitation. The address must have a verified
+     * email binding (see /api/email/register + /verify) — without it the
+     * call returns 400 with code 'email-not-verified'. Replaces the old
+     * direct-add endpoint, which was the silent-add attack vector.
+     */
+    @Post(':id/invitations')
+    async createInvitation(
         @Param('id') id: string,
         @Body() body: AddMemberDto,
         @Headers('x-admin-token') token?: string,
     ) {
         try {
-            const member = await this.groupService.addMember(id, body.address ?? '', token);
-            return { address: member.address, role: member.role, joinedAt: member.joinedAt };
+            const result = await this.invitationService.createInvitation(id, body.address ?? '', token);
+            return { invited: true, email: maskEmail(result.email), expiresAt: result.expiresAt };
         } catch (e) {
             throw this.toHttpError(e);
         }
     }
 
     /**
-     * POST /pplns/groups/:id/members/batch
-     * Adds multiple addresses in a single token check + single cache
-     * rebuild. Benign per-address failures land in `skipped`; token
-     * failures still throw (they're auth issues, not per-address).
+     * POST /pplns/groups/:id/invitations/batch
+     * Create invitations for multiple addresses. Per-address failures
+     * (no email, already member, already invited, etc.) land in
+     * `skipped` so the admin can fix them individually. Token failures
+     * still abort — they're an auth issue, not per-address.
      */
-    @Post(':id/members/batch')
-    async addMembersBatch(
+    @Post(':id/invitations/batch')
+    async createInvitationsBatch(
         @Param('id') id: string,
         @Body() body: AddMembersBatchDto,
         @Headers('x-admin-token') token?: string,
     ) {
+        // Pre-validate the admin token once by attempting to create the
+        // first invitation. If that fails on token, abort the batch. All
+        // subsequent calls reuse the same token through the service.
+        const addresses = (body.addresses ?? []).map(a => (a ?? '').trim()).filter(a => !!a);
+        const invited: { address: string; email: string; expiresAt: Date }[] = [];
+        const skipped: { address: string; reason: string }[] = [];
+        const seen = new Set<string>();
+        for (const addr of addresses) {
+            if (seen.has(addr)) {
+                skipped.push({ address: addr, reason: 'duplicate-in-batch' });
+                continue;
+            }
+            seen.add(addr);
+            try {
+                const r = await this.invitationService.createInvitation(id, addr, token);
+                invited.push({ address: addr, email: maskEmail(r.email), expiresAt: r.expiresAt });
+            } catch (e) {
+                if (e instanceof GroupServiceError && e.code === 'invalid-token') {
+                    throw this.toHttpError(e);
+                }
+                if (e instanceof InvitationServiceError) {
+                    skipped.push({ address: addr, reason: e.code });
+                    continue;
+                }
+                if (e instanceof GroupServiceError) {
+                    skipped.push({ address: addr, reason: e.code });
+                    continue;
+                }
+                throw e;
+            }
+        }
+        return { invited, skipped };
+    }
+
+    /**
+     * GET /pplns/groups/:id/invitations
+     * List pending invitations for the group. Admin-token-auth — used by
+     * the admin dashboard to see who's been invited but hasn't responded.
+     */
+    @Get(':id/invitations')
+    async listInvitations(
+        @Param('id') id: string,
+        @Headers('x-admin-token') token?: string,
+    ) {
         try {
-            return await this.groupService.addMembersBatch(id, body.addresses ?? [], token);
+            await this.groupService.requireAdminToken(id, token);
+            const rows = await this.invitationService.listPendingForGroup(id);
+            return rows.map(r => ({
+                token: r.token,
+                address: r.address,
+                email: maskEmail(r.email),
+                createdAt: r.createdAt,
+                expiresAt: r.expiresAt,
+                status: r.status,
+            }));
+        } catch (e) {
+            throw this.toHttpError(e);
+        }
+    }
+
+    /**
+     * DELETE /pplns/groups/:id/invitations/:token
+     * Cancel a pending invitation before the recipient responds.
+     * Admin-token-auth.
+     */
+    @Delete(':id/invitations/:token')
+    async cancelInvitation(
+        @Param('id') id: string,
+        @Param('token') invToken: string,
+        @Headers('x-admin-token') token?: string,
+    ) {
+        try {
+            await this.invitationService.cancelInvitation(invToken, id, token);
+            return { cancelled: true };
         } catch (e) {
             throw this.toHttpError(e);
         }
@@ -381,6 +463,33 @@ export class PplnsGroupController {
             }[e.code] ?? HttpStatus.BAD_REQUEST;
             return new HttpException({ code: e.code, message: e.message }, status);
         }
+        if (e instanceof InvitationServiceError) {
+            const status = {
+                'not-found': HttpStatus.NOT_FOUND,
+                'expired': HttpStatus.GONE,
+                'email-not-verified': HttpStatus.FAILED_DEPENDENCY,
+                'invitation-pending': HttpStatus.CONFLICT,
+                'already-member': HttpStatus.CONFLICT,
+                'address-in-group': HttpStatus.CONFLICT,
+                'already-declined': HttpStatus.CONFLICT,
+                'invalid-address': HttpStatus.BAD_REQUEST,
+                'config-missing': HttpStatus.SERVICE_UNAVAILABLE,
+            }[e.code] ?? HttpStatus.BAD_REQUEST;
+            return new HttpException({ code: e.code, message: e.message }, status);
+        }
         return new HttpException({ code: 'internal-error', message: (e as Error)?.message ?? 'Internal error' }, HttpStatus.INTERNAL_SERVER_ERROR);
     }
+}
+
+/**
+ * Don't expose full email addresses to anyone with admin-token access — the
+ * admin doesn't need to read another member's email, only know that the
+ * invitation reached SOMEONE. Mask everything except first char + domain.
+ */
+function maskEmail(email: string): string {
+    if (!email) return '';
+    const [local, domain] = email.split('@');
+    if (!domain) return '***';
+    const head = local.slice(0, 1);
+    return `${head}***@${domain}`;
 }

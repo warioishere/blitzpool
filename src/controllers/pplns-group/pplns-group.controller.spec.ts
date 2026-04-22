@@ -15,6 +15,7 @@ describe('PplnsGroupController.chart', () => {
             listMembers: jest.fn().mockResolvedValue(opts.members ?? []),
         };
         const groupSoloService = {} as any;
+        const invitationService = {} as any;
         const clientService = {} as any;
         const clientStatisticsService = {
             getChartDataForAddress: jest.fn(async (address: string) =>
@@ -25,6 +26,7 @@ describe('PplnsGroupController.chart', () => {
         const controller = new PplnsGroupController(
             groupService as any,
             groupSoloService,
+            invitationService,
             clientService,
             clientStatisticsService as any,
             clientRejectedStatisticsService,

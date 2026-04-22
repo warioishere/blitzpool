@@ -158,6 +158,16 @@ export class GroupService implements OnModuleInit {
 
     async addMember(groupId: string, address: string, token: string | undefined): Promise<PplnsGroupMemberEntity> {
         await this.requireAdminToken(groupId, token);
+        return this.addMemberWithoutAdmin(groupId, address);
+    }
+
+    /**
+     * Add a member bypassing the admin-token check. Intended for callers
+     * that have already verified authorization through a different
+     * mechanism — currently only the invitation-accept flow, where the
+     * invitee proves they own the address by clicking the email link.
+     */
+    async addMemberWithoutAdmin(groupId: string, address: string): Promise<PplnsGroupMemberEntity> {
         if (!address) {
             throw new GroupServiceError('invalid-address', 'Address required');
         }
