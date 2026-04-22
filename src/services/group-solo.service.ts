@@ -219,10 +219,21 @@ export class GroupSoloService implements OnModuleInit {
         const pendingMap = new Map<string, number>();
         for (const p of pendingEntities) pendingMap.set(p.address, p.pendingSats);
 
+        // Pending balances are IOUs to members from prior sub-dust / trim
+        // rounds (and, with group-solo, from kick-redistribute). They have
+        // to be settled out of THIS block's miner cut — not on top of it —
+        // otherwise the sum of coinbase outputs exceeds blockRewardSats
+        // and Bitcoin Core rejects the block with bad-cb-amount. Subtract
+        // the total pending from rewardForMiners before distributing by
+        // share ratio; each miner still gets their own pending credited
+        // on top of their reduced base-share.
+        const totalPending = Array.from(pendingMap.values()).reduce((s, v) => s + v, 0);
+        const effectiveMinerReward = Math.max(0, rewardForMiners - totalPending);
+
         const minerShares: { address: string; sats: number; percent: number }[] = [];
         for (const [addr, diff] of addressDiff) {
             const ratio = diff / totalDiff;
-            const baseSats = Math.floor(ratio * rewardForMiners);
+            const baseSats = Math.floor(ratio * effectiveMinerReward);
             const totalSats = baseSats + (pendingMap.get(addr) ?? 0);
             minerShares.push({
                 address: addr,
@@ -494,14 +505,20 @@ export class GroupSoloService implements OnModuleInit {
         }
 
         const rewardForMiners = Math.floor(((100 - this.feePercent) / 100) * blockRewardSats);
+        // Same pending-settlement rule as getPayoutDistribution: pending
+        // comes out of the miner cut, not on top. Otherwise total outputs
+        // exceed blockReward and Core rejects with bad-cb-amount.
+        const pendingEntities = await this.balanceRepo.find({ where: { groupId } });
+        const totalPending = pendingEntities.reduce((s, p) => s + (p.pendingSats ?? 0), 0);
+        const effectiveMinerReward = Math.max(0, rewardForMiners - totalPending);
 
         for (const [addr, diff] of addressDiff) {
             const ratio = diff / totalDiff;
-            const sats = Math.floor(ratio * rewardForMiners);
+            const sats = Math.floor(ratio * effectiveMinerReward);
             const existing = await this.balanceRepo.findOneBy({ address: addr, groupId });
             const pending = existing?.pendingSats ?? 0;
             const totalSats = sats + pending;
-            const percent = ratio * (100 - this.feePercent);
+            const percent = (totalSats / blockRewardSats) * 100;
 
             if (totalSats >= DUST_LIMIT_SATS) {
                 if (existing && pending > 0) {

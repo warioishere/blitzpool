@@ -59,6 +59,7 @@ function rpcCall(method: string, params: any[] = []): Promise<any> {
 function createMockRedis() {
   const store = new Map<string, string>();
   const zsets = new Map<string, { score: number; value: string }[]>();
+  const hashes = new Map<string, Map<string, string>>();
   const getZ = (key: string) => {
     if (!zsets.has(key)) zsets.set(key, []);
     return zsets.get(key)!;
@@ -88,8 +89,32 @@ function createMockRedis() {
       return z.slice(start, e + 1).map(x => x.value);
     },
     zCard: async (key: string) => getZ(key).length,
+    zRem: async (key: string, value: string) => {
+      const z = getZ(key);
+      const idx = z.findIndex(e => e.value === value);
+      if (idx >= 0) z.splice(idx, 1);
+    },
+    hSet: async (key: string, field: string, value: string) => {
+      if (!hashes.has(key)) hashes.set(key, new Map());
+      hashes.get(key)!.set(field, value);
+    },
+    hGet: async (key: string, field: string) => hashes.get(key)?.get(field) ?? null,
+    hDel: async (key: string, field: string) => { hashes.get(key)?.delete(field); },
+    hGetAll: async (key: string) => {
+      const h = hashes.get(key);
+      return h ? Object.fromEntries(h.entries()) : {};
+    },
+    hIncrByFloat: async (key: string, field: string, amount: number) => {
+      if (!hashes.has(key)) hashes.set(key, new Map());
+      const h = hashes.get(key)!;
+      const val = parseFloat(h.get(field) ?? '0') + amount;
+      h.set(field, val.toString());
+      return val;
+    },
+    expire: async (_key: string, _seconds: number) => 1,
     _store: store,
     _zsets: zsets,
+    _hashes: hashes,
   };
 }
 
