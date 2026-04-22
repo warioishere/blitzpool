@@ -85,7 +85,7 @@ export class EmailService implements OnModuleInit {
         if (!this.enabled || !this.transport) {
             throw new Error('EmailService not configured');
         }
-        const subject = `Invitation to join ${ctx.groupName} — Blitz Pool`;
+        const subject = `Invitation to join ${sanitizeHeader(ctx.groupName)} — Blitz Pool`;
         const html = renderInvitationHtml(ctx);
         const text = renderInvitationText(ctx);
         await this.transport.sendMail({
@@ -235,12 +235,12 @@ function renderInvitationHtml(ctx: InvitationEmailContext): string {
   Invitation expires ${escapeHtml(expires)}. If you don't recognise the inviter, decline.
 </p>
 `;
-    return shellHtml(`Invitation to join ${ctx.groupName}`, body);
+    return shellHtml(`Invitation to join ${sanitizeHeader(ctx.groupName)}`, body);
 }
 
 function renderInvitationText(ctx: InvitationEmailContext): string {
     return [
-        `You've been invited to join the payout group "${ctx.groupName}" on Blitz Pool.`,
+        `You've been invited to join the payout group "${sanitizeHeader(ctx.groupName)}" on Blitz Pool.`,
         ``,
         `Your address: ${ctx.address}`,
         `Invited by:   ${ctx.inviterAddress}`,
@@ -250,6 +250,16 @@ function renderInvitationText(ctx: InvitationEmailContext): string {
         `Invitation expires ${ctx.expiresAt.toUTCString()}.`,
         `If you don't recognise the inviter, decline.`,
     ].join('\n');
+}
+
+/**
+ * Strip characters that could break email headers (Subject, body section
+ * markers). Defense-in-depth — the group-name input is already validated
+ * at `GroupService.createGroup`, but any future caller that forgets to
+ * validate would still produce a safe header through this helper.
+ */
+function sanitizeHeader(s: string): string {
+    return (s ?? '').replace(/[\r\n\0]/g, ' ').slice(0, 200);
 }
 
 function escapeHtml(s: string): string {
