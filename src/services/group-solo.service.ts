@@ -23,8 +23,25 @@ import { GroupService } from './group.service';
 
 const DUST_LIMIT_SATS = 546;
 const DEFAULT_COINBASE_WEIGHT_BUDGET = 50_000;
+
+// Coinbase structural weight constants, calibrated against the real builder
+// in src/models/MiningJob.ts (createCoinbaseTransaction).
+//
+// BASE: version + input(coinbase prev-out, script, sequence) + output-count
+// byte + locktime + witness-reserved-value. ~420 WU on the wire; 320 is a
+// conservative-low estimate that leaves small headroom.
+//
+// OUTPUT: we size for P2TR (34-byte scriptPubKey → 43 bytes serialized →
+// 172 WU) rather than P2WPKH (22 bytes → 124 WU) so a group made entirely
+// of Taproot miners doesn't overshoot the budget.
+//
+// WITNESS_OUTPUT: the segwit-commitment OP_RETURN added by MiningJob at
+// line 69 is ~38 bytes script → ~47 bytes serialized → ~188 WU. Reserving
+// 124 for it (as earlier code did by treating it as a regular output)
+// underestimated by ~64 WU. Reserve the real figure.
 const COINBASE_BASE_WEIGHT = 320;
-const COINBASE_OUTPUT_WEIGHT = 124;
+const COINBASE_OUTPUT_WEIGHT = 172;
+const COINBASE_WITNESS_COMMITMENT_WEIGHT = 188;
 
 function redisKeys(groupId: string) {
     return {
@@ -229,8 +246,15 @@ export class GroupSoloService implements OnModuleInit {
             .sort((a, b) => b.sats - a.sats);
 
         const feeOutputCount = this.feeAddress ? 1 : 0;
+        // Budget layout: BASE + OP_RETURN (witness commitment) + feeOutput?
+        //   → rest splits into miner outputs of COINBASE_OUTPUT_WEIGHT each.
+        // The OP_RETURN is always present (segwit commitment), the fee
+        // output only when feeAddress is configured.
         const maxMinerOutputs = Math.floor(
-            (this.coinbaseWeightBudget - COINBASE_BASE_WEIGHT - (feeOutputCount + 1) * COINBASE_OUTPUT_WEIGHT)
+            (this.coinbaseWeightBudget
+                - COINBASE_BASE_WEIGHT
+                - COINBASE_WITNESS_COMMITMENT_WEIGHT
+                - feeOutputCount * COINBASE_OUTPUT_WEIGHT)
             / COINBASE_OUTPUT_WEIGHT,
         );
 
@@ -245,8 +269,23 @@ export class GroupSoloService implements OnModuleInit {
         let total = trimmed.reduce((sum, m) => sum + m.percent, 0);
 
         if (this.feeAddress) {
-            payouts.unshift({ address: this.feeAddress, percent: feePercent });
-            total += feePercent;
+            // Only emit the fee output if the resulting on-chain amount
+            // clears dust. Below ~546 sats (depends on output type) the
+            // output would be rejected by Bitcoin Core policy and the
+            // whole block invalidated. In practice on mainnet at the
+            // current 3.125 BTC subsidy this never triggers for any
+            // feePercent > 0, but a regtest / low-subsidy / configured-
+            // down scenario can hit it. When dust, fold the fee silently
+            // into the miner pool so the block is still valid — the pool
+            // operator loses that block's fee, which is the right
+            // tradeoff over a bricked block.
+            const feeSats = Math.floor((feePercent / 100) * blockRewardSats);
+            if (feeSats >= DUST_LIMIT_SATS) {
+                payouts.unshift({ address: this.feeAddress, percent: feePercent });
+                total += feePercent;
+            } else {
+                console.warn(`[GroupSolo] Fee output ${feeSats} sats < dust — omitting fee, miners keep 100% this block`);
+            }
         }
 
         // Sweep remainder into fee (or last miner if no fee address).
@@ -493,12 +532,18 @@ export class GroupSoloService implements OnModuleInit {
 
         if (this.feeAddress) {
             const feeSats = blockRewardSats - rewardForMiners;
-            await this.historyRepo.save(this.historyRepo.create({
-                groupId, blockHeight, address: this.feeAddress,
-                paidSats: feeSats, percent: this.feePercent,
-                sharesInRound: 0, totalSharesInRound: 0,
-                inCoinbase: true,
-            }));
+            if (feeSats >= DUST_LIMIT_SATS) {
+                await this.historyRepo.save(this.historyRepo.create({
+                    groupId, blockHeight, address: this.feeAddress,
+                    paidSats: feeSats, percent: this.feePercent,
+                    sharesInRound: 0, totalSharesInRound: 0,
+                    inCoinbase: true,
+                }));
+            } else {
+                // Dust — fee was omitted from the coinbase to keep the
+                // block valid. See dust-gate in getPayoutDistribution.
+                console.warn(`[GroupSolo] Fallback: fee output ${feeSats} sats < dust — not recording fee history row`);
+            }
         }
 
         await this.resetRound(groupId);
