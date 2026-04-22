@@ -216,12 +216,20 @@ export class PplnsGroupInvitationService {
     /**
      * List pending invitations for an address — drives the "you have
      * pending invitations" banner on the dashboard.
+     *
+     * Deliberately does NOT include the invitation token. /app/:address
+     * is a public URL with no authentication, so exposing the token in
+     * this response would let any visitor construct /invite/:token and
+     * accept on the address holder's behalf — defeating the whole point
+     * of the email-based trust anchor. Instead we return a masked email
+     * hint so the user knows WHICH inbox to check, and they accept by
+     * clicking the link in the email itself.
      */
     async listPendingForAddress(address: string): Promise<{
-        token: string;
         groupId: string;
         groupName: string;
         inviterAddress: string;
+        maskedEmail: string;
         createdAt: Date;
         expiresAt: Date;
     }[]> {
@@ -236,10 +244,10 @@ export class PplnsGroupInvitationService {
             const group = await this.groupService.getGroup(row.groupId);
             if (!group || group.dissolvedAt) continue;
             result.push({
-                token: row.token,
                 groupId: row.groupId,
                 groupName: group.name,
                 inviterAddress: group.creatorAddress,
+                maskedEmail: maskEmail(row.email),
                 createdAt: row.createdAt,
                 expiresAt: row.expiresAt,
             });
@@ -291,4 +299,18 @@ export class PplnsGroupInvitationService {
         }
         return url.replace(/\/+$/, '');
     }
+}
+
+/**
+ * Mask an email for public display: first char of the local part + domain.
+ * Gives the recipient enough of a hint to know which inbox to check
+ * without exposing the full address to anyone who knows their mining
+ * address.
+ */
+function maskEmail(email: string): string {
+    if (!email) return '';
+    const [local, domain] = email.split('@');
+    if (!domain) return '***';
+    const head = local.slice(0, 1);
+    return `${head}***@${domain}`;
 }
