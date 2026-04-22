@@ -127,7 +127,8 @@ describe('PplnsGroupInvitationService', () => {
         expect(sent.address).toBe('bc1qbob');
         // Single inviteUrl pointing at the UI invite page — no automatic
         // accept/decline URL anymore, the user confirms on the page.
-        expect(sent.inviteUrl).toContain('https://blitzpool.test/invite/');
+        // Hash routing: path lives in the fragment, hence /#/invite/<token>.
+        expect(sent.inviteUrl).toContain('https://blitzpool.test/#/invite/');
 
         expect(invitationRepo.rows).toHaveLength(1);
         expect(invitationRepo.rows[0].status).toBe('pending');

@@ -67,7 +67,11 @@ export class AddressEmailService {
             expiresAt,
         }));
 
-        const verifyUrl = `${this.poolBaseUrl()}/email/verify/${token}`;
+        // UI uses HashLocationStrategy — the routable path has to live in
+        // the URL fragment (after `#`). Without the hash, Caddy+Angular
+        // resolve only the bare "/" and land the user on the homepage,
+        // because the path part is never read by the router.
+        const verifyUrl = `${this.poolBaseUrl()}/#/email/verify/${token}`;
         await this.emailService.sendVerification({
             to: normalizedEmail,
             address,

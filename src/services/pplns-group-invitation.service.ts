@@ -118,7 +118,9 @@ export class PplnsGroupInvitationService {
             address,
             groupName: group.name,
             inviterAddress: group.creatorAddress,
-            inviteUrl: `${baseUrl}/invite/${token}`,
+            // UI uses HashLocationStrategy — path has to be in the
+            // fragment. See address-email.service.ts for the same trap.
+            inviteUrl: `${baseUrl}/#/invite/${token}`,
             expiresAt: invitation.expiresAt,
         });
 
