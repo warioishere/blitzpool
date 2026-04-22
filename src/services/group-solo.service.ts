@@ -7,6 +7,11 @@ import { Repository } from 'typeorm';
 import { PplnsGroupBlockHistoryEntity } from '../ORM/pplns-group/pplns-group-block-history.entity';
 import { PplnsGroupBalanceEntity } from '../ORM/pplns-group/pplns-group-balance.entity';
 import { GroupService } from './group.service';
+import {
+    buildCoinbaseDistribution,
+    DUST_LIMIT_SATS,
+    DEFAULT_COINBASE_WEIGHT_BUDGET,
+} from './coinbase-distribution';
 
 /**
  * Group-solo PROP-style payout engine.
@@ -21,27 +26,10 @@ import { GroupService } from './group.service';
  * Only active when GROUP_SOLO_PORT is configured.
  */
 
-const DUST_LIMIT_SATS = 546;
-const DEFAULT_COINBASE_WEIGHT_BUDGET = 50_000;
-
-// Coinbase structural weight constants, calibrated against the real builder
-// in src/models/MiningJob.ts (createCoinbaseTransaction).
-//
-// BASE: version + input(coinbase prev-out, script, sequence) + output-count
-// byte + locktime + witness-reserved-value. ~420 WU on the wire; 320 is a
-// conservative-low estimate that leaves small headroom.
-//
-// OUTPUT: we size for P2TR (34-byte scriptPubKey → 43 bytes serialized →
-// 172 WU) rather than P2WPKH (22 bytes → 124 WU) so a group made entirely
-// of Taproot miners doesn't overshoot the budget.
-//
-// WITNESS_OUTPUT: the segwit-commitment OP_RETURN added by MiningJob at
-// line 69 is ~38 bytes script → ~47 bytes serialized → ~188 WU. Reserving
-// 124 for it (as earlier code did by treating it as a regular output)
-// underestimated by ~64 WU. Reserve the real figure.
-const COINBASE_BASE_WEIGHT = 320;
-const COINBASE_OUTPUT_WEIGHT = 172;
-const COINBASE_WITNESS_COMMITMENT_WEIGHT = 188;
+// Coinbase distribution math is shared with PPLNS via
+// ./coinbase-distribution.ts — see its docblock for invariants. Constants
+// (DUST_LIMIT_SATS, DEFAULT_COINBASE_WEIGHT_BUDGET) are re-imported from
+// there so there's a single source of truth.
 
 function redisKeys(groupId: string) {
     return {
@@ -201,120 +189,28 @@ export class GroupSoloService implements OnModuleInit {
             return this.fallback();
         }
 
-        const addressDiff = new Map<string, number>();
-        let totalDiff = 0;
+        const addressShares = new Map<string, number>();
         for (const e of entries) {
             const [addr, diffStr] = e.split(':');
             const diff = parseFloat(diffStr) || 0;
-            addressDiff.set(addr, (addressDiff.get(addr) ?? 0) + diff);
-            totalDiff += diff;
+            addressShares.set(addr, (addressShares.get(addr) ?? 0) + diff);
         }
-        if (totalDiff <= 0) return this.fallback();
 
-        const feePercent = this.feePercent;
-        const rewardForMiners = Math.floor(((100 - feePercent) / 100) * blockRewardSats);
-
-        // Include pending balances from prior rounds.
         const pendingEntities = await this.balanceRepo.find({ where: { groupId } });
-        const pendingMap = new Map<string, number>();
-        for (const p of pendingEntities) pendingMap.set(p.address, p.pendingSats);
+        const pendingBalances = new Map<string, number>();
+        for (const p of pendingEntities) pendingBalances.set(p.address, p.pendingSats);
 
-        // Pending balances are IOUs to members from prior sub-dust / trim
-        // rounds (and, with group-solo, from kick-redistribute). They have
-        // to be settled out of THIS block's miner cut — not on top of it —
-        // otherwise the sum of coinbase outputs exceeds blockRewardSats
-        // and Bitcoin Core rejects the block with bad-cb-amount. Subtract
-        // the total pending from rewardForMiners before distributing by
-        // share ratio; each miner still gets their own pending credited
-        // on top of their reduced base-share.
-        const totalPending = Array.from(pendingMap.values()).reduce((s, v) => s + v, 0);
-        const effectiveMinerReward = Math.max(0, rewardForMiners - totalPending);
-
-        const minerShares: { address: string; sats: number; percent: number }[] = [];
-        for (const [addr, diff] of addressDiff) {
-            const ratio = diff / totalDiff;
-            const baseSats = Math.floor(ratio * effectiveMinerReward);
-            const totalSats = baseSats + (pendingMap.get(addr) ?? 0);
-            minerShares.push({
-                address: addr,
-                sats: totalSats,
-                percent: (totalSats / blockRewardSats) * 100,
-            });
-        }
-        // Pending-only entries (members with pending ≥ dust but no shares this round).
-        for (const [addr, pending] of pendingMap) {
-            if (!addressDiff.has(addr) && pending >= DUST_LIMIT_SATS) {
-                minerShares.push({
-                    address: addr,
-                    sats: pending,
-                    percent: (pending / blockRewardSats) * 100,
-                });
-            }
-        }
-
-        const eligible = minerShares
-            .filter(m => m.sats >= DUST_LIMIT_SATS)
-            .sort((a, b) => b.sats - a.sats);
-
-        const feeOutputCount = this.feeAddress ? 1 : 0;
-        // Budget layout: BASE + OP_RETURN (witness commitment) + feeOutput?
-        //   → rest splits into miner outputs of COINBASE_OUTPUT_WEIGHT each.
-        // The OP_RETURN is always present (segwit commitment), the fee
-        // output only when feeAddress is configured.
-        const maxMinerOutputs = Math.floor(
-            (this.coinbaseWeightBudget
-                - COINBASE_BASE_WEIGHT
-                - COINBASE_WITNESS_COMMITMENT_WEIGHT
-                - feeOutputCount * COINBASE_OUTPUT_WEIGHT)
-            / COINBASE_OUTPUT_WEIGHT,
-        );
-
-        const trimmed = eligible.length > maxMinerOutputs && maxMinerOutputs > 0
-            ? eligible.slice(0, maxMinerOutputs)
-            : eligible;
-        if (trimmed.length < eligible.length) {
-            console.warn(`[GroupSolo] Group ${groupId}: trimmed ${eligible.length - trimmed.length} smallest outputs to pending`);
-        }
-
-        const payouts: GroupSoloPayoutEntry[] = trimmed.map(m => ({ address: m.address, percent: m.percent }));
-        let total = trimmed.reduce((sum, m) => sum + m.percent, 0);
-
-        if (this.feeAddress) {
-            // Only emit the fee output if the resulting on-chain amount
-            // clears dust. Below ~546 sats (depends on output type) the
-            // output would be rejected by Bitcoin Core policy and the
-            // whole block invalidated. In practice on mainnet at the
-            // current 3.125 BTC subsidy this never triggers for any
-            // feePercent > 0, but a regtest / low-subsidy / configured-
-            // down scenario can hit it. When dust, fold the fee silently
-            // into the miner pool so the block is still valid — the pool
-            // operator loses that block's fee, which is the right
-            // tradeoff over a bricked block.
-            const feeSats = Math.floor((feePercent / 100) * blockRewardSats);
-            if (feeSats >= DUST_LIMIT_SATS) {
-                payouts.unshift({ address: this.feeAddress, percent: feePercent });
-                total += feePercent;
-            } else {
-                console.warn(`[GroupSolo] Fee output ${feeSats} sats < dust — omitting fee, miners keep 100% this block`);
-            }
-        }
-
-        // Sweep remainder into fee (or last miner if no fee address).
-        if (payouts.length > 0 && total < 100) {
-            const remainder = 100 - total;
-            if (this.feeAddress) {
-                payouts[0].percent += remainder;
-            } else {
-                payouts[payouts.length - 1].percent += remainder;
-            }
-        }
+        const { payouts, consideredAddresses } = buildCoinbaseDistribution({
+            addressShares,
+            pendingBalances,
+            blockRewardSats,
+            feePercent: this.feePercent,
+            feeAddress: this.feeAddress,
+            coinbaseWeightBudget: this.coinbaseWeightBudget,
+            logLabel: `[GroupSolo ${groupId}]`,
+        });
 
         const result = payouts.length > 0 ? payouts : this.fallback();
-        // Record every address that contributed work at snapshot-build time, including
-        // sub-dust miners that got filtered out of the coinbase. See `snapshots` field
-        // doc for why this distinction matters.
-        const consideredAddresses = new Set<string>(addressDiff.keys());
-        for (const addr of pendingMap.keys()) consideredAddresses.add(addr);
         await this.writeSnapshot(groupId, {
             distribution: result,
             blockRewardSats,

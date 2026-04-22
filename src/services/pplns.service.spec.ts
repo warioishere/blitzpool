@@ -596,17 +596,16 @@ describe('PplnsService', () => {
     it('should report correct max outputs for default budget', () => {
       const { service } = createService();
       const max = service.getMaxCoinbaseOutputs();
-      // Budget 50000, base 320, fee+opreturn = 2*124 = 248
-      // (50000 - 320 - 248) / 124 = floor(49432/124) = 398
-      expect(max).toBeGreaterThan(300);
-      expect(max).toBeLessThan(500);
+      // New formula with P2TR-sized outputs (172 WU) + dedicated OP_RETURN (188 WU):
+      // (50000 - 320 - 188 - 1*172) / 172 = floor(49320/172) = 286
+      expect(max).toBeGreaterThan(250);
+      expect(max).toBeLessThan(320);
     });
 
     it('should trim outputs when miners exceed weight budget', async () => {
-      // Tiny budget: only fits ~3 miner outputs
-      // Budget 1000, base 320, fee+opreturn = 248, remaining = 432, per output = 124
-      // max miner outputs = floor(432/124) = 3
-      const { service } = createService({ weightBudget: '1000' });
+      // Budget sized for exactly 3 miner outputs:
+      // (B - 320 - 188 - 172) / 172 = 3  →  B = 3*172 + 680 = 1196
+      const { service } = createService({ weightBudget: '1200' });
       service.setNetworkDifficulty(100_000_000); // large window
 
       // Add 10 miners with equal shares
@@ -619,7 +618,7 @@ describe('PplnsService', () => {
       // Should have: fee + max 3 miners = 4 outputs (not 11)
       const minerOutputs = dist.filter(d => d.address !== 'bc1qfee');
       expect(minerOutputs.length).toBeLessThanOrEqual(3);
-      expect(dist.length).toBeLessThanOrEqual(4); // fee + 3 miners
+      expect(dist.length).toBeLessThanOrEqual(4);
 
       // Percentages should still sum to ~100
       const totalPercent = dist.reduce((s, d) => s + d.percent, 0);
@@ -627,8 +626,8 @@ describe('PplnsService', () => {
     });
 
     it('should keep largest miners when trimming', async () => {
-      // Budget for ~3 miner outputs
-      const { service } = createService({ weightBudget: '1000' });
+      // Budget for 3 miner outputs under the new P2TR constants.
+      const { service } = createService({ weightBudget: '1200' });
       service.setNetworkDifficulty(100_000_000);
 
       // Miners with very different shares
@@ -652,10 +651,10 @@ describe('PplnsService', () => {
     });
 
     it('should not trim when miners fit within budget', async () => {
-      const { service } = createService(); // default 50000 budget
+      const { service } = createService(); // default 50000 budget, ~286 miner outputs
       service.setNetworkDifficulty(100_000_000);
 
-      // 5 miners — well within 400 output limit
+      // 5 miners — well within budget
       for (let i = 0; i < 5; i++) {
         await service.recordShare(`miner${i}`, 1000);
       }
@@ -668,8 +667,9 @@ describe('PplnsService', () => {
     it('should handle custom weight budget from env', () => {
       const { service } = createService({ weightBudget: '100000' });
       const max = service.getMaxCoinbaseOutputs();
-      // (100000 - 320 - 248) / 124 = floor(99432/124) = 802
-      expect(max).toBeGreaterThan(700);
+      // (100000 - 320 - 188 - 172) / 172 = floor(99320/172) = 577
+      expect(max).toBeGreaterThan(500);
+      expect(max).toBeLessThan(650);
     });
   });
 });

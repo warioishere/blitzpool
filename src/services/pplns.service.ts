@@ -8,6 +8,14 @@ import { Subscription } from 'rxjs';
 import { PplnsBalanceService } from '../ORM/pplns-balance/pplns-balance.service';
 import { PplnsPayoutHistoryEntity } from '../ORM/pplns-balance/pplns-payout-history.entity';
 import { StratumV1JobsService } from './stratum-v1-jobs.service';
+import {
+    buildCoinbaseDistribution,
+    DUST_LIMIT_SATS,
+    DEFAULT_COINBASE_WEIGHT_BUDGET,
+    COINBASE_BASE_WEIGHT,
+    COINBASE_OUTPUT_WEIGHT,
+    COINBASE_WITNESS_COMMITMENT_WEIGHT,
+} from './coinbase-distribution';
 
 /**
  * PPLNS (Pay Per Last N Shares) engine.
@@ -19,15 +27,14 @@ import { StratumV1JobsService } from './stratum-v1-jobs.service';
  */
 
 const PPLNS_WINDOW_FACTOR = 4;
-const DUST_LIMIT_SATS = 546; // P2PKH dust; P2WPKH is 294 but use higher for safety
 const REDIS_KEY_SHARES = 'pplns:shares';
 const REDIS_KEY_COUNTER = 'pplns:counter';
 const REDIS_KEY_WINDOW_TOTAL = 'pplns:window:total';
 
-// Coinbase weight budget — must match bitcoin.conf blockreservedweight
-const DEFAULT_COINBASE_WEIGHT_BUDGET = 50_000; // WU — fits ~400 P2WPKH outputs
-const COINBASE_BASE_WEIGHT = 320; // Approx: input + witness + OP_RETURN commitment
-const COINBASE_OUTPUT_WEIGHT = 124; // Per P2WPKH output: (8 value + 1 len + 22 script) * 4
+// DUST_LIMIT_SATS + coinbase weight constants live in ./coinbase-distribution.ts
+// (the shared pure module used by both PPLNS and Group-Solo). Single source of
+// truth so fee dust-gate / weight-budget-trim / pending-out-of-miner-cut all
+// stay in sync across payout modes.
 
 export interface PplnsPayoutEntry {
     address: string;
@@ -138,12 +145,20 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
     }
 
     /**
-     * Max miner outputs that fit in the coinbase weight budget.
+     * Max miner outputs that fit in the coinbase weight budget. Mirrors
+     * the formula in `buildCoinbaseDistribution`: base + witness-commitment
+     * are always present; fee output is present only when `feeAddress` is
+     * configured; the rest of the budget splits into miner outputs at
+     * `COINBASE_OUTPUT_WEIGHT` each.
      */
     getMaxCoinbaseOutputs(): number {
         const feeOutputCount = this.feeAddress ? 1 : 0;
         return Math.floor(
-            (this.coinbaseWeightBudget - COINBASE_BASE_WEIGHT - (feeOutputCount + 1) * COINBASE_OUTPUT_WEIGHT) / COINBASE_OUTPUT_WEIGHT,
+            (this.coinbaseWeightBudget
+                - COINBASE_BASE_WEIGHT
+                - COINBASE_WITNESS_COMMITMENT_WEIGHT
+                - feeOutputCount * COINBASE_OUTPUT_WEIGHT)
+            / COINBASE_OUTPUT_WEIGHT,
         );
     }
 
@@ -245,97 +260,36 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         }
 
         // 2. Sum difficulty per address
-        const addressDiff = new Map<string, number>();
-        let totalDiff = 0;
-
+        const addressShares = new Map<string, number>();
         for (const entry of entries) {
             const parts = entry.split(':');
             const addr = parts[0];
             const diff = parseFloat(parts[1]) || 0;
-            addressDiff.set(addr, (addressDiff.get(addr) ?? 0) + diff);
-            totalDiff += diff;
+            addressShares.set(addr, (addressShares.get(addr) ?? 0) + diff);
         }
 
-        if (totalDiff <= 0) {
-            return this.fallbackDistribution();
-        }
-
-        // 3. Calculate pool fee
-        const feePercent = this.feePercent;
-        const minerPercent = 100 - feePercent;
-
-        // 4. Calculate sat amounts per miner and handle dust/pending
-        const rewardForMiners = Math.floor((minerPercent / 100) * blockRewardSats);
-        const payouts: PplnsPayoutEntry[] = [];
-        let totalAssignedPercent = 0;
-
-        // Load pending balances
+        // 3. Load pending balances
         const pendingEntities = await this.balanceService.getAllWithPending();
-        const pendingMap = new Map<string, number>();
+        const pendingBalances = new Map<string, number>();
         for (const e of pendingEntities) {
-            pendingMap.set(e.address, e.pendingSats);
+            pendingBalances.set(e.address, e.pendingSats);
         }
 
-        // Calculate each miner's share
-        const minerShares: { address: string; sats: number; percent: number }[] = [];
-        for (const [addr, diff] of addressDiff) {
-            const ratio = diff / totalDiff;
-            const baseSats = Math.floor(ratio * rewardForMiners);
-            const pendingSats = pendingMap.get(addr) ?? 0;
-            const totalSats = baseSats + pendingSats;
-            const percent = (totalSats / blockRewardSats) * 100;
-
-            minerShares.push({ address: addr, sats: totalSats, percent });
-        }
-
-        // Also include addresses with pending balance that have NO shares in current window
-        for (const [addr, pending] of pendingMap) {
-            if (!addressDiff.has(addr) && pending >= DUST_LIMIT_SATS) {
-                // This miner has accumulated enough from previous blocks
-                const percent = (pending / blockRewardSats) * 100;
-                minerShares.push({ address: addr, sats: pending, percent });
-            }
-        }
-
-        // Separate into coinbase-eligible (>= dust) and pending (< dust)
-        const eligible = minerShares
-            .filter(ms => ms.sats >= DUST_LIMIT_SATS)
-            .sort((a, b) => b.sats - a.sats); // largest first
-
-        // 5. Coinbase weight check — trim smallest outputs if coinbase would exceed budget
-        // +1 for fee output, +1 for OP_RETURN witness commitment
-        const feeOutputCount = this.feeAddress ? 1 : 0;
-        const maxMinerOutputs = Math.floor(
-            (this.coinbaseWeightBudget - COINBASE_BASE_WEIGHT - (feeOutputCount + 1) * COINBASE_OUTPUT_WEIGHT) / COINBASE_OUTPUT_WEIGHT,
-        );
-
-        let trimmed = eligible;
-        if (eligible.length > maxMinerOutputs && maxMinerOutputs > 0) {
-            trimmed = eligible.slice(0, maxMinerOutputs);
-            const removedCount = eligible.length - maxMinerOutputs;
-            console.warn(`[PPLNS] Coinbase weight limit: trimmed ${removedCount} smallest outputs to pending (${eligible.length} → ${trimmed.length} outputs, budget ${this.coinbaseWeightBudget} WU)`);
-        }
-
-        for (const ms of trimmed) {
-            payouts.push({ address: ms.address, percent: ms.percent });
-            totalAssignedPercent += ms.percent;
-        }
-
-        // 6. Add pool fee
-        if (this.feeAddress) {
-            payouts.unshift({ address: this.feeAddress, percent: feePercent });
-            totalAssignedPercent += feePercent;
-        }
-
-        // 6. Ensure percentages sum to ~100 — assign remainder to fee address
-        if (payouts.length > 0 && totalAssignedPercent < 100) {
-            const remainder = 100 - totalAssignedPercent;
-            if (this.feeAddress) {
-                payouts[0].percent += remainder;
-            } else {
-                payouts[payouts.length - 1].percent += remainder;
-            }
-        }
+        // 4. Delegate the math to the shared pure builder. Handles:
+        //    - pending settled out of miner cut (no bad-cb-amount)
+        //    - sub-dust filter + weight-budget trim
+        //    - fee dust-gate
+        //    - remainder sweep
+        //    - fallback-to-fee-100% when no usable work
+        const { payouts } = buildCoinbaseDistribution({
+            addressShares,
+            pendingBalances,
+            blockRewardSats,
+            feePercent: this.feePercent,
+            feeAddress: this.feeAddress,
+            coinbaseWeightBudget: this.coinbaseWeightBudget,
+            logLabel: '[PPLNS]',
+        });
 
         const result = payouts.length > 0 ? payouts : this.fallbackDistribution();
 
@@ -472,14 +426,18 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         }
         if (totalDiff <= 0) return;
 
+        // Settle pending out of miner cut (mirrors buildCoinbaseDistribution).
         const rewardForMiners = Math.floor(((100 - this.feePercent) / 100) * blockRewardSats);
+        const pendingEntities = await this.balanceService.getAllWithPending();
+        const totalPending = pendingEntities.reduce((s, e) => s + (e.pendingSats ?? 0), 0);
+        const effectiveMinerReward = Math.max(0, rewardForMiners - totalPending);
 
         for (const [addr, diff] of addressDiff) {
             const ratio = diff / totalDiff;
-            const sats = Math.floor(ratio * rewardForMiners);
+            const sats = Math.floor(ratio * effectiveMinerReward);
             const pending = await this.balanceService.getPending(addr);
             const totalSats = sats + pending;
-            const percent = ratio * (100 - this.feePercent);
+            const percent = (totalSats / blockRewardSats) * 100;
 
             if (totalSats >= DUST_LIMIT_SATS) {
                 if (pending > 0) await this.balanceService.markPaid(addr, pending);
@@ -494,8 +452,8 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
             }
         }
 
-        // Pending-only addresses
-        const pendingEntities = await this.balanceService.getAllWithPending();
+        // Pending-only addresses (≥ dust). Below dust just stays on the
+        // books until it crosses the threshold or the miner returns.
         const processed = new Set(addressDiff.keys());
         for (const entity of pendingEntities) {
             if (processed.has(entity.address)) continue;
@@ -508,11 +466,17 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
             }
         }
 
-        const feeSats = blockRewardSats - rewardForMiners;
+        // Fee output, dust-gated.
         if (this.feeAddress) {
-            await this.payoutHistoryRepo.save(this.payoutHistoryRepo.create({
-                blockHeight, address: this.feeAddress, paidSats: feeSats, percent: this.feePercent, inCoinbase: true,
-            }));
+            const feeSats = Math.floor((this.feePercent / 100) * blockRewardSats);
+            if (feeSats >= DUST_LIMIT_SATS) {
+                await this.payoutHistoryRepo.save(this.payoutHistoryRepo.create({
+                    blockHeight, address: this.feeAddress, paidSats: feeSats,
+                    percent: this.feePercent, inCoinbase: true,
+                }));
+            } else {
+                console.warn(`[PPLNS] Fallback: fee output ${feeSats} sats < dust — omitting fee history row`);
+            }
         }
     }
 
