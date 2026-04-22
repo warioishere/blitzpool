@@ -307,6 +307,75 @@ describe('PPLNS Regtest — pending-out-of-miner-cut invariant', () => {
         console.log('✅ PPLNS with pending: coinbase total respects blockReward, Core accepted');
     }, 120000);
 
+    it('snapshot-persist: distribution snapshot survives service restart via Redis', async () => {
+        // Mirrors the group-solo snapshot-persist test: write snapshot via
+        // service A (simulates the moment miners receive the coinbase
+        // template), then spin up service B on the same Redis and run
+        // onBlockFound — B must book payouts from the persisted snapshot,
+        // not fall back to onBlockFoundFromWindow.
+        const env: Record<string, string> = {
+            PPLNS_PORT: '3336',
+            PPLNS_FEE_ADDRESS: ADDR_FEE,
+            PPLNS_FEE_PERCENT: '2',
+        };
+        const balanceService = createMockBalanceService();
+        const historyRepo = createMockHistoryRepo();
+
+        const redis = createMockRedis();
+        const svcA = new PplnsService(
+            { get: (k: string) => env[k] } as any,
+            { store: {} } as any,
+            balanceService as any,
+            historyRepo as any,
+            createMockJobsService() as any,
+        );
+        (svcA as any).redis = redis;
+        (svcA as any).enabled = true;
+        svcA.setNetworkDifficulty(1e12);
+
+        await svcA.recordShare(ADDR_ALICE, 100);
+        await svcA.recordShare(ADDR_BOB, 200);
+
+        const template = await rpcCall('getblocktemplate', [{ rules: ['segwit'] }]);
+        const blockReward = template.coinbasevalue;
+
+        const distributionA = await svcA.getPayoutDistribution(blockReward);
+        // Snapshot must be in Redis now.
+        expect(redis._store.get('pplns:snapshot')).toBeTruthy();
+
+        // Simulate pool restart: new service instance, same Redis.
+        const svcB = new PplnsService(
+            { get: (k: string) => env[k] } as any,
+            { store: {} } as any,
+            balanceService as any,
+            historyRepo as any,
+            createMockJobsService() as any,
+        );
+        (svcB as any).redis = redis;
+        (svcB as any).enabled = true;
+        svcB.setNetworkDifficulty(1e12);
+
+        // Build + submit the block using A's distribution.
+        const { submitResult } = await assembleAndSubmitBlock(distributionA);
+        expect(submitResult).toBeNull();
+
+        // Book payouts via service B — must read the Redis snapshot, not fall through.
+        await svcB.onBlockFound(template.height, blockReward);
+
+        // History entries should reflect A's distribution — one per payout entry.
+        const historyForBlock = (historyRepo._rows as any[]).filter(
+            r => r.blockHeight === template.height,
+        );
+        expect(historyForBlock.length).toBe(distributionA.length);
+        expect(historyForBlock.map(r => r.address).sort())
+            .toEqual(distributionA.map(d => d.address).sort());
+
+        // Snapshot key consumed.
+        expect(redis._store.get('pplns:snapshot')).toBeUndefined();
+
+        console.log('✅ PPLNS snapshot-persist: fresh service instance consumed Redis snapshot');
+    }, 120000);
+
     it('tiny feePercent → fee output dust-gated, block still validates', async () => {
         // 0.00001 % of 5 BTC subsidy = 500 sats < 546 dust.
         const { service } = makeService({ feePercent: '0.00001' });

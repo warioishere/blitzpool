@@ -30,6 +30,13 @@ const PPLNS_WINDOW_FACTOR = 4;
 const REDIS_KEY_SHARES = 'pplns:shares';
 const REDIS_KEY_COUNTER = 'pplns:counter';
 const REDIS_KEY_WINDOW_TOTAL = 'pplns:window:total';
+// Coinbase snapshot — JSON-encoded distribution that was actually used to
+// build the latest coinbase. Persisted in Redis (not an in-memory Map) so
+// a pool restart between getPayoutDistribution and onBlockFound doesn't
+// lose it and force onBlockFoundFromWindow (whose distribution can differ
+// from what's already on-chain).
+const REDIS_KEY_SNAPSHOT = 'pplns:snapshot';
+const SNAPSHOT_TTL_SECONDS = 60 * 60; // 1h — covers worst-case block-find + restart window.
 
 // DUST_LIMIT_SATS + coinbase weight constants live in ./coinbase-distribution.ts
 // (the shared pure module used by both PPLNS and Group-Solo). Single source of
@@ -57,9 +64,11 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
     private cachedDistributionAt = 0;
     private static readonly DISTRIBUTION_CACHE_TTL_MS = 30_000; // 30 seconds max
 
-    // Coinbase snapshot — the distribution that was actually used to build the latest coinbase.
-    // onBlockFound uses this instead of recalculating, so bookkeeping matches on-chain reality.
-    private coinbaseSnapshot: { distribution: PplnsPayoutEntry[]; blockRewardSats: number } | null = null;
+    // Coinbase snapshot is persisted via Redis (see REDIS_KEY_SNAPSHOT /
+    // SNAPSHOT_TTL_SECONDS). The helpers `writeSnapshot` / `readSnapshot` /
+    // `deleteSnapshot` wrap the (de)serialization so no in-memory state
+    // needs to survive a pool restart for onBlockFound to book payouts
+    // against the exact distribution that went on-chain.
 
     // Block-found lock — prevents concurrent onBlockFound calls from double-processing
     private blockFoundInProgress = false;
@@ -298,10 +307,37 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         this.cachedDistributionReward = blockRewardSats;
         this.cachedDistributionAt = Date.now();
 
-        // Save snapshot — onBlockFound will use this for bookkeeping
-        this.coinbaseSnapshot = { distribution: result, blockRewardSats };
+        // Save snapshot to Redis — onBlockFound will use it for bookkeeping.
+        await this.writeSnapshot({ distribution: result, blockRewardSats });
 
         return result;
+    }
+
+    private async writeSnapshot(snapshot: { distribution: PplnsPayoutEntry[]; blockRewardSats: number }): Promise<void> {
+        try {
+            await this.redis.set(REDIS_KEY_SNAPSHOT, JSON.stringify(snapshot), { EX: SNAPSHOT_TTL_SECONDS });
+        } catch {
+            // Older node-redis / ioredis variants don't accept the options
+            // object — fall back to set + expire.
+            await this.redis.set(REDIS_KEY_SNAPSHOT, JSON.stringify(snapshot));
+            if (typeof this.redis.expire === 'function') {
+                await this.redis.expire(REDIS_KEY_SNAPSHOT, SNAPSHOT_TTL_SECONDS);
+            }
+        }
+    }
+
+    private async readSnapshot(): Promise<{ distribution: PplnsPayoutEntry[]; blockRewardSats: number } | null> {
+        const raw = await this.redis.get(REDIS_KEY_SNAPSHOT);
+        if (!raw) return null;
+        try {
+            return JSON.parse(raw);
+        } catch {
+            return null;
+        }
+    }
+
+    private async deleteSnapshot(): Promise<void> {
+        await this.redis.del(REDIS_KEY_SNAPSHOT);
     }
 
     /**
@@ -338,8 +374,8 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         console.log(`[PPLNS] Block ${blockHeight} found! Processing payouts...`);
 
         // Use the coinbase snapshot — this is the exact distribution that went into the block.
-        // If no snapshot exists (e.g. first block, or race condition), fall back to recalculating.
-        const snapshot = this.coinbaseSnapshot;
+        // If no snapshot exists (e.g. first block, or Redis flushed), fall back to recalculating.
+        const snapshot = await this.readSnapshot();
         if (!snapshot || snapshot.distribution.length === 0) {
             console.warn(`[PPLNS] No coinbase snapshot available for block ${blockHeight} — falling back to window recalculation`);
             await this.onBlockFoundFromWindow(blockHeight, blockRewardSats);
@@ -347,7 +383,7 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         }
 
         // Clear snapshot — it's been consumed
-        this.coinbaseSnapshot = null;
+        await this.deleteSnapshot();
 
         const reward = snapshot.blockRewardSats;
 
