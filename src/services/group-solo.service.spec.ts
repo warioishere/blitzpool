@@ -428,4 +428,38 @@ describe('GroupSoloService', () => {
         expect(best.bestDifficulty).toBe(0);
         expect(best.address).toBeNull();
     });
+
+    it('removeMemberState redistributes pending balance + in-round shares to remaining members', async () => {
+        const { service, redis, groupService, balanceRepo } = makeService();
+        groupService._setMembership('bc1qalice', 'g1', true);
+        groupService._setMembership('bc1qbob', 'g1', true);
+        groupService._setMembership('bc1qcharlie', 'g1', true);
+
+        // Seed: alice + bob + charlie all mined this round.
+        await service.recordShare('bc1qalice', 100);
+        await service.recordShare('bc1qbob', 200);
+        await service.recordShare('bc1qcharlie', 300);
+
+        // Bob had accumulated 900 sats pending from prior sub-dust rounds.
+        (balanceRepo._rows as any[]).push({
+            address: 'bc1qbob', groupId: 'g1', pendingSats: 900, totalPaidSats: 0,
+        });
+
+        // Kick Bob — pending 900 splits evenly to alice + charlie (450 each),
+        // bob's row deleted, bob's in-round diff 200 removed from total.
+        await service.removeMemberState('g1', 'bc1qbob', ['bc1qalice', 'bc1qcharlie']);
+
+        // In-round total went 600 → 400.
+        expect(parseFloat((redis._store.get('groupsolo:g1:total') ?? '0') as string)).toBeCloseTo(400);
+
+        // Bob's row gone.
+        const bobRow = (balanceRepo._rows as any[]).find(r => r.address === 'bc1qbob');
+        expect(bobRow).toBeUndefined();
+
+        // Alice + Charlie got +450 each in pending.
+        const aliceRow = (balanceRepo._rows as any[]).find(r => r.address === 'bc1qalice');
+        const charlieRow = (balanceRepo._rows as any[]).find(r => r.address === 'bc1qcharlie');
+        expect(aliceRow?.pendingSats).toBe(450);
+        expect(charlieRow?.pendingSats).toBe(450);
+    });
 });

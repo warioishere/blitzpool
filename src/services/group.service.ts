@@ -251,7 +251,16 @@ export class GroupService implements OnModuleInit {
             );
         }
 
-        await this.groupSoloService.removeMemberState(groupId, address);
+        // Snapshot the remaining members BEFORE we delete the target — the
+        // state-cleanup step splits the kicked miner's pending balance
+        // across these addresses, so we need the list before the member
+        // row vanishes from the DB.
+        const allMembers = await this.memberRepo.find({ where: { groupId } });
+        const remainingAddresses = allMembers
+            .filter(m => m.address !== address)
+            .map(m => m.address);
+
+        await this.groupSoloService.removeMemberState(groupId, address, remainingAddresses);
         await this.memberRepo.delete({ groupId, address });
         await this.recomputeActive(groupId);
         await this.rebuildCache();

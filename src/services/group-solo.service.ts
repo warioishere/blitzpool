@@ -549,12 +549,27 @@ export class GroupSoloService implements OnModuleInit {
      * balance row, and their last-share timestamp. Called by GroupService
      * before deleting the member row during an admin kick.
      *
-     * Effect on the remaining members: their share of the round's total
-     * grows proportionally because `total` is decremented by exactly the
-     * diff we remove. On the next block, the distribution picks up the
-     * freed-up percentage automatically.
+     * Effect on the remaining members:
+     *   - Shares in the current Redis round: the kicked miner's entries
+     *     are removed and `total` is decremented by their diff. Others'
+     *     share of the round grows proportionally on the next block.
+     *   - Accumulated pending balance (sub-dust from prior rounds): split
+     *     equally among `remainingAddresses` and credited to each of
+     *     their pplns_group_balance rows. The kicked miner's row is then
+     *     deleted. Integer-division remainder (< N sats) is dropped.
+     *
+     * `remainingAddresses` is passed in by the caller (GroupService, which
+     * already read the member list for other reasons) so we don't need a
+     * second query inside this service. An empty list triggers forfeit —
+     * the only case where the group has literally no one left is on
+     * dissolveInternal, which uses removeGroupState instead anyway.
      */
-    async removeMemberState(groupId: string, address: string): Promise<void> {
+    async removeMemberState(groupId: string, address: string, remainingAddresses: string[] = []): Promise<void> {
+        // Read the kicked member's pending balance before we clear anything,
+        // so we can redistribute it on the way out.
+        const existing = await this.balanceRepo.findOneBy({ address, groupId });
+        const pendingToRedistribute = existing?.pendingSats ?? 0;
+
         if (this.isEnabled()) {
             const keys = redisKeys(groupId);
             const entries = await this.redis.zRange(keys.shares, 0, -1);
@@ -572,7 +587,18 @@ export class GroupSoloService implements OnModuleInit {
             await this.redis.hDel(keys.rejectedShares, address);
             await this.redis.hDel(keys.lastShareAt, address);
         }
+
         await this.balanceRepo.delete({ address, groupId });
+
+        if (pendingToRedistribute > 0 && remainingAddresses.length > 0) {
+            const perMember = Math.floor(pendingToRedistribute / remainingAddresses.length);
+            if (perMember > 0) {
+                for (const recipient of remainingAddresses) {
+                    await this.addPending(groupId, recipient, perMember);
+                }
+                console.log(`[GroupSolo] Kicked ${address} from ${groupId}: redistributed ${pendingToRedistribute} sats pending to ${remainingAddresses.length} member(s) (${perMember} each)`);
+            }
+        }
     }
 
     /**
