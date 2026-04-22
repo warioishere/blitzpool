@@ -18,7 +18,7 @@ export class PplnsGroupInvitationEntity {
     token: string;
 
     @Index()
-    @Column({ type: 'varchar', length: 36 })
+    @Column({ type: 'uuid' })
     groupId: string;
 
     @Index()

@@ -20,6 +20,15 @@ export class AddPplnsGroupForeignKeysAndExpiryIndexes1776600000000 implements Mi
     name = 'AddPplnsGroupForeignKeysAndExpiryIndexes1776600000000';
 
     public async up(queryRunner: QueryRunner): Promise<void> {
+        // pplns_group_invitation.groupId was originally created as varchar(36)
+        // while pplns_group.id is uuid. Postgres refuses to FK across
+        // non-identical types, so convert the column first. The cast is
+        // safe because the only writer is GroupService.createGroup which
+        // always uses crypto.randomUUID().
+        await queryRunner.query(
+            `ALTER TABLE "pplns_group_invitation" ALTER COLUMN "groupId" TYPE uuid USING "groupId"::uuid`,
+        );
+
         const addGroupFk = async (tableName: string) => {
             const table = await queryRunner.getTable(tableName);
             if (!table) return;
@@ -87,5 +96,11 @@ export class AddPplnsGroupForeignKeysAndExpiryIndexes1776600000000 implements Mi
 
         await dropIndex('pplns_email_verification', 'IDX_pplns_email_verification_expiresAt');
         await dropIndex('pplns_group_invitation', 'IDX_pplns_group_invitation_expiresAt');
+
+        // Cast the invitation.groupId column back to varchar(36) to match
+        // the pre-migration schema.
+        await queryRunner.query(
+            `ALTER TABLE "pplns_group_invitation" ALTER COLUMN "groupId" TYPE varchar(36) USING "groupId"::text`,
+        );
     }
 }
