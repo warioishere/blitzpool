@@ -1,6 +1,9 @@
 jest.mock('node-telegram-bot-api', () => jest.fn());
 
 import { GroupSoloService } from './group-solo.service';
+import { PplnsGroupBlockHistoryEntity } from '../ORM/pplns-group/pplns-group-block-history.entity';
+import { PplnsGroupBalanceEntity } from '../ORM/pplns-group/pplns-group-balance.entity';
+import { attachMockTxManager } from './__test-helpers__/mock-tx-manager';
 
 // ── Mock Redis (sorted set + key-value) ─────────────────────────
 
@@ -136,6 +139,10 @@ function makeService(envOverrides: Record<string, string> = {}) {
     const historyRepo = createMockRepo();
     const balanceRepo = createMockRepo();
     const groupService = createMockGroupService();
+    attachMockTxManager([
+        [PplnsGroupBlockHistoryEntity, historyRepo],
+        [PplnsGroupBalanceEntity, balanceRepo],
+    ]);
     const service = new GroupSoloService(
         configService as any,
         cacheManager as any,

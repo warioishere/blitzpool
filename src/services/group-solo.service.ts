@@ -269,6 +269,13 @@ export class GroupSoloService implements OnModuleInit {
      * Called when a block is found by a group-solo miner. Uses the coinbase snapshot
      * for bookkeeping, credits addresses trimmed from the coinbase to pending, and
      * resets the round (deletes all three Redis keys for this group).
+     *
+     * Idempotency: every history-write + balance-update happens inside one
+     * Postgres transaction, guarded by a pre-check on
+     * pplns_group_block_history.(groupId, blockHeight). A crash mid-TX rolls
+     * back everything, so replay after restart re-runs from scratch. The
+     * unique index on (groupId, blockHeight, address) is the defense-in-
+     * depth layer that catches pathological races (clustered pool).
      */
     async onBlockFound(blockHeight: number, blockRewardSats: number, finderAddress: string): Promise<void> {
         if (!this.isEnabled()) return;
@@ -283,6 +290,13 @@ export class GroupSoloService implements OnModuleInit {
         this.blockFoundLocks.add(groupId);
 
         try {
+            // Idempotency pre-check.
+            const alreadyProcessed = await this.historyRepo.findOneBy({ groupId, blockHeight });
+            if (alreadyProcessed) {
+                console.log(`[GroupSolo] Block ${blockHeight} for group ${groupId} already processed — skipping replay`);
+                return;
+            }
+
             console.log(`[GroupSolo] Block ${blockHeight} found by group ${groupId} (finder=${finderAddress})`);
 
             const snapshot = await this.readSnapshot(groupId);
@@ -291,94 +305,109 @@ export class GroupSoloService implements OnModuleInit {
                 await this.onBlockFoundFromWindow(groupId, blockHeight, blockRewardSats);
                 return;
             }
-            await this.deleteSnapshot(groupId);
+
             const reward = snapshot.blockRewardSats;
-
-            // Miners in the snapshot get paid via coinbase; clear any prior pending.
-            for (const d of snapshot.distribution) {
-                const paidSats = Math.floor((d.percent / 100) * reward);
-                const isFee = d.address === this.feeAddress;
-                if (!isFee) {
-                    const existing = await this.balanceRepo.findOneBy({ address: d.address, groupId });
-                    if (existing && existing.pendingSats > 0) {
-                        existing.totalPaidSats += existing.pendingSats;
-                        existing.pendingSats = 0;
-                        await this.balanceRepo.save(existing);
-                    }
-                }
-                await this.historyRepo.save(this.historyRepo.create({
-                    groupId, blockHeight, address: d.address,
-                    paidSats, percent: d.percent,
-                    sharesInRound: 0, totalSharesInRound: 0,
-                    inCoinbase: true,
-                }));
-            }
-
-            // For each window address not in snapshot.distribution, determine whether
-            // it was considered at snapshot-build time:
-            //   - YES → sub-dust miner (filtered by dust or weight-budget): credit to
-            //     pending so it accumulates for future coinbase inclusion.
-            //   - NO  → late arriver (share landed in Redis after snapshot was built):
-            //     under PROP rules this work is lost for the current block. Credit
-            //     would double-count because the snapshot already claims 100% of the
-            //     miner cut in the on-chain coinbase.
             const snapshotAddrs = new Set(snapshot.distribution.map(d => d.address));
             const keys = redisKeys(groupId);
-            const entries = await this.redis.zRange(keys.shares, 0, -1);
-            if (entries && entries.length > 0) {
-                const addressDiff = new Map<string, number>();
-                let totalDiff = 0;
-                for (const e of entries) {
-                    const [addr, diffStr] = e.split(':');
-                    const diff = parseFloat(diffStr) || 0;
-                    addressDiff.set(addr, (addressDiff.get(addr) ?? 0) + diff);
-                    totalDiff += diff;
-                }
-                const rewardForMiners = Math.floor(((100 - this.feePercent) / 100) * reward);
-                for (const [addr, diff] of addressDiff) {
-                    if (snapshotAddrs.has(addr)) continue;
-                    const wasConsidered = snapshot.consideredAddresses.has(addr);
-                    if (wasConsidered) {
-                        // Sub-dust or weight-trimmed — credit to pending proportional to
-                        // their share of the (original) snapshot-time window. Since we
-                        // don't store the snapshot-time totalDiff, we use current-window
-                        // ratio as an approximation; on mainnet the window is stable
-                        // enough that this is accurate to within rounding.
-                        const sats = Math.floor((diff / totalDiff) * rewardForMiners);
-                        if (sats > 0) {
-                            await this.addPending(groupId, addr, sats);
-                            await this.historyRepo.save(this.historyRepo.create({
-                                groupId, blockHeight, address: addr,
-                                paidSats: sats,
-                                percent: (diff / totalDiff) * (100 - this.feePercent),
-                                sharesInRound: Math.round(diff),
-                                totalSharesInRound: Math.round(totalDiff),
-                                inCoinbase: false,
-                            }));
+            const windowEntries = await this.redis.zRange(keys.shares, 0, -1);
+
+            try {
+                await this.historyRepo.manager.transaction(async (em) => {
+                    const historyRepo = em.getRepository(PplnsGroupBlockHistoryEntity);
+                    const balanceRepo = em.getRepository(PplnsGroupBalanceEntity);
+
+                    // Miners in the snapshot get paid via coinbase; clear any prior pending.
+                    for (const d of snapshot.distribution) {
+                        const paidSats = Math.floor((d.percent / 100) * reward);
+                        const isFee = d.address === this.feeAddress;
+                        if (!isFee) {
+                            const existing = await balanceRepo.findOneBy({ address: d.address, groupId });
+                            if (existing && existing.pendingSats > 0) {
+                                existing.totalPaidSats += existing.pendingSats;
+                                existing.pendingSats = 0;
+                                await balanceRepo.save(existing);
+                            }
                         }
-                    } else {
-                        // Late arriver — audit row only, no payout.
-                        await this.historyRepo.save(this.historyRepo.create({
-                            groupId, blockHeight, address: addr,
-                            paidSats: 0,
-                            percent: 0,
-                            sharesInRound: Math.round(diff),
-                            totalSharesInRound: Math.round(totalDiff),
-                            inCoinbase: false,
+                        await historyRepo.save(historyRepo.create({
+                            groupId, blockHeight, address: d.address,
+                            paidSats, percent: d.percent,
+                            sharesInRound: 0, totalSharesInRound: 0,
+                            inCoinbase: true,
                         }));
-                        console.log(`[GroupSolo]   ${addr}: ${diff.toFixed(2)} shares in round but not in coinbase snapshot (late arrival, PROP rules)`);
                     }
+
+                    // For each window address not in snapshot.distribution:
+                    //   - was considered (sub-dust / weight-trimmed) → credit to pending
+                    //   - not considered (late arriver) → audit row only
+                    if (windowEntries && windowEntries.length > 0) {
+                        const addressDiff = new Map<string, number>();
+                        let totalDiff = 0;
+                        for (const e of windowEntries) {
+                            const [addr, diffStr] = e.split(':');
+                            const diff = parseFloat(diffStr) || 0;
+                            addressDiff.set(addr, (addressDiff.get(addr) ?? 0) + diff);
+                            totalDiff += diff;
+                        }
+                        const rewardForMiners = Math.floor(((100 - this.feePercent) / 100) * reward);
+                        for (const [addr, diff] of addressDiff) {
+                            if (snapshotAddrs.has(addr)) continue;
+                            const wasConsidered = snapshot.consideredAddresses.has(addr);
+                            if (wasConsidered) {
+                                const sats = Math.floor((diff / totalDiff) * rewardForMiners);
+                                if (sats > 0) {
+                                    const existing = await balanceRepo.findOneBy({ address: addr, groupId });
+                                    if (existing) {
+                                        existing.pendingSats += sats;
+                                        await balanceRepo.save(existing);
+                                    } else {
+                                        await balanceRepo.save(balanceRepo.create({
+                                            address: addr, groupId, pendingSats: sats, totalPaidSats: 0,
+                                        }));
+                                    }
+                                    await historyRepo.save(historyRepo.create({
+                                        groupId, blockHeight, address: addr,
+                                        paidSats: sats,
+                                        percent: (diff / totalDiff) * (100 - this.feePercent),
+                                        sharesInRound: Math.round(diff),
+                                        totalSharesInRound: Math.round(totalDiff),
+                                        inCoinbase: false,
+                                    }));
+                                }
+                            } else {
+                                // Late arriver — audit row only, no payout.
+                                await historyRepo.save(historyRepo.create({
+                                    groupId, blockHeight, address: addr,
+                                    paidSats: 0,
+                                    percent: 0,
+                                    sharesInRound: Math.round(diff),
+                                    totalSharesInRound: Math.round(totalDiff),
+                                    inCoinbase: false,
+                                }));
+                                console.log(`[GroupSolo]   ${addr}: ${diff.toFixed(2)} shares in round but not in coinbase snapshot (late arrival, PROP rules)`);
+                            }
+                        }
+                    }
+                });
+            } catch (e: any) {
+                if (e?.code === '23505') {
+                    console.warn(`[GroupSolo] Block ${blockHeight} raced against duplicate write — skipping (23505)`);
+                    return;
                 }
+                throw e;
             }
 
-            // PROP semantics: clear the round.
+            // Snapshot + round cleared only after the TX committed.
+            await this.deleteSnapshot(groupId);
             await this.resetRound(groupId);
         } finally {
             this.blockFoundLocks.delete(groupId);
         }
     }
 
-    /** Fallback when no snapshot is available (first block or race). */
+    /**
+     * Fallback when no snapshot is available (first block or race).
+     * All writes atomic in one TX; the pre-check in onBlockFound guards replay.
+     */
     private async onBlockFoundFromWindow(groupId: string, blockHeight: number, blockRewardSats: number): Promise<void> {
         const keys = redisKeys(groupId);
         const entries = await this.redis.zRange(keys.shares, 0, -1);
@@ -408,55 +437,71 @@ export class GroupSoloService implements OnModuleInit {
         const totalPending = pendingEntities.reduce((s, p) => s + (p.pendingSats ?? 0), 0);
         const effectiveMinerReward = Math.max(0, rewardForMiners - totalPending);
 
-        for (const [addr, diff] of addressDiff) {
-            const ratio = diff / totalDiff;
-            const sats = Math.floor(ratio * effectiveMinerReward);
-            const existing = await this.balanceRepo.findOneBy({ address: addr, groupId });
-            const pending = existing?.pendingSats ?? 0;
-            const totalSats = sats + pending;
-            const percent = (totalSats / blockRewardSats) * 100;
+        try {
+            await this.historyRepo.manager.transaction(async (em) => {
+                const historyRepo = em.getRepository(PplnsGroupBlockHistoryEntity);
+                const balanceRepo = em.getRepository(PplnsGroupBalanceEntity);
 
-            if (totalSats >= DUST_LIMIT_SATS) {
-                if (existing && pending > 0) {
-                    existing.totalPaidSats += pending;
-                    existing.pendingSats = 0;
-                    await this.balanceRepo.save(existing);
-                }
-                await this.historyRepo.save(this.historyRepo.create({
-                    groupId, blockHeight, address: addr,
-                    paidSats: totalSats, percent,
-                    sharesInRound: Math.round(diff),
-                    totalSharesInRound: Math.round(totalDiff),
-                    inCoinbase: true,
-                }));
-            } else {
-                if (sats > 0) {
-                    await this.addPending(groupId, addr, sats);
-                    await this.historyRepo.save(this.historyRepo.create({
-                        groupId, blockHeight, address: addr,
-                        paidSats: sats, percent,
-                        sharesInRound: Math.round(diff),
-                        totalSharesInRound: Math.round(totalDiff),
-                        inCoinbase: false,
-                    }));
-                }
-            }
-        }
+                for (const [addr, diff] of addressDiff) {
+                    const ratio = diff / totalDiff;
+                    const sats = Math.floor(ratio * effectiveMinerReward);
+                    const existing = await balanceRepo.findOneBy({ address: addr, groupId });
+                    const pending = existing?.pendingSats ?? 0;
+                    const totalSats = sats + pending;
+                    const percent = (totalSats / blockRewardSats) * 100;
 
-        if (this.feeAddress) {
-            const feeSats = blockRewardSats - rewardForMiners;
-            if (feeSats >= DUST_LIMIT_SATS) {
-                await this.historyRepo.save(this.historyRepo.create({
-                    groupId, blockHeight, address: this.feeAddress,
-                    paidSats: feeSats, percent: this.feePercent,
-                    sharesInRound: 0, totalSharesInRound: 0,
-                    inCoinbase: true,
-                }));
-            } else {
-                // Dust — fee was omitted from the coinbase to keep the
-                // block valid. See dust-gate in getPayoutDistribution.
-                console.warn(`[GroupSolo] Fallback: fee output ${feeSats} sats < dust — not recording fee history row`);
+                    if (totalSats >= DUST_LIMIT_SATS) {
+                        if (existing && pending > 0) {
+                            existing.totalPaidSats += pending;
+                            existing.pendingSats = 0;
+                            await balanceRepo.save(existing);
+                        }
+                        await historyRepo.save(historyRepo.create({
+                            groupId, blockHeight, address: addr,
+                            paidSats: totalSats, percent,
+                            sharesInRound: Math.round(diff),
+                            totalSharesInRound: Math.round(totalDiff),
+                            inCoinbase: true,
+                        }));
+                    } else if (sats > 0) {
+                        if (existing) {
+                            existing.pendingSats += sats;
+                            await balanceRepo.save(existing);
+                        } else {
+                            await balanceRepo.save(balanceRepo.create({
+                                address: addr, groupId, pendingSats: sats, totalPaidSats: 0,
+                            }));
+                        }
+                        await historyRepo.save(historyRepo.create({
+                            groupId, blockHeight, address: addr,
+                            paidSats: sats, percent,
+                            sharesInRound: Math.round(diff),
+                            totalSharesInRound: Math.round(totalDiff),
+                            inCoinbase: false,
+                        }));
+                    }
+                }
+
+                if (this.feeAddress) {
+                    const feeSats = blockRewardSats - rewardForMiners;
+                    if (feeSats >= DUST_LIMIT_SATS) {
+                        await historyRepo.save(historyRepo.create({
+                            groupId, blockHeight, address: this.feeAddress,
+                            paidSats: feeSats, percent: this.feePercent,
+                            sharesInRound: 0, totalSharesInRound: 0,
+                            inCoinbase: true,
+                        }));
+                    } else {
+                        console.warn(`[GroupSolo] Fallback: fee output ${feeSats} sats < dust — not recording fee history row`);
+                    }
+                }
+            });
+        } catch (e: any) {
+            if (e?.code === '23505') {
+                console.warn(`[GroupSolo] Block ${blockHeight} (fallback) raced against duplicate write — skipping (23505)`);
+                return;
             }
+            throw e;
         }
 
         await this.resetRound(groupId);

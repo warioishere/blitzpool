@@ -1,6 +1,9 @@
 jest.mock('node-telegram-bot-api', () => jest.fn());
 
 import { PplnsService } from './pplns.service';
+import { PplnsPayoutHistoryEntity } from '../ORM/pplns-balance/pplns-payout-history.entity';
+import { PplnsBalanceEntity } from '../ORM/pplns-balance/pplns-balance.entity';
+import { attachMockTxManager } from './__test-helpers__/mock-tx-manager';
 
 // ── Mock Redis ──────────────────────────────────────────────────
 
@@ -42,26 +45,28 @@ function createMockRedis() {
   };
 }
 
-// ── Mock Balance Service ────────────────────────────────────────
+// ── Mock Balance backing (service + repo over shared store) ──────
+// The service methods are what PplnsService calls outside transactions;
+// the repo methods are what `em.getRepository(PplnsBalanceEntity)`
+// returns inside the onBlockFound transaction. Both must see the same
+// state, so we back them with one Map.
 
-function createMockBalanceService() {
-  const balances = new Map<string, { pendingSats: number; totalPaidSats: number }>();
+function createMockBalanceBacking() {
+  const balances = new Map<string, { address: string; pendingSats: number; totalPaidSats: number }>();
 
-  return {
+  const service = {
     addPending: jest.fn(async (address: string, sats: number) => {
       const existing = balances.get(address);
       if (existing) {
         existing.pendingSats += sats;
       } else {
-        balances.set(address, { pendingSats: sats, totalPaidSats: 0 });
+        balances.set(address, { address, pendingSats: sats, totalPaidSats: 0 });
       }
     }),
     getPending: jest.fn(async (address: string) => balances.get(address)?.pendingSats ?? 0),
     getBalance: jest.fn(async (address: string) => balances.get(address) ?? null),
     getAllWithPending: jest.fn(async () =>
-      Array.from(balances.entries())
-        .filter(([, b]) => b.pendingSats > 0)
-        .map(([address, b]) => ({ address, ...b })),
+      Array.from(balances.values()).filter(b => b.pendingSats > 0),
     ),
     markPaid: jest.fn(async (address: string, sats: number) => {
       const existing = balances.get(address);
@@ -70,12 +75,30 @@ function createMockBalanceService() {
         existing.totalPaidSats += sats;
       }
     }),
-    // Helper
+    // Helpers
     _set: (address: string, pendingSats: number, totalPaidSats = 0) => {
-      balances.set(address, { pendingSats, totalPaidSats });
+      balances.set(address, { address, pendingSats, totalPaidSats });
     },
     _get: (address: string) => balances.get(address),
   };
+
+  const repo: any = {
+    findOneBy: jest.fn(async (where: any) => balances.get(where.address) ?? null),
+    save: jest.fn(async (row: any) => {
+      const existing = balances.get(row.address);
+      if (existing) Object.assign(existing, row);
+      else balances.set(row.address, { address: row.address, pendingSats: row.pendingSats ?? 0, totalPaidSats: row.totalPaidSats ?? 0 });
+      return row;
+    }),
+    create: jest.fn((partial: any) => ({ ...partial })),
+    find: jest.fn(async (q?: any) =>
+      q?.where?.pendingSats
+        ? Array.from(balances.values()).filter(b => b.pendingSats > 0)
+        : Array.from(balances.values()),
+    ),
+  };
+
+  return { service, repo };
 }
 
 // ── Mock Payout History Repo ────────────────────────────────────
@@ -86,6 +109,9 @@ function createMockPayoutHistoryRepo() {
     create: jest.fn((data: any) => data),
     save: jest.fn(async (entity: any) => { saved.push(entity); return entity; }),
     find: jest.fn(async () => saved),
+    findOneBy: jest.fn(async (where: any) =>
+      saved.find(r => Object.entries(where).every(([k, v]) => r[k] === v)) ?? null,
+    ),
     _getSaved: () => saved,
   };
 }
@@ -94,8 +120,13 @@ function createMockPayoutHistoryRepo() {
 
 function createService(opts: { feeAddress?: string; feePercent?: string; port?: string; weightBudget?: string } = {}) {
   const redis = createMockRedis();
-  const balanceService = createMockBalanceService();
+  const balanceBacking = createMockBalanceBacking();
+  const balanceService = balanceBacking.service;
   const payoutHistoryRepo = createMockPayoutHistoryRepo();
+  attachMockTxManager([
+    [PplnsPayoutHistoryEntity, payoutHistoryRepo],
+    [PplnsBalanceEntity, balanceBacking.repo],
+  ]);
 
   const configService = {
     get: jest.fn((key: string) => {
@@ -404,8 +435,9 @@ describe('PplnsService', () => {
 
       await service.onBlockFound(800000, BLOCK_REWARD);
 
-      // 30 sats < 546 → addPending should have been called
-      expect(balanceService.addPending).toHaveBeenCalledWith('bc1qTiny', expect.any(Number));
+      // 30 sats < 546 → Tiny goes to pending. onBlockFound now writes
+      // through the transactional balance-repo path, so we verify the
+      // shared backing store rather than the legacy service-facade spy.
       const balTiny = balanceService._get('bc1qTiny');
       expect(balTiny).toBeDefined();
       expect(balTiny!.pendingSats).toBeGreaterThan(0);

@@ -16,6 +16,9 @@
 import * as bitcoinjs from 'bitcoinjs-lib';
 import * as http from 'http';
 import { PplnsService } from './pplns.service';
+import { PplnsPayoutHistoryEntity } from '../ORM/pplns-balance/pplns-payout-history.entity';
+import { PplnsBalanceEntity } from '../ORM/pplns-balance/pplns-balance.entity';
+import { attachMockTxManager } from './__test-helpers__/mock-tx-manager';
 
 const RPC_URL = 'http://127.0.0.1:18443';
 const RPC_USER = 'test';
@@ -100,13 +103,15 @@ function createMockRedis() {
     };
 }
 
-// ── Balance-service mock — subset that PPLNS actually calls ──
-
-function createMockBalanceService() {
-    const rows: { address: string; pendingSats: number; totalPaidSats: number }[] = [];
-    const find = (addr: string) => rows.find(r => r.address === addr);
-    return {
-        getAllWithPending: async () => rows.filter(r => r.pendingSats > 0),
+// ── Balance backing: single row store exposed as both service and repo
+// facades. onBlockFound reads via `this.balanceService.getAllWithPending()`
+// outside the TX, then mutates via `em.getRepository(PplnsBalanceEntity)`
+// inside the TX — both must see the same state.
+function createMockBalanceBacking() {
+    const rows: any[] = [];
+    const find = (addr: string) => rows.find((r: any) => r.address === addr);
+    const service = {
+        getAllWithPending: async () => rows.filter((r: any) => r.pendingSats > 0),
         getPending: async (addr: string) => find(addr)?.pendingSats ?? 0,
         addPending: async (addr: string, sats: number) => {
             const existing = find(addr);
@@ -122,15 +127,33 @@ function createMockBalanceService() {
         },
         _rows: rows,
     };
+    const repo: any = {
+        findOneBy: async (where: any) => find(where.address) ?? null,
+        save: async (row: any) => {
+            const existing = find(row.address);
+            if (existing) Object.assign(existing, row);
+            else rows.push({ ...row });
+            return row;
+        },
+        create: (partial: any) => ({ ...partial }),
+        find: async (q: any) => q?.where?.pendingSats ? rows.filter((r: any) => r.pendingSats > 0) : [...rows],
+        _rows: rows,
+    };
+    return { service, repo, _rows: rows };
 }
 
 function createMockHistoryRepo() {
     const rows: any[] = [];
-    return {
+    // findOneBy lets the idempotency pre-check work: returns first matching row
+    // (by blockHeight) if present.
+    const repo: any = {
         save: async (row: any) => { rows.push({ ...row }); return row; },
         create: (partial: any) => ({ ...partial }),
+        findOneBy: async (where: any) =>
+            rows.find((r: any) => Object.entries(where).every(([k, v]) => r[k] === v)) ?? null,
         _rows: rows,
     };
+    return repo;
 }
 
 function createMockJobsService() {
@@ -147,12 +170,16 @@ function makeService(opts: { feeAddress?: string; feePercent?: string } = {}) {
         PPLNS_FEE_ADDRESS: opts.feeAddress ?? ADDR_FEE,
         PPLNS_FEE_PERCENT: opts.feePercent ?? '2',
     };
-    const balanceService = createMockBalanceService();
+    const balanceBacking = createMockBalanceBacking();
     const historyRepo = createMockHistoryRepo();
+    attachMockTxManager([
+        [PplnsPayoutHistoryEntity, historyRepo],
+        [PplnsBalanceEntity, balanceBacking.repo],
+    ]);
     const service = new PplnsService(
         { get: (k: string) => env[k] } as any,
         { store: {} } as any,
-        balanceService as any,
+        balanceBacking.service as any,
         historyRepo as any,
         createMockJobsService() as any,
     );
@@ -160,7 +187,7 @@ function makeService(opts: { feeAddress?: string; feePercent?: string } = {}) {
     (service as any).redis = redis;
     (service as any).enabled = true;
     service.setNetworkDifficulty(1e12); // generous window, no trimming
-    return { service, redis, balanceService, historyRepo };
+    return { service, redis, balanceService: balanceBacking.service, historyRepo };
 }
 
 // ── Block Builder (same pattern as group-solo regtest) ──
@@ -318,14 +345,18 @@ describe('PPLNS Regtest — pending-out-of-miner-cut invariant', () => {
             PPLNS_FEE_ADDRESS: ADDR_FEE,
             PPLNS_FEE_PERCENT: '2',
         };
-        const balanceService = createMockBalanceService();
+        const balanceBacking = createMockBalanceBacking();
         const historyRepo = createMockHistoryRepo();
+        attachMockTxManager([
+            [PplnsPayoutHistoryEntity, historyRepo],
+            [PplnsBalanceEntity, balanceBacking.repo],
+        ]);
 
         const redis = createMockRedis();
         const svcA = new PplnsService(
             { get: (k: string) => env[k] } as any,
             { store: {} } as any,
-            balanceService as any,
+            balanceBacking.service as any,
             historyRepo as any,
             createMockJobsService() as any,
         );
@@ -347,7 +378,7 @@ describe('PPLNS Regtest — pending-out-of-miner-cut invariant', () => {
         const svcB = new PplnsService(
             { get: (k: string) => env[k] } as any,
             { store: {} } as any,
-            balanceService as any,
+            balanceBacking.service as any,
             historyRepo as any,
             createMockJobsService() as any,
         );

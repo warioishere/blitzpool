@@ -1,5 +1,10 @@
-import { Column, CreateDateColumn, Entity, PrimaryGeneratedColumn } from 'typeorm';
+import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn } from 'typeorm';
 
+// Idempotency defense-in-depth: at most one history row per (block, address).
+// onBlockFound upserts with ON CONFLICT DO NOTHING, so a crash mid-processing
+// followed by restart can't double-write bookkeeping rows or double-clear
+// pending balances.
+@Index('UQ_pplns_payout_history_block_address', ['blockHeight', 'address'], { unique: true })
 @Entity('pplns_payout_history')
 export class PplnsPayoutHistoryEntity {
 

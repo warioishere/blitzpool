@@ -1,5 +1,9 @@
 import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn } from 'typeorm';
 
+// Idempotency defense-in-depth: at most one history row per (group, block,
+// address). onBlockFound upserts with ON CONFLICT DO NOTHING, so a crash
+// mid-processing followed by restart can't double-write bookkeeping rows.
+@Index('UQ_pplns_group_block_history_group_block_address', ['groupId', 'blockHeight', 'address'], { unique: true })
 @Entity('pplns_group_block_history')
 export class PplnsGroupBlockHistoryEntity {
 

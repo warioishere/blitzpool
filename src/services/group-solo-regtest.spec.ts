@@ -14,6 +14,9 @@
 import * as bitcoinjs from 'bitcoinjs-lib';
 import * as http from 'http';
 import { GroupSoloService } from './group-solo.service';
+import { PplnsGroupBlockHistoryEntity } from '../ORM/pplns-group/pplns-group-block-history.entity';
+import { PplnsGroupBalanceEntity } from '../ORM/pplns-group/pplns-group-balance.entity';
+import { attachMockTxManager } from './__test-helpers__/mock-tx-manager';
 
 const RPC_URL = 'http://127.0.0.1:18443';
 const RPC_USER = 'test';
@@ -141,11 +144,17 @@ function makeService() {
   addressToGroup.set(ADDR_BOB, { groupId: 'grp-1', active: true });
   addressToGroup.set(ADDR_CHARLIE, { groupId: 'grp-1', active: true });
 
+  const historyRepo = createMockRepo();
+  const balanceRepo = createMockRepo();
+  attachMockTxManager([
+    [PplnsGroupBlockHistoryEntity, historyRepo],
+    [PplnsGroupBalanceEntity, balanceRepo],
+  ]);
   const service = new GroupSoloService(
     { get: (k: string) => env[k] } as any,
     { store: {} } as any,
-    createMockRepo() as any,
-    createMockRepo() as any,
+    historyRepo as any,
+    balanceRepo as any,
     { getGroupForAddress: (a: string) => addressToGroup.get(a) } as any,
   );
   const redis = createMockRedis();

@@ -17,6 +17,9 @@ import * as bitcoinjs from 'bitcoinjs-lib';
 import { MiningJob } from '../models/MiningJob';
 import { IJobTemplate } from './stratum-v1-jobs.service';
 import { PplnsService } from './pplns.service';
+import { PplnsPayoutHistoryEntity } from '../ORM/pplns-balance/pplns-payout-history.entity';
+import { PplnsBalanceEntity } from '../ORM/pplns-balance/pplns-balance.entity';
+import { attachMockTxManager } from './__test-helpers__/mock-tx-manager';
 
 // ── Helpers ──────────────────────────────────────────────────────
 
@@ -98,20 +101,18 @@ function createMockRedis() {
   };
 }
 
-function createMockBalanceService() {
-  const balances = new Map<string, { pendingSats: number; totalPaidSats: number }>();
-  return {
+function createMockBalanceBacking() {
+  const balances = new Map<string, { address: string; pendingSats: number; totalPaidSats: number }>();
+  const service = {
     addPending: jest.fn(async (address: string, sats: number) => {
       const existing = balances.get(address);
       if (existing) { existing.pendingSats += sats; }
-      else { balances.set(address, { pendingSats: sats, totalPaidSats: 0 }); }
+      else { balances.set(address, { address, pendingSats: sats, totalPaidSats: 0 }); }
     }),
     getPending: jest.fn(async (address: string) => balances.get(address)?.pendingSats ?? 0),
     getBalance: jest.fn(async (address: string) => balances.get(address) ?? null),
     getAllWithPending: jest.fn(async () =>
-      Array.from(balances.entries())
-        .filter(([, b]) => b.pendingSats > 0)
-        .map(([address, b]) => ({ address, ...b })),
+      Array.from(balances.values()).filter(b => b.pendingSats > 0),
     ),
     markPaid: jest.fn(async (address: string, sats: number) => {
       const existing = balances.get(address);
@@ -122,6 +123,22 @@ function createMockBalanceService() {
     }),
     _get: (address: string) => balances.get(address),
   };
+  const repo: any = {
+    findOneBy: jest.fn(async (where: any) => balances.get(where.address) ?? null),
+    save: jest.fn(async (row: any) => {
+      const existing = balances.get(row.address);
+      if (existing) Object.assign(existing, row);
+      else balances.set(row.address, { address: row.address, pendingSats: row.pendingSats ?? 0, totalPaidSats: row.totalPaidSats ?? 0 });
+      return row;
+    }),
+    create: jest.fn((partial: any) => ({ ...partial })),
+    find: jest.fn(async (q?: any) =>
+      q?.where?.pendingSats
+        ? Array.from(balances.values()).filter(b => b.pendingSats > 0)
+        : Array.from(balances.values()),
+    ),
+  };
+  return { service, repo };
 }
 
 function createMockPayoutHistoryRepo() {
@@ -130,14 +147,22 @@ function createMockPayoutHistoryRepo() {
     create: jest.fn((data: any) => data),
     save: jest.fn(async (entity: any) => { saved.push(entity); return entity; }),
     find: jest.fn(async () => saved),
+    findOneBy: jest.fn(async (where: any) =>
+      saved.find(r => Object.entries(where).every(([k, v]) => r[k] === v)) ?? null,
+    ),
     _getSaved: () => saved,
   };
 }
 
 function createPplnsService(feeAddress: string, feePercent: string) {
   const redis = createMockRedis();
-  const balanceService = createMockBalanceService();
+  const balanceBacking = createMockBalanceBacking();
+  const balanceService = balanceBacking.service;
   const payoutHistoryRepo = createMockPayoutHistoryRepo();
+  attachMockTxManager([
+    [PplnsPayoutHistoryEntity, payoutHistoryRepo],
+    [PplnsBalanceEntity, balanceBacking.repo],
+  ]);
   const configService = {
     get: jest.fn((key: string) => {
       const config: Record<string, string> = {
