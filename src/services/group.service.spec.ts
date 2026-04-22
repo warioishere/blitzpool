@@ -66,6 +66,27 @@ function createMockRepo<T extends { id?: any }>() {
                 }
             }
         }),
+        update: jest.fn(async (where: any, patch: any) => {
+            for (const row of rows.values()) {
+                if (Object.entries(where).every(([k, v]) => (row as any)[k] === v)) {
+                    Object.assign(row, patch);
+                }
+            }
+        }),
+    };
+}
+
+function createMockConfig(overrides: Record<string, string | undefined> = {}) {
+    return {
+        get: jest.fn((key: string) => overrides[key]),
+    };
+}
+
+function createMockGroupSolo() {
+    return {
+        getMemberLastActive: jest.fn(async () => null),
+        removeMemberState: jest.fn(async () => undefined),
+        removeGroupState: jest.fn(async () => undefined),
     };
 }
 
@@ -78,12 +99,20 @@ jest.mock('typeorm', () => ({
 describe('GroupService', () => {
     let groupRepo: ReturnType<typeof createMockRepo>;
     let memberRepo: ReturnType<typeof createMockRepo>;
+    let groupSolo: ReturnType<typeof createMockGroupSolo>;
     let service: GroupService;
 
     beforeEach(async () => {
         groupRepo = createMockRepo();
         memberRepo = createMockRepo();
-        service = new GroupService(groupRepo as any, memberRepo as any);
+        groupSolo = createMockGroupSolo();
+        const config = createMockConfig();
+        service = new GroupService(
+            groupRepo as any,
+            memberRepo as any,
+            config as any,
+            groupSolo as any,
+        );
         await service.onModuleInit();
     });
 
@@ -145,7 +174,9 @@ describe('GroupService', () => {
     it('deactivates group when member count drops below 2', async () => {
         const { group, adminToken } = await service.createGroup('group-one', 'bc1qalice');
         await service.addMember(group.id, 'bc1qbob', adminToken);
-        await service.selfLeave(group.id, 'bc1qbob');
+        // Simulate inactivity by backdating joinedAt past the kick threshold.
+        await memberRepo.update({ address: 'bc1qbob' }, { joinedAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) });
+        await service.removeMember(group.id, 'bc1qbob', adminToken);
         const updated: any = await groupRepo.findOneBy({ id: group.id });
         expect(updated.active).toBe(false);
     });
@@ -167,36 +198,30 @@ describe('GroupService', () => {
     it('cache reflects inactive state when only one member remains', async () => {
         const { group, adminToken } = await service.createGroup('group-one', 'bc1qalice');
         await service.addMember(group.id, 'bc1qbob', adminToken);
-        await service.selfLeave(group.id, 'bc1qbob');
+        await memberRepo.update({ address: 'bc1qbob' }, { joinedAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) });
+        await service.removeMember(group.id, 'bc1qbob', adminToken);
         // Creator still present but group inactive
         expect(service.getGroupForAddress('bc1qalice')).toEqual({ groupId: group.id, active: false });
     });
 
     // ── Creator leave / transfer ────────────────────────────────
 
-    it('blocks creator self-leave', async () => {
+    it('blocks removeMember when target is the creator', async () => {
         const { group, adminToken } = await service.createGroup('group-one', 'bc1qalice');
         await service.addMember(group.id, 'bc1qbob', adminToken);
-        await expect(service.selfLeave(group.id, 'bc1qalice'))
-            .rejects.toMatchObject({ code: 'creator-cannot-self-leave' });
+        await expect(service.removeMember(group.id, 'bc1qalice', adminToken))
+            .rejects.toMatchObject({ code: 'creator-cannot-be-removed' });
     });
 
-    it('auto-transfers creator role to oldest member when creator is kicked by token', async () => {
-        const { group, adminToken } = await service.createGroup('group-one', 'bc1qalice');
-        await service.addMember(group.id, 'bc1qbob', adminToken);
-        await service.addMember(group.id, 'bc1qcharlie', adminToken);
-        await service.removeMember(group.id, 'bc1qalice', adminToken);
-
+    it('transferCreator + then the old creator is removable after inactivity window', async () => {
+        const { group, adminToken: oldToken } = await service.createGroup('group-one', 'bc1qalice');
+        await service.addMember(group.id, 'bc1qbob', oldToken);
+        const { adminToken: newToken } = await service.transferCreator(group.id, 'bc1qbob', oldToken);
+        // Backdate alice's join so she's eligible for removal under the 14d gate.
+        await memberRepo.update({ address: 'bc1qalice' }, { joinedAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) });
+        await service.removeMember(group.id, 'bc1qalice', newToken);
         const members = Array.from(memberRepo._rows.values()) as any[];
-        const creator = members.find(m => m.role === 'creator');
-        expect(creator.address).toBe('bc1qbob'); // oldest remaining
-    });
-
-    it('dissolves group when last creator leaves alone', async () => {
-        const { group, adminToken } = await service.createGroup('group-one', 'bc1qalice');
-        await service.removeMember(group.id, 'bc1qalice', adminToken);
-        const updated: any = await groupRepo.findOneBy({ id: group.id });
-        expect(updated.dissolvedAt).toBeDefined();
+        expect(members.find(m => m.address === 'bc1qalice')).toBeUndefined();
     });
 
     it('transferCreator rotates admin token', async () => {
@@ -211,60 +236,4 @@ describe('GroupService', () => {
         await expect(service.requireAdminToken(group.id, newToken)).resolves.toBeDefined();
     });
 
-    // ── Batch add ────────────────────────────────────────────────
-
-    it('addMembersBatch adds multiple valid addresses in one call', async () => {
-        const { group, adminToken } = await service.createGroup('group-one', 'bc1qalice');
-        const result = await service.addMembersBatch(
-            group.id,
-            ['bc1qbob', 'bc1qcharlie', 'bc1qdan'],
-            adminToken,
-        );
-        expect(result.added.length).toBe(3);
-        expect(result.skipped.length).toBe(0);
-        expect(result.added.map(m => m.address)).toEqual(['bc1qbob', 'bc1qcharlie', 'bc1qdan']);
-    });
-
-    it('addMembersBatch skips already-member and continues with the rest', async () => {
-        const { group, adminToken } = await service.createGroup('group-one', 'bc1qalice');
-        await service.addMember(group.id, 'bc1qbob', adminToken);
-        const result = await service.addMembersBatch(
-            group.id,
-            ['bc1qbob', 'bc1qcharlie'],
-            adminToken,
-        );
-        expect(result.added.length).toBe(1);
-        expect(result.added[0].address).toBe('bc1qcharlie');
-        expect(result.skipped.length).toBe(1);
-        expect(result.skipped[0]).toMatchObject({ address: 'bc1qbob', reason: 'already-member' });
-    });
-
-    it('addMembersBatch skips address already in a different group', async () => {
-        const { group: g1, adminToken: t1 } = await service.createGroup('group-alpha', 'bc1qalice');
-        await service.addMember(g1.id, 'bc1qbob', t1);
-        const { group: g2, adminToken: t2 } = await service.createGroup('group-beta', 'bc1qcharlie');
-        const result = await service.addMembersBatch(g2.id, ['bc1qbob', 'bc1qdan'], t2);
-        expect(result.added.map(m => m.address)).toEqual(['bc1qdan']);
-        expect(result.skipped).toEqual([{ address: 'bc1qbob', reason: 'address-in-group' }]);
-    });
-
-    it('addMembersBatch collapses duplicates in the same submission', async () => {
-        const { group, adminToken } = await service.createGroup('group-one', 'bc1qalice');
-        const result = await service.addMembersBatch(
-            group.id,
-            ['bc1qbob', 'bc1qbob', 'bc1qcharlie'],
-            adminToken,
-        );
-        expect(result.added.map(m => m.address)).toEqual(['bc1qbob', 'bc1qcharlie']);
-        expect(result.skipped).toEqual([{ address: 'bc1qbob', reason: 'duplicate-in-batch' }]);
-    });
-
-    it('addMembersBatch rejects invalid admin token without adding anything', async () => {
-        const { group } = await service.createGroup('group-one', 'bc1qalice');
-        await expect(
-            service.addMembersBatch(group.id, ['bc1qbob'], 'GRP-wrong'),
-        ).rejects.toMatchObject({ code: 'invalid-token' });
-        const members = Array.from(memberRepo._rows.values()) as any[];
-        expect(members.length).toBe(1); // creator only
-    });
 });

@@ -54,10 +54,25 @@ function createMockRedis() {
             h.set(field, val.toString());
             return val;
         }),
+        hSet: jest.fn(async (key: string, field: string, value: string) => {
+            getH(key).set(field, value);
+        }),
+        hGet: jest.fn(async (key: string, field: string) => {
+            const h = hashes.get(key);
+            return h?.get(field) ?? null;
+        }),
+        hDel: jest.fn(async (key: string, field: string) => {
+            hashes.get(key)?.delete(field);
+        }),
         hGetAll: jest.fn(async (key: string) => {
             const h = hashes.get(key);
             if (!h) return {};
             return Object.fromEntries(h.entries());
+        }),
+        zRem: jest.fn(async (key: string, value: string) => {
+            const z = getZ(key);
+            const idx = z.findIndex(e => e.value === value);
+            if (idx >= 0) z.splice(idx, 1);
         }),
         _store: store,
         _zsets: zsets,
@@ -84,11 +99,23 @@ function createMockRepo<T>() {
     return {
         save: jest.fn(async (row: T) => { rows.push({ ...row }); return row; }),
         create: jest.fn((partial: Partial<T>) => ({ ...partial }) as T),
-        find: jest.fn(async () => [...rows]),
+        find: jest.fn(async (query?: any) => {
+            if (!query?.where) return [...rows];
+            return (rows as any[]).filter(r =>
+                Object.entries(query.where).every(([k, v]) => r[k] === v),
+            );
+        }),
         findOneBy: jest.fn(async (where: any) => {
             return (rows as any[]).find(r =>
                 Object.entries(where).every(([k, v]) => r[k] === v),
             ) ?? null;
+        }),
+        delete: jest.fn(async (where: any) => {
+            for (let i = rows.length - 1; i >= 0; i--) {
+                if (Object.entries(where).every(([k, v]) => (rows[i] as any)[k] === v)) {
+                    rows.splice(i, 1);
+                }
+            }
         }),
         _rows: rows,
     };
@@ -362,7 +389,9 @@ describe('GroupSoloService', () => {
 
         await service.onBlockFound(900_000, 100_000_000, 'bc1qalice');
 
-        expect(redis._hashes.size).toBe(0);
+        // rejected-shares hash is cleared on round reset; lastShareAt is NOT
+        // (it survives across rounds, powering the admin kick inactivity gate).
+        expect(redis._hashes.get('groupsolo:g1:rejected-shares')?.size ?? 0).toBe(0);
         const stats = await service.getRoundStats('g1');
         expect(stats.totalRejected).toBe(0);
     });

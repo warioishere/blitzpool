@@ -1,9 +1,11 @@
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import { Injectable, OnModuleInit, Inject, forwardRef } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { IsNull, Repository } from 'typeorm';
 import * as crypto from 'crypto';
 import { PplnsGroupEntity } from '../ORM/pplns-group/pplns-group.entity';
 import { PplnsGroupMemberEntity } from '../ORM/pplns-group/pplns-group-member.entity';
+import { GroupSoloService } from './group-solo.service';
 
 /**
  * Manages group lifecycle (create/transfer/dissolve), membership (add/kick/self-leave),
@@ -14,6 +16,8 @@ import { PplnsGroupMemberEntity } from '../ORM/pplns-group/pplns-group-member.en
  */
 
 const MIN_MEMBERS_ACTIVE = 2;
+const DEFAULT_KICK_INACTIVITY_DAYS = 14;
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
 export class GroupServiceError extends Error {
     constructor(public readonly code: string, message: string) {
@@ -37,13 +41,23 @@ export class GroupService implements OnModuleInit {
 
     /** address → { groupId, active }. Refreshed on every membership change. */
     private addressCache = new Map<string, GroupCacheEntry>();
+    private readonly kickInactivityDays: number;
 
     constructor(
         @InjectRepository(PplnsGroupEntity)
         private readonly groupRepo: Repository<PplnsGroupEntity>,
         @InjectRepository(PplnsGroupMemberEntity)
         private readonly memberRepo: Repository<PplnsGroupMemberEntity>,
-    ) {}
+        private readonly configService: ConfigService,
+        @Inject(forwardRef(() => GroupSoloService))
+        private readonly groupSoloService: GroupSoloService,
+    ) {
+        const raw = this.configService.get<string>('GROUP_INACTIVITY_KICK_DAYS');
+        const parsed = raw ? parseInt(raw, 10) : NaN;
+        this.kickInactivityDays = Number.isFinite(parsed) && parsed >= 0
+            ? parsed
+            : DEFAULT_KICK_INACTIVITY_DAYS;
+    }
 
     async onModuleInit(): Promise<void> {
         await this.rebuildCache();
@@ -122,6 +136,12 @@ export class GroupService implements OnModuleInit {
         if (!trimmedName || trimmedName.length < 3 || trimmedName.length > 64) {
             throw new GroupServiceError('invalid-name', 'Group name must be 3–64 characters');
         }
+        // Control characters (CR, LF, NUL, TAB, …) break email Subject headers
+        // — reject them at the create boundary so the group name is safe to
+        // interpolate into transactional emails without further escaping.
+        if (/[\x00-\x1f\x7f]/.test(trimmedName)) {
+            throw new GroupServiceError('invalid-name', 'Group name must not contain control characters');
+        }
         if (!creatorAddress) {
             throw new GroupServiceError('invalid-address', 'Creator address required');
         }
@@ -192,78 +212,21 @@ export class GroupService implements OnModuleInit {
     }
 
     /**
-     * Adds multiple members in a single token check + single cache rebuild.
-     * Benign per-address failures (already-member, address-in-group, empty
-     * address) are collected into `skipped` instead of aborting the batch.
-     * Token failures still throw and abort — they're not a per-address
-     * issue but a missing/invalid auth credential.
+     * Remove a non-creator member. The target must be inactive for at least
+     * `GROUP_INACTIVITY_KICK_DAYS` days (default 14) measured from their last
+     * accepted share, or from `joinedAt` if they never mined. This keeps the
+     * admin from unilaterally evicting actively-mining members, while still
+     * allowing cleanup of abandoned memberships on long-lived groups.
+     *
+     * Before the member row is deleted the in-flight round state for that
+     * address (Redis shares, rejected counter, pending balance row) is
+     * cleared through `GroupSoloService.removeMemberState`, so their work
+     * evaporates from the current round and the remaining members' shares
+     * grow proportionally on the next block.
      */
-    async addMembersBatch(
-        groupId: string,
-        addresses: string[],
-        token: string | undefined,
-    ): Promise<{
-        added: { address: string; role: 'member'; joinedAt: Date }[];
-        skipped: { address: string; reason: 'already-member' | 'address-in-group' | 'invalid-address' | 'duplicate-in-batch' }[];
-    }> {
-        await this.requireAdminToken(groupId, token);
-
-        const added: { address: string; role: 'member'; joinedAt: Date }[] = [];
-        const skipped: { address: string; reason: 'already-member' | 'address-in-group' | 'invalid-address' | 'duplicate-in-batch' }[] = [];
-        const seen = new Set<string>();
-        let anyAdded = false;
-
-        for (const raw of addresses) {
-            const address = (raw ?? '').trim();
-            if (!address) {
-                skipped.push({ address: raw, reason: 'invalid-address' });
-                continue;
-            }
-            if (seen.has(address)) {
-                skipped.push({ address, reason: 'duplicate-in-batch' });
-                continue;
-            }
-            seen.add(address);
-
-            const existing = await this.memberRepo.findOneBy({ address });
-            if (existing) {
-                skipped.push({
-                    address,
-                    reason: existing.groupId === groupId ? 'already-member' : 'address-in-group',
-                });
-                continue;
-            }
-
-            const saved = await this.memberRepo.save(this.memberRepo.create({
-                groupId,
-                address,
-                role: 'member',
-            }));
-            added.push({ address: saved.address, role: 'member', joinedAt: saved.joinedAt });
-            anyAdded = true;
-        }
-
-        if (anyAdded) {
-            await this.recomputeActive(groupId);
-            await this.rebuildCache();
-        }
-        return { added, skipped };
-    }
-
     async removeMember(groupId: string, address: string, token: string | undefined): Promise<void> {
         await this.requireAdminToken(groupId, token);
         await this.internalRemove(groupId, address, /*fromCreator*/ true);
-    }
-
-    async selfLeave(groupId: string, address: string): Promise<void> {
-        const member = await this.memberRepo.findOneBy({ groupId, address });
-        if (!member) {
-            throw new GroupServiceError('not-member', 'Address is not a member of this group');
-        }
-        if (member.role === 'creator') {
-            throw new GroupServiceError('creator-cannot-self-leave', 'Creator must transfer role or dissolve the group before leaving');
-        }
-        await this.internalRemove(groupId, address, /*fromCreator*/ false);
     }
 
     private async internalRemove(groupId: string, address: string, fromCreator: boolean): Promise<void> {
@@ -271,34 +234,24 @@ export class GroupService implements OnModuleInit {
         if (!member) {
             throw new GroupServiceError('not-member', 'Address is not a member of this group');
         }
-
         if (member.role === 'creator') {
-            // Creator removal: auto-transfer to oldest remaining member, or dissolve if none.
-            const remaining = await this.memberRepo.find({
-                where: { groupId },
-                order: { joinedAt: 'ASC' },
-            });
-            const others = remaining.filter(m => m.address !== address);
-            if (others.length === 0) {
-                await this.dissolveInternal(groupId);
-                return;
-            }
-            const newCreator = others[0];
-            newCreator.role = 'creator';
-            await this.memberRepo.save(newCreator);
-            // Rotate admin token so old one can't be used anymore.
-            const newToken = this.generateToken();
-            const group = await this.groupRepo.findOneBy({ id: groupId });
-            if (group) {
-                group.adminTokenHash = this.hashToken(newToken);
-                group.creatorAddress = newCreator.address;
-                await this.groupRepo.save(group);
-            }
-            // NOTE: The new admin token can't be returned from this path since it's
-            // triggered by a creator-leave. The new creator must call /recover if
-            // they don't have the token. (Recovery not implemented in MVP.)
+            throw new GroupServiceError(
+                'creator-cannot-be-removed',
+                'Creator must transfer the role or dissolve the group before being removed',
+            );
         }
 
+        const lastActive = await this.groupSoloService.getMemberLastActive(groupId, address);
+        const reference = lastActive ?? member.joinedAt.getTime();
+        const daysSince = (Date.now() - reference) / MS_PER_DAY;
+        if (daysSince < this.kickInactivityDays) {
+            throw new GroupServiceError(
+                'member-still-active',
+                `Member has been active within the last ${this.kickInactivityDays} days`,
+            );
+        }
+
+        await this.groupSoloService.removeMemberState(groupId, address);
         await this.memberRepo.delete({ groupId, address });
         await this.recomputeActive(groupId);
         await this.rebuildCache();
@@ -345,6 +298,12 @@ export class GroupService implements OnModuleInit {
     }
 
     private async dissolveInternal(groupId: string): Promise<void> {
+        // Clear all group-solo round state (Redis shares, rejected hash,
+        // last-seen hash, pending balance rows) before dropping the members.
+        // Without this the keys live forever in Valkey since they carry no
+        // TTL, and orphan balance rows would be stranded with a groupId
+        // that no longer resolves.
+        await this.groupSoloService.removeGroupState(groupId);
         await this.memberRepo.delete({ groupId });
         const group = await this.groupRepo.findOneBy({ id: groupId });
         if (group) {

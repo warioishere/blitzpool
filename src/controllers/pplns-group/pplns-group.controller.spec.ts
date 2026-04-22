@@ -16,6 +16,7 @@ describe('PplnsGroupController.chart', () => {
         };
         const groupSoloService = {} as any;
         const invitationService = {} as any;
+        const addressEmailService = {} as any;
         const clientService = {} as any;
         const clientStatisticsService = {
             getChartDataForAddress: jest.fn(async (address: string) =>
@@ -27,6 +28,7 @@ describe('PplnsGroupController.chart', () => {
             groupService as any,
             groupSoloService,
             invitationService,
+            addressEmailService,
             clientService,
             clientStatisticsService as any,
             clientRejectedStatisticsService,

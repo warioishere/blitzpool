@@ -1,4 +1,4 @@
-import { Injectable, Inject, OnModuleInit } from '@nestjs/common';
+import { Injectable, Inject, OnModuleInit, forwardRef } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
@@ -34,6 +34,10 @@ function redisKeys(groupId: string) {
         // Per-address rejected shares for the current round (diff-1 weighted).
         // No separate count key — the share value already captures real work.
         rejectedShares: `groupsolo:${groupId}:rejected-shares`,
+        // Per-address last-accepted-share epoch-ms. Persists across rounds
+        // (NOT cleared on block-found) so the admin-kick inactivity gate
+        // can look back weeks.
+        lastShareAt: `groupsolo:${groupId}:last-share-at`,
     };
 }
 
@@ -75,6 +79,7 @@ export class GroupSoloService implements OnModuleInit {
         private readonly historyRepo: Repository<PplnsGroupBlockHistoryEntity>,
         @InjectRepository(PplnsGroupBalanceEntity)
         private readonly balanceRepo: Repository<PplnsGroupBalanceEntity>,
+        @Inject(forwardRef(() => GroupService))
         private readonly groupService: GroupService,
     ) {
         this.feeAddress = this.configService.get('PPLNS_FEE_ADDRESS') ?? '';
@@ -122,10 +127,12 @@ export class GroupSoloService implements OnModuleInit {
         if (!entry || !entry.active) return false;
 
         const keys = redisKeys(entry.groupId);
+        const now = Date.now();
         const counter = await this.redis.incr(keys.counter);
-        const payload = `${address}:${difficulty}:${Date.now()}`;
+        const payload = `${address}:${difficulty}:${now}`;
         await this.redis.zAdd(keys.shares, { score: counter, value: payload });
         await this.redis.incrByFloat(keys.total, difficulty);
+        await this.redis.hSet(keys.lastShareAt, address, String(now));
         return true;
     }
 
@@ -286,7 +293,7 @@ export class GroupSoloService implements OnModuleInit {
                 const paidSats = Math.floor((d.percent / 100) * reward);
                 const isFee = d.address === this.feeAddress;
                 if (!isFee) {
-                    const existing = await this.balanceRepo.findOneBy({ address: d.address });
+                    const existing = await this.balanceRepo.findOneBy({ address: d.address, groupId });
                     if (existing && existing.pendingSats > 0) {
                         existing.totalPaidSats += existing.pendingSats;
                         existing.pendingSats = 0;
@@ -392,7 +399,7 @@ export class GroupSoloService implements OnModuleInit {
         for (const [addr, diff] of addressDiff) {
             const ratio = diff / totalDiff;
             const sats = Math.floor(ratio * rewardForMiners);
-            const existing = await this.balanceRepo.findOneBy({ address: addr });
+            const existing = await this.balanceRepo.findOneBy({ address: addr, groupId });
             const pending = existing?.pendingSats ?? 0;
             const totalSats = sats + pending;
             const percent = ratio * (100 - this.feePercent);
@@ -438,7 +445,7 @@ export class GroupSoloService implements OnModuleInit {
     }
 
     private async addPending(groupId: string, address: string, sats: number): Promise<void> {
-        const existing = await this.balanceRepo.findOneBy({ address });
+        const existing = await this.balanceRepo.findOneBy({ address, groupId });
         if (existing) {
             existing.pendingSats += sats;
             await this.balanceRepo.save(existing);
@@ -455,6 +462,72 @@ export class GroupSoloService implements OnModuleInit {
         await this.redis.del(keys.counter);
         await this.redis.del(keys.total);
         await this.redis.del(keys.rejectedShares);
+        // lastShareAt is intentionally NOT cleared on round reset — it
+        // survives across blocks so the inactivity gate measures actual
+        // time since last work, not time since last round start.
+    }
+
+    // ── Member lifecycle (called by GroupService) ──────────────
+
+    /**
+     * Milliseconds-since-epoch of the most recent accepted share from
+     * `address` in `groupId`, or null if no share has ever been recorded
+     * (member was invited but never mined to this group).
+     */
+    async getMemberLastActive(groupId: string, address: string): Promise<number | null> {
+        if (!this.isEnabled()) return null;
+        const keys = redisKeys(groupId);
+        const raw = await this.redis.hGet(keys.lastShareAt, address);
+        if (!raw) return null;
+        const n = parseInt(raw, 10);
+        return Number.isFinite(n) ? n : null;
+    }
+
+    /**
+     * Remove all round-state for a single member in a group: their shares
+     * in the current Redis window, their rejected counter, their pending
+     * balance row, and their last-share timestamp. Called by GroupService
+     * before deleting the member row during an admin kick.
+     *
+     * Effect on the remaining members: their share of the round's total
+     * grows proportionally because `total` is decremented by exactly the
+     * diff we remove. On the next block, the distribution picks up the
+     * freed-up percentage automatically.
+     */
+    async removeMemberState(groupId: string, address: string): Promise<void> {
+        if (this.isEnabled()) {
+            const keys = redisKeys(groupId);
+            const entries = await this.redis.zRange(keys.shares, 0, -1);
+            let removedDiff = 0;
+            for (const e of (entries ?? [])) {
+                const [addr, diffStr] = e.split(':');
+                if (addr === address) {
+                    await this.redis.zRem(keys.shares, e);
+                    removedDiff += parseFloat(diffStr) || 0;
+                }
+            }
+            if (removedDiff > 0) {
+                await this.redis.incrByFloat(keys.total, -removedDiff);
+            }
+            await this.redis.hDel(keys.rejectedShares, address);
+            await this.redis.hDel(keys.lastShareAt, address);
+        }
+        await this.balanceRepo.delete({ address, groupId });
+    }
+
+    /**
+     * Remove all round-state for every member of a group. Called by
+     * GroupService.dissolveInternal so no orphan keys/rows survive the
+     * dissolve event.
+     */
+    async removeGroupState(groupId: string): Promise<void> {
+        if (this.isEnabled()) {
+            await this.resetRound(groupId);
+            const keys = redisKeys(groupId);
+            await this.redis.del(keys.lastShareAt);
+        }
+        await this.balanceRepo.delete({ groupId });
+        await this.historyRepo.delete({ groupId });
     }
 
     // ── Stats (for API) ──────────────────────────────────────────
