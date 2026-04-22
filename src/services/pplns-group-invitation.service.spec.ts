@@ -125,8 +125,9 @@ describe('PplnsGroupInvitationService', () => {
         const sent = (emailService.sendInvitation as jest.Mock).mock.calls[0][0];
         expect(sent.to).toBe('bob@example.com');
         expect(sent.address).toBe('bc1qbob');
-        expect(sent.acceptUrl).toContain('https://blitzpool.test/invite/');
-        expect(sent.declineUrl).toContain('/decline');
+        // Single inviteUrl pointing at the UI invite page — no automatic
+        // accept/decline URL anymore, the user confirms on the page.
+        expect(sent.inviteUrl).toContain('https://blitzpool.test/invite/');
 
         expect(invitationRepo.rows).toHaveLength(1);
         expect(invitationRepo.rows[0].status).toBe('pending');

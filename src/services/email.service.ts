@@ -8,8 +8,8 @@ interface InvitationEmailContext {
     address: string;
     groupName: string;
     inviterAddress: string;
-    acceptUrl: string;
-    declineUrl: string;
+    /** UI page where the recipient reviews the invitation and clicks Accept or Decline. */
+    inviteUrl: string;
     expiresAt: Date;
 }
 
@@ -220,22 +220,16 @@ function renderInvitationHtml(ctx: InvitationEmailContext): string {
   </td></tr>
 </table>
 <p style="margin:0 0 16px;font-size:14px;line-height:1.6;color:${COLOR_TEXT};">
-  When you accept, your mining address joins this group and future blocks you find will be paid out via the group's PROP-style coinbase split.
+  Open the invitation page to review it and accept or decline. When you accept, your mining address joins this group and future blocks you find will be paid out via the group's PROP-style coinbase split.
 </p>
 <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:0 0 24px;">
-  <tr>
-    <td style="padding-right:12px;">${buttonHtml(ctx.acceptUrl, 'Accept invitation')}</td>
-    <td>${buttonHtml(ctx.declineUrl, 'Decline', false)}</td>
-  </tr>
+  <tr><td>${buttonHtml(ctx.inviteUrl, 'Open invitation')}</td></tr>
 </table>
 <p style="margin:0 0 8px;font-size:12px;color:${COLOR_MUTED};">
-  Or copy these links:
-</p>
-<p style="margin:0 0 6px;font-size:12px;color:${COLOR_MUTED};word-break:break-all;">
-  Accept: <a href="${escapeAttr(ctx.acceptUrl)}" style="color:${COLOR_PRIMARY};text-decoration:underline;">${escapeHtml(ctx.acceptUrl)}</a>
+  Or paste this link into your browser:
 </p>
 <p style="margin:0 0 24px;font-size:12px;color:${COLOR_MUTED};word-break:break-all;">
-  Decline: <a href="${escapeAttr(ctx.declineUrl)}" style="color:${COLOR_PRIMARY};text-decoration:underline;">${escapeHtml(ctx.declineUrl)}</a>
+  <a href="${escapeAttr(ctx.inviteUrl)}" style="color:${COLOR_PRIMARY};text-decoration:underline;">${escapeHtml(ctx.inviteUrl)}</a>
 </p>
 <p style="margin:0;font-size:12px;color:${COLOR_MUTED};">
   Invitation expires ${escapeHtml(expires)}. If you don't recognise the inviter, decline.
@@ -251,8 +245,7 @@ function renderInvitationText(ctx: InvitationEmailContext): string {
         `Your address: ${ctx.address}`,
         `Invited by:   ${ctx.inviterAddress}`,
         ``,
-        `Accept:  ${ctx.acceptUrl}`,
-        `Decline: ${ctx.declineUrl}`,
+        `Open the invitation: ${ctx.inviteUrl}`,
         ``,
         `Invitation expires ${ctx.expiresAt.toUTCString()}.`,
         `If you don't recognise the inviter, decline.`,

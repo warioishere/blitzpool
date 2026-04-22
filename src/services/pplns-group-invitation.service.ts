@@ -107,14 +107,18 @@ export class PplnsGroupInvitationService {
             expiresAt,
         }));
 
+        // Email link goes to the UI invitation page, not directly at the
+        // accept/decline endpoints — the recipient sees the group context
+        // and confirms there with an explicit button click. This protects
+        // against accidental accept/decline from email-preview link
+        // pre-fetchers or one-tap email-client gestures.
         const baseUrl = this.poolBaseUrl();
         await this.emailService.sendInvitation({
             to: binding.email,
             address,
             groupName: group.name,
             inviterAddress: group.creatorAddress,
-            acceptUrl: `${baseUrl}/invite/${token}/accept`,
-            declineUrl: `${baseUrl}/invite/${token}/decline`,
+            inviteUrl: `${baseUrl}/invite/${token}`,
             expiresAt: invitation.expiresAt,
         });
 
