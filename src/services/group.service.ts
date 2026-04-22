@@ -6,6 +6,7 @@ import * as crypto from 'crypto';
 import { PplnsGroupEntity } from '../ORM/pplns-group/pplns-group.entity';
 import { PplnsGroupMemberEntity } from '../ORM/pplns-group/pplns-group-member.entity';
 import { GroupSoloService } from './group-solo.service';
+import { normalizeBtcAddress } from '../utils/btc-address.utils';
 
 /**
  * Manages group lifecycle (create/transfer/dissolve), membership (add/kick/self-leave),
@@ -114,7 +115,7 @@ export class GroupService implements OnModuleInit {
     // ── Lookup ────────────────────────────────────────────────────
 
     getGroupForAddress(address: string): GroupCacheEntry | undefined {
-        return this.addressCache.get(address);
+        return this.addressCache.get(normalizeBtcAddress(address));
     }
 
     async getGroup(groupId: string): Promise<PplnsGroupEntity | null> {
@@ -142,7 +143,8 @@ export class GroupService implements OnModuleInit {
         if (/[\x00-\x1f\x7f]/.test(trimmedName)) {
             throw new GroupServiceError('invalid-name', 'Group name must not contain control characters');
         }
-        if (!creatorAddress) {
+        const normalizedAddress = normalizeBtcAddress(creatorAddress);
+        if (!normalizedAddress) {
             throw new GroupServiceError('invalid-address', 'Creator address required');
         }
 
@@ -151,7 +153,7 @@ export class GroupService implements OnModuleInit {
             throw new GroupServiceError('name-taken', 'Group name already in use');
         }
 
-        const existingMember = await this.memberRepo.findOneBy({ address: creatorAddress });
+        const existingMember = await this.memberRepo.findOneBy({ address: normalizedAddress });
         if (existingMember) {
             throw new GroupServiceError('address-in-group', 'Address is already a member of another group');
         }
@@ -160,14 +162,14 @@ export class GroupService implements OnModuleInit {
         const group = await this.groupRepo.save(this.groupRepo.create({
             id: crypto.randomUUID(),
             name: trimmedName,
-            creatorAddress,
+            creatorAddress: normalizedAddress,
             adminTokenHash: this.hashToken(adminToken),
             active: false,
         }));
 
         await this.memberRepo.save(this.memberRepo.create({
             groupId: group.id,
-            address: creatorAddress,
+            address: normalizedAddress,
             role: 'creator',
         }));
 
@@ -188,11 +190,12 @@ export class GroupService implements OnModuleInit {
      * invitee proves they own the address by clicking the email link.
      */
     async addMemberWithoutAdmin(groupId: string, address: string): Promise<PplnsGroupMemberEntity> {
-        if (!address) {
+        const normalizedAddress = normalizeBtcAddress(address);
+        if (!normalizedAddress) {
             throw new GroupServiceError('invalid-address', 'Address required');
         }
 
-        const existing = await this.memberRepo.findOneBy({ address });
+        const existing = await this.memberRepo.findOneBy({ address: normalizedAddress });
         if (existing) {
             if (existing.groupId === groupId) {
                 throw new GroupServiceError('already-member', 'Address is already in this group');
@@ -202,7 +205,7 @@ export class GroupService implements OnModuleInit {
 
         const member = await this.memberRepo.save(this.memberRepo.create({
             groupId,
-            address,
+            address: normalizedAddress,
             role: 'member',
         }));
 

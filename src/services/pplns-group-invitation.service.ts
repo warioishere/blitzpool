@@ -10,6 +10,7 @@ import { PplnsGroupInvitationEntity } from '../ORM/pplns-group/pplns-group-invit
 import { GroupService, GroupServiceError } from './group.service';
 import { AddressEmailService } from './address-email.service';
 import { EmailService } from './email.service';
+import { normalizeBtcAddress } from '../utils/btc-address.utils';
 
 const INVITATION_TTL_DAYS = 7;
 
@@ -65,7 +66,9 @@ export class PplnsGroupInvitationService {
     ): Promise<CreatedInvitation> {
         const group = await this.groupService.requireAdminToken(groupId, adminToken);
 
-        if (!address) throw new InvitationServiceError('invalid-address', 'Address required');
+        const normalizedAddress = normalizeBtcAddress(address);
+        if (!normalizedAddress) throw new InvitationServiceError('invalid-address', 'Address required');
+        address = normalizedAddress;
 
         // Already a member? Skip.
         const existingMember = await this.memberRepo.findOneBy({ address });
@@ -181,8 +184,14 @@ export class PplnsGroupInvitationService {
             throw new InvitationServiceError('group-dissolved', 'Group no longer exists');
         }
 
+        // Invitation rows were stored with a normalized address (bech32
+        // lowercased) but older data from before this change might not
+        // be — re-normalize here for the lookup so legacy rows still
+        // resolve correctly.
+        const normalizedInvitedAddress = normalizeBtcAddress(invitation.address);
+
         // Make sure the address didn't join another group in the meantime.
-        const existingMember = await this.memberRepo.findOneBy({ address: invitation.address });
+        const existingMember = await this.memberRepo.findOneBy({ address: normalizedInvitedAddress });
         if (existingMember && existingMember.groupId !== invitation.groupId) {
             throw new InvitationServiceError('address-in-group', 'Address is now in another group — invitation invalid');
         }
@@ -197,7 +206,7 @@ export class PplnsGroupInvitationService {
 
         const member = await this.groupService.addMemberWithoutAdmin(
             invitation.groupId,
-            invitation.address,
+            normalizedInvitedAddress,
         );
 
         invitation.status = 'accepted';

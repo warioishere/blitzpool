@@ -7,6 +7,7 @@ import * as crypto from 'crypto';
 import { AddressEmailEntity } from '../ORM/address-email/address-email.entity';
 import { EmailVerificationEntity } from '../ORM/address-email/email-verification.entity';
 import { EmailService } from './email.service';
+import { normalizeBtcAddress } from '../utils/btc-address.utils';
 
 const VERIFICATION_TTL_HOURS = 24;
 // Loose RFC 5322 sanity check, not a full validator. The MX/handshake
@@ -47,7 +48,9 @@ export class AddressEmailService {
      * an already-verified binding until the new one is confirmed.
      */
     async register(address: string, email: string): Promise<{ token: string }> {
-        if (!address) throw new AddressEmailServiceError('invalid-address', 'Address required');
+        const normalizedAddress = normalizeBtcAddress(address);
+        if (!normalizedAddress) throw new AddressEmailServiceError('invalid-address', 'Address required');
+        address = normalizedAddress;
         const normalizedEmail = (email ?? '').trim().toLowerCase();
         if (!EMAIL_RE.test(normalizedEmail)) {
             throw new AddressEmailServiceError('invalid-email', 'Email format invalid');
@@ -125,7 +128,7 @@ export class AddressEmailService {
      * count.
      */
     async getVerified(address: string): Promise<AddressEmailEntity | null> {
-        const row = await this.bindingRepo.findOneBy({ address });
+        const row = await this.bindingRepo.findOneBy({ address: normalizeBtcAddress(address) });
         if (!row || !row.verifiedAt) return null;
         return row;
     }
