@@ -23,6 +23,9 @@ import * as bitcoinjs from 'bitcoinjs-lib';
 import { generateFormattedTimeSlots } from './utils/timeslot.utils';
 
 import { LiveHashrateService } from './services/live-hashrate.service';
+import { MiningModeService } from './services/mining-mode.service';
+import { PplnsService } from './services/pplns.service';
+import { GroupSoloService } from './services/group-solo.service';
 
 function extractHost(addr: string): string {
   if (!addr) return '';
@@ -86,6 +89,9 @@ export class AppController {
     private readonly stratumV1JobsService: StratumV1JobsService,
     private readonly metricsService: MetricsService,
     private readonly liveHashrateService: LiveHashrateService,
+    private readonly miningModeService: MiningModeService,
+    private readonly pplnsService: PplnsService,
+    private readonly groupSoloService: GroupSoloService,
   ) {
     const packagePath = join(__dirname, '..', 'package.json');
     this.version = JSON.parse(readFileSync(packagePath, 'utf8')).version;
@@ -142,19 +148,48 @@ export class AppController {
   public async clientBlockTemplate(@Param('address') address: string) {
     const tpl = await firstValueFrom(this.stratumV1JobsService.newMiningJob$);
 
-    const devFeeAddress = this.configService.get('DEV_FEE_ADDRESS');
-    const devFeePercent = parseFloat(
-      this.configService.get('DEV_FEE_PERCENT') ?? '1.5',
-    );
-
+    // Build payoutInformation that matches the actual coinbase the pool would
+    // produce for this miner. In PPLNS/group-solo the coinbase is a multi-output
+    // distribution, not a solo payout — returning a solo-shaped template here
+    // would mislead the miner.
+    const modeResult = await this.miningModeService.getMode(address);
     let payoutInformation;
-    if (devFeeAddress == null || devFeeAddress.length < 1) {
-      payoutInformation = [{ address, percent: 100 }];
-    } else {
-      payoutInformation = [
-        { address: devFeeAddress, percent: devFeePercent },
-        { address, percent: 100 - devFeePercent },
-      ];
+    let mode: 'solo' | 'pplns' | 'group-solo' = modeResult.mode;
+
+    if (modeResult.mode === 'group-solo' && modeResult.groupId && this.groupSoloService.isEnabled()) {
+      const distribution = await this.groupSoloService.getPayoutDistribution(
+        modeResult.groupId,
+        tpl.blockData.coinbasevalue,
+      );
+      if (distribution && distribution.length > 0) {
+        payoutInformation = distribution;
+      }
+    } else if (modeResult.mode === 'pplns' && this.pplnsService.isEnabled()) {
+      const distribution = await this.pplnsService.getPayoutDistribution(
+        tpl.blockData.coinbasevalue,
+      );
+      if (distribution && distribution.length > 0) {
+        payoutInformation = distribution;
+      }
+    }
+
+    // Fall back to solo if: mode is solo, or mode lookup produced an empty
+    // distribution (e.g. PPLNS window is empty right now). Behavior matches
+    // what StratumV1Client does on a solo port.
+    if (!payoutInformation) {
+      mode = 'solo';
+      const devFeeAddress = this.configService.get('DEV_FEE_ADDRESS');
+      const devFeePercent = parseFloat(
+        this.configService.get('DEV_FEE_PERCENT') ?? '1.5',
+      );
+      if (devFeeAddress == null || devFeeAddress.length < 1) {
+        payoutInformation = [{ address, percent: 100 }];
+      } else {
+        payoutInformation = [
+          { address: devFeeAddress, percent: devFeePercent },
+          { address, percent: 100 - devFeePercent },
+        ];
+      }
     }
 
     const networkConfig = this.configService.get('NETWORK');
@@ -194,6 +229,11 @@ export class AppController {
       blockTemplate,
       blockHex: block.toHex(),
       coinbaseTxHex: job.getCoinbaseTxHex(),
+      mode,
+      payoutInformation,
+      ...(modeResult.mode === 'group-solo' && modeResult.groupId
+        ? { groupId: modeResult.groupId }
+        : {}),
     };
   }
 

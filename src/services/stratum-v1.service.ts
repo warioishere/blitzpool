@@ -22,6 +22,7 @@ import { ShareTotalsCacheService } from './share-totals-cache.service';
 import { AddressSettingsCacheService } from './address-settings-cache.service';
 import { DifficultyScoresCacheService } from './difficulty-scores-cache.service';
 import { PplnsService } from './pplns.service';
+import { GroupSoloService } from './group-solo.service';
 
 @Injectable()
 export class StratumV1Service implements OnModuleInit {
@@ -47,6 +48,7 @@ export class StratumV1Service implements OnModuleInit {
     private readonly shareTotalsCacheService: ShareTotalsCacheService,
     @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
     private readonly pplnsService: PplnsService,
+    private readonly groupSoloService: GroupSoloService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -108,6 +110,7 @@ export class StratumV1Service implements OnModuleInit {
       this.redisClient,
       portConfig.payoutMode ?? 'solo',
       this.pplnsService,
+      this.groupSoloService,
     );
 
     socket.on('close', async (hadError: boolean) => {

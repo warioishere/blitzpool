@@ -26,12 +26,16 @@ describe('PplnsController', () => {
         const clientService = {
             getUserAgentsForAddresses: jest.fn(async () => opts.userAgents ?? []),
         };
+        const miningModeService = {
+            getMode: jest.fn().mockResolvedValue({ mode: 'pplns' }),
+        };
         const controller = new PplnsController(
             pplnsService as any,
             clientStatisticsService as any,
             clientService as any,
+            miningModeService as any,
         );
-        return { controller, pplnsService, clientStatisticsService, clientService };
+        return { controller, pplnsService, clientStatisticsService, clientService, miningModeService };
     }
 
     describe('info', () => {
@@ -156,6 +160,15 @@ describe('PplnsController', () => {
             await controller.getChart('something-weird' as any);
 
             expect(clientStatisticsService.getChartDataForAddress).toHaveBeenCalledWith('bc1qa', '1d');
+        });
+    });
+
+    describe('getMiningMode', () => {
+        it('delegates to MiningModeService.getMode', async () => {
+            const { controller, miningModeService } = setup({ distribution: [] });
+            const res = await controller.getMiningMode('bc1qfoo');
+            expect(miningModeService.getMode).toHaveBeenCalledWith('bc1qfoo');
+            expect(res).toEqual({ mode: 'pplns' });
         });
     });
 });

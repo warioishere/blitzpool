@@ -65,6 +65,7 @@ function createService(envOverrides: Record<string, string> = {}) {
     {} as any, // templateDistributionService
     {} as any, // jobDeclarationService
     { isEnabled: () => false } as any, // pplnsService
+    { isEnabled: () => false, getGroupForAddress: () => undefined } as any, // groupSoloService
   );
 
   return { service, configService, clientService, addressSettingsCacheService, difficultyScoresCacheService };
@@ -298,6 +299,7 @@ describe('StratumV2Service', () => {
         expect.anything(), // extranonceManager
         expect.anything(), // templateDistributionService
         expect.anything(), // pplnsService
+        expect.anything(), // groupSoloService
       );
     });
   });

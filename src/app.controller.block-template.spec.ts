@@ -18,6 +18,9 @@ import { ConfigService } from '@nestjs/config';
 import { StratumV1JobsService } from './services/stratum-v1-jobs.service';
 import { MetricsService } from './services/metrics.service';
 import { LiveHashrateService } from './services/live-hashrate.service';
+import { MiningModeService } from './services/mining-mode.service';
+import { PplnsService } from './services/pplns.service';
+import { GroupSoloService } from './services/group-solo.service';
 
 describe('AppController /api/info/block-template', () => {
   let app: NestFastifyApplication;
@@ -43,6 +46,9 @@ describe('AppController /api/info/block-template', () => {
         { provide: StratumV1JobsService, useValue: { newMiningJob$: of({}), getNextId: jest.fn() } },
         { provide: MetricsService, useValue: {} },
         { provide: LiveHashrateService, useValue: {} },
+        { provide: MiningModeService, useValue: { getMode: jest.fn().mockResolvedValue({ mode: 'solo' }) } },
+        { provide: PplnsService, useValue: { isEnabled: () => false, getPayoutDistribution: jest.fn() } },
+        { provide: GroupSoloService, useValue: { isEnabled: () => false, getPayoutDistribution: jest.fn() } },
       ],
     }).compile();
 

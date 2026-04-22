@@ -39,6 +39,7 @@ import { ClientDifficultyStatisticsService } from '../ORM/client-difficulty-stat
 import { ShareTotalsCacheService } from '../services/share-totals-cache.service';
 import { AddressSettingsCacheService } from '../services/address-settings-cache.service';
 import { PplnsService } from '../services/pplns.service';
+import { GroupSoloService } from '../services/group-solo.service';
 import { PayoutMode } from './interfaces/unified-stratum.interfaces';
 
 
@@ -116,6 +117,7 @@ export class StratumV1Client {
         private readonly redisClient?: any,
         private readonly payoutMode: PayoutMode = 'solo',
         private readonly pplnsService?: PplnsService,
+        private readonly groupSoloService?: GroupSoloService,
     ) {
         this.initialDifficulty = Number.isFinite(initialDifficulty)
             ? initialDifficulty
@@ -716,6 +718,29 @@ export class StratumV1Client {
         );
     }
 
+    /**
+     * Live lookup of the active group-id for this session's address. Returns null
+     * if group-solo isn't enabled, the address hasn't been authorized yet, or the
+     * address isn't a member of an active group. Called per-share/per-job because
+     * membership can change after connect (miner added to group while connected).
+     */
+    private activeGroupId(): string | null {
+        if (!this.groupSoloService?.isEnabled()) return null;
+        const address = this.clientAuthorization?.address;
+        if (!address) return null;
+        const entry = this.groupSoloService.getGroupForAddress(address);
+        return entry?.active ? entry.groupId : null;
+    }
+
+    /** Dispatch a rejected share to group-solo if the miner is currently in an active group. */
+    private async dispatchGroupReject(): Promise<void> {
+        if (!this.activeGroupId()) return;
+        await this.groupSoloService!.recordReject(
+            this.clientAuthorization.address,
+            this.sessionDifficulty,
+        );
+    }
+
     private async sendNewMiningJob(jobTemplate: IJobTemplate) {
         const jobStartTime = Date.now();
 
@@ -730,7 +755,16 @@ export class StratumV1Client {
             this.hashRate = this.statistics.hashRate;
         }
 
-        if (this.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
+        const jobGroupId = this.activeGroupId();
+        if (jobGroupId) {
+            // Group-solo takes precedence: per-group shared coinbase, PROP-style
+            payoutInformation = await this.groupSoloService!.getPayoutDistribution(
+                jobGroupId,
+                jobTemplate.blockData.coinbasevalue,
+            );
+            this.noFee = false;
+            if (!payoutInformation || payoutInformation.length === 0) return;
+        } else if (this.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
             // PPLNS: Shared coinbase with proportional payouts
             // Network difficulty is synced centrally via PplnsService's job subscription
             payoutInformation = await this.pplnsService.getPayoutDistribution(jobTemplate.blockData.coinbasevalue);
@@ -865,6 +899,7 @@ export class StratumV1Client {
                 eStratumErrorCode[eStratumErrorCode.DuplicateShare],
                 this.sessionDifficulty,
             );
+            await this.dispatchGroupReject();
             const err = new StratumErrorMessage(
                 submission.id,
                 eStratumErrorCode.DuplicateShare,
@@ -900,6 +935,7 @@ export class StratumV1Client {
                 eStratumErrorCode[eStratumErrorCode.JobNotFound],
                 this.sessionDifficulty,
             );
+            await this.dispatchGroupReject();
             const err = new StratumErrorMessage(
                 submission.id,
                 eStratumErrorCode.JobNotFound,
@@ -932,6 +968,7 @@ export class StratumV1Client {
                 eStratumErrorCode[eStratumErrorCode.JobNotFound],
                 this.sessionDifficulty,
             );
+            await this.dispatchGroupReject();
             console.warn(`Job template ${job.jobTemplateId} not found for job ${submission.jobId}`);
             delete this.stratumV1JobsService.jobs[submission.jobId];
             const err = new StratumErrorMessage(
@@ -989,8 +1026,16 @@ export class StratumV1Client {
                     await this.addressSettingsService.resetBestDifficultyAndShares();
                     await this.addressSettingsCacheService.clear();
 
-                    // Process PPLNS payouts (update pending balances)
-                    if (this.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
+                    // Process group-solo payouts (finder's group gets the coinbase, round resets)
+                    const foundGroupId = this.activeGroupId();
+                    if (foundGroupId) {
+                        await this.groupSoloService!.onBlockFound(
+                            jobTemplate.blockData.height,
+                            jobTemplate.blockData.coinbasevalue,
+                            this.clientAuthorization.address,
+                        );
+                    } else if (this.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
+                        // Process PPLNS payouts (update pending balances)
                         await this.pplnsService.onBlockFound(
                             jobTemplate.blockData.height,
                             jobTemplate.blockData.coinbasevalue,
@@ -1005,8 +1050,14 @@ export class StratumV1Client {
                 // Persist to Redis atomically (stateless service)
                 await this.clientStatisticsService.addAcceptedShare(this.entity, this.sessionDifficulty);
 
-                // Record share in PPLNS window if on PPLNS port
-                if (this.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
+                // Record share — group-solo takes precedence over port's payoutMode
+                const shareGroupId = this.activeGroupId();
+                if (shareGroupId) {
+                    await this.groupSoloService!.recordShare(
+                        this.clientAuthorization.address,
+                        this.sessionDifficulty,
+                    );
+                } else if (this.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
                     await this.pplnsService.recordShare(
                         this.clientAuthorization.address,
                         this.sessionDifficulty,
@@ -1100,6 +1151,7 @@ export class StratumV1Client {
                 eStratumErrorCode[eStratumErrorCode.LowDifficultyShare],
                 this.sessionDifficulty,
             );
+            await this.dispatchGroupReject();
             const err = new StratumErrorMessage(
                 submission.id,
                 eStratumErrorCode.LowDifficultyShare,

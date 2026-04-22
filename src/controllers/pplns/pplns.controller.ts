@@ -2,6 +2,7 @@ import { Controller, Get, Param, Query } from '@nestjs/common';
 import { PplnsService } from '../../services/pplns.service';
 import { ClientStatisticsService } from '../../ORM/client-statistics/client-statistics.service';
 import { ClientService } from '../../ORM/client/client.service';
+import { MiningModeService } from '../../services/mining-mode.service';
 
 @Controller('pplns')
 export class PplnsController {
@@ -10,6 +11,7 @@ export class PplnsController {
         private readonly pplnsService: PplnsService,
         private readonly clientStatisticsService: ClientStatisticsService,
         private readonly clientService: ClientService,
+        private readonly miningModeService: MiningModeService,
     ) {}
 
     /**
@@ -34,6 +36,20 @@ export class PplnsController {
     }
 
     /**
+     * GET /pplns/mode/:address
+     * Returns the mining mode the given BTC address is currently operating in.
+     *   - 'group-solo' if the address is in an active group
+     *   - 'pplns' otherwise, if the address has shares in the PPLNS window
+     *   - 'solo' otherwise
+     * The UI uses this for mode-aware dashboard rendering (hiding solo-only
+     * widgets, showing PPLNS/group panels).
+     */
+    @Get('mode/:address')
+    async getMiningMode(@Param('address') address: string) {
+        return this.miningModeService.getMode(address);
+    }
+
+    /**
      * GET /pplns/status
      * Pool-wide PPLNS status: window stats, miner count, fee config.
      */
@@ -44,6 +60,19 @@ export class PplnsController {
             enabled: this.pplnsService.isEnabled(),
             ...windowStats,
         };
+    }
+
+    /**
+     * GET /pplns/fees
+     * Pool-side fee configuration shared by PPLNS and group-solo payout paths.
+     * The UI reads this to render current fees on the groups-landing page
+     * without having to re-deploy when fees change. `feePercent` is a human
+     * percentage (e.g. 2 for 2%), `feeAddress` is the BTC address where the
+     * pool fee output lands in the coinbase transaction.
+     */
+    @Get('fees')
+    getFees() {
+        return this.pplnsService.getFeeConfig();
     }
 
     /**
