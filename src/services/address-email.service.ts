@@ -1,5 +1,6 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Interval } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, LessThan } from 'typeorm';
 import * as crypto from 'crypto';
@@ -27,6 +28,8 @@ export class AddressEmailServiceError extends Error {
  */
 @Injectable()
 export class AddressEmailService {
+
+    private readonly logger = new Logger(AddressEmailService.name);
 
     constructor(
         @InjectRepository(AddressEmailEntity)
@@ -128,15 +131,22 @@ export class AddressEmailService {
     }
 
     /**
-     * Periodic cleanup hook — drops expired verification tokens. Not wired
-     * to a scheduler here; call from a cron or accept the small DB bloat
-     * (rows are tiny). Returns count of deleted rows for logging.
+     * Periodic cleanup — drops expired verification tokens. Fires hourly
+     * via @Interval; also safe to call directly.
      */
+    @Interval(60 * 60 * 1000)
     async purgeExpiredTokens(): Promise<number> {
-        const result = await this.verificationRepo.delete({
-            expiresAt: LessThan(new Date()),
-        });
-        return result.affected ?? 0;
+        try {
+            const result = await this.verificationRepo.delete({
+                expiresAt: LessThan(new Date()),
+            });
+            const n = result.affected ?? 0;
+            if (n > 0) this.logger.log(`Purged ${n} expired verification tokens`);
+            return n;
+        } catch (err) {
+            this.logger.warn(`purgeExpiredTokens failed: ${(err as Error).message}`);
+            return 0;
+        }
     }
 
     private generateToken(): string {
