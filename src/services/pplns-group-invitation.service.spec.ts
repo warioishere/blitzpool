@@ -181,6 +181,21 @@ describe('PplnsGroupInvitationService', () => {
         await expect(service.accept(r.token)).rejects.toThrow(/declined/i);
     });
 
+    it('accept fails when the group has been dissolved between invite and accept', async () => {
+        const { service, addressEmailService, groupService, memberRepo } = makeService();
+        addressEmailService._setVerified('bc1qbob', 'bob@example.com');
+        const r = await service.createInvitation('g1', 'bc1qbob', 'good-token');
+
+        // Admin dissolves the group after the invite but before the accept.
+        groupService.getGroup = jest.fn(async (id: string) => ({
+            id, name: 'Friends', creatorAddress: 'bc1qadmin',
+            dissolvedAt: new Date(),
+        }));
+
+        await expect(service.accept(r.token)).rejects.toMatchObject({ code: 'group-dissolved' });
+        expect(memberRepo.rows).toHaveLength(0);
+    });
+
     it('accept fails on expired invitation', async () => {
         const { service, addressEmailService, invitationRepo } = makeService();
         addressEmailService._setVerified('bc1qbob', 'bob@example.com');

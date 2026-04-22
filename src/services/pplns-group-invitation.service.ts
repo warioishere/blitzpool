@@ -1,5 +1,6 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Interval } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import { LessThan, Repository } from 'typeorm';
 import * as crypto from 'crypto';
@@ -38,6 +39,8 @@ export interface CreatedInvitation {
  */
 @Injectable()
 export class PplnsGroupInvitationService {
+
+    private readonly logger = new Logger(PplnsGroupInvitationService.name);
 
     constructor(
         @InjectRepository(PplnsGroupInvitationEntity)
@@ -169,6 +172,15 @@ export class PplnsGroupInvitationService {
             throw new InvitationServiceError('expired', 'Invitation has expired');
         }
 
+        // The group may have been dissolved between invite-send and accept.
+        // addMemberWithoutAdmin would happily write a member row into a
+        // dissolved group (rebuildCache filters it out but the stale DB
+        // row remains, causing UI/stratum inconsistency). Block it here.
+        const group = await this.groupService.getGroup(invitation.groupId);
+        if (!group || group.dissolvedAt) {
+            throw new InvitationServiceError('group-dissolved', 'Group no longer exists');
+        }
+
         // Make sure the address didn't join another group in the meantime.
         const existingMember = await this.memberRepo.findOneBy({ address: invitation.address });
         if (existingMember && existingMember.groupId !== invitation.groupId) {
@@ -290,13 +302,23 @@ export class PplnsGroupInvitationService {
 
     /**
      * Periodic cleanup — flips expired pending invitations to 'expired'.
+     * Fires hourly via @Interval. The method is also safe to call directly
+     * (tests / admin endpoints).
      */
+    @Interval(60 * 60 * 1000)
     async expireOld(): Promise<number> {
-        const result = await this.invitationRepo.update(
-            { status: 'pending', expiresAt: LessThan(new Date()) },
-            { status: 'expired' },
-        );
-        return result.affected ?? 0;
+        try {
+            const result = await this.invitationRepo.update(
+                { status: 'pending', expiresAt: LessThan(new Date()) },
+                { status: 'expired' },
+            );
+            const n = result.affected ?? 0;
+            if (n > 0) this.logger.log(`Marked ${n} expired invitations`);
+            return n;
+        } catch (err) {
+            this.logger.warn(`expireOld failed: ${(err as Error).message}`);
+            return 0;
+        }
     }
 
     private generateToken(): string {

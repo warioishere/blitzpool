@@ -509,6 +509,7 @@ export class PplnsGroupController {
                 'already-member': HttpStatus.CONFLICT,
                 'address-in-group': HttpStatus.CONFLICT,
                 'already-declined': HttpStatus.CONFLICT,
+                'group-dissolved': HttpStatus.GONE,
                 'invalid-address': HttpStatus.BAD_REQUEST,
                 'config-missing': HttpStatus.SERVICE_UNAVAILABLE,
             }[e.code] ?? HttpStatus.BAD_REQUEST;

@@ -77,7 +77,7 @@ export class PplnsInvitationController {
     private toHttp(e: any): HttpException {
         if (e instanceof InvitationServiceError) {
             const status = e.code === 'not-found' ? HttpStatus.NOT_FOUND
-                : e.code === 'expired' ? HttpStatus.GONE
+                : e.code === 'expired' || e.code === 'group-dissolved' ? HttpStatus.GONE
                 : e.code === 'already-declined' || e.code === 'already-member' ? HttpStatus.CONFLICT
                 : HttpStatus.BAD_REQUEST;
             return new HttpException({ code: e.code, message: e.message }, status);
