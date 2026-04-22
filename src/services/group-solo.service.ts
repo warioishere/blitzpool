@@ -38,7 +38,20 @@ function redisKeys(groupId: string) {
         // (NOT cleared on block-found) so the admin-kick inactivity gate
         // can look back weeks.
         lastShareAt: `groupsolo:${groupId}:last-share-at`,
+        // Coinbase-time distribution snapshot, JSON-encoded. Created by
+        // getPayoutDistribution, consumed by onBlockFound. Persists across
+        // pool restart (AOF) so a crash between job-send and block-found
+        // doesn't cause payouts to drift from the on-chain coinbase.
+        snapshot: `groupsolo:${groupId}:snapshot`,
     };
+}
+
+const SNAPSHOT_TTL_SECONDS = 60 * 60; // 1h — covers worst-case block+restart delay.
+
+interface StoredSnapshot {
+    distribution: GroupSoloPayoutEntry[];
+    blockRewardSats: number;
+    consideredAddresses: string[];
 }
 
 export interface GroupSoloPayoutEntry {
@@ -56,18 +69,22 @@ export class GroupSoloService implements OnModuleInit {
     private readonly coinbaseWeightBudget: number;
 
     /**
-     * Coinbase snapshot per group.  `distribution` = what goes into the coinbase;
-     * `consideredAddresses` = every address that was in the Redis window at the moment
-     * the snapshot was built (including sub-dust miners that were filtered out).  This
-     * lets onBlockFound tell apart two classes of "not in coinbase" miners:
+     * Coinbase snapshot per group, persisted in Redis (see redisKeys().snapshot).
+     * `distribution` = what goes into the coinbase; `consideredAddresses` = every
+     * address that was in the Redis window at the moment the snapshot was built
+     * (including sub-dust miners filtered out). This lets onBlockFound distinguish
+     * two classes of "not in coinbase" miners:
      *   - sub-dust: was in the window at snapshot time → credit to pending so they accumulate
      *   - late arriver: submitted after snapshot was built → don't credit (would double-count)
+     *
+     * Persistence in Redis (not an in-memory Map) is critical: a pool restart
+     * between the miner receiving the coinbase template and the block landing
+     * would otherwise lose the snapshot, forcing onBlockFound onto the
+     * current-window fallback whose distribution can differ from the on-chain
+     * coinbase. 1h TTL covers worst-case block-find + restart windows; long
+     * enough that a normal-case outage is fine, short enough that stale
+     * snapshots don't pile up forever.
      */
-    private snapshots = new Map<string, {
-        distribution: GroupSoloPayoutEntry[];
-        blockRewardSats: number;
-        consideredAddresses: Set<string>;
-    }>();
 
     /** Per-group block-found reentrancy guard. */
     private blockFoundLocks = new Set<string>();
@@ -248,8 +265,51 @@ export class GroupSoloService implements OnModuleInit {
         // doc for why this distinction matters.
         const consideredAddresses = new Set<string>(addressDiff.keys());
         for (const addr of pendingMap.keys()) consideredAddresses.add(addr);
-        this.snapshots.set(groupId, { distribution: result, blockRewardSats, consideredAddresses });
+        await this.writeSnapshot(groupId, {
+            distribution: result,
+            blockRewardSats,
+            consideredAddresses: Array.from(consideredAddresses),
+        });
         return result;
+    }
+
+    private async writeSnapshot(groupId: string, snapshot: StoredSnapshot): Promise<void> {
+        const keys = redisKeys(groupId);
+        try {
+            await this.redis.set(keys.snapshot, JSON.stringify(snapshot), { EX: SNAPSHOT_TTL_SECONDS });
+        } catch {
+            // Some ioredis / node-redis variants don't accept the options
+            // object — fall back to set + expire.
+            await this.redis.set(keys.snapshot, JSON.stringify(snapshot));
+            if (typeof this.redis.expire === 'function') {
+                await this.redis.expire(keys.snapshot, SNAPSHOT_TTL_SECONDS);
+            }
+        }
+    }
+
+    private async readSnapshot(groupId: string): Promise<{
+        distribution: GroupSoloPayoutEntry[];
+        blockRewardSats: number;
+        consideredAddresses: Set<string>;
+    } | null> {
+        const keys = redisKeys(groupId);
+        const raw = await this.redis.get(keys.snapshot);
+        if (!raw) return null;
+        try {
+            const parsed: StoredSnapshot = JSON.parse(raw);
+            return {
+                distribution: parsed.distribution,
+                blockRewardSats: parsed.blockRewardSats,
+                consideredAddresses: new Set(parsed.consideredAddresses),
+            };
+        } catch {
+            return null;
+        }
+    }
+
+    private async deleteSnapshot(groupId: string): Promise<void> {
+        const keys = redisKeys(groupId);
+        await this.redis.del(keys.snapshot);
     }
 
     private fallback(): GroupSoloPayoutEntry[] {
@@ -279,13 +339,13 @@ export class GroupSoloService implements OnModuleInit {
         try {
             console.log(`[GroupSolo] Block ${blockHeight} found by group ${groupId} (finder=${finderAddress})`);
 
-            const snapshot = this.snapshots.get(groupId);
+            const snapshot = await this.readSnapshot(groupId);
             if (!snapshot || snapshot.distribution.length === 0) {
                 console.warn(`[GroupSolo] No snapshot for group ${groupId} — using window recalculation fallback`);
                 await this.onBlockFoundFromWindow(groupId, blockHeight, blockRewardSats);
                 return;
             }
-            this.snapshots.delete(groupId);
+            await this.deleteSnapshot(groupId);
             const reward = snapshot.blockRewardSats;
 
             // Miners in the snapshot get paid via coinbase; clear any prior pending.
@@ -525,6 +585,7 @@ export class GroupSoloService implements OnModuleInit {
             await this.resetRound(groupId);
             const keys = redisKeys(groupId);
             await this.redis.del(keys.lastShareAt);
+            await this.redis.del(keys.snapshot);
         }
         await this.balanceRepo.delete({ groupId });
         await this.historyRepo.delete({ groupId });

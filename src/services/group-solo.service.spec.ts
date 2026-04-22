@@ -24,7 +24,8 @@ function createMockRedis() {
             return val;
         }),
         get: jest.fn(async (key: string) => store.get(key) ?? null),
-        set: jest.fn(async (key: string, value: string) => { store.set(key, value); }),
+        set: jest.fn(async (key: string, value: string, _opts?: any) => { store.set(key, value); }),
+        expire: jest.fn(async (_key: string, _seconds: number) => 1),
         del: jest.fn(async (key: string) => { store.delete(key); zsets.delete(key); hashes.delete(key); }),
         incrByFloat: jest.fn(async (key: string, amount: number) => {
             const val = parseFloat(store.get(key) ?? '0') + amount;
