@@ -1,4 +1,5 @@
 import { Body, Controller, Get, HttpException, HttpStatus, Param, Post } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { AddressEmailService, AddressEmailServiceError } from '../../services/address-email.service';
 
 interface RegisterDto {
@@ -16,6 +17,10 @@ export class EmailController {
      * Bind an email to a mining address. Sends a verification link to the
      * email — the binding is not "verified" until the link is clicked.
      */
+    // 5 register attempts / minute per IP. Each call sends an email —
+    // looser limits invite SMTP-quota abuse and spam-listing of the
+    // pool's sender domain.
+    @Throttle(5, 60)
     @Post('register')
     async register(@Body() body: RegisterDto): Promise<{ ok: true; verificationSent: true }> {
         try {

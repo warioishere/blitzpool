@@ -1,4 +1,5 @@
 import { Controller, Get, HttpException, HttpStatus, Param, Post } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { InvitationServiceError, PplnsGroupInvitationService } from '../../services/pplns-group-invitation.service';
 
 @Controller('pplns/invitations')
@@ -48,6 +49,9 @@ export class PplnsInvitationController {
      * auth: knowing it implies access to the email account that received
      * the invitation.
      */
+    // 20 req/min per IP. Token is 256-bit so brute force isn't the concern;
+    // this just caps accidental burst / malicious retry loops.
+    @Throttle(20, 60)
     @Post(':token/accept')
     async accept(@Param('token') token: string) {
         try {
@@ -64,6 +68,7 @@ export class PplnsInvitationController {
      * to decline on someone's behalf, and it lets the recipient dispose
      * of an unwanted invitation even without email access.
      */
+    @Throttle(20, 60)
     @Post(':token/decline')
     async decline(@Param('token') token: string) {
         try {

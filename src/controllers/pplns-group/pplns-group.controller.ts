@@ -1,4 +1,5 @@
 import { Body, Controller, Delete, Get, Headers, HttpException, HttpStatus, Param, Post, Query } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { GroupService, GroupServiceError } from '../../services/group.service';
 import { GroupSoloService } from '../../services/group-solo.service';
 import { InvitationServiceError, PplnsGroupInvitationService } from '../../services/pplns-group-invitation.service';
@@ -310,6 +311,10 @@ export class PplnsGroupController {
      * call returns 400 with code 'email-not-verified'. Replaces the old
      * direct-add endpoint, which was the silent-add attack vector.
      */
+    // 10 invites / minute per IP. An admin with a valid token could
+    // otherwise DoS the SMTP provider or spam addresses for tribunal-style
+    // harassment. Token-auth isn't a substitute for rate-limiting here.
+    @Throttle(10, 60)
     @Post(':id/invitations')
     async createInvitation(
         @Param('id') id: string,
@@ -331,6 +336,8 @@ export class PplnsGroupController {
      * `skipped` so the admin can fix them individually. Token failures
      * still abort — they're an auth issue, not per-address.
      */
+    // Tighter than single because each call can send many mails.
+    @Throttle(5, 60)
     @Post(':id/invitations/batch')
     async createInvitationsBatch(
         @Param('id') id: string,
