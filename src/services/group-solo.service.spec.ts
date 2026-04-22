@@ -315,15 +315,13 @@ describe('GroupSoloService', () => {
         await service.recordShare('bc1qalice', 200);
 
         const stats = await service.getRoundStats('g1');
-        expect(stats.shareCount).toBe(2);
-        expect(stats.totalDifficulty).toBe(300);
+        expect(stats.totalShares).toBe(300);
+        expect(stats.totalRejected).toBe(0);
         expect(stats.perAddress).toHaveLength(1);
         expect(stats.perAddress[0].address).toBe('bc1qalice');
+        expect(stats.perAddress[0].totalShares).toBe(300);
         expect(stats.perAddress[0].percent).toBe(100);
-        expect(stats.totalRejectedDifficulty).toBe(0);
-        expect(stats.rejectedShareCount).toBe(0);
-        expect(stats.perAddress[0].rejectedDifficulty).toBe(0);
-        expect(stats.perAddress[0].rejectedShareCount).toBe(0);
+        expect(stats.perAddress[0].totalRejected).toBe(0);
     });
 
     it('recordReject rejects addresses not in an active group', async () => {
@@ -345,17 +343,14 @@ describe('GroupSoloService', () => {
         await service.recordReject('bc1qbob', 200);
 
         const stats = await service.getRoundStats('g1');
-        expect(stats.totalRejectedDifficulty).toBe(300);
-        expect(stats.rejectedShareCount).toBe(3);
+        expect(stats.totalRejected).toBe(300);
 
         const alice = stats.perAddress.find(p => p.address === 'bc1qalice')!;
-        expect(alice.rejectedDifficulty).toBe(100);
-        expect(alice.rejectedShareCount).toBe(2);
+        expect(alice.totalRejected).toBe(100);
         const bob = stats.perAddress.find(p => p.address === 'bc1qbob')!;
-        expect(bob.rejectedDifficulty).toBe(200);
-        expect(bob.rejectedShareCount).toBe(1);
+        expect(bob.totalRejected).toBe(200);
         // Bob had no accepted shares but still shows up because of rejects
-        expect(bob.difficulty).toBe(0);
+        expect(bob.totalShares).toBe(0);
     });
 
     it('onBlockFound also clears rejected counters', async () => {
@@ -369,7 +364,38 @@ describe('GroupSoloService', () => {
 
         expect(redis._hashes.size).toBe(0);
         const stats = await service.getRoundStats('g1');
-        expect(stats.rejectedShareCount).toBe(0);
-        expect(stats.totalRejectedDifficulty).toBe(0);
+        expect(stats.totalRejected).toBe(0);
+    });
+
+    it('getRoundBestDifficulty returns max single-share diff and submitter', async () => {
+        const { service, groupService } = makeService();
+        groupService._setMembership('bc1qalice', 'g1', true);
+        groupService._setMembership('bc1qbob', 'g1', true);
+
+        // No shares yet
+        const empty = await service.getRoundBestDifficulty('g1');
+        expect(empty.bestDifficulty).toBe(0);
+        expect(empty.address).toBeNull();
+
+        await service.recordShare('bc1qalice', 100);
+        await service.recordShare('bc1qbob', 500_000);
+        await service.recordShare('bc1qalice', 250);
+
+        const best = await service.getRoundBestDifficulty('g1');
+        expect(best.bestDifficulty).toBe(500_000);
+        expect(best.address).toBe('bc1qbob');
+        expect(typeof best.time).toBe('number');
+    });
+
+    it('getRoundBestDifficulty resets after onBlockFound', async () => {
+        const { service, groupService } = makeService();
+        groupService._setMembership('bc1qalice', 'g1', true);
+        await service.recordShare('bc1qalice', 100);
+        await service.getPayoutDistribution('g1', 100_000_000);
+        await service.onBlockFound(900_000, 100_000_000, 'bc1qalice');
+
+        const best = await service.getRoundBestDifficulty('g1');
+        expect(best.bestDifficulty).toBe(0);
+        expect(best.address).toBeNull();
     });
 });

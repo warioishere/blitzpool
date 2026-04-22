@@ -31,8 +31,9 @@ function redisKeys(groupId: string) {
         shares: `groupsolo:${groupId}:shares`,
         counter: `groupsolo:${groupId}:counter`,
         total: `groupsolo:${groupId}:total`,
-        rejectedDiff: `groupsolo:${groupId}:rejected-diff`,
-        rejectedCount: `groupsolo:${groupId}:rejected-count`,
+        // Per-address rejected shares for the current round (diff-1 weighted).
+        // No separate count key — the share value already captures real work.
+        rejectedShares: `groupsolo:${groupId}:rejected-shares`,
     };
 }
 
@@ -129,18 +130,18 @@ export class GroupSoloService implements OnModuleInit {
     }
 
     /**
-     * Record a rejected share. Aggregated per-address into two hashes so the
-     * distribution endpoint can show rejected stats per member. Reset with the
-     * rest of the round on block-found.
+     * Record a rejected share. Aggregated per-address into a single hash so
+     * the distribution endpoint can show rejected stats per member. Value
+     * is diff-1 weighted (real work units). Reset with the rest of the
+     * round on block-found.
      */
-    async recordReject(address: string, difficulty: number): Promise<boolean> {
+    async recordReject(address: string, shares: number): Promise<boolean> {
         if (!this.isEnabled()) return false;
         const entry = this.groupService.getGroupForAddress(address);
         if (!entry || !entry.active) return false;
 
         const keys = redisKeys(entry.groupId);
-        await this.redis.hIncrByFloat(keys.rejectedDiff, address, difficulty);
-        await this.redis.hIncrBy(keys.rejectedCount, address, 1);
+        await this.redis.hIncrByFloat(keys.rejectedShares, address, shares);
         return true;
     }
 
@@ -453,85 +454,99 @@ export class GroupSoloService implements OnModuleInit {
         await this.redis.del(keys.shares);
         await this.redis.del(keys.counter);
         await this.redis.del(keys.total);
-        await this.redis.del(keys.rejectedDiff);
-        await this.redis.del(keys.rejectedCount);
+        await this.redis.del(keys.rejectedShares);
     }
 
     // ── Stats (for API) ──────────────────────────────────────────
 
     async getRoundStats(groupId: string): Promise<{
-        totalDifficulty: number;
-        shareCount: number;
-        totalRejectedDifficulty: number;
-        rejectedShareCount: number;
+        totalShares: number;
+        totalRejected: number;
         perAddress: {
             address: string;
-            difficulty: number;
+            totalShares: number;
             percent: number;
-            rejectedDifficulty: number;
-            rejectedShareCount: number;
+            totalRejected: number;
         }[];
     }> {
         if (!this.isEnabled()) {
             return {
-                totalDifficulty: 0,
-                shareCount: 0,
-                totalRejectedDifficulty: 0,
-                rejectedShareCount: 0,
+                totalShares: 0,
+                totalRejected: 0,
                 perAddress: [],
             };
         }
         const keys = redisKeys(groupId);
         const entries = await this.redis.zRange(keys.shares, 0, -1);
-        const addressDiff = new Map<string, number>();
-        let totalDiff = 0;
+        const addressShares = new Map<string, number>();
+        let totalShares = 0;
+        // All values are diff-1 weighted (real work units), not raw share counts.
         for (const e of (entries ?? [])) {
-            const [addr, diffStr] = e.split(':');
-            const diff = parseFloat(diffStr) || 0;
-            addressDiff.set(addr, (addressDiff.get(addr) ?? 0) + diff);
-            totalDiff += diff;
+            const [addr, sharesStr] = e.split(':');
+            const shares = parseFloat(sharesStr) || 0;
+            addressShares.set(addr, (addressShares.get(addr) ?? 0) + shares);
+            totalShares += shares;
         }
 
-        const rejectedDiffMap = (await this.redis.hGetAll(keys.rejectedDiff)) ?? {};
-        const rejectedCountMap = (await this.redis.hGetAll(keys.rejectedCount)) ?? {};
-        const addressRejDiff = new Map<string, number>();
-        const addressRejCount = new Map<string, number>();
-        let totalRejDiff = 0;
-        let totalRejCount = 0;
-        for (const [addr, v] of Object.entries(rejectedDiffMap)) {
-            const d = parseFloat(v as string) || 0;
-            addressRejDiff.set(addr, d);
-            totalRejDiff += d;
-        }
-        for (const [addr, v] of Object.entries(rejectedCountMap)) {
-            const c = parseInt(v as string, 10) || 0;
-            addressRejCount.set(addr, c);
-            totalRejCount += c;
+        const rejectedSharesMap = (await this.redis.hGetAll(keys.rejectedShares)) ?? {};
+        const addressRejected = new Map<string, number>();
+        let totalRejected = 0;
+        for (const [addr, v] of Object.entries(rejectedSharesMap)) {
+            const r = parseFloat(v as string) || 0;
+            addressRejected.set(addr, r);
+            totalRejected += r;
         }
 
         const allAddresses = new Set<string>([
-            ...addressDiff.keys(),
-            ...addressRejDiff.keys(),
-            ...addressRejCount.keys(),
+            ...addressShares.keys(),
+            ...addressRejected.keys(),
         ]);
         const perAddress = Array.from(allAddresses).map((address) => {
-            const difficulty = addressDiff.get(address) ?? 0;
+            const shares = addressShares.get(address) ?? 0;
             return {
                 address,
-                difficulty,
-                percent: totalDiff > 0 ? (difficulty / totalDiff) * 100 : 0,
-                rejectedDifficulty: addressRejDiff.get(address) ?? 0,
-                rejectedShareCount: addressRejCount.get(address) ?? 0,
+                totalShares: shares,
+                percent: totalShares > 0 ? (shares / totalShares) * 100 : 0,
+                totalRejected: addressRejected.get(address) ?? 0,
             };
         }).sort((a, b) => b.percent - a.percent);
 
         return {
-            totalDifficulty: totalDiff,
-            shareCount: (entries ?? []).length,
-            totalRejectedDifficulty: totalRejDiff,
-            rejectedShareCount: totalRejCount,
+            totalShares,
+            totalRejected,
             perAddress,
         };
+    }
+
+    /**
+     * Best single share submitted in the current round across all group
+     * members — i.e. the highest diff-1-weighted share in the Redis window.
+     * Returns the value plus the address that submitted it. Resets when
+     * the round resets (block-found).
+     */
+    async getRoundBestDifficulty(groupId: string): Promise<{
+        bestDifficulty: number;
+        address: string | null;
+        time: number | null;
+    }> {
+        if (!this.isEnabled()) {
+            return { bestDifficulty: 0, address: null, time: null };
+        }
+        const keys = redisKeys(groupId);
+        const entries = await this.redis.zRange(keys.shares, 0, -1);
+        let bestDiff = 0;
+        let bestAddr: string | null = null;
+        let bestTime: number | null = null;
+        for (const e of (entries ?? [])) {
+            const [addr, diffStr, timeStr] = e.split(':');
+            const diff = parseFloat(diffStr) || 0;
+            if (diff > bestDiff) {
+                bestDiff = diff;
+                bestAddr = addr;
+                bestTime = parseInt(timeStr, 10) || null;
+            }
+        }
+        return { bestDifficulty: bestDiff, address: bestAddr, time: bestTime };
     }
 
     async getBlockHistory(groupId: string, limit = 100): Promise<PplnsGroupBlockHistoryEntity[]> {

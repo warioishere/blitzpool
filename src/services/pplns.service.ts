@@ -586,27 +586,28 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
 
     /**
      * Get current distribution (all miners and their share).
+     * `totalShares` is diff-1-weighted real work, not raw share count.
      */
-    async getCurrentDistribution(): Promise<{ address: string; difficulty: number; percent: number }[]> {
+    async getCurrentDistribution(): Promise<{ address: string; totalShares: number; percent: number }[]> {
         if (!this.redis) return [];
 
         const entries = await this.redis.zRange(REDIS_KEY_SHARES, 0, -1);
         if (!entries || entries.length === 0) return [];
 
-        const addressDiff = new Map<string, number>();
-        let totalDiff = 0;
+        const addressShares = new Map<string, number>();
+        let totalShares = 0;
         for (const entry of entries) {
             const parts = entry.split(':');
-            const diff = parseFloat(parts[1]) || 0;
-            addressDiff.set(parts[0], (addressDiff.get(parts[0]) ?? 0) + diff);
-            totalDiff += diff;
+            const shares = parseFloat(parts[1]) || 0;
+            addressShares.set(parts[0], (addressShares.get(parts[0]) ?? 0) + shares);
+            totalShares += shares;
         }
 
-        return Array.from(addressDiff.entries())
-            .map(([address, difficulty]) => ({
+        return Array.from(addressShares.entries())
+            .map(([address, shares]) => ({
                 address,
-                difficulty,
-                percent: totalDiff > 0 ? (difficulty / totalDiff) * 100 : 0,
+                totalShares: shares,
+                percent: totalShares > 0 ? (shares / totalShares) * 100 : 0,
             }))
             .sort((a, b) => b.percent - a.percent);
     }

@@ -231,6 +231,19 @@ export class PplnsGroupController {
         return this.groupSoloService.getRoundStats(id);
     }
 
+    /**
+     * GET /pplns/groups/:id/best-difficulty
+     * Highest single-share diff submitted in the current round across all
+     * group members, plus the address that submitted it. Round-based —
+     * resets on block-found together with the rest of the round state.
+     */
+    @Get(':id/best-difficulty')
+    async bestDifficulty(@Param('id') id: string) {
+        const group = await this.groupService.getGroup(id);
+        if (!group || group.dissolvedAt) throw new HttpException({ code: 'not-found' }, HttpStatus.NOT_FOUND);
+        return this.groupSoloService.getRoundBestDifficulty(id);
+    }
+
     @Get(':id/history')
     async history(@Param('id') id: string, @Query('limit') limitStr?: string) {
         const group = await this.groupService.getGroup(id);
