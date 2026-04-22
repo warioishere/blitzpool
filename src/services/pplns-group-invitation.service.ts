@@ -268,13 +268,24 @@ export class PplnsGroupInvitationService {
         return rows.filter(r => r.expiresAt.getTime() >= now);
     }
 
-    async cancelInvitation(token: string, groupId: string, adminToken: string | undefined): Promise<void> {
+    /**
+     * Cancel the pending invitation for an address in a group. Identified
+     * by (groupId, address) rather than by token, so the admin never sees
+     * the secret token — that lives only in the email body.
+     */
+    async cancelInvitationByAddress(
+        groupId: string,
+        address: string,
+        adminToken: string | undefined,
+    ): Promise<void> {
         await this.groupService.requireAdminToken(groupId, adminToken);
-        const invitation = await this.invitationRepo.findOneBy({ token });
-        if (!invitation || invitation.groupId !== groupId) {
-            throw new InvitationServiceError('not-found', 'Invitation not found in this group');
+        const invitation = await this.invitationRepo.findOne({
+            where: { groupId, address, status: 'pending' },
+        });
+        if (!invitation) {
+            throw new InvitationServiceError('not-found', 'No pending invitation for this address in this group');
         }
-        await this.invitationRepo.delete({ token });
+        await this.invitationRepo.delete({ token: invitation.token });
     }
 
     /**

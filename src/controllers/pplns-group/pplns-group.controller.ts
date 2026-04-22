@@ -2,6 +2,7 @@ import { Body, Controller, Delete, Get, Headers, HttpException, HttpStatus, Para
 import { GroupService, GroupServiceError } from '../../services/group.service';
 import { GroupSoloService } from '../../services/group-solo.service';
 import { InvitationServiceError, PplnsGroupInvitationService } from '../../services/pplns-group-invitation.service';
+import { AddressEmailService } from '../../services/address-email.service';
 import { ClientService } from '../../ORM/client/client.service';
 import { ClientStatisticsService } from '../../ORM/client-statistics/client-statistics.service';
 import { ClientRejectedStatisticsService } from '../../ORM/client-rejected-statistics/client-rejected-statistics.service';
@@ -32,6 +33,7 @@ export class PplnsGroupController {
         private readonly groupService: GroupService,
         private readonly groupSoloService: GroupSoloService,
         private readonly invitationService: PplnsGroupInvitationService,
+        private readonly addressEmailService: AddressEmailService,
         private readonly clientService: ClientService,
         private readonly clientStatisticsService: ClientStatisticsService,
         private readonly clientRejectedStatisticsService: ClientRejectedStatisticsService,
@@ -52,8 +54,8 @@ export class PplnsGroupController {
     }
 
     @Get(':id')
-    async details(@Param('id') id: string) {
-        return this.detailsForGroupId(id);
+    async details(@Param('id') id: string, @Headers('x-admin-token') adminToken?: string) {
+        return this.detailsForGroupId(id, adminToken);
     }
 
     /**
@@ -64,27 +66,58 @@ export class PplnsGroupController {
      * open their group dashboard before the 2nd member joins.
      */
     @Get('by-address/:address')
-    async byAddress(@Param('address') address: string) {
+    async byAddress(@Param('address') address: string, @Headers('x-admin-token') adminToken?: string) {
         const entry = this.groupService.getGroupForAddress(address);
         if (!entry) throw new HttpException({ code: 'not-found' }, HttpStatus.NOT_FOUND);
-        return this.detailsForGroupId(entry.groupId);
+        return this.detailsForGroupId(entry.groupId, adminToken);
     }
 
-    private async detailsForGroupId(id: string) {
+    /**
+     * Returns per-member rows including a `lastShareAt` (epoch-ms or null)
+     * and, for callers that supply a valid admin token, the member's
+     * verified email. The email is omitted entirely when no valid admin
+     * token is present — this endpoint doubles as the public group-page
+     * and the admin dashboard feed, and non-admins have no business seeing
+     * other members' emails.
+     */
+    private async detailsForGroupId(id: string, adminToken?: string) {
         const group = await this.groupService.getGroup(id);
         if (!group || group.dissolvedAt) throw new HttpException({ code: 'not-found' }, HttpStatus.NOT_FOUND);
+
+        let isAdmin = false;
+        if (adminToken) {
+            try {
+                await this.groupService.requireAdminToken(id, adminToken);
+                isAdmin = true;
+            } catch {
+                // Invalid admin token is not a hard error here — the caller
+                // may legitimately be a non-admin fetching public details.
+                // We just don't include emails in that case.
+            }
+        }
+
         const members = await this.groupService.listMembers(id);
-        const membersWithHashrate = await Promise.all(members.map(async m => ({
-            address: m.address,
-            role: m.role,
-            joinedAt: m.joinedAt,
-            hashrate: await this.addressHashrate(m.address),
-        })));
-        const totalHashrate = membersWithHashrate.reduce((sum, m) => sum + m.hashrate, 0);
+        const membersWithStatus = await Promise.all(members.map(async m => {
+            const hashrate = await this.addressHashrate(m.address);
+            const lastShareAt = await this.groupSoloService.getMemberLastActive(id, m.address);
+            const row: any = {
+                address: m.address,
+                role: m.role,
+                joinedAt: m.joinedAt,
+                hashrate,
+                lastShareAt,
+            };
+            if (isAdmin) {
+                const binding = await this.addressEmailService.getVerified(m.address);
+                row.email = binding?.email ?? null;
+            }
+            return row;
+        }));
+        const totalHashrate = membersWithStatus.reduce((sum, m) => sum + m.hashrate, 0);
         return {
             ...this.publicGroupView(group),
             totalHashrate,
-            members: membersWithHashrate,
+            members: membersWithStatus,
         };
     }
 
@@ -285,7 +318,7 @@ export class PplnsGroupController {
     ) {
         try {
             const result = await this.invitationService.createInvitation(id, body.address ?? '', token);
-            return { invited: true, email: maskEmail(result.email), expiresAt: result.expiresAt };
+            return { invited: true, email: result.email, expiresAt: result.expiresAt };
         } catch (e) {
             throw this.toHttpError(e);
         }
@@ -319,7 +352,7 @@ export class PplnsGroupController {
             seen.add(addr);
             try {
                 const r = await this.invitationService.createInvitation(id, addr, token);
-                invited.push({ address: addr, email: maskEmail(r.email), expiresAt: r.expiresAt });
+                invited.push({ address: addr, email: r.email, expiresAt: r.expiresAt });
             } catch (e) {
                 if (e instanceof GroupServiceError && e.code === 'invalid-token') {
                     throw this.toHttpError(e);
@@ -342,6 +375,12 @@ export class PplnsGroupController {
      * GET /pplns/groups/:id/invitations
      * List pending invitations for the group. Admin-token-auth — used by
      * the admin dashboard to see who's been invited but hasn't responded.
+     *
+     * The invitation token is deliberately NOT returned. It lives only in
+     * the email body — that's what makes the email a trust anchor against
+     * silent-add. Returning it here would let a malicious admin accept
+     * the invitation on behalf of the invitee without the invitee ever
+     * seeing the mail.
      */
     @Get(':id/invitations')
     async listInvitations(
@@ -352,9 +391,8 @@ export class PplnsGroupController {
             await this.groupService.requireAdminToken(id, token);
             const rows = await this.invitationService.listPendingForGroup(id);
             return rows.map(r => ({
-                token: r.token,
                 address: r.address,
-                email: maskEmail(r.email),
+                email: r.email,
                 createdAt: r.createdAt,
                 expiresAt: r.expiresAt,
                 status: r.status,
@@ -365,24 +403,33 @@ export class PplnsGroupController {
     }
 
     /**
-     * DELETE /pplns/groups/:id/invitations/:token
+     * DELETE /pplns/groups/:id/invitations/by-address/:address
      * Cancel a pending invitation before the recipient responds.
-     * Admin-token-auth.
+     * Admin-token-auth. Addressed by (groupId, address) instead of token
+     * so the admin never needs to see the secret token.
      */
-    @Delete(':id/invitations/:token')
+    @Delete(':id/invitations/by-address/:address')
     async cancelInvitation(
         @Param('id') id: string,
-        @Param('token') invToken: string,
+        @Param('address') address: string,
         @Headers('x-admin-token') token?: string,
     ) {
         try {
-            await this.invitationService.cancelInvitation(invToken, id, token);
+            await this.invitationService.cancelInvitationByAddress(id, address, token);
             return { cancelled: true };
         } catch (e) {
             throw this.toHttpError(e);
         }
     }
 
+    /**
+     * DELETE /pplns/groups/:id/members/:address
+     * Remove a non-creator member. Admin-token-auth, AND the target must
+     * be inactive (no share submitted for ≥ GROUP_INACTIVITY_KICK_DAYS days).
+     * There is no unauthenticated "self-leave" — if a miner wants out,
+     * they repoint their miner to a different address; after the
+     * inactivity window the admin can prune the stale member row.
+     */
     @Delete(':id/members/:address')
     async removeMember(
         @Param('id') id: string,
@@ -391,16 +438,6 @@ export class PplnsGroupController {
     ) {
         try {
             await this.groupService.removeMember(id, address, token);
-            return { removed: true };
-        } catch (e) {
-            throw this.toHttpError(e);
-        }
-    }
-
-    @Delete(':id/members/:address/self')
-    async selfLeave(@Param('id') id: string, @Param('address') address: string) {
-        try {
-            await this.groupService.selfLeave(id, address);
             return { removed: true };
         } catch (e) {
             throw this.toHttpError(e);
@@ -459,7 +496,7 @@ export class PplnsGroupController {
                 'address-in-group': HttpStatus.CONFLICT,
                 'already-member': HttpStatus.CONFLICT,
                 'already-creator': HttpStatus.CONFLICT,
-                'creator-cannot-self-leave': HttpStatus.FORBIDDEN,
+                'member-still-active': HttpStatus.FORBIDDEN,
             }[e.code] ?? HttpStatus.BAD_REQUEST;
             return new HttpException({ code: e.code, message: e.message }, status);
         }
@@ -481,15 +518,3 @@ export class PplnsGroupController {
     }
 }
 
-/**
- * Don't expose full email addresses to anyone with admin-token access — the
- * admin doesn't need to read another member's email, only know that the
- * invitation reached SOMEONE. Mask everything except first char + domain.
- */
-function maskEmail(email: string): string {
-    if (!email) return '';
-    const [local, domain] = email.split('@');
-    if (!domain) return '***';
-    const head = local.slice(0, 1);
-    return `${head}***@${domain}`;
-}

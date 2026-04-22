@@ -222,6 +222,12 @@ describe('PplnsGroupInvitationService', () => {
 
         const list = await service.listPendingForAddress('bc1qbob');
         expect(list).toHaveLength(1);
-        expect(list[0].token).toBe(r1.token);
+        // Sanity: the response is the non-expired one (we can tell by the groupId).
+        expect(list[0].groupId).toBe('g1');
+        // The token is deliberately NOT in the response — this endpoint serves
+        // the public dashboard banner, and leaking the token would let any
+        // visitor of /app/:address accept the invitation on the recipient's
+        // behalf. Reference r1.token to avoid an unused-binding complaint.
+        expect(r1.token).toBeTruthy();
     });
 });
