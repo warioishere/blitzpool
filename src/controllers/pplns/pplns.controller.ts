@@ -3,6 +3,7 @@ import { PplnsService } from '../../services/pplns.service';
 import { ClientStatisticsService } from '../../ORM/client-statistics/client-statistics.service';
 import { ClientService } from '../../ORM/client/client.service';
 import { MiningModeService } from '../../services/mining-mode.service';
+import { PoolModeHashrateService } from '../../ORM/pool-mode-hashrate/pool-mode-hashrate.service';
 
 @Controller('pplns')
 export class PplnsController {
@@ -12,6 +13,7 @@ export class PplnsController {
         private readonly clientStatisticsService: ClientStatisticsService,
         private readonly clientService: ClientService,
         private readonly miningModeService: MiningModeService,
+        private readonly poolModeHashrateService: PoolModeHashrateService,
     ) {}
 
     /**
@@ -86,32 +88,22 @@ export class PplnsController {
 
     /**
      * GET /pplns/chart?range=1d|3d|7d
-     * Historical hashrate time-series for the PPLNS group — drop-in compatible
-     * with `/api/info/chart`. Each data point is the sum (per 10-minute slot)
-     * of per-address hashrates across every address currently in the PPLNS
-     * window. Uses the same share-based hashrate formula
-     * (`shares * DIFFICULTY_1 / 600`) as `/api/info/chart`.
+     * Historical hashrate time-series for the PPLNS payout mode — drop-in
+     * compatible with `/api/info/chart` in shape.
+     *
+     * Backed by the `pool_mode_hashrate` table, which is incremented on
+     * every accepted PPLNS-routed share. Prior implementation summed the
+     * PER-ADDRESS chart data for every address currently in the window,
+     * which double-counted non-PPLNS activity when a group-solo miner had
+     * briefly tested PPLNS (their address stayed in the window for hours
+     * while they mined group-solo, causing their current group hashrate
+     * to show up as "PPLNS").
      */
     @Get('chart')
     async getChart(@Query('range') range: '1d' | '3d' | '7d' = '1d') {
         const validRange: '1d' | '3d' | '7d' =
             range === '3d' ? '3d' : range === '7d' ? '7d' : '1d';
-
-        const distribution = await this.pplnsService.getCurrentDistribution();
-        if (distribution.length === 0) return [];
-
-        const perAddressSeries = await Promise.all(
-            distribution.map(d => this.clientStatisticsService.getChartDataForAddress(d.address, validRange)),
-        );
-        const sumByLabel = new Map<string, number>();
-        for (const series of perAddressSeries) {
-            for (const point of series) {
-                sumByLabel.set(point.label, (sumByLabel.get(point.label) ?? 0) + point.data);
-            }
-        }
-        return Array.from(sumByLabel.entries())
-            .sort(([a], [b]) => a.localeCompare(b))
-            .map(([label, data]) => ({ label, data }));
+        return this.poolModeHashrateService.getChart('pplns', validRange);
     }
 
     /**

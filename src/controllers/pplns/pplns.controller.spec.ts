@@ -5,14 +5,14 @@ import { PplnsController } from './pplns.controller';
 describe('PplnsController', () => {
 
     function setup(opts: {
-        distribution: { address: string; difficulty: number; percent: number }[];
+        distribution?: { address: string; difficulty: number; percent: number }[];
         chartByAddress?: Record<string, { label: string; data: number }[]>;
         userAgents?: any[];
         enabled?: boolean;
         windowStats?: any;
     }) {
         const pplnsService = {
-            getCurrentDistribution: jest.fn().mockResolvedValue(opts.distribution),
+            getCurrentDistribution: jest.fn().mockResolvedValue(opts.distribution ?? []),
             isEnabled: jest.fn().mockReturnValue(opts.enabled ?? true),
             getWindowStats: jest.fn().mockResolvedValue(opts.windowStats ?? {
                 totalDifficulty: 0, windowSize: 0, shareCount: 0, minerCount: 0,
@@ -29,13 +29,18 @@ describe('PplnsController', () => {
         const miningModeService = {
             getMode: jest.fn().mockResolvedValue({ mode: 'pplns' }),
         };
+        const poolModeHashrateService = {
+            getChart: jest.fn().mockResolvedValue([]),
+            incrementAccepted: jest.fn(),
+        };
         const controller = new PplnsController(
             pplnsService as any,
             clientStatisticsService as any,
             clientService as any,
             miningModeService as any,
+            poolModeHashrateService as any,
         );
-        return { controller, pplnsService, clientStatisticsService, clientService, miningModeService };
+        return { controller, pplnsService, clientStatisticsService, clientService, miningModeService, poolModeHashrateService };
     }
 
     describe('info', () => {
@@ -82,84 +87,44 @@ describe('PplnsController', () => {
     });
 
     describe('getChart', () => {
-        it('sums per-address time-series into one aggregated chart (same label → added data)', async () => {
-            const { controller } = setup({
-                distribution: [
-                    { address: 'bc1qalice', difficulty: 800, percent: 80 },
-                    { address: 'bc1qbob',   difficulty: 200, percent: 20 },
-                ],
-                chartByAddress: {
-                    'bc1qalice': [
-                        { label: '2026-04-19T10:00:00.000Z', data: 500e9 },
-                        { label: '2026-04-19T10:10:00.000Z', data: 520e9 },
-                    ],
-                    'bc1qbob': [
-                        { label: '2026-04-19T10:00:00.000Z', data: 200e9 },
-                        { label: '2026-04-19T10:10:00.000Z', data: 210e9 },
-                    ],
-                },
-            });
+        // The old implementation walked every address currently in the PPLNS
+        // window and summed their full per-address hashrate charts. That
+        // double-counted non-PPLNS hashrate whenever an address was still
+        // in the window from an earlier PPLNS test but was now mining
+        // group-solo or solo. The current controller delegates to
+        // PoolModeHashrateService, which only counts shares actually routed
+        // to PPLNS — per-mode at write time, not per-address at read time.
+
+        it('delegates to PoolModeHashrateService.getChart with mode=pplns', async () => {
+            const { controller, poolModeHashrateService } = setup({});
+            const fixture = [
+                { label: '2026-04-22T08:10:00.000Z', data: 1.1e12 },
+                { label: '2026-04-22T08:20:00.000Z', data: 1.3e12 },
+            ];
+            (poolModeHashrateService.getChart as jest.Mock).mockResolvedValue(fixture);
 
             const chart = await controller.getChart('1d');
 
-            expect(chart).toEqual([
-                { label: '2026-04-19T10:00:00.000Z', data: 700e9 },
-                { label: '2026-04-19T10:10:00.000Z', data: 730e9 },
-            ]);
+            expect(poolModeHashrateService.getChart).toHaveBeenCalledWith('pplns', '1d');
+            expect(chart).toEqual(fixture);
         });
 
-        it('handles addresses with partial data (sparse timestamps)', async () => {
-            // Alice has 10:00 and 10:10; Bob only has 10:10. The 10:00 slot should
-            // just contain Alice's data without a "missing Bob = 0" phantom entry.
-            const { controller } = setup({
-                distribution: [
-                    { address: 'bc1qalice', difficulty: 100, percent: 50 },
-                    { address: 'bc1qbob',   difficulty: 100, percent: 50 },
-                ],
-                chartByAddress: {
-                    'bc1qalice': [
-                        { label: '2026-04-19T10:00:00.000Z', data: 500e9 },
-                        { label: '2026-04-19T10:10:00.000Z', data: 500e9 },
-                    ],
-                    'bc1qbob': [
-                        { label: '2026-04-19T10:10:00.000Z', data: 300e9 },
-                    ],
-                },
-            });
-
-            const chart = await controller.getChart('1d');
-
-            expect(chart).toEqual([
-                { label: '2026-04-19T10:00:00.000Z', data: 500e9 },
-                { label: '2026-04-19T10:10:00.000Z', data: 800e9 },
-            ]);
-        });
-
-        it('returns an empty array when no addresses are in the window', async () => {
-            const { controller } = setup({ distribution: [] });
-            expect(await controller.getChart('1d')).toEqual([]);
-        });
-
-        it('passes the range parameter through to ClientStatisticsService', async () => {
-            const { controller, clientStatisticsService } = setup({
-                distribution: [{ address: 'bc1qa', difficulty: 1, percent: 100 }],
-                chartByAddress: { 'bc1qa': [] },
-            });
-
+        it('passes the range parameter through', async () => {
+            const { controller, poolModeHashrateService } = setup({});
             await controller.getChart('7d');
-
-            expect(clientStatisticsService.getChartDataForAddress).toHaveBeenCalledWith('bc1qa', '7d');
+            expect(poolModeHashrateService.getChart).toHaveBeenCalledWith('pplns', '7d');
         });
 
         it('defaults to 1d when an unknown range is passed', async () => {
-            const { controller, clientStatisticsService } = setup({
-                distribution: [{ address: 'bc1qa', difficulty: 1, percent: 100 }],
-                chartByAddress: { 'bc1qa': [] },
-            });
-
+            const { controller, poolModeHashrateService } = setup({});
             await controller.getChart('something-weird' as any);
+            expect(poolModeHashrateService.getChart).toHaveBeenCalledWith('pplns', '1d');
+        });
 
-            expect(clientStatisticsService.getChartDataForAddress).toHaveBeenCalledWith('bc1qa', '1d');
+        it('returns whatever the service returns (including empty)', async () => {
+            const { controller, poolModeHashrateService } = setup({});
+            (poolModeHashrateService.getChart as jest.Mock).mockResolvedValue([]);
+            expect(await controller.getChart('1d')).toEqual([]);
         });
     });
 

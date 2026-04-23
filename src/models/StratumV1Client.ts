@@ -41,6 +41,7 @@ import { AddressSettingsCacheService } from '../services/address-settings-cache.
 import { PplnsService } from '../services/pplns.service';
 import { GroupSoloService } from '../services/group-solo.service';
 import { MinerActiveModeService } from '../services/miner-active-mode.service';
+import { PoolModeHashrateService } from '../ORM/pool-mode-hashrate/pool-mode-hashrate.service';
 import { PayoutMode } from './interfaces/unified-stratum.interfaces';
 
 
@@ -120,6 +121,7 @@ export class StratumV1Client {
         private readonly pplnsService?: PplnsService,
         private readonly groupSoloService?: GroupSoloService,
         private readonly minerActiveModeService?: MinerActiveModeService,
+        private readonly poolModeHashrateService?: PoolModeHashrateService,
     ) {
         this.initialDifficulty = Number.isFinite(initialDifficulty)
             ? initialDifficulty
@@ -1072,23 +1074,26 @@ export class StratumV1Client {
                 // ACTUALLY on right now. Marker has a 5-min TTL and is
                 // refreshed every share.
                 const shareGroupId = this.activeGroupId();
+                let effectiveMode: 'solo' | 'pplns' | 'group-solo';
                 if (this.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
                     await this.pplnsService.recordShare(
                         this.clientAuthorization.address,
                         this.sessionDifficulty,
                     );
-                    await this.minerActiveModeService?.mark(this.clientAuthorization.address, 'pplns');
+                    effectiveMode = 'pplns';
                 } else if (shareGroupId) {
                     await this.groupSoloService!.recordShare(
                         this.clientAuthorization.address,
                         this.sessionDifficulty,
                     );
-                    await this.minerActiveModeService?.mark(this.clientAuthorization.address, 'group-solo');
+                    effectiveMode = 'group-solo';
                 } else {
-                    // Pure solo — no payout-service call, but the marker
-                    // still flips any stale pplns/group-solo marker to 'solo'.
-                    await this.minerActiveModeService?.mark(this.clientAuthorization.address, 'solo');
+                    // Pure solo — no payout-service, but still tagged so
+                    // the per-mode hashrate aggregate stays complete.
+                    effectiveMode = 'solo';
                 }
+                await this.minerActiveModeService?.mark(this.clientAuthorization.address, effectiveMode);
+                await this.poolModeHashrateService?.incrementAccepted(effectiveMode, this.sessionDifficulty);
 
                 this.shareTotalsCacheService.increment(
                     this.clientAuthorization.address,

@@ -67,6 +67,7 @@ function createService(envOverrides: Record<string, string> = {}) {
     { isEnabled: () => false } as any, // pplnsService
     { isEnabled: () => false, getGroupForAddress: () => undefined } as any, // groupSoloService
     { mark: jest.fn(), get: jest.fn() } as any, // minerActiveModeService
+    { incrementAccepted: jest.fn(), getChart: jest.fn() } as any, // poolModeHashrateService
   );
 
   return { service, configService, clientService, addressSettingsCacheService, difficultyScoresCacheService };
@@ -302,6 +303,7 @@ describe('StratumV2Service', () => {
         expect.anything(), // pplnsService
         expect.anything(), // groupSoloService
         expect.anything(), // minerActiveModeService
+        expect.anything(), // poolModeHashrateService
       );
     });
   });

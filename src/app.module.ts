@@ -17,6 +17,7 @@ import { AddressSettingsModule } from './ORM/address-settings/address-settings.m
 import { WorkerSharesModule } from './ORM/worker-shares/worker-shares.module';
 import { BlocksModule } from './ORM/blocks/blocks.module';
 import { ClientStatisticsModule } from './ORM/client-statistics/client-statistics.module';
+import { PoolModeHashrateModule } from './ORM/pool-mode-hashrate/pool-mode-hashrate.module';
 import { ClientModule } from './ORM/client/client.module';
 import { RpcBlocksModule } from './ORM/rpc-block/rpc-block.module';
 import { TelegramSubscriptionsModule } from './ORM/telegram-subscriptions/telegram-subscriptions.module';
@@ -85,6 +86,7 @@ import { buildDatabaseConfig } from './config/database.config';
 
 const ORMModules = [
     ClientStatisticsModule,
+    PoolModeHashrateModule,
     ClientModule,
     AddressSettingsModule,
     WorkerSharesModule,

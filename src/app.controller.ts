@@ -26,6 +26,8 @@ import { LiveHashrateService } from './services/live-hashrate.service';
 import { MiningModeService } from './services/mining-mode.service';
 import { PplnsService } from './services/pplns.service';
 import { GroupSoloService } from './services/group-solo.service';
+import { PoolModeHashrateService } from './ORM/pool-mode-hashrate/pool-mode-hashrate.service';
+import type { MiningMode } from './services/mining-mode.service';
 
 function extractHost(addr: string): string {
   if (!addr) return '';
@@ -92,6 +94,7 @@ export class AppController {
     private readonly miningModeService: MiningModeService,
     private readonly pplnsService: PplnsService,
     private readonly groupSoloService: GroupSoloService,
+    private readonly poolModeHashrateService: PoolModeHashrateService,
   ) {
     const packagePath = join(__dirname, '..', 'package.json');
     this.version = JSON.parse(readFileSync(packagePath, 'utf8')).version;
@@ -339,6 +342,28 @@ export class AppController {
     return chartData;
 
 
+  }
+
+  /**
+   * Per-payout-mode hashrate chart. Reads from `pool_mode_hashrate` which
+   * is incremented on every accepted share with its routed payout mode,
+   * so "Solo" / "PPLNS" / "Group-Solo" curves reflect the work actually
+   * routed to each mode — no retrospective address-state derivation.
+   *
+   * Shape is drop-in compatible with /api/info/chart: [{ label, data }].
+   */
+  @Get('info/chart/mode/:mode')
+  public async infoChartMode(
+    @Param('mode') mode: string,
+    @Query('range') range: '1d' | '3d' | '7d' = '7d',
+  ) {
+    const validModes: MiningMode[] = ['solo', 'pplns', 'group-solo'];
+    if (!validModes.includes(mode as MiningMode)) {
+      return [];
+    }
+    const validRange: '1d' | '3d' | '7d' =
+      range === '3d' ? '3d' : range === '7d' ? '7d' : '1d';
+    return this.poolModeHashrateService.getChart(mode as MiningMode, validRange);
   }
 
   @Get('info/chart/live')
