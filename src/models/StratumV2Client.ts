@@ -25,6 +25,7 @@ import { ClientDifficultyStatisticsService } from '../ORM/client-difficulty-stat
 import { ShareTotalsCacheService } from '../services/share-totals-cache.service';
 import { PplnsService } from '../services/pplns.service';
 import { GroupSoloService } from '../services/group-solo.service';
+import { MinerActiveModeService } from '../services/miner-active-mode.service';
 import { ClientEntity } from '../ORM/client/client.entity';
 import { MiningJob } from './MiningJob';
 import { StratumV1ClientStatistics } from './StratumV1ClientStatistics';
@@ -214,6 +215,7 @@ export class StratumV2Client {
     private readonly templateDistributionService?: TemplateDistributionService,
     private readonly pplnsService?: PplnsService,
     private readonly groupSoloService?: GroupSoloService,
+    private readonly minerActiveModeService?: MinerActiveModeService,
   ) {
     this.sessionId = this.generateSessionId();
     this.sessionStart = new Date();
@@ -1478,12 +1480,21 @@ export class StratumV2Client {
       await this.clientStatisticsService.addAcceptedShare(this.entity!, jobDifficulty);
 
       // Record share — PPLNS port overrides group membership, matching
-      // the coinbase-build + block-found routing above.
+      // the coinbase-build + block-found routing above. After the routing
+      // decision, write a Redis port-marker so /api/pplns/mode/:address
+      // reflects the port the miner is ACTUALLY on right now. 5-min TTL,
+      // refreshed every share.
       const shareGroupId = this.activeGroupId();
       if (this.portConfig.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
         await this.pplnsService.recordShare(this.address!, jobDifficulty);
+        await this.minerActiveModeService?.mark(this.address!, 'pplns');
       } else if (shareGroupId) {
         await this.groupSoloService!.recordShare(this.address!, jobDifficulty);
+        await this.minerActiveModeService?.mark(this.address!, 'group-solo');
+      } else if (this.address) {
+        // Pure solo — no payout-service, but the marker still flips any
+        // stale pplns/group-solo marker to 'solo'.
+        await this.minerActiveModeService?.mark(this.address, 'solo');
       }
 
       this.shareTotalsCacheService.increment(

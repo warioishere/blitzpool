@@ -75,6 +75,7 @@ function makeMiningModeAwareSv1(opts: {
         opts.payoutMode,
         undefined,                // pplnsService — not needed for reject path
         groupSoloService as any,
+        undefined,                // minerActiveModeService — reject path doesn't mark mode
     );
 
     // Simulate an authorized miner — dispatchGroupReject only runs once

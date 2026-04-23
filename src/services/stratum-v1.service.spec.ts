@@ -39,6 +39,7 @@ describe('StratumV1Service.onModuleInit', () => {
       { store: {} } as any,
       { isEnabled: () => false } as any,
       { isEnabled: () => false, getGroupForAddress: () => undefined } as any,
+      { mark: jest.fn(), get: jest.fn() } as any,
     );
   }
 

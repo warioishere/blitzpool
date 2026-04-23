@@ -35,6 +35,7 @@ import { ClientDifficultyStatisticsService } from '../ORM/client-difficulty-stat
 import { ShareTotalsCacheService } from './share-totals-cache.service';
 import { PplnsService } from './pplns.service';
 import { GroupSoloService } from './group-solo.service';
+import { MinerActiveModeService } from './miner-active-mode.service';
 import { DifficultyScoresCacheService } from './difficulty-scores-cache.service';
 
 interface GroupChannel {
@@ -85,6 +86,7 @@ export class StratumV2Service implements OnModuleInit, IProtocolHandler {
     private readonly jobDeclarationService: JobDeclarationService,
     private readonly pplnsService: PplnsService,
     private readonly groupSoloService: GroupSoloService,
+    private readonly minerActiveModeService: MinerActiveModeService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -187,6 +189,7 @@ export class StratumV2Service implements OnModuleInit, IProtocolHandler {
       this.templateDistributionService,
       this.pplnsService,
       this.groupSoloService,
+      this.minerActiveModeService,
     );
 
     // Client self-registers when channel is opened and self-unregisters on close.

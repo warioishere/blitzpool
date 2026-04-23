@@ -23,6 +23,7 @@ import { AddressSettingsCacheService } from './address-settings-cache.service';
 import { DifficultyScoresCacheService } from './difficulty-scores-cache.service';
 import { PplnsService } from './pplns.service';
 import { GroupSoloService } from './group-solo.service';
+import { MinerActiveModeService } from './miner-active-mode.service';
 
 @Injectable()
 export class StratumV1Service implements OnModuleInit {
@@ -49,6 +50,7 @@ export class StratumV1Service implements OnModuleInit {
     @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
     private readonly pplnsService: PplnsService,
     private readonly groupSoloService: GroupSoloService,
+    private readonly minerActiveModeService: MinerActiveModeService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -111,6 +113,7 @@ export class StratumV1Service implements OnModuleInit {
       portConfig.payoutMode ?? 'solo',
       this.pplnsService,
       this.groupSoloService,
+      this.minerActiveModeService,
     );
 
     socket.on('close', async (hadError: boolean) => {

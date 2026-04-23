@@ -1,12 +1,14 @@
 jest.mock('node-telegram-bot-api', () => jest.fn());
 
-import { MiningModeService } from './mining-mode.service';
+import { MiningModeService, MiningMode } from './mining-mode.service';
 
 describe('MiningModeService.getMode', () => {
 
     function setup(opts: {
         distribution?: { address: string; difficulty: number; percent: number }[];
         groupForAddress?: Record<string, { groupId: string; active: boolean } | undefined>;
+        /** Simulates the Redis port-marker set by the stratum layer. */
+        liveMarker?: Record<string, MiningMode>;
     }) {
         const pplnsService = {
             getCurrentDistribution: jest.fn().mockResolvedValue(opts.distribution ?? []),
@@ -14,7 +16,15 @@ describe('MiningModeService.getMode', () => {
         const groupService = {
             getGroupForAddress: jest.fn((address: string) => opts.groupForAddress?.[address]),
         };
-        return new MiningModeService(pplnsService as any, groupService as any);
+        const minerActiveModeService = {
+            get: jest.fn(async (address: string) => opts.liveMarker?.[address] ?? null),
+            mark: jest.fn(),
+        };
+        return new MiningModeService(
+            pplnsService as any,
+            groupService as any,
+            minerActiveModeService as any,
+        );
     }
 
     it('returns group-solo when the address is in an active group with no PPLNS shares', async () => {
@@ -65,5 +75,65 @@ describe('MiningModeService.getMode', () => {
     it('returns solo when no groups exist and no PPLNS activity at all', async () => {
         const svc = setup({});
         expect(await svc.getMode('bc1qnew')).toEqual({ mode: 'solo' });
+    });
+
+    // ── Live port-marker tests ────────────────────────────────────────
+    // The marker is the primary signal — it reflects the port the miner
+    // is ACTUALLY connected to right now. Only when the marker is
+    // absent/expired does the service fall back to PPLNS window / group
+    // state. These cases cover the port-switch recovery scenario that
+    // the legacy state-based detection handled with hours of lag.
+
+    it('live marker "solo" overrides stale PPLNS window shares', async () => {
+        // Scenario: miner PPLNS-tested for 1h, then switched back to
+        // solo port. Their old PPLNS shares are still in the window,
+        // but new shares are landing as solo. Marker says solo,
+        // detection must reflect that.
+        const svc = setup({
+            liveMarker: { 'bc1qalice': 'solo' },
+            distribution: [{ address: 'bc1qalice', difficulty: 500, percent: 50 }],
+        });
+        expect(await svc.getMode('bc1qalice')).toEqual({ mode: 'solo' });
+    });
+
+    it('live marker "group-solo" overrides stale PPLNS window shares', async () => {
+        // Scenario: group member tested PPLNS, then went back to
+        // solo port (where address-driven group routing kicks in).
+        const svc = setup({
+            liveMarker: { 'bc1qalice': 'group-solo' },
+            groupForAddress: { 'bc1qalice': { groupId: 'grp-1', active: true } },
+            distribution: [{ address: 'bc1qalice', difficulty: 500, percent: 50 }],
+        });
+        expect(await svc.getMode('bc1qalice')).toEqual({ mode: 'group-solo', groupId: 'grp-1' });
+    });
+
+    it('live marker "pplns" wins even when address is also in a group', async () => {
+        // Complementary to the "port-flip override" test above —
+        // confirmed via live marker this time.
+        const svc = setup({
+            liveMarker: { 'bc1qalice': 'pplns' },
+            groupForAddress: { 'bc1qalice': { groupId: 'grp-1', active: true } },
+        });
+        expect(await svc.getMode('bc1qalice')).toEqual({ mode: 'pplns' });
+    });
+
+    it('live marker "group-solo" falls through when the group no longer exists', async () => {
+        // Defensive: a group-solo marker set right before the group was
+        // dissolved. Detection must not return a dangling groupId.
+        const svc = setup({
+            liveMarker: { 'bc1qalice': 'group-solo' },
+            // No groupForAddress entry — group was dissolved.
+            distribution: [{ address: 'bc1qalice', difficulty: 500, percent: 50 }],
+        });
+        expect(await svc.getMode('bc1qalice')).toEqual({ mode: 'pplns' });
+    });
+
+    it('legacy detection kicks in when no live marker is set', async () => {
+        // An offline miner has no recent marker. The fallback should
+        // behave exactly as it did before the marker was introduced.
+        const svc = setup({
+            groupForAddress: { 'bc1qalice': { groupId: 'grp-1', active: true } },
+        });
+        expect(await svc.getMode('bc1qalice')).toEqual({ mode: 'group-solo', groupId: 'grp-1' });
     });
 });
