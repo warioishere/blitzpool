@@ -20,6 +20,27 @@ interface VerificationEmailContext {
     expiresAt: Date;
 }
 
+export type CapacityAlertLevel = 'warning' | 'urgent' | 'recovery';
+
+export interface CapacityAlertContext {
+    to: string;
+    level: CapacityAlertLevel;
+    /** Human label for the bucket — 'PPLNS main pool' or 'Group "<name>"'. */
+    scope: string;
+    /** Distinct miner addresses currently in the window. */
+    current: number;
+    /** Max outputs the current coinbase weight budget can fit. */
+    max: number;
+    /** Percentage current / max, 0–1. */
+    percent: number;
+    /** Active threshold that was crossed, 0–1 (e.g. 0.8 = 80 %). */
+    threshold: number;
+    /** The literal coinbase weight budget used for the ceiling calc. */
+    coinbaseWeightBudget: number;
+    /** ENV var name the operator should bump — 'PPLNS_COINBASE_WEIGHT_BUDGET'. */
+    envVarName: string;
+}
+
 /**
  * Sends transactional emails for the address-email-binding and group-invitation
  * flows. Reads SMTP credentials from env (SMTP_HOST/PORT/USER/PASS/FROM) and
@@ -88,6 +109,29 @@ export class EmailService implements OnModuleInit {
         const subject = `Invitation to join ${sanitizeHeader(ctx.groupName)} — Blitz Pool`;
         const html = renderInvitationHtml(ctx);
         const text = renderInvitationText(ctx);
+        await this.transport.sendMail({
+            from: this.fromAddress,
+            to: ctx.to,
+            subject,
+            html,
+            text,
+        });
+    }
+
+    /**
+     * Operator alert: the coinbase output capacity (derived from the current
+     * PPLNS_COINBASE_WEIGHT_BUDGET) is nearing its ceiling. Sent when the
+     * active-miner count crosses a configured threshold (default 80 %), at
+     * escalation into 'urgent' (default 95 %), and once when the condition
+     * clears back below the warning threshold.
+     */
+    async sendCapacityAlert(ctx: CapacityAlertContext): Promise<void> {
+        if (!this.enabled || !this.transport) {
+            throw new Error('EmailService not configured');
+        }
+        const subject = capacitySubject(ctx);
+        const html = renderCapacityAlertHtml(ctx);
+        const text = renderCapacityAlertText(ctx);
         await this.transport.sendMail({
             from: this.fromAddress,
             to: ctx.to,
@@ -260,6 +304,114 @@ function renderInvitationText(ctx: InvitationEmailContext): string {
  */
 function sanitizeHeader(s: string): string {
     return (s ?? '').replace(/[\r\n\0]/g, ' ').slice(0, 200);
+}
+
+// ── Capacity alert ────────────────────────────────────────────────────
+
+function capacitySubject(ctx: CapacityAlertContext): string {
+    const pct = (ctx.percent * 100).toFixed(0);
+    const scope = sanitizeHeader(ctx.scope);
+    if (ctx.level === 'urgent') {
+        return `[Blitz Pool] URGENT: ${scope} coinbase capacity at ${pct} %`;
+    }
+    if (ctx.level === 'recovery') {
+        return `[Blitz Pool] Recovered: ${scope} coinbase capacity back to ${pct} %`;
+    }
+    return `[Blitz Pool] Warning: ${scope} coinbase capacity at ${pct} %`;
+}
+
+function renderCapacityAlertHtml(ctx: CapacityAlertContext): string {
+    const pct = (ctx.percent * 100).toFixed(1);
+    const thresholdPct = (ctx.threshold * 100).toFixed(0);
+    const headline = ctx.level === 'urgent'
+        ? 'Coinbase capacity critical'
+        : ctx.level === 'recovery'
+            ? 'Coinbase capacity recovered'
+            : 'Coinbase capacity warning';
+    const badge = ctx.level === 'urgent' ? '#FF5252'
+        : ctx.level === 'recovery' ? '#66BB6A'
+            : '#FFB74D';
+    const badgeLabel = ctx.level === 'urgent' ? 'URGENT'
+        : ctx.level === 'recovery' ? 'RECOVERED'
+            : 'WARNING';
+
+    const recSection = ctx.level === 'recovery' ? '' : `
+<p style="margin:24px 0 8px;font-size:14px;font-weight:600;color:${COLOR_TEXT};">Recommended action</p>
+<p style="margin:0 0 16px;font-size:14px;line-height:1.6;color:${COLOR_TEXT};">
+  Bump both settings to roughly double the current value (e.g. 100 000 or 200 000):
+</p>
+<p style="margin:0 0 16px;padding:12px 16px;background:${COLOR_BG};border-radius:6px;font-family:'Roboto Mono',monospace;font-size:13px;color:${COLOR_PRIMARY};line-height:1.6;">
+  bitcoin.conf: <strong>blockreservedweight=${escapeHtml(String(ctx.coinbaseWeightBudget * 2))}</strong><br>
+  blitzpool.env: <strong>${escapeHtml(ctx.envVarName)}=${escapeHtml(String(ctx.coinbaseWeightBudget * 2))}</strong>
+</p>
+<p style="margin:0 0 16px;font-size:13px;line-height:1.6;color:${COLOR_MUTED};">
+  Then restart bitcoind and the pool. Without an increase, every block above 100 % capacity trims the smallest miners to pending — they'll wait longer for their next payout.
+</p>`;
+
+    const body = `
+<table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:0 0 20px;">
+  <tr><td style="background:${badge};color:${COLOR_PRIMARY_TEXT};padding:4px 12px;border-radius:4px;font-size:11px;font-weight:700;letter-spacing:0.1em;">
+    ${badgeLabel}
+  </td></tr>
+</table>
+<h1 style="margin:0 0 16px;font-size:22px;font-weight:600;color:${COLOR_TEXT};">${escapeHtml(headline)}</h1>
+<p style="margin:0 0 24px;font-size:14px;line-height:1.6;color:${COLOR_TEXT};">
+  ${escapeHtml(ctx.scope)} coinbase capacity is currently at <strong style="color:${COLOR_PRIMARY};">${escapeHtml(pct)} %</strong>
+  (threshold ${escapeHtml(thresholdPct)} %).
+</p>
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin:0 0 16px;background:${COLOR_BG};border-radius:6px;">
+  <tr><td style="padding:16px;">
+    <p style="margin:0 0 8px;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:${COLOR_MUTED};">Active miners</p>
+    <p style="margin:0 0 16px;font-family:'Roboto Mono',monospace;font-size:18px;color:${COLOR_TEXT};">
+      ${escapeHtml(String(ctx.current))} / ${escapeHtml(String(ctx.max))}
+    </p>
+    <p style="margin:0 0 8px;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:${COLOR_MUTED};">Coinbase weight budget</p>
+    <p style="margin:0;font-family:'Roboto Mono',monospace;font-size:13px;color:${COLOR_PRIMARY};">
+      ${escapeHtml(ctx.envVarName)}=${escapeHtml(String(ctx.coinbaseWeightBudget))}
+    </p>
+  </td></tr>
+</table>
+${recSection}
+<p style="margin:24px 0 0;font-size:12px;color:${COLOR_MUTED};">
+  This is an automated operator alert. Next check in roughly one hour. Set
+  <code style="font-family:'Roboto Mono',monospace;color:${COLOR_TEXT};">POOL_CAPACITY_ALERT_ENABLED=false</code>
+  to silence.
+</p>
+`;
+    return shellHtml(headline, body);
+}
+
+function renderCapacityAlertText(ctx: CapacityAlertContext): string {
+    const pct = (ctx.percent * 100).toFixed(1);
+    const thresholdPct = (ctx.threshold * 100).toFixed(0);
+    const head = ctx.level === 'urgent'
+        ? `URGENT: ${ctx.scope} coinbase capacity critical`
+        : ctx.level === 'recovery'
+            ? `RECOVERED: ${ctx.scope} coinbase capacity back to normal`
+            : `WARNING: ${ctx.scope} coinbase capacity threshold crossed`;
+
+    const lines = [
+        head,
+        ``,
+        `Current: ${ctx.current} / ${ctx.max} miners  (${pct} %)`,
+        `Threshold: ${thresholdPct} %`,
+        `Budget: ${ctx.envVarName}=${ctx.coinbaseWeightBudget}`,
+        ``,
+    ];
+    if (ctx.level !== 'recovery') {
+        lines.push(
+            `Recommended: bump both to ${ctx.coinbaseWeightBudget * 2}`,
+            `  bitcoin.conf: blockreservedweight=${ctx.coinbaseWeightBudget * 2}`,
+            `  blitzpool.env: ${ctx.envVarName}=${ctx.coinbaseWeightBudget * 2}`,
+            `Then restart bitcoind + pool.`,
+            ``,
+        );
+    }
+    lines.push(
+        `Next check in ~1h.`,
+        `Silence with POOL_CAPACITY_ALERT_ENABLED=false.`,
+    );
+    return lines.join('\n');
 }
 
 function escapeHtml(s: string): string {

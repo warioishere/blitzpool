@@ -61,6 +61,7 @@ import { GroupSoloService } from './services/group-solo.service';
 import { GroupService } from './services/group.service';
 import { EmailService } from './services/email.service';
 import { AddressEmailService } from './services/address-email.service';
+import { CoinbaseCapacityMonitorService } from './services/coinbase-capacity-monitor.service';
 import { PplnsGroupInvitationService } from './services/pplns-group-invitation.service';
 import { MiningModeService } from './services/mining-mode.service';
 import { MinerActiveModeService } from './services/miner-active-mode.service';
@@ -221,6 +222,7 @@ const ORMModules = [
         EmailService,
         AddressEmailService,
         PplnsGroupInvitationService,
+        CoinbaseCapacityMonitorService,
         // Global throttler guard — per-endpoint limits override via @Throttle().
         { provide: APP_GUARD, useClass: ThrottlerGuard },
     ],
