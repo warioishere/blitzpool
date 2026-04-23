@@ -1453,19 +1453,20 @@ export class StratumV2Client {
         await this.addressSettingsService.resetBestDifficultyAndShares();
         await this.addressSettingsCacheService.clear();
 
-        // Group-solo takes precedence — finder's group gets the coinbase, round resets
+        // Routing priority: explicit PPLNS port trumps group membership.
+        // Mirror of StratumV1Client — bewusster Port-Wahl des Miners schlägt
+        // die Default-Address-Driven-Group-Routing.
         const foundGroupId = this.activeGroupId();
-        if (foundGroupId && jobTemplate) {
+        if (this.portConfig.payoutMode === 'pplns' && this.pplnsService?.isEnabled() && jobTemplate) {
+          await this.pplnsService.onBlockFound(
+            jobTemplate.blockData.height,
+            jobTemplate.blockData.coinbasevalue,
+          );
+        } else if (foundGroupId && jobTemplate) {
           await this.groupSoloService!.onBlockFound(
             jobTemplate.blockData.height,
             jobTemplate.blockData.coinbasevalue,
             this.address!,
-          );
-        } else if (this.portConfig.payoutMode === 'pplns' && this.pplnsService?.isEnabled() && jobTemplate) {
-          // Process PPLNS payouts (update pending balances)
-          await this.pplnsService.onBlockFound(
-            jobTemplate.blockData.height,
-            jobTemplate.blockData.coinbasevalue,
           );
         }
       }
@@ -1476,12 +1477,13 @@ export class StratumV2Client {
       this.hashRate = this.statistics.hashRate;
       await this.clientStatisticsService.addAcceptedShare(this.entity!, jobDifficulty);
 
-      // Record share — group-solo takes precedence over port's payoutMode
+      // Record share — PPLNS port overrides group membership, matching
+      // the coinbase-build + block-found routing above.
       const shareGroupId = this.activeGroupId();
-      if (shareGroupId) {
-        await this.groupSoloService!.recordShare(this.address!, jobDifficulty);
-      } else if (this.portConfig.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
+      if (this.portConfig.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
         await this.pplnsService.recordShare(this.address!, jobDifficulty);
+      } else if (shareGroupId) {
+        await this.groupSoloService!.recordShare(this.address!, jobDifficulty);
       }
 
       this.shareTotalsCacheService.increment(
@@ -1715,16 +1717,16 @@ export class StratumV2Client {
       this.hashRate = this.statistics.hashRate;
     }
 
-    // PPLNS mode: shared coinbase with proportional payouts
+    // Routing priority (matches recordShare / onBlockFound / SV1):
+    // PPLNS port > group-membership > solo. Both PPLNS and group paths
+    // need an async distribution call, so they're handled upstream in
+    // buildPayoutInformationAsync; sync variant just returns null to
+    // signal "come back async".
     if (this.portConfig.payoutMode === 'pplns' && this.pplnsService?.isEnabled() && blockRewardSats) {
-      // Note: getPayoutDistribution is async but buildPayoutInformation is sync.
-      // We rely on the cached distribution from the last job update cycle.
-      // For the initial call, the caller should use getPayoutDistributionAsync() instead.
       this.noFee = false;
-      return null; // Signal caller to use async path
+      return null;
     }
 
-    // Group-solo mode: per-group shared coinbase — also async
     if (blockRewardSats && this.activeGroupId()) {
       this.noFee = false;
       return null;
@@ -1751,17 +1753,18 @@ export class StratumV2Client {
   }
 
   private async buildPayoutInformationAsync(blockRewardSats: number): Promise<{ address: string; percent: number }[] | null> {
-    // Group-solo takes precedence over PPLNS.
-    const asyncGroupId = this.activeGroupId();
-    if (asyncGroupId) {
-      const distribution = await this.groupSoloService!.getPayoutDistribution(asyncGroupId, blockRewardSats);
+    // PPLNS port overrides group membership — a miner who connected
+    // to the PPLNS port opted out of group-solo for this session.
+    if (this.portConfig.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
+      const distribution = await this.pplnsService.getPayoutDistribution(blockRewardSats);
       if (distribution && distribution.length > 0) {
         this.noFee = false;
         return distribution;
       }
     }
-    if (this.portConfig.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
-      const distribution = await this.pplnsService.getPayoutDistribution(blockRewardSats);
+    const asyncGroupId = this.activeGroupId();
+    if (asyncGroupId) {
+      const distribution = await this.groupSoloService!.getPayoutDistribution(asyncGroupId, blockRewardSats);
       if (distribution && distribution.length > 0) {
         this.noFee = false;
         return distribution;
@@ -2087,12 +2090,15 @@ export class StratumV2Client {
         diff,
       );
     }
-    // Group-solo: record against the group's round counters if this miner is
-    // currently a member of an active group (live lookup — membership can
-    // change after channel-open).
-    const rejGroupId = this.activeGroupId();
-    if (rejGroupId && this.address) {
-      await this.groupSoloService!.recordReject(this.address, diff);
+    // Group-solo reject counter. Skipped when the miner is on the PPLNS
+    // port — that's an explicit opt-out from group bookkeeping for this
+    // session, so inflating the group's reject counter from these sessions
+    // would be wrong.
+    if (this.portConfig.payoutMode !== 'pplns') {
+      const rejGroupId = this.activeGroupId();
+      if (rejGroupId && this.address) {
+        await this.groupSoloService!.recordReject(this.address, diff);
+      }
     }
   }
 

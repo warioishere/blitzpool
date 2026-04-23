@@ -17,11 +17,25 @@ describe('MiningModeService.getMode', () => {
         return new MiningModeService(pplnsService as any, groupService as any);
     }
 
-    it('returns group-solo when the address is in an active group', async () => {
+    it('returns group-solo when the address is in an active group with no PPLNS shares', async () => {
+        // No PPLNS window activity → fall through to group-solo.
         const svc = setup({
             groupForAddress: { 'bc1qalice': { groupId: 'grp-1', active: true } },
         });
         expect(await svc.getMode('bc1qalice')).toEqual({ mode: 'group-solo', groupId: 'grp-1' });
+    });
+
+    it('PPLNS takes precedence over group membership (port-flip override)', async () => {
+        // A group member who started mining on the PPLNS port has shares
+        // landing in the PPLNS window. Share-routing at the stratum layer
+        // gives PPLNS precedence over group-solo in that case; the
+        // mode-detection API mirrors the same priority so the UI reflects
+        // where the miner's shares are actually going.
+        const svc = setup({
+            groupForAddress: { 'bc1qalice': { groupId: 'grp-1', active: true } },
+            distribution: [{ address: 'bc1qalice', difficulty: 500, percent: 50 }],
+        });
+        expect(await svc.getMode('bc1qalice')).toEqual({ mode: 'pplns' });
     });
 
     it('ignores inactive group membership and falls through to pplns/solo', async () => {
