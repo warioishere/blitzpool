@@ -301,6 +301,61 @@ describe('PplnsService', () => {
     });
   });
 
+  // ── Deployment migration ─────────────────────────────────────
+
+  describe('deployment-migration: aggregate bootstrap', () => {
+    it('onModuleInit rebuilds the aggregate from raw shares when hash is empty', async () => {
+      // Simulate a pre-aggregate-rollout Redis: raw sorted set has
+      // shares, hash doesn't exist. Without the bootstrap rebuild, the
+      // first getPayoutDistribution after deploy would treat the empty
+      // hash as "current window has no miners" — silently excluding
+      // every pre-deploy miner. bootstrap check must populate the hash.
+      const { service, redis } = createService();
+      service.setNetworkDifficulty(10_000_000);
+
+      // Seed the raw set directly, bypassing recordShare (so the hash
+      // stays empty, matching a pre-deploy Redis state).
+      await redis.zAdd('pplns:shares', { score: 1, value: 'bc1qA:100:1000' });
+      await redis.zAdd('pplns:shares', { score: 2, value: 'bc1qB:200:2000' });
+      await redis.zAdd('pplns:shares', { score: 3, value: 'bc1qA:50:3000' });
+      expect(redis._getHash('pplns:window:by-address')).toBeUndefined();
+
+      // Trigger onModuleInit explicitly. The existing createService
+      // bypasses it by manually wiring redis, so call it ourselves to
+      // exercise the bootstrap path.
+      await (service as any).onModuleInit();
+
+      const hash = redis._getHash('pplns:window:by-address');
+      expect(hash).toBeDefined();
+      // A had 100 + 50 = 150; B had 200.
+      expect(parseFloat(hash!.get('bc1qA') ?? '0')).toBeCloseTo(150);
+      expect(parseFloat(hash!.get('bc1qB') ?? '0')).toBeCloseTo(200);
+
+      // And getPayoutDistribution now sees both miners (would have
+      // silently excluded them pre-fix).
+      const dist = await service.getPayoutDistribution(100_000_000);
+      expect(dist.find(d => d.address === 'bc1qA')).toBeDefined();
+      expect(dist.find(d => d.address === 'bc1qB')).toBeDefined();
+    });
+
+    it('onModuleInit is a no-op when hash already matches (warm restart)', async () => {
+      const { service, redis } = createService();
+      service.setNetworkDifficulty(10_000_000);
+
+      // Normal state: shares flow through recordShare, hash stays in
+      // sync. A restart where both exist should just leave it alone.
+      await service.recordShare('bc1qA', 100);
+      await service.recordShare('bc1qB', 200);
+      const before = { ...redis._getHash('pplns:window:by-address')! };
+
+      await (service as any).onModuleInit();
+
+      const after = redis._getHash('pplns:window:by-address')!;
+      expect(parseFloat(after.get('bc1qA') ?? '0')).toBeCloseTo(100);
+      expect(parseFloat(after.get('bc1qB') ?? '0')).toBeCloseTo(200);
+    });
+  });
+
   // ── Window-by-Address Aggregate ──────────────────────────────
 
   describe('window aggregate (pplns:window:by-address)', () => {

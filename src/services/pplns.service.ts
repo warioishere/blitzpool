@@ -135,6 +135,30 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
             console.error('[PPLNS] Failed to access Redis client:', error);
         }
 
+        // Deployment migration: pre-aggregate rollouts have a populated
+        // raw share set but no pplns:window:by-address hash. The first
+        // post-deploy recordShare would otherwise populate the hash with
+        // a single entry, and the next getPayoutDistribution would read
+        // that lone entry as "the whole window" — silently excluding
+        // every pre-deploy miner from the distribution.
+        //
+        // On startup, if the raw set has shares but the hash is empty,
+        // rebuild the hash from scratch before serving any traffic.
+        if (this.redis) {
+            try {
+                const aggEmpty = Object.keys((await this.redis.hGetAll(REDIS_KEY_WINDOW_BY_ADDRESS)) ?? {}).length === 0;
+                const rawCount = typeof this.redis.zCard === 'function'
+                    ? await this.redis.zCard(REDIS_KEY_SHARES)
+                    : (await this.redis.zRange(REDIS_KEY_SHARES, 0, -1) ?? []).length;
+                if (aggEmpty && rawCount > 0) {
+                    console.log(`[PPLNS] Rebuilding window-by-address aggregate from ${rawCount} raw shares (deployment migration or post-flush cold start)`);
+                    await this.recalculateWindowByAddress();
+                }
+            } catch (error) {
+                console.warn('[PPLNS] Aggregate bootstrap check failed:', (error as Error).message);
+            }
+        }
+
         // Subscribe to new block templates to keep network difficulty in sync
         this.jobSubscription = this.stratumV1JobsService.newMiningJob$.subscribe((jobTemplate) => {
             if (jobTemplate?.blockData?.networkDifficulty) {
