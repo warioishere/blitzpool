@@ -155,6 +155,17 @@ export class GroupSoloService implements OnModuleInit {
         await this.redis.zAdd(keys.shares, { score: counter, value: payload });
         await this.redis.incrByFloat(keys.total, difficulty);
         await this.redis.hSet(keys.lastShareAt, address, String(now));
+
+        // Persist last-accepted-share timestamp on the balance row so the
+        // dust-sweep cron can tell dormant dust from active dust. No-op
+        // when the balance row doesn't exist yet — the first pending
+        // credit in onBlockFound will initialize it.
+        this.balanceRepo.update({ address, groupId: entry.groupId }, {
+            lastAcceptedShareAt: new Date(now),
+        }).catch(err => {
+            console.warn(`[GroupSolo] touchLastAcceptedShareAt failed for ${address} in ${entry.groupId}:`, (err as Error).message);
+        });
+
         return true;
     }
 
@@ -332,7 +343,7 @@ export class GroupSoloService implements OnModuleInit {
                             groupId, blockHeight, address: d.address,
                             paidSats, percent: d.percent,
                             sharesInRound: 0, totalSharesInRound: 0,
-                            inCoinbase: true,
+                            inCoinbase: true, rowType: 'coinbase',
                         }));
                     }
 
@@ -355,13 +366,16 @@ export class GroupSoloService implements OnModuleInit {
                             if (wasConsidered) {
                                 const sats = Math.floor((diff / totalDiff) * rewardForMiners);
                                 if (sats > 0) {
+                                    const now = new Date();
                                     const existing = await balanceRepo.findOneBy({ address: addr, groupId });
                                     if (existing) {
                                         existing.pendingSats += sats;
+                                        existing.lastAcceptedShareAt = now;
                                         await balanceRepo.save(existing);
                                     } else {
                                         await balanceRepo.save(balanceRepo.create({
                                             address: addr, groupId, pendingSats: sats, totalPaidSats: 0,
+                                            lastAcceptedShareAt: now,
                                         }));
                                     }
                                     await historyRepo.save(historyRepo.create({
@@ -370,7 +384,7 @@ export class GroupSoloService implements OnModuleInit {
                                         percent: (diff / totalDiff) * (100 - this.feePercent),
                                         sharesInRound: Math.round(diff),
                                         totalSharesInRound: Math.round(totalDiff),
-                                        inCoinbase: false,
+                                        inCoinbase: false, rowType: 'pending',
                                     }));
                                 }
                             } else {
@@ -381,7 +395,7 @@ export class GroupSoloService implements OnModuleInit {
                                     percent: 0,
                                     sharesInRound: Math.round(diff),
                                     totalSharesInRound: Math.round(totalDiff),
-                                    inCoinbase: false,
+                                    inCoinbase: false, rowType: 'pending',
                                 }));
                                 console.log(`[GroupSolo]   ${addr}: ${diff.toFixed(2)} shares in round but not in coinbase snapshot (late arrival, PROP rules)`);
                             }
@@ -442,6 +456,7 @@ export class GroupSoloService implements OnModuleInit {
                 const historyRepo = em.getRepository(PplnsGroupBlockHistoryEntity);
                 const balanceRepo = em.getRepository(PplnsGroupBalanceEntity);
 
+                const now = new Date();
                 for (const [addr, diff] of addressDiff) {
                     const ratio = diff / totalDiff;
                     const sats = Math.floor(ratio * effectiveMinerReward);
@@ -454,6 +469,7 @@ export class GroupSoloService implements OnModuleInit {
                         if (existing && pending > 0) {
                             existing.totalPaidSats += pending;
                             existing.pendingSats = 0;
+                            existing.lastAcceptedShareAt = now;
                             await balanceRepo.save(existing);
                         }
                         await historyRepo.save(historyRepo.create({
@@ -461,15 +477,17 @@ export class GroupSoloService implements OnModuleInit {
                             paidSats: totalSats, percent,
                             sharesInRound: Math.round(diff),
                             totalSharesInRound: Math.round(totalDiff),
-                            inCoinbase: true,
+                            inCoinbase: true, rowType: 'coinbase',
                         }));
                     } else if (sats > 0) {
                         if (existing) {
                             existing.pendingSats += sats;
+                            existing.lastAcceptedShareAt = now;
                             await balanceRepo.save(existing);
                         } else {
                             await balanceRepo.save(balanceRepo.create({
                                 address: addr, groupId, pendingSats: sats, totalPaidSats: 0,
+                                lastAcceptedShareAt: now,
                             }));
                         }
                         await historyRepo.save(historyRepo.create({
@@ -477,7 +495,7 @@ export class GroupSoloService implements OnModuleInit {
                             paidSats: sats, percent,
                             sharesInRound: Math.round(diff),
                             totalSharesInRound: Math.round(totalDiff),
-                            inCoinbase: false,
+                            inCoinbase: false, rowType: 'pending',
                         }));
                     }
                 }
@@ -489,7 +507,7 @@ export class GroupSoloService implements OnModuleInit {
                             groupId, blockHeight, address: this.feeAddress,
                             paidSats: feeSats, percent: this.feePercent,
                             sharesInRound: 0, totalSharesInRound: 0,
-                            inCoinbase: true,
+                            inCoinbase: true, rowType: 'coinbase',
                         }));
                     } else {
                         console.warn(`[GroupSolo] Fallback: fee output ${feeSats} sats < dust — not recording fee history row`);

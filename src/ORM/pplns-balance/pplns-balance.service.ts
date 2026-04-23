@@ -38,6 +38,17 @@ export class PplnsBalanceService {
         return this.repo.find({ where: { pendingSats: MoreThan(0) } });
     }
 
+    /**
+     * Refresh the lastAcceptedShareAt timestamp for an existing balance row.
+     * No-op when no row exists yet (miner hasn't had any pending/paid
+     * activity — the dust-sweep has nothing to act on anyway). Called from
+     * PplnsService.recordShare on every accepted share; the cheap UPDATE
+     * avoids a find-then-save round-trip on the hot path.
+     */
+    async touchLastAcceptedShareAt(address: string): Promise<void> {
+        await this.repo.update({ address }, { lastAcceptedShareAt: new Date() });
+    }
+
     async markPaid(address: string, sats: number): Promise<void> {
         const entity = await this.repo.findOneBy({ address });
         if (!entity) return;

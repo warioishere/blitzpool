@@ -125,6 +125,7 @@ function createMockBalanceBacking() {
                 existing.totalPaidSats += sats;
             }
         },
+        touchLastAcceptedShareAt: async (_addr: string) => undefined,
         _rows: rows,
     };
     const repo: any = {

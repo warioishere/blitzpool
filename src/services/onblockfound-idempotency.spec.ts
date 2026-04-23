@@ -123,6 +123,12 @@ function createUniqueEnforcingHistoryRepo(uniqueFields: string[]) {
                 }
             }
         }),
+        update: jest.fn(async (where: any, patch: any) => {
+            for (const row of rows as any[]) {
+                if (Object.entries(where).every(([k, v]) => row[k] === v)) Object.assign(row, patch);
+            }
+            return { affected: 0 } as any;
+        }),
         _rows: rows,
     };
     return repo;
@@ -153,6 +159,12 @@ function createBalanceRepo() {
                     rows.splice(i, 1);
                 }
             }
+        }),
+        update: jest.fn(async (where: any, patch: any) => {
+            for (const row of rows as any[]) {
+                if (Object.entries(where).every(([k, v]) => row[k] === v)) Object.assign(row, patch);
+            }
+            return { affected: 0 } as any;
         }),
         _rows: rows,
     };
@@ -194,6 +206,7 @@ describe('PplnsService.onBlockFound — idempotency', () => {
                     existing.totalPaidSats += sats;
                 }
             },
+            touchLastAcceptedShareAt: async (_addr: string) => undefined,
         };
 
         const env: Record<string, string> = {

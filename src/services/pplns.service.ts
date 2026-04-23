@@ -188,6 +188,13 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         // Invalidate cached distribution — share weights changed
         this.cachedDistribution = null;
 
+        // Keep pplns_balance.lastAcceptedShareAt fresh so the dust-sweep
+        // cron can distinguish "miner still active" from "dormant pending
+        // leftover". No-op if the miner has no balance row yet.
+        this.balanceService.touchLastAcceptedShareAt(address).catch(err => {
+            console.warn(`[PPLNS] touchLastAcceptedShareAt failed for ${address}:`, (err as Error).message);
+        });
+
         await this.trimWindow();
     }
 
@@ -454,17 +461,20 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
                             if (snapshotAddresses.has(addr)) continue;
                             const sats = Math.floor((diff / totalDiff) * rewardForMiners);
                             if (sats > 0) {
+                                const now = new Date();
                                 const existing = await balanceRepo.findOneBy({ address: addr });
                                 if (existing) {
                                     existing.pendingSats += sats;
+                                    existing.lastAcceptedShareAt = now;
                                     await balanceRepo.save(existing);
                                 } else {
                                     await balanceRepo.save(balanceRepo.create({
                                         address: addr, pendingSats: sats, totalPaidSats: 0,
+                                        lastAcceptedShareAt: now,
                                     }));
                                 }
                                 await historyRepo.save(historyRepo.create({
-                                    blockHeight, address: addr, paidSats: sats, percent: (diff / totalDiff) * (100 - this.feePercent), inCoinbase: false,
+                                    blockHeight, address: addr, paidSats: sats, percent: (diff / totalDiff) * (100 - this.feePercent), inCoinbase: false, rowType: 'pending',
                                 }));
                                 console.log(`[PPLNS]   ${addr}: ${sats} sats → pending (not in coinbase)`);
                             }
@@ -519,6 +529,7 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
                 const historyRepo = em.getRepository(PplnsPayoutHistoryEntity);
                 const balanceRepo = em.getRepository(PplnsBalanceEntity);
 
+                const now = new Date();
                 for (const [addr, diff] of addressDiff) {
                     const ratio = diff / totalDiff;
                     const sats = Math.floor(ratio * effectiveMinerReward);
@@ -531,22 +542,25 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
                         if (balance && pending > 0) {
                             balance.totalPaidSats += pending;
                             balance.pendingSats = 0;
+                            balance.lastAcceptedShareAt = now;
                             await balanceRepo.save(balance);
                         }
                         await historyRepo.save(historyRepo.create({
-                            blockHeight, address: addr, paidSats: totalSats, percent, inCoinbase: true,
+                            blockHeight, address: addr, paidSats: totalSats, percent, inCoinbase: true, rowType: 'coinbase',
                         }));
                     } else if (sats > 0) {
                         if (balance) {
                             balance.pendingSats += sats;
+                            balance.lastAcceptedShareAt = now;
                             await balanceRepo.save(balance);
                         } else {
                             await balanceRepo.save(balanceRepo.create({
                                 address: addr, pendingSats: sats, totalPaidSats: 0,
+                                lastAcceptedShareAt: now,
                             }));
                         }
                         await historyRepo.save(historyRepo.create({
-                            blockHeight, address: addr, paidSats: sats, percent, inCoinbase: false,
+                            blockHeight, address: addr, paidSats: sats, percent, inCoinbase: false, rowType: 'pending',
                         }));
                     }
                 }

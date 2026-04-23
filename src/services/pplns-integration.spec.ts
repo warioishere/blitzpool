@@ -121,6 +121,7 @@ function createMockBalanceBacking() {
         existing.totalPaidSats += sats;
       }
     }),
+    touchLastAcceptedShareAt: jest.fn(async () => undefined),
     _get: (address: string) => balances.get(address),
   };
   const repo: any = {

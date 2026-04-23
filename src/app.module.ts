@@ -64,6 +64,7 @@ import { AddressEmailService } from './services/address-email.service';
 import { PplnsGroupInvitationService } from './services/pplns-group-invitation.service';
 import { MiningModeService } from './services/mining-mode.service';
 import { MinerActiveModeService } from './services/miner-active-mode.service';
+import { DustSweepService } from './services/dust-sweep.service';
 import { PplnsGroupEntity } from './ORM/pplns-group/pplns-group.entity';
 import { PplnsGroupMemberEntity } from './ORM/pplns-group/pplns-group-member.entity';
 import { PplnsGroupBlockHistoryEntity } from './ORM/pplns-group/pplns-group-block-history.entity';
@@ -216,6 +217,7 @@ const ORMModules = [
         GroupService,
         MiningModeService,
         MinerActiveModeService,
+        DustSweepService,
         EmailService,
         AddressEmailService,
         PplnsGroupInvitationService,

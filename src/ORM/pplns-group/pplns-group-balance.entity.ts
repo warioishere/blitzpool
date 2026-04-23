@@ -23,6 +23,15 @@ export class PplnsGroupBalanceEntity {
     @Column({ type: 'bigint', default: 0, transformer: { from: (v: string) => Number(v), to: (v: number) => v } })
     totalPaidSats: number;
 
+    /**
+     * Last accepted-share timestamp for this (address, groupId). Updated
+     * by GroupSoloService.recordShare. Drives the dust-sweep cron —
+     * rows under the dust limit whose share timestamp is > 30d stale
+     * get absorbed (audit row in block history, balance row deleted).
+     */
+    @Column({ type: 'timestamptz', nullable: true })
+    lastAcceptedShareAt: Date | null;
+
     @UpdateDateColumn()
     updatedAt: Date;
 }

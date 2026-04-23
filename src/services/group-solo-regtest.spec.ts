@@ -129,6 +129,12 @@ function createMockRepo<T>() {
     find: async () => [...rows],
     findOneBy: async (where: any) =>
       (rows as any[]).find(r => Object.entries(where).every(([k, v]) => r[k] === v)) ?? null,
+    update: async (where: any, patch: any) => {
+      for (const row of rows as any[]) {
+        if (Object.entries(where).every(([k, v]) => row[k] === v)) Object.assign(row, patch);
+      }
+      return { affected: 0 } as any;
+    },
     _rows: rows,
   };
 }

@@ -26,6 +26,20 @@ export class PplnsPayoutHistoryEntity {
     @Column({ type: 'boolean', default: true })
     inCoinbase: boolean;
 
+    /**
+     * Discriminator for row semantics:
+     *   - 'coinbase'    : paid on-chain via the block's coinbase tx
+     *   - 'pending'     : sub-dust / weight-trimmed, credited to pendingSats
+     *   - 'dust-sweep'  : absorbed by the daily sweep cron after inactivity
+     *
+     * Existing rows default to 'coinbase' via the migration backfill —
+     * inCoinbase=true mapped to 'coinbase', inCoinbase=false mapped to
+     * 'pending'. New code uses rowType; inCoinbase is kept for backward
+     * compatibility but should be derived from rowType in new UI.
+     */
+    @Column({ type: 'varchar', length: 16, default: 'coinbase' })
+    rowType: 'coinbase' | 'pending' | 'dust-sweep';
+
     @CreateDateColumn()
     createdAt: Date;
 }

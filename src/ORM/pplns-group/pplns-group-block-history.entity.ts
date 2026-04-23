@@ -36,6 +36,15 @@ export class PplnsGroupBlockHistoryEntity {
     @Column({ type: 'boolean', default: true })
     inCoinbase: boolean;
 
+    /**
+     * Discriminator for row semantics — see pplns_payout_history.rowType
+     * for the full enum. Added so the dust-sweep path has a dedicated
+     * marker without overloading inCoinbase=false (which is also the
+     * sub-dust-pending case).
+     */
+    @Column({ type: 'varchar', length: 16, default: 'coinbase' })
+    rowType: 'coinbase' | 'pending' | 'dust-sweep';
+
     @CreateDateColumn()
     createdAt: Date;
 }
