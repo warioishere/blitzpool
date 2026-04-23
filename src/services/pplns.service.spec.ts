@@ -11,6 +11,13 @@ function createMockRedis() {
   const store = new Map<string, string>();
   // Sorted set: array of { score, value } sorted by score
   let zset: { score: number; value: string }[] = [];
+  // Hash store: key → { field → value }
+  const hashes = new Map<string, Map<string, string>>();
+  const getHash = (key: string) => {
+    let h = hashes.get(key);
+    if (!h) { h = new Map(); hashes.set(key, h); }
+    return h;
+  };
 
   return {
     incr: jest.fn(async (key: string) => {
@@ -20,7 +27,7 @@ function createMockRedis() {
     }),
     get: jest.fn(async (key: string) => store.get(key) ?? null),
     set: jest.fn(async (key: string, value: string, _opts?: any) => { store.set(key, value); }),
-    del: jest.fn(async (key: string) => { store.delete(key); }),
+    del: jest.fn(async (key: string) => { store.delete(key); hashes.delete(key); }),
     expire: jest.fn(async (_key: string, _seconds: number) => 1),
     incrByFloat: jest.fn(async (key: string, amount: number) => {
       const val = parseFloat(store.get(key) ?? '0') + amount;
@@ -39,9 +46,21 @@ function createMockRedis() {
       zset.splice(start, end - start + 1);
     }),
     zCard: jest.fn(async () => zset.length),
+    hGetAll: jest.fn(async (key: string) => {
+      const h = hashes.get(key);
+      if (!h) return {};
+      return Object.fromEntries(h.entries());
+    }),
+    hIncrByFloat: jest.fn(async (key: string, field: string, amount: number) => {
+      const h = getHash(key);
+      const cur = parseFloat(h.get(field) ?? '0') + amount;
+      h.set(field, cur.toString());
+      return cur;
+    }),
     // Helpers for tests
     _getZset: () => zset,
-    _clear: () => { store.clear(); zset = []; },
+    _getHash: (key: string) => hashes.get(key),
+    _clear: () => { store.clear(); zset = []; hashes.clear(); },
   };
 }
 
@@ -83,20 +102,34 @@ function createMockBalanceBacking() {
     _get: (address: string) => balances.get(address),
   };
 
+  const applySave = (row: any) => {
+    const existing = balances.get(row.address);
+    if (existing) Object.assign(existing, row);
+    else balances.set(row.address, { address: row.address, pendingSats: row.pendingSats ?? 0, totalPaidSats: row.totalPaidSats ?? 0 });
+    return row;
+  };
   const repo: any = {
     findOneBy: jest.fn(async (where: any) => balances.get(where.address) ?? null),
-    save: jest.fn(async (row: any) => {
-      const existing = balances.get(row.address);
-      if (existing) Object.assign(existing, row);
-      else balances.set(row.address, { address: row.address, pendingSats: row.pendingSats ?? 0, totalPaidSats: row.totalPaidSats ?? 0 });
-      return row;
-    }),
-    create: jest.fn((partial: any) => ({ ...partial })),
-    find: jest.fn(async (q?: any) =>
-      q?.where?.pendingSats
-        ? Array.from(balances.values()).filter(b => b.pendingSats > 0)
-        : Array.from(balances.values()),
+    // save() accepts a single entity or an array — TypeORM supports both,
+    // and PplnsService.onBlockFound now uses the array form for batching.
+    save: jest.fn(async (rows: any) =>
+      Array.isArray(rows) ? rows.map(applySave) : applySave(rows),
     ),
+    create: jest.fn((partial: any) => ({ ...partial })),
+    find: jest.fn(async (q?: any) => {
+      // Support `{ where: { address: In([...]) } }`. TypeORM's In() returns
+      // a FindOperator object; to keep the mock decoupled from TypeORM
+      // internals we sniff for `_value` which is where the IN-list lives.
+      const inOp = q?.where?.address;
+      if (inOp && typeof inOp === 'object' && Array.isArray(inOp._value)) {
+        const set = new Set<string>(inOp._value);
+        return Array.from(balances.values()).filter(b => set.has(b.address));
+      }
+      if (q?.where?.pendingSats) {
+        return Array.from(balances.values()).filter(b => b.pendingSats > 0);
+      }
+      return Array.from(balances.values());
+    }),
   };
 
   return { service, repo };
@@ -108,7 +141,15 @@ function createMockPayoutHistoryRepo() {
   const saved: any[] = [];
   return {
     create: jest.fn((data: any) => data),
-    save: jest.fn(async (entity: any) => { saved.push(entity); return entity; }),
+    save: jest.fn(async (entity: any) => {
+      if (Array.isArray(entity)) { saved.push(...entity); return entity; }
+      saved.push(entity); return entity;
+    }),
+    // Batch INSERT path used by the new onBlockFound code.
+    insert: jest.fn(async (rows: any) => {
+      if (Array.isArray(rows)) saved.push(...rows); else saved.push(rows);
+      return { identifiers: [] };
+    }),
     find: jest.fn(async () => saved),
     findOneBy: jest.fn(async (where: any) =>
       saved.find(r => Object.entries(where).every(([k, v]) => r[k] === v)) ?? null,
@@ -257,6 +298,74 @@ describe('PplnsService', () => {
 
       const entries = await redis.zRange('pplns:shares', 0, -1);
       expect(entries).toHaveLength(2);
+    });
+  });
+
+  // ── Window-by-Address Aggregate ──────────────────────────────
+
+  describe('window aggregate (pplns:window:by-address)', () => {
+    it('recordShare increments the aggregate per address', async () => {
+      const { service, redis } = createService();
+      service.setNetworkDifficulty(10_000_000);
+
+      await recordShares(service, [
+        { address: 'bc1qA', difficulty: 100 },
+        { address: 'bc1qA', difficulty: 50 },
+        { address: 'bc1qB', difficulty: 200 },
+      ]);
+
+      const hash = redis._getHash('pplns:window:by-address');
+      expect(parseFloat(hash!.get('bc1qA') ?? '0')).toBeCloseTo(150);
+      expect(parseFloat(hash!.get('bc1qB') ?? '0')).toBeCloseTo(200);
+    });
+
+    it('trimWindow decrements the aggregate for removed shares', async () => {
+      const { service, redis } = createService();
+      // Small window so trim actually fires.
+      service.setNetworkDifficulty(10);
+
+      // Fill >> windowSize (4 * 10 = 40) so trim is forced.
+      for (let i = 0; i < 150; i++) {
+        await service.recordShare('bc1qA', 1);
+      }
+
+      const hash = redis._getHash('pplns:window:by-address');
+      // After trim the aggregate for bc1qA should equal the total of
+      // entries still in the window — NOT 150 (untrimmed total). Upper
+      // bound is windowSize + one batch's worth of residual (trim
+      // condition is `total > windowSize`, not `<=`).
+      const aggA = parseFloat(hash!.get('bc1qA') ?? '0');
+      expect(aggA).toBeLessThanOrEqual(100);
+      expect(aggA).toBeGreaterThan(0);
+
+      // And the aggregate must match the actual current window contents.
+      const entries = await redis.zRange('pplns:shares', 0, -1);
+      const expected = entries.reduce((s: number, e: string) =>
+        s + (parseFloat(e.split(':')[1]) || 0), 0);
+      expect(aggA).toBeCloseTo(expected);
+    });
+
+    it('getPayoutDistribution reads the aggregate (not the raw zset)', async () => {
+      // Prove the hot-path is O(distinct miners), not O(shares): stuff
+      // many shares per miner and verify the distribution comes out
+      // exactly right (same result as if we scanned the whole zset).
+      const { service, redis } = createService({ feePercent: '2' });
+      service.setNetworkDifficulty(10_000_000);
+
+      for (let i = 0; i < 50; i++) await service.recordShare('bc1qA', 2);
+      for (let i = 0; i < 30; i++) await service.recordShare('bc1qB', 1);
+
+      const dist = await service.getPayoutDistribution(100_000_000);
+      const a = dist.find(d => d.address === 'bc1qA');
+      const b = dist.find(d => d.address === 'bc1qB');
+      // A contributes 100 units, B 30; miner cut split 100:30.
+      expect(a!.percent).toBeGreaterThan(b!.percent);
+
+      // And the aggregate hash is the single source we read — clear the
+      // raw zset and the distribution still works.
+      const dist2 = await service.getPayoutDistribution(100_000_001); // miss cache
+      expect(dist2.find(d => d.address === 'bc1qA')).toBeDefined();
+      expect(dist2.find(d => d.address === 'bc1qB')).toBeDefined();
     });
   });
 

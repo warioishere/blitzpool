@@ -100,13 +100,53 @@ function createMockGroupService() {
 
 function createMockRepo<T>() {
     const rows: T[] = [];
+    // Upsert-style save: match by id / (address, groupId) / address so
+    // calling save() multiple times on the same logical entity updates
+    // the existing row instead of appending duplicate copies. Entries
+    // without any matching key (fresh history rows) are pushed as new.
+    // Accepts either a single entity or an array (TypeORM supports both,
+    // batch-aware onBlockFound uses the array form).
+    const applySave = (row: T) => {
+        const r = row as any;
+        let existing: any = null;
+        if (r?.id !== undefined) {
+            existing = (rows as any[]).find(x => x.id === r.id);
+        } else if (r?.address !== undefined && r?.groupId !== undefined) {
+            existing = (rows as any[]).find(x => x.address === r.address && x.groupId === r.groupId);
+        } else if (r?.address !== undefined) {
+            existing = (rows as any[]).find(x => x.address === r.address);
+        }
+        if (existing) {
+            Object.assign(existing, row);
+        } else {
+            rows.push(row); // push reference so downstream mutations reflect
+        }
+    };
     return {
-        save: jest.fn(async (row: T) => { rows.push({ ...row }); return row; }),
+        save: jest.fn(async (arg: T | T[]) => {
+            const batch = Array.isArray(arg) ? arg : [arg];
+            for (const row of batch) applySave(row);
+            return arg;
+        }),
+        // Batch INSERT — appends all rows without upsert. Used by the
+        // new batch-aware onBlockFound history-writing path.
+        insert: jest.fn(async (arg: T | T[]) => {
+            const batch = Array.isArray(arg) ? arg : [arg];
+            for (const row of batch) rows.push(row);
+            return { identifiers: [] };
+        }),
         create: jest.fn((partial: Partial<T>) => ({ ...partial }) as T),
         find: jest.fn(async (query?: any) => {
             if (!query?.where) return [...rows];
             return (rows as any[]).filter(r =>
-                Object.entries(query.where).every(([k, v]) => r[k] === v),
+                Object.entries(query.where).every(([k, v]) => {
+                    // Support TypeORM's In() operator: FindOperator carries
+                    // its value in `_value` for any field, not just address.
+                    if (v && typeof v === 'object' && Array.isArray((v as any)._value)) {
+                        return new Set((v as any)._value).has((r as any)[k]);
+                    }
+                    return (r as any)[k] === v;
+                }),
             );
         }),
         findOneBy: jest.fn(async (where: any) => {

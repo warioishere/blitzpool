@@ -141,13 +141,40 @@ function createMockRedis() {
 
 function createMockRepo<T>() {
     const rows: T[] = [];
+    const applySave = (row: T) => {
+        const r = row as any;
+        let existing: any = null;
+        if (r?.id !== undefined) {
+            existing = (rows as any[]).find(x => x.id === r.id);
+        } else if (r?.address !== undefined && r?.groupId !== undefined) {
+            existing = (rows as any[]).find(x => x.address === r.address && x.groupId === r.groupId);
+        } else if (r?.address !== undefined) {
+            existing = (rows as any[]).find(x => x.address === r.address);
+        }
+        if (existing) Object.assign(existing, row);
+        else rows.push(row);
+    };
     return {
-        save: async (row: T) => { rows.push({ ...row }); return row; },
+        save: async (arg: T | T[]) => {
+            const batch = Array.isArray(arg) ? arg : [arg];
+            for (const row of batch) applySave(row);
+            return arg;
+        },
+        insert: async (arg: T | T[]) => {
+            const batch = Array.isArray(arg) ? arg : [arg];
+            for (const row of batch) rows.push(row);
+            return { identifiers: [] };
+        },
         create: (partial: Partial<T>) => ({ ...partial }) as T,
         find: async (query?: any) => {
             if (!query?.where) return [...rows];
             return (rows as any[]).filter(r =>
-                Object.entries(query.where).every(([k, v]) => r[k] === v),
+                Object.entries(query.where).every(([k, v]) => {
+                    if (v && typeof v === 'object' && Array.isArray((v as any)._value)) {
+                        return new Set((v as any)._value).has(r[k]);
+                    }
+                    return r[k] === v;
+                }),
             );
         },
         findOneBy: async (where: any) =>

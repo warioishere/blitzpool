@@ -70,6 +70,12 @@ function createMockJobTemplate(height = 800_000): IJobTemplate {
 function createMockRedis() {
   const store = new Map<string, string>();
   let zset: { score: number; value: string }[] = [];
+  const hashes = new Map<string, Map<string, string>>();
+  const getHash = (key: string) => {
+    let h = hashes.get(key);
+    if (!h) { h = new Map(); hashes.set(key, h); }
+    return h;
+  };
 
   return {
     incr: jest.fn(async (key: string) => {
@@ -79,7 +85,7 @@ function createMockRedis() {
     }),
     get: jest.fn(async (key: string) => store.get(key) ?? null),
     set: jest.fn(async (key: string, value: string, _opts?: any) => { store.set(key, value); }),
-    del: jest.fn(async (key: string) => { store.delete(key); }),
+    del: jest.fn(async (key: string) => { store.delete(key); hashes.delete(key); }),
     expire: jest.fn(async (_key: string, _seconds: number) => 1),
     incrByFloat: jest.fn(async (key: string, amount: number) => {
       const val = parseFloat(store.get(key) ?? '0') + amount;
@@ -98,6 +104,17 @@ function createMockRedis() {
       zset.splice(start, end - start + 1);
     }),
     zCard: jest.fn(async () => zset.length),
+    hGetAll: jest.fn(async (key: string) => {
+      const h = hashes.get(key);
+      if (!h) return {};
+      return Object.fromEntries(h.entries());
+    }),
+    hIncrByFloat: jest.fn(async (key: string, field: string, amount: number) => {
+      const h = getHash(key);
+      const cur = parseFloat(h.get(field) ?? '0') + amount;
+      h.set(field, cur.toString());
+      return cur;
+    }),
   };
 }
 
@@ -124,20 +141,29 @@ function createMockBalanceBacking() {
     touchLastAcceptedShareAt: jest.fn(async () => undefined),
     _get: (address: string) => balances.get(address),
   };
+  const applySave = (row: any) => {
+    const existing = balances.get(row.address);
+    if (existing) Object.assign(existing, row);
+    else balances.set(row.address, { address: row.address, pendingSats: row.pendingSats ?? 0, totalPaidSats: row.totalPaidSats ?? 0 });
+    return row;
+  };
   const repo: any = {
     findOneBy: jest.fn(async (where: any) => balances.get(where.address) ?? null),
-    save: jest.fn(async (row: any) => {
-      const existing = balances.get(row.address);
-      if (existing) Object.assign(existing, row);
-      else balances.set(row.address, { address: row.address, pendingSats: row.pendingSats ?? 0, totalPaidSats: row.totalPaidSats ?? 0 });
-      return row;
-    }),
-    create: jest.fn((partial: any) => ({ ...partial })),
-    find: jest.fn(async (q?: any) =>
-      q?.where?.pendingSats
-        ? Array.from(balances.values()).filter(b => b.pendingSats > 0)
-        : Array.from(balances.values()),
+    save: jest.fn(async (arg: any) =>
+      Array.isArray(arg) ? arg.map(applySave) : applySave(arg),
     ),
+    create: jest.fn((partial: any) => ({ ...partial })),
+    find: jest.fn(async (q?: any) => {
+      const inOp = q?.where?.address;
+      if (inOp && typeof inOp === 'object' && Array.isArray(inOp._value)) {
+        const set = new Set<string>(inOp._value);
+        return Array.from(balances.values()).filter(b => set.has(b.address));
+      }
+      if (q?.where?.pendingSats) {
+        return Array.from(balances.values()).filter(b => b.pendingSats > 0);
+      }
+      return Array.from(balances.values());
+    }),
   };
   return { service, repo };
 }
@@ -146,7 +172,14 @@ function createMockPayoutHistoryRepo() {
   const saved: any[] = [];
   return {
     create: jest.fn((data: any) => data),
-    save: jest.fn(async (entity: any) => { saved.push(entity); return entity; }),
+    save: jest.fn(async (entity: any) => {
+      if (Array.isArray(entity)) { saved.push(...entity); return entity; }
+      saved.push(entity); return entity;
+    }),
+    insert: jest.fn(async (rows: any) => {
+      if (Array.isArray(rows)) saved.push(...rows); else saved.push(rows);
+      return { identifiers: [] };
+    }),
     find: jest.fn(async () => saved),
     findOneBy: jest.fn(async (where: any) =>
       saved.find(r => Object.entries(where).every(([k, v]) => r[k] === v)) ?? null,

@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { PplnsGroupBlockHistoryEntity } from '../ORM/pplns-group/pplns-group-block-history.entity';
 import { PplnsGroupBalanceEntity } from '../ORM/pplns-group/pplns-group-balance.entity';
 import { GroupService } from './group.service';
@@ -338,24 +338,59 @@ export class GroupSoloService implements OnModuleInit {
             const keys = redisKeys(groupId);
             const windowEntries = await this.redis.zRange(keys.shares, 0, -1);
 
+            // Aggregate window diff per-address once (O(shares) but bounded
+            // by round — group-solo resets per block, so it never grows
+            // unbounded the way PPLNS does).
+            const addressDiff = new Map<string, number>();
+            let totalDiff = 0;
+            if (windowEntries && windowEntries.length > 0) {
+                for (const e of windowEntries) {
+                    const [addr, diffStr] = e.split(':');
+                    const diff = parseFloat(diffStr) || 0;
+                    addressDiff.set(addr, (addressDiff.get(addr) ?? 0) + diff);
+                    totalDiff += diff;
+                }
+            }
+
             try {
                 await this.historyRepo.manager.transaction(async (em) => {
                     const historyRepo = em.getRepository(PplnsGroupBlockHistoryEntity);
                     const balanceRepo = em.getRepository(PplnsGroupBalanceEntity);
+
+                    // Single IN-list fetch for every balance row we might
+                    // touch — snapshot miners (non-fee) + window miners that
+                    // were considered. At 2 000 miners in a group this is
+                    // one query instead of ~2 000 findOneBy round-trips.
+                    const addrsNeedingBalance = new Set<string>();
+                    for (const d of snapshot.distribution) {
+                        if (d.address !== this.feeAddress) addrsNeedingBalance.add(d.address);
+                    }
+                    for (const addr of addressDiff.keys()) {
+                        if (!snapshotAddrs.has(addr) && snapshot.consideredAddresses.has(addr)) {
+                            addrsNeedingBalance.add(addr);
+                        }
+                    }
+                    const existingBalances = addrsNeedingBalance.size > 0
+                        ? await balanceRepo.find({ where: { groupId, address: In(Array.from(addrsNeedingBalance)) } })
+                        : [];
+                    const balanceMap = new Map(existingBalances.map(b => [b.address, b]));
+
+                    const balancesToSave = new Map<string, PplnsGroupBalanceEntity>();
+                    const historyRows: PplnsGroupBlockHistoryEntity[] = [];
 
                     // Miners in the snapshot get paid via coinbase; clear any prior pending.
                     for (const d of snapshot.distribution) {
                         const paidSats = Math.floor((d.percent / 100) * reward);
                         const isFee = d.address === this.feeAddress;
                         if (!isFee) {
-                            const existing = await balanceRepo.findOneBy({ address: d.address, groupId });
+                            const existing = balanceMap.get(d.address);
                             if (existing && existing.pendingSats > 0) {
                                 existing.totalPaidSats += existing.pendingSats;
                                 existing.pendingSats = 0;
-                                await balanceRepo.save(existing);
+                                balancesToSave.set(existing.address, existing);
                             }
                         }
-                        await historyRepo.save(historyRepo.create({
+                        historyRows.push(historyRepo.create({
                             groupId, blockHeight, address: d.address,
                             paidSats, percent: d.percent,
                             sharesInRound: 0, totalSharesInRound: 0,
@@ -366,56 +401,55 @@ export class GroupSoloService implements OnModuleInit {
                     // For each window address not in snapshot.distribution:
                     //   - was considered (sub-dust / weight-trimmed) → credit to pending
                     //   - not considered (late arriver) → audit row only
-                    if (windowEntries && windowEntries.length > 0) {
-                        const addressDiff = new Map<string, number>();
-                        let totalDiff = 0;
-                        for (const e of windowEntries) {
-                            const [addr, diffStr] = e.split(':');
-                            const diff = parseFloat(diffStr) || 0;
-                            addressDiff.set(addr, (addressDiff.get(addr) ?? 0) + diff);
-                            totalDiff += diff;
-                        }
-                        const rewardForMiners = Math.floor(((100 - this.feePercent) / 100) * reward);
-                        for (const [addr, diff] of addressDiff) {
-                            if (snapshotAddrs.has(addr)) continue;
-                            const wasConsidered = snapshot.consideredAddresses.has(addr);
-                            if (wasConsidered) {
-                                const sats = Math.floor((diff / totalDiff) * rewardForMiners);
-                                if (sats > 0) {
-                                    const now = new Date();
-                                    const existing = await balanceRepo.findOneBy({ address: addr, groupId });
-                                    if (existing) {
-                                        existing.pendingSats += sats;
-                                        existing.lastAcceptedShareAt = now;
-                                        await balanceRepo.save(existing);
-                                    } else {
-                                        await balanceRepo.save(balanceRepo.create({
-                                            address: addr, groupId, pendingSats: sats, totalPaidSats: 0,
-                                            lastAcceptedShareAt: now,
-                                        }));
-                                    }
-                                    await historyRepo.save(historyRepo.create({
-                                        groupId, blockHeight, address: addr,
-                                        paidSats: sats,
-                                        percent: (diff / totalDiff) * (100 - this.feePercent),
-                                        sharesInRound: Math.round(diff),
-                                        totalSharesInRound: Math.round(totalDiff),
-                                        inCoinbase: false, rowType: 'pending',
-                                    }));
+                    const rewardForMiners = Math.floor(((100 - this.feePercent) / 100) * reward);
+                    for (const [addr, diff] of addressDiff) {
+                        if (snapshotAddrs.has(addr)) continue;
+                        const wasConsidered = snapshot.consideredAddresses.has(addr);
+                        if (wasConsidered) {
+                            const sats = totalDiff > 0 ? Math.floor((diff / totalDiff) * rewardForMiners) : 0;
+                            if (sats > 0) {
+                                const now = new Date();
+                                let existing = balanceMap.get(addr);
+                                if (!existing) {
+                                    existing = balanceRepo.create({
+                                        address: addr, groupId, pendingSats: 0, totalPaidSats: 0,
+                                        lastAcceptedShareAt: now,
+                                    });
+                                    balanceMap.set(addr, existing);
                                 }
-                            } else {
-                                // Late arriver — audit row only, no payout.
-                                await historyRepo.save(historyRepo.create({
+                                existing.pendingSats += sats;
+                                existing.lastAcceptedShareAt = now;
+                                balancesToSave.set(existing.address, existing);
+                                historyRows.push(historyRepo.create({
                                     groupId, blockHeight, address: addr,
-                                    paidSats: 0,
-                                    percent: 0,
+                                    paidSats: sats,
+                                    percent: (diff / totalDiff) * (100 - this.feePercent),
                                     sharesInRound: Math.round(diff),
                                     totalSharesInRound: Math.round(totalDiff),
                                     inCoinbase: false, rowType: 'pending',
                                 }));
-                                console.log(`[GroupSolo]   ${addr}: ${diff.toFixed(2)} shares in round but not in coinbase snapshot (late arrival, PROP rules)`);
                             }
+                        } else {
+                            // Late arriver — audit row only, no payout.
+                            historyRows.push(historyRepo.create({
+                                groupId, blockHeight, address: addr,
+                                paidSats: 0,
+                                percent: 0,
+                                sharesInRound: Math.round(diff),
+                                totalSharesInRound: Math.round(totalDiff),
+                                inCoinbase: false, rowType: 'pending',
+                            }));
+                            console.log(`[GroupSolo]   ${addr}: ${diff.toFixed(2)} shares in round but not in coinbase snapshot (late arrival, PROP rules)`);
                         }
+                    }
+
+                    // Batch persist — one save for balances, one insert for
+                    // history rows. Replaces the O(miners) round-trip pattern.
+                    if (balancesToSave.size > 0) {
+                        await balanceRepo.save(Array.from(balancesToSave.values()));
+                    }
+                    if (historyRows.length > 0) {
+                        await historyRepo.insert(historyRows);
                     }
                 });
             } catch (e: any) {
@@ -472,11 +506,20 @@ export class GroupSoloService implements OnModuleInit {
                 const historyRepo = em.getRepository(PplnsGroupBlockHistoryEntity);
                 const balanceRepo = em.getRepository(PplnsGroupBalanceEntity);
 
+                // Existing pending rows were already fetched above into
+                // pendingEntities (needed for totalPending). Index them
+                // here for the per-miner loop; no additional findOneBy
+                // round-trips required.
+                const balanceMap = new Map(pendingEntities.map(p => [p.address, p]));
+
+                const balancesToSave = new Map<string, PplnsGroupBalanceEntity>();
+                const historyRows: PplnsGroupBlockHistoryEntity[] = [];
                 const now = new Date();
+
                 for (const [addr, diff] of addressDiff) {
                     const ratio = diff / totalDiff;
                     const sats = Math.floor(ratio * effectiveMinerReward);
-                    const existing = await balanceRepo.findOneBy({ address: addr, groupId });
+                    let existing = balanceMap.get(addr);
                     const pending = existing?.pendingSats ?? 0;
                     const totalSats = sats + pending;
                     const percent = (totalSats / blockRewardSats) * 100;
@@ -486,9 +529,9 @@ export class GroupSoloService implements OnModuleInit {
                             existing.totalPaidSats += pending;
                             existing.pendingSats = 0;
                             existing.lastAcceptedShareAt = now;
-                            await balanceRepo.save(existing);
+                            balancesToSave.set(existing.address, existing);
                         }
-                        await historyRepo.save(historyRepo.create({
+                        historyRows.push(historyRepo.create({
                             groupId, blockHeight, address: addr,
                             paidSats: totalSats, percent,
                             sharesInRound: Math.round(diff),
@@ -496,17 +539,17 @@ export class GroupSoloService implements OnModuleInit {
                             inCoinbase: true, rowType: 'coinbase',
                         }));
                     } else if (sats > 0) {
-                        if (existing) {
-                            existing.pendingSats += sats;
-                            existing.lastAcceptedShareAt = now;
-                            await balanceRepo.save(existing);
-                        } else {
-                            await balanceRepo.save(balanceRepo.create({
-                                address: addr, groupId, pendingSats: sats, totalPaidSats: 0,
+                        if (!existing) {
+                            existing = balanceRepo.create({
+                                address: addr, groupId, pendingSats: 0, totalPaidSats: 0,
                                 lastAcceptedShareAt: now,
-                            }));
+                            });
+                            balanceMap.set(addr, existing);
                         }
-                        await historyRepo.save(historyRepo.create({
+                        existing.pendingSats += sats;
+                        existing.lastAcceptedShareAt = now;
+                        balancesToSave.set(existing.address, existing);
+                        historyRows.push(historyRepo.create({
                             groupId, blockHeight, address: addr,
                             paidSats: sats, percent,
                             sharesInRound: Math.round(diff),
@@ -519,7 +562,7 @@ export class GroupSoloService implements OnModuleInit {
                 if (this.feeAddress) {
                     const feeSats = blockRewardSats - rewardForMiners;
                     if (feeSats >= DUST_LIMIT_SATS) {
-                        await historyRepo.save(historyRepo.create({
+                        historyRows.push(historyRepo.create({
                             groupId, blockHeight, address: this.feeAddress,
                             paidSats: feeSats, percent: this.feePercent,
                             sharesInRound: 0, totalSharesInRound: 0,
@@ -528,6 +571,13 @@ export class GroupSoloService implements OnModuleInit {
                     } else {
                         console.warn(`[GroupSolo] Fallback: fee output ${feeSats} sats < dust — not recording fee history row`);
                     }
+                }
+
+                if (balancesToSave.size > 0) {
+                    await balanceRepo.save(Array.from(balancesToSave.values()));
+                }
+                if (historyRows.length > 0) {
+                    await historyRepo.insert(historyRows);
                 }
             });
         } catch (e: any) {

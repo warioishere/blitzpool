@@ -63,9 +63,14 @@ function rpcCall(method: string, params: any[] = []): Promise<any> {
 function createMockRedis() {
     const store = new Map<string, string>();
     const zsets = new Map<string, { score: number; value: string }[]>();
+    const hashes = new Map<string, Map<string, string>>();
     const getZ = (key: string) => {
         if (!zsets.has(key)) zsets.set(key, []);
         return zsets.get(key)!;
+    };
+    const getH = (key: string) => {
+        if (!hashes.has(key)) hashes.set(key, new Map());
+        return hashes.get(key)!;
     };
     return {
         incr: async (key: string) => {
@@ -75,7 +80,7 @@ function createMockRedis() {
         },
         get: async (key: string) => store.get(key) ?? null,
         set: async (key: string, value: string, _opts?: any) => { store.set(key, value); },
-        del: async (key: string) => { store.delete(key); zsets.delete(key); },
+        del: async (key: string) => { store.delete(key); zsets.delete(key); hashes.delete(key); },
         expire: async () => 1,
         incrByFloat: async (key: string, amount: number) => {
             const v = parseFloat(store.get(key) ?? '0') + amount;
@@ -97,6 +102,17 @@ function createMockRedis() {
             const z = getZ(key);
             const e = end === -1 ? z.length - 1 : end;
             z.splice(start, e - start + 1);
+        },
+        hGetAll: async (key: string) => {
+            const h = hashes.get(key);
+            if (!h) return {};
+            return Object.fromEntries(h.entries());
+        },
+        hIncrByFloat: async (key: string, field: string, amount: number) => {
+            const h = getH(key);
+            const cur = parseFloat(h.get(field) ?? '0') + amount;
+            h.set(field, cur.toString());
+            return cur;
         },
         _store: store,
         _zsets: zsets,
@@ -128,16 +144,31 @@ function createMockBalanceBacking() {
         touchLastAcceptedShareAt: async (_addr: string) => undefined,
         _rows: rows,
     };
+    const applySave = (row: any) => {
+        const existing = find(row.address);
+        if (existing) Object.assign(existing, row);
+        else rows.push(row);
+        return row;
+    };
     const repo: any = {
         findOneBy: async (where: any) => find(where.address) ?? null,
-        save: async (row: any) => {
-            const existing = find(row.address);
-            if (existing) Object.assign(existing, row);
-            else rows.push({ ...row });
-            return row;
+        save: async (arg: any) =>
+            Array.isArray(arg) ? arg.map(applySave) : applySave(arg),
+        insert: async (arg: any) => {
+            const batch = Array.isArray(arg) ? arg : [arg];
+            for (const row of batch) rows.push(row);
+            return { identifiers: [] };
         },
         create: (partial: any) => ({ ...partial }),
-        find: async (q: any) => q?.where?.pendingSats ? rows.filter((r: any) => r.pendingSats > 0) : [...rows],
+        find: async (q: any) => {
+            const inOp = q?.where?.address;
+            if (inOp && typeof inOp === 'object' && Array.isArray(inOp._value)) {
+                const set = new Set<string>(inOp._value);
+                return rows.filter((r: any) => set.has(r.address));
+            }
+            if (q?.where?.pendingSats) return rows.filter((r: any) => r.pendingSats > 0);
+            return [...rows];
+        },
         _rows: rows,
     };
     return { service, repo, _rows: rows };
@@ -148,7 +179,15 @@ function createMockHistoryRepo() {
     // findOneBy lets the idempotency pre-check work: returns first matching row
     // (by blockHeight) if present.
     const repo: any = {
-        save: async (row: any) => { rows.push({ ...row }); return row; },
+        save: async (arg: any) => {
+            if (Array.isArray(arg)) { for (const r of arg) rows.push(r); return arg; }
+            rows.push(arg); return arg;
+        },
+        insert: async (arg: any) => {
+            const batch = Array.isArray(arg) ? arg : [arg];
+            for (const row of batch) rows.push(row);
+            return { identifiers: [] };
+        },
         create: (partial: any) => ({ ...partial }),
         findOneBy: async (where: any) =>
             rows.find((r: any) => Object.entries(where).every(([k, v]) => r[k] === v)) ?? null,

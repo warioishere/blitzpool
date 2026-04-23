@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
 import { InjectRepository } from '@nestjs/typeorm';
-import { EntityManager, Repository } from 'typeorm';
+import { EntityManager, In, Repository } from 'typeorm';
 import { Subscription } from 'rxjs';
 import { PplnsBalanceService } from '../ORM/pplns-balance/pplns-balance.service';
 import { PplnsBalanceEntity } from '../ORM/pplns-balance/pplns-balance.entity';
@@ -31,6 +31,18 @@ const PPLNS_WINDOW_FACTOR = 4;
 const REDIS_KEY_SHARES = 'pplns:shares';
 const REDIS_KEY_COUNTER = 'pplns:counter';
 const REDIS_KEY_WINDOW_TOTAL = 'pplns:window:total';
+// Per-address diff-1 aggregate for the current window. Maintained in lock-
+// step with REDIS_KEY_SHARES: recordShare increments, trimWindow decrements.
+// Hot-path readers (getPayoutDistribution, onBlockFound) use hGetAll on this
+// hash instead of zRange 0 -1 over the raw share set, so lookup cost is O(N
+// distinct miners) rather than O(M individual shares). At 2 000 miners ×
+// ~1 share/second the raw set holds >1M entries in a normal window — the
+// aggregate is a handful of kilobytes.
+//
+// Drift: hIncrByFloat accumulates float error over very long runs. Same
+// failsafe as REDIS_KEY_WINDOW_TOTAL — every 1000 trims we do a full
+// recalculate from REDIS_KEY_SHARES to reset accumulated drift.
+const REDIS_KEY_WINDOW_BY_ADDRESS = 'pplns:window:by-address';
 // Coinbase snapshot — JSON-encoded distribution that was actually used to
 // build the latest coinbase. Persisted in Redis (not an in-memory Map) so
 // a pool restart between getPayoutDistribution and onBlockFound doesn't
@@ -199,6 +211,9 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         const entry = `${address}:${difficulty}:${Date.now()}`;
         await this.redis.zAdd(REDIS_KEY_SHARES, { score: counter, value: entry });
         await this.redis.incrByFloat(REDIS_KEY_WINDOW_TOTAL, difficulty);
+        // Maintain the per-address aggregate in lock-step with the raw
+        // share set so hot-path readers can skip the zRange 0 -1 scan.
+        await this.redis.hIncrByFloat(REDIS_KEY_WINDOW_BY_ADDRESS, address, difficulty);
 
         // Invalidate cached distribution — share weights changed
         this.cachedDistribution = null;
@@ -231,23 +246,63 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
             if (!oldest || oldest.length === 0) break;
 
             let removedDiff = 0;
+            // Group removed diff per-address so we can decrement the
+            // per-address aggregate with one hIncrByFloat per miner
+            // instead of one per share.
+            const removedByAddr = new Map<string, number>();
             for (const entry of oldest) {
                 const parts = entry.split(':');
-                removedDiff += parseFloat(parts[1]) || 0;
+                const diff = parseFloat(parts[1]) || 0;
+                removedDiff += diff;
+                removedByAddr.set(parts[0], (removedByAddr.get(parts[0]) ?? 0) + diff);
             }
 
             await this.redis.zRemRangeByRank(REDIS_KEY_SHARES, 0, oldest.length - 1);
             total -= removedDiff;
+
+            for (const [addr, d] of removedByAddr) {
+                await this.redis.hIncrByFloat(REDIS_KEY_WINDOW_BY_ADDRESS, addr, -d);
+            }
         }
 
         this.trimCounter++;
 
-        // Every 1000 trims, recalculate total from sorted set to fix float drift
+        // Every 1000 trims, recalculate total + per-address aggregate from
+        // the raw sorted set to fix accumulated float drift. Same failsafe
+        // cadence as the existing window-total recalc.
         if (this.trimCounter % 1000 === 0) {
             total = await this.recalculateWindowTotal();
+            await this.recalculateWindowByAddress();
         }
 
         await this.redis.set(REDIS_KEY_WINDOW_TOTAL, total.toString());
+    }
+
+    /**
+     * Recalculate the per-address window aggregate by scanning the raw
+     * sorted set. Expensive (O(M shares)) but runs at most every 1000
+     * trims, so amortized cost per share is tiny. Zero-or-negative entries
+     * are removed from the hash to keep `hGetAll` cheap for downstream
+     * readers.
+     */
+    private async recalculateWindowByAddress(): Promise<void> {
+        const entries = await this.redis.zRange(REDIS_KEY_SHARES, 0, -1);
+        const byAddr = new Map<string, number>();
+        for (const entry of (entries ?? [])) {
+            const parts = entry.split(':');
+            const diff = parseFloat(parts[1]) || 0;
+            byAddr.set(parts[0], (byAddr.get(parts[0]) ?? 0) + diff);
+        }
+        // Rebuild atomically: clear then repopulate. At the volumes the
+        // recalc runs (every 1000 trims), the brief hGetAll-miss window
+        // is a non-issue — getPayoutDistribution returns fallback-to-fee
+        // if the aggregate reads empty, and the next recordShare repopulates.
+        await this.redis.del(REDIS_KEY_WINDOW_BY_ADDRESS);
+        for (const [addr, diff] of byAddr) {
+            if (diff > 0) {
+                await this.redis.hIncrByFloat(REDIS_KEY_WINDOW_BY_ADDRESS, addr, diff);
+            }
+        }
     }
 
     /**
@@ -261,6 +316,31 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
             total += parseFloat(entry.split(':')[1]) || 0;
         }
         return total;
+    }
+
+    /**
+     * Read the current PPLNS window grouped by address. Uses the
+     * per-address aggregate hash (O(distinct miners)) instead of scanning
+     * the raw sorted set (O(M shares) — can be millions at scale). Falls
+     * back to the sorted-set scan if the aggregate is empty, which covers
+     * pre-this-optimization Redis state and edge cases right after a
+     * recalculate.
+     */
+    private async readWindowByAddress(): Promise<Map<string, number>> {
+        const out = new Map<string, number>();
+        const hash = (await this.redis.hGetAll(REDIS_KEY_WINDOW_BY_ADDRESS)) ?? {};
+        for (const [addr, diffStr] of Object.entries(hash)) {
+            const diff = parseFloat(diffStr as string) || 0;
+            if (diff > 0) out.set(addr, diff);
+        }
+        if (out.size > 0) return out;
+        const entries = await this.redis.zRange(REDIS_KEY_SHARES, 0, -1);
+        for (const entry of (entries ?? [])) {
+            const parts = entry.split(':');
+            const diff = parseFloat(parts[1]) || 0;
+            out.set(parts[0], (out.get(parts[0]) ?? 0) + diff);
+        }
+        return out;
     }
 
     // ── Payout Distribution ──────────────────────────────────────
@@ -285,19 +365,13 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
             return this.cachedDistribution;
         }
 
-        // 1. Read all shares from window
-        const entries = await this.redis.zRange(REDIS_KEY_SHARES, 0, -1);
-        if (!entries || entries.length === 0) {
+        // 1. Read per-address aggregate (O(distinct miners), not O(shares)).
+        //    recordShare / trimWindow keep this in lock-step with the raw
+        //    share set. readWindowByAddress handles legacy-state fallback
+        //    to the sorted-set scan.
+        const addressShares = await this.readWindowByAddress();
+        if (addressShares.size === 0) {
             return this.fallbackDistribution();
-        }
-
-        // 2. Sum difficulty per address
-        const addressShares = new Map<string, number>();
-        for (const entry of entries) {
-            const parts = entry.split(':');
-            const addr = parts[0];
-            const diff = parseFloat(parts[1]) || 0;
-            addressShares.set(addr, (addressShares.get(addr) ?? 0) + diff);
         }
 
         // 3. Load pending balances
@@ -463,27 +537,51 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
 
             const reward = snapshot.blockRewardSats;
             const snapshotAddresses = new Set(snapshot.distribution.map(d => d.address));
-            const windowEntries = await this.redis.zRange(REDIS_KEY_SHARES, 0, -1);
+            // O(distinct miners), not O(shares) — see readWindowByAddress.
+            const windowByAddr = await this.readWindowByAddress();
 
             try {
                 await this.payoutHistoryRepo.manager.transaction(async (em) => {
                     const historyRepo = em.getRepository(PplnsPayoutHistoryEntity);
                     const balanceRepo = em.getRepository(PplnsBalanceEntity);
 
+                    // Single round-trip to fetch every balance row we might
+                    // touch, instead of one findOneBy per miner. At 2 000
+                    // miners the former is ~2 000 × 2–10 ms (4–40 s per TX)
+                    // → an IN-list lookup is a single query.
+                    const addrsNeedingBalance = new Set<string>();
+                    for (const entry of snapshot.distribution) {
+                        if (entry.address !== this.feeAddress) addrsNeedingBalance.add(entry.address);
+                    }
+                    for (const addr of windowByAddr.keys()) {
+                        if (!snapshotAddresses.has(addr) && snapshot.consideredAddresses.has(addr)) {
+                            addrsNeedingBalance.add(addr);
+                        }
+                    }
+                    const existingBalances = addrsNeedingBalance.size > 0
+                        ? await balanceRepo.find({ where: { address: In(Array.from(addrsNeedingBalance)) } })
+                        : [];
+                    const balanceMap = new Map(existingBalances.map(b => [b.address, b]));
+
+                    const balancesToSave = new Map<string, PplnsBalanceEntity>();
+                    const historyRows: PplnsPayoutHistoryEntity[] = [];
+
+                    // Process snapshot distribution (fee + miners that
+                    // made it into the coinbase)
                     for (const entry of snapshot.distribution) {
                         const paidSats = Math.floor((entry.percent / 100) * reward);
                         const isFee = entry.address === this.feeAddress;
 
                         if (!isFee) {
-                            const balance = await balanceRepo.findOneBy({ address: entry.address });
+                            const balance = balanceMap.get(entry.address);
                             if (balance && balance.pendingSats > 0) {
                                 balance.totalPaidSats += balance.pendingSats;
                                 balance.pendingSats = 0;
-                                await balanceRepo.save(balance);
+                                balancesToSave.set(balance.address, balance);
                             }
                         }
 
-                        await historyRepo.save(historyRepo.create({
+                        historyRows.push(historyRepo.create({
                             blockHeight, address: entry.address, paidSats, percent: entry.percent, inCoinbase: true,
                         }));
 
@@ -504,48 +602,49 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
                     //     sliding, so the late arriver's shares stay in the
                     //     window and get paid via the NEXT block's snapshot;
                     //     crediting here in addition would be a double-pay.
-                    if (windowEntries && windowEntries.length > 0) {
-                        const addressDiff = new Map<string, number>();
-                        let totalDiff = 0;
-                        for (const e of windowEntries) {
-                            const parts = e.split(':');
-                            const diff = parseFloat(parts[1]) || 0;
-                            addressDiff.set(parts[0], (addressDiff.get(parts[0]) ?? 0) + diff);
-                            totalDiff += diff;
-                        }
-
-                        const rewardForMiners = Math.floor(((100 - this.feePercent) / 100) * reward);
-                        for (const [addr, diff] of addressDiff) {
-                            if (snapshotAddresses.has(addr)) continue;
-                            const wasConsidered = snapshot.consideredAddresses.has(addr);
-                            if (wasConsidered) {
-                                const sats = Math.floor((diff / totalDiff) * rewardForMiners);
-                                if (sats > 0) {
-                                    const now = new Date();
-                                    const existing = await balanceRepo.findOneBy({ address: addr });
-                                    if (existing) {
-                                        existing.pendingSats += sats;
-                                        existing.lastAcceptedShareAt = now;
-                                        await balanceRepo.save(existing);
-                                    } else {
-                                        await balanceRepo.save(balanceRepo.create({
-                                            address: addr, pendingSats: sats, totalPaidSats: 0,
-                                            lastAcceptedShareAt: now,
-                                        }));
-                                    }
-                                    await historyRepo.save(historyRepo.create({
-                                        blockHeight, address: addr, paidSats: sats, percent: (diff / totalDiff) * (100 - this.feePercent), inCoinbase: false, rowType: 'pending',
-                                    }));
-                                    console.log(`[PPLNS]   ${addr}: ${sats} sats → pending (sub-dust / weight-trimmed)`);
+                    const totalDiff = Array.from(windowByAddr.values()).reduce((s, v) => s + v, 0);
+                    const rewardForMiners = Math.floor(((100 - this.feePercent) / 100) * reward);
+                    for (const [addr, diff] of windowByAddr) {
+                        if (snapshotAddresses.has(addr)) continue;
+                        const wasConsidered = snapshot.consideredAddresses.has(addr);
+                        if (wasConsidered) {
+                            const sats = totalDiff > 0 ? Math.floor((diff / totalDiff) * rewardForMiners) : 0;
+                            if (sats > 0) {
+                                const now = new Date();
+                                let balance = balanceMap.get(addr);
+                                if (!balance) {
+                                    balance = balanceRepo.create({
+                                        address: addr, pendingSats: 0, totalPaidSats: 0,
+                                        lastAcceptedShareAt: now,
+                                    });
+                                    balanceMap.set(addr, balance);
                                 }
-                            } else {
-                                // Late arriver — audit row only, no payout.
-                                await historyRepo.save(historyRepo.create({
-                                    blockHeight, address: addr, paidSats: 0, percent: 0, inCoinbase: false, rowType: 'pending',
+                                balance.pendingSats += sats;
+                                balance.lastAcceptedShareAt = now;
+                                balancesToSave.set(balance.address, balance);
+                                historyRows.push(historyRepo.create({
+                                    blockHeight, address: addr, paidSats: sats, percent: (diff / totalDiff) * (100 - this.feePercent), inCoinbase: false, rowType: 'pending',
                                 }));
-                                console.log(`[PPLNS]   ${addr}: ${diff.toFixed(2)} shares in window but not in snapshot (late arrival, stays in sliding window for next block)`);
+                                console.log(`[PPLNS]   ${addr}: ${sats} sats → pending (sub-dust / weight-trimmed)`);
                             }
+                        } else {
+                            // Late arriver — audit row only, no payout.
+                            historyRows.push(historyRepo.create({
+                                blockHeight, address: addr, paidSats: 0, percent: 0, inCoinbase: false, rowType: 'pending',
+                            }));
+                            console.log(`[PPLNS]   ${addr}: ${diff.toFixed(2)} shares in window but not in snapshot (late arrival, stays in sliding window for next block)`);
                         }
+                    }
+
+                    // Batch persist everything — one save for all balance
+                    // rows, one insert for all history rows. Avoids the
+                    // O(miners) round-trip explosion of the old per-miner
+                    // save() calls.
+                    if (balancesToSave.size > 0) {
+                        await balanceRepo.save(Array.from(balancesToSave.values()));
+                    }
+                    if (historyRows.length > 0) {
+                        await historyRepo.insert(historyRows);
                     }
                 });
             } catch (e: any) {
@@ -574,16 +673,10 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
      * state (the pre-check in onBlockFound guards replay).
      */
     private async onBlockFoundFromWindow(blockHeight: number, blockRewardSats: number): Promise<void> {
-        const entries = await this.redis.zRange(REDIS_KEY_SHARES, 0, -1);
-        if (!entries || entries.length === 0) return;
+        const addressDiff = await this.readWindowByAddress();
+        if (addressDiff.size === 0) return;
 
-        const addressDiff = new Map<string, number>();
-        let totalDiff = 0;
-        for (const entry of entries) {
-            const parts = entry.split(':');
-            addressDiff.set(parts[0], (addressDiff.get(parts[0]) ?? 0) + (parseFloat(parts[1]) || 0));
-            totalDiff += parseFloat(parts[1]) || 0;
-        }
+        const totalDiff = Array.from(addressDiff.values()).reduce((s, v) => s + v, 0);
         if (totalDiff <= 0) return;
 
         const rewardForMiners = Math.floor(((100 - this.feePercent) / 100) * blockRewardSats);
@@ -596,11 +689,26 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
                 const historyRepo = em.getRepository(PplnsPayoutHistoryEntity);
                 const balanceRepo = em.getRepository(PplnsBalanceEntity);
 
+                // Single IN-list fetch for every address we might touch
+                // — window miners + pending-only miners — instead of one
+                // findOneBy per row.
+                const addrsNeedingBalance = new Set<string>([
+                    ...addressDiff.keys(),
+                    ...pendingEntities.map(e => e.address),
+                ]);
+                const existingBalances = addrsNeedingBalance.size > 0
+                    ? await balanceRepo.find({ where: { address: In(Array.from(addrsNeedingBalance)) } })
+                    : [];
+                const balanceMap = new Map(existingBalances.map(b => [b.address, b]));
+
+                const balancesToSave = new Map<string, PplnsBalanceEntity>();
+                const historyRows: PplnsPayoutHistoryEntity[] = [];
                 const now = new Date();
+
                 for (const [addr, diff] of addressDiff) {
                     const ratio = diff / totalDiff;
                     const sats = Math.floor(ratio * effectiveMinerReward);
-                    const balance = await balanceRepo.findOneBy({ address: addr });
+                    let balance = balanceMap.get(addr);
                     const pending = balance?.pendingSats ?? 0;
                     const totalSats = sats + pending;
                     const percent = (totalSats / blockRewardSats) * 100;
@@ -610,23 +718,23 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
                             balance.totalPaidSats += pending;
                             balance.pendingSats = 0;
                             balance.lastAcceptedShareAt = now;
-                            await balanceRepo.save(balance);
+                            balancesToSave.set(balance.address, balance);
                         }
-                        await historyRepo.save(historyRepo.create({
+                        historyRows.push(historyRepo.create({
                             blockHeight, address: addr, paidSats: totalSats, percent, inCoinbase: true, rowType: 'coinbase',
                         }));
                     } else if (sats > 0) {
-                        if (balance) {
-                            balance.pendingSats += sats;
-                            balance.lastAcceptedShareAt = now;
-                            await balanceRepo.save(balance);
-                        } else {
-                            await balanceRepo.save(balanceRepo.create({
-                                address: addr, pendingSats: sats, totalPaidSats: 0,
+                        if (!balance) {
+                            balance = balanceRepo.create({
+                                address: addr, pendingSats: 0, totalPaidSats: 0,
                                 lastAcceptedShareAt: now,
-                            }));
+                            });
+                            balanceMap.set(addr, balance);
                         }
-                        await historyRepo.save(historyRepo.create({
+                        balance.pendingSats += sats;
+                        balance.lastAcceptedShareAt = now;
+                        balancesToSave.set(balance.address, balance);
+                        historyRows.push(historyRepo.create({
                             blockHeight, address: addr, paidSats: sats, percent, inCoinbase: false, rowType: 'pending',
                         }));
                     }
@@ -638,13 +746,13 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
                 for (const entity of pendingEntities) {
                     if (processed.has(entity.address)) continue;
                     if (entity.pendingSats >= DUST_LIMIT_SATS) {
-                        const row = await balanceRepo.findOneBy({ address: entity.address });
+                        const row = balanceMap.get(entity.address);
                         if (row) {
-                            row.totalPaidSats += row.pendingSats;
                             const paidAmount = row.pendingSats;
+                            row.totalPaidSats += row.pendingSats;
                             row.pendingSats = 0;
-                            await balanceRepo.save(row);
-                            await historyRepo.save(historyRepo.create({
+                            balancesToSave.set(row.address, row);
+                            historyRows.push(historyRepo.create({
                                 blockHeight, address: entity.address, paidSats: paidAmount,
                                 percent: (paidAmount / blockRewardSats) * 100, inCoinbase: true,
                             }));
@@ -655,13 +763,20 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
                 if (this.feeAddress) {
                     const feeSats = Math.floor((this.feePercent / 100) * blockRewardSats);
                     if (feeSats >= DUST_LIMIT_SATS) {
-                        await historyRepo.save(historyRepo.create({
+                        historyRows.push(historyRepo.create({
                             blockHeight, address: this.feeAddress, paidSats: feeSats,
                             percent: this.feePercent, inCoinbase: true,
                         }));
                     } else {
                         console.warn(`[PPLNS] Fallback: fee output ${feeSats} sats < dust — omitting fee history row`);
                     }
+                }
+
+                if (balancesToSave.size > 0) {
+                    await balanceRepo.save(Array.from(balancesToSave.values()));
+                }
+                if (historyRows.length > 0) {
+                    await historyRepo.insert(historyRows);
                 }
             });
         } catch (e: any) {

@@ -96,22 +96,38 @@ function createMockRedis() {
 function createUniqueEnforcingHistoryRepo(uniqueFields: string[]) {
     const rows: any[] = [];
     const keyOf = (r: any) => uniqueFields.map(f => r[f]).join('|');
+    const insertOne = (row: any) => {
+        const k = keyOf(row);
+        if (rows.some(r => keyOf(r) === k)) {
+            const err: any = new Error('duplicate key value violates unique constraint');
+            err.code = '23505';
+            throw err;
+        }
+        const clone = { ...row };
+        rows.push(clone);
+        return clone;
+    };
     const repo: any = {
-        save: jest.fn(async (row: any) => {
-            const k = keyOf(row);
-            if (rows.some(r => keyOf(r) === k)) {
-                const err: any = new Error('duplicate key value violates unique constraint');
-                err.code = '23505';
-                throw err;
-            }
-            const clone = { ...row };
-            rows.push(clone);
-            return clone;
+        save: jest.fn(async (arg: any) => {
+            if (Array.isArray(arg)) return arg.map(insertOne);
+            return insertOne(arg);
+        }),
+        // Batch INSERT path — enforces the same unique constraint. Uses
+        // the same 23505-throw so onBlockFound's catch path runs.
+        insert: jest.fn(async (arg: any) => {
+            const batch = Array.isArray(arg) ? arg : [arg];
+            for (const row of batch) insertOne(row);
+            return { identifiers: [] };
         }),
         create: jest.fn((partial: any) => ({ ...partial })),
         find: jest.fn(async (q?: any) => {
             if (!q?.where) return [...rows];
-            return rows.filter(r => Object.entries(q.where).every(([k, v]) => r[k] === v));
+            return rows.filter(r => Object.entries(q.where).every(([k, v]) => {
+                if (v && typeof v === 'object' && Array.isArray((v as any)._value)) {
+                    return new Set((v as any)._value).has(r[k]);
+                }
+                return r[k] === v;
+            }));
         }),
         findOneBy: jest.fn(async (where: any) =>
             rows.find(r => Object.entries(where).every(([k, v]) => r[k] === v)) ?? null,
@@ -138,12 +154,21 @@ function createBalanceRepo() {
     const rows: any[] = [];
     const find = (addr: string, groupId?: string) =>
         rows.find((r: any) => r.address === addr && (groupId === undefined || r.groupId === groupId));
+    const applySave = (row: any) => {
+        const existing = find(row.address, row.groupId);
+        if (existing) Object.assign(existing, row);
+        else rows.push(row); // push reference so downstream mutations propagate
+        return row;
+    };
     const repo: any = {
-        save: jest.fn(async (row: any) => {
-            const existing = find(row.address, row.groupId);
-            if (existing) Object.assign(existing, row);
-            else rows.push({ ...row });
-            return row;
+        save: jest.fn(async (arg: any) => {
+            if (Array.isArray(arg)) return arg.map(applySave);
+            return applySave(arg);
+        }),
+        insert: jest.fn(async (arg: any) => {
+            const batch = Array.isArray(arg) ? arg : [arg];
+            for (const row of batch) rows.push(row);
+            return { identifiers: [] };
         }),
         create: jest.fn((partial: any) => ({ ...partial })),
         findOneBy: jest.fn(async (where: any) =>
@@ -151,7 +176,12 @@ function createBalanceRepo() {
         ),
         find: jest.fn(async (q?: any) => {
             if (!q?.where) return [...rows];
-            return rows.filter((r: any) => Object.entries(q.where).every(([k, v]) => r[k] === v));
+            return rows.filter((r: any) => Object.entries(q.where).every(([k, v]) => {
+                if (v && typeof v === 'object' && Array.isArray((v as any)._value)) {
+                    return new Set((v as any)._value).has((r as any)[k]);
+                }
+                return (r as any)[k] === v;
+            }));
         }),
         delete: jest.fn(async (where: any) => {
             for (let i = rows.length - 1; i >= 0; i--) {
