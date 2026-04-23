@@ -27,6 +27,19 @@ import { DUST_LIMIT_SATS } from './coinbase-distribution';
  * the sats were never actually minted; the "pending" was purely a pool-
  * side ledger promise.
  *
+ * blockHeight for audit rows: encoded as `-Math.floor(Date.now() / 1000)`
+ * (negative Unix seconds). Two reasons:
+ *   1. Audit rows aren't associated with any real block — a negative
+ *      value cannot be confused with a real height.
+ *   2. The unique index on (blockHeight, address) added in
+ *      1776800000000-AddPayoutHistoryUniqueConstraints would otherwise
+ *      block a second sweep of the same address: balance row is deleted
+ *      after sweep, miner resumes mining, accumulates dust again, goes
+ *      dormant → next sweep tries to insert (blockHeight=0, address) a
+ *      second time → 23505. Using the current epoch makes the pair unique
+ *      across sweep runs (second-granularity is enough given the 24h
+ *      cadence).
+ *
  * Env:
  *   DUST_SWEEP_ENABLED       default 'true'   — set 'false' to disable
  *   DUST_SWEEP_DORMANT_DAYS  default '30'     — inactivity threshold
@@ -91,6 +104,16 @@ export class DustSweepService implements OnModuleInit {
         return { pplnsSwept, groupSwept };
     }
 
+    /**
+     * Generate a blockHeight placeholder for audit rows that doesn't
+     * collide with prior dust-sweep rows for the same address. Negative
+     * Unix seconds — easy to recognise, fits in Postgres int, and unique
+     * across sweep runs at second granularity.
+     */
+    private sweepBlockHeight(): number {
+        return -Math.floor(Date.now() / 1000);
+    }
+
     private async sweepPplns(cutoff: Date): Promise<number> {
         const candidates = await this.pplnsBalanceRepo
             .createQueryBuilder('b')
@@ -107,7 +130,7 @@ export class DustSweepService implements OnModuleInit {
                     const history = em.getRepository(PplnsPayoutHistoryEntity);
                     const balance = em.getRepository(PplnsBalanceEntity);
                     await history.save(history.create({
-                        blockHeight: 0, // no associated block
+                        blockHeight: this.sweepBlockHeight(),
                         address: row.address,
                         paidSats: row.pendingSats,
                         percent: 0,
@@ -141,7 +164,7 @@ export class DustSweepService implements OnModuleInit {
                     const balance = em.getRepository(PplnsGroupBalanceEntity);
                     await history.save(history.create({
                         groupId: row.groupId,
-                        blockHeight: 0,
+                        blockHeight: this.sweepBlockHeight(),
                         address: row.address,
                         paidSats: row.pendingSats,
                         percent: 0,

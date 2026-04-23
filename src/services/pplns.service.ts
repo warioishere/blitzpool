@@ -36,8 +36,23 @@ const REDIS_KEY_WINDOW_TOTAL = 'pplns:window:total';
 // a pool restart between getPayoutDistribution and onBlockFound doesn't
 // lose it and force onBlockFoundFromWindow (whose distribution can differ
 // from what's already on-chain).
+//
+// `consideredAddresses` captures every address that was in addressShares
+// or pendingBalances at snapshot-build time (including sub-dust miners
+// filtered out of the coinbase). onBlockFound uses it to distinguish two
+// classes of "not in coinbase" miners — sub-dust (was considered, credit
+// to pending) vs late arriver (submitted after snapshot, audit only).
+// Without this, late-arriver shares get credited to pending AND stay in
+// the sliding window for future blocks → double-paid. Same fix pattern
+// as group-solo (commit 6ace1b8).
 const REDIS_KEY_SNAPSHOT = 'pplns:snapshot';
 const SNAPSHOT_TTL_SECONDS = 60 * 60; // 1h — covers worst-case block-find + restart window.
+
+interface StoredPplnsSnapshot {
+    distribution: PplnsPayoutEntry[];
+    blockRewardSats: number;
+    consideredAddresses: string[];
+}
 
 // DUST_LIMIT_SATS + coinbase weight constants live in ./coinbase-distribution.ts
 // (the shared pure module used by both PPLNS and Group-Solo). Single source of
@@ -298,7 +313,7 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         //    - fee dust-gate
         //    - remainder sweep
         //    - fallback-to-fee-100% when no usable work
-        const { payouts } = buildCoinbaseDistribution({
+        const { payouts, consideredAddresses } = buildCoinbaseDistribution({
             addressShares,
             pendingBalances,
             blockRewardSats,
@@ -316,12 +331,19 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         this.cachedDistributionAt = Date.now();
 
         // Save snapshot to Redis — onBlockFound will use it for bookkeeping.
-        await this.writeSnapshot({ distribution: result, blockRewardSats });
+        // consideredAddresses distinguishes sub-dust (was in the window at
+        // snapshot time) from late arrivers (submitted after), preventing
+        // double-credit in the sliding-window PPLNS payout path.
+        await this.writeSnapshot({
+            distribution: result,
+            blockRewardSats,
+            consideredAddresses: Array.from(consideredAddresses),
+        });
 
         return result;
     }
 
-    private async writeSnapshot(snapshot: { distribution: PplnsPayoutEntry[]; blockRewardSats: number }): Promise<void> {
+    private async writeSnapshot(snapshot: StoredPplnsSnapshot): Promise<void> {
         try {
             await this.redis.set(REDIS_KEY_SNAPSHOT, JSON.stringify(snapshot), { EX: SNAPSHOT_TTL_SECONDS });
         } catch {
@@ -334,11 +356,24 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         }
     }
 
-    private async readSnapshot(): Promise<{ distribution: PplnsPayoutEntry[]; blockRewardSats: number } | null> {
+    private async readSnapshot(): Promise<{
+        distribution: PplnsPayoutEntry[];
+        blockRewardSats: number;
+        consideredAddresses: Set<string>;
+    } | null> {
         const raw = await this.redis.get(REDIS_KEY_SNAPSHOT);
         if (!raw) return null;
         try {
-            return JSON.parse(raw);
+            const parsed: StoredPplnsSnapshot = JSON.parse(raw);
+            return {
+                distribution: parsed.distribution,
+                blockRewardSats: parsed.blockRewardSats,
+                // Legacy snapshots (pre-this-fix) don't carry the field.
+                // Treat as empty set — every non-snapshot address is then
+                // classed as late arriver, which is the safer side (no
+                // phantom pending credit) during the rollout transition.
+                consideredAddresses: new Set(parsed.consideredAddresses ?? []),
+            };
         } catch {
             return null;
         }
@@ -407,6 +442,22 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
                 return;
             }
 
+            // Defensive check: if the block's reward doesn't match the snapshot's
+            // reward, the snapshot was built for a different job (e.g. coinbasevalue
+            // changed between concurrent jobs as mempool churned). Booking payouts
+            // against the wrong distribution would drift from on-chain reality, so
+            // fall back to the window-recalc path — it produces its own fresh
+            // distribution from the current window and uses the real blockReward.
+            if (snapshot.blockRewardSats !== blockRewardSats) {
+                console.warn(
+                    `[PPLNS] Snapshot blockReward ${snapshot.blockRewardSats} != block's `
+                    + `${blockRewardSats} — snapshot is for a different job, falling back to window recalc`,
+                );
+                await this.deleteSnapshot();
+                await this.onBlockFoundFromWindow(blockHeight, blockRewardSats);
+                return;
+            }
+
             // Snapshot is consumed only after the TX commits (delete after),
             // so a crash mid-TX leaves it for replay.
 
@@ -443,9 +494,16 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
                         }
                     }
 
-                    // Miners in the current window but NOT in the snapshot: sub-dust
-                    // or trimmed by weight-budget. Credit their proportional cut to
-                    // pending so it accumulates for a future block.
+                    // For each window address not in the snapshot distribution,
+                    // distinguish:
+                    //   - sub-dust / weight-trimmed: was in the window at
+                    //     snapshot-build time (consideredAddresses) → credit to
+                    //     pending for a future block
+                    //   - late arriver: submitted after snapshot build → audit
+                    //     row only, NO pending credit. The PPLNS window is
+                    //     sliding, so the late arriver's shares stay in the
+                    //     window and get paid via the NEXT block's snapshot;
+                    //     crediting here in addition would be a double-pay.
                     if (windowEntries && windowEntries.length > 0) {
                         const addressDiff = new Map<string, number>();
                         let totalDiff = 0;
@@ -459,24 +517,33 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
                         const rewardForMiners = Math.floor(((100 - this.feePercent) / 100) * reward);
                         for (const [addr, diff] of addressDiff) {
                             if (snapshotAddresses.has(addr)) continue;
-                            const sats = Math.floor((diff / totalDiff) * rewardForMiners);
-                            if (sats > 0) {
-                                const now = new Date();
-                                const existing = await balanceRepo.findOneBy({ address: addr });
-                                if (existing) {
-                                    existing.pendingSats += sats;
-                                    existing.lastAcceptedShareAt = now;
-                                    await balanceRepo.save(existing);
-                                } else {
-                                    await balanceRepo.save(balanceRepo.create({
-                                        address: addr, pendingSats: sats, totalPaidSats: 0,
-                                        lastAcceptedShareAt: now,
+                            const wasConsidered = snapshot.consideredAddresses.has(addr);
+                            if (wasConsidered) {
+                                const sats = Math.floor((diff / totalDiff) * rewardForMiners);
+                                if (sats > 0) {
+                                    const now = new Date();
+                                    const existing = await balanceRepo.findOneBy({ address: addr });
+                                    if (existing) {
+                                        existing.pendingSats += sats;
+                                        existing.lastAcceptedShareAt = now;
+                                        await balanceRepo.save(existing);
+                                    } else {
+                                        await balanceRepo.save(balanceRepo.create({
+                                            address: addr, pendingSats: sats, totalPaidSats: 0,
+                                            lastAcceptedShareAt: now,
+                                        }));
+                                    }
+                                    await historyRepo.save(historyRepo.create({
+                                        blockHeight, address: addr, paidSats: sats, percent: (diff / totalDiff) * (100 - this.feePercent), inCoinbase: false, rowType: 'pending',
                                     }));
+                                    console.log(`[PPLNS]   ${addr}: ${sats} sats → pending (sub-dust / weight-trimmed)`);
                                 }
+                            } else {
+                                // Late arriver — audit row only, no payout.
                                 await historyRepo.save(historyRepo.create({
-                                    blockHeight, address: addr, paidSats: sats, percent: (diff / totalDiff) * (100 - this.feePercent), inCoinbase: false, rowType: 'pending',
+                                    blockHeight, address: addr, paidSats: 0, percent: 0, inCoinbase: false, rowType: 'pending',
                                 }));
-                                console.log(`[PPLNS]   ${addr}: ${sats} sats → pending (not in coinbase)`);
+                                console.log(`[PPLNS]   ${addr}: ${diff.toFixed(2)} shares in window but not in snapshot (late arrival, stays in sliding window for next block)`);
                             }
                         }
                     }

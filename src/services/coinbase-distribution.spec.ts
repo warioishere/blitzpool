@@ -227,6 +227,61 @@ describe('buildCoinbaseDistribution', () => {
         expect(r.totalPendingSettled).toBe(3500);
     });
 
+    // ── Pathological-case guard ────────────────────────────────
+
+    it('totalPending > rewardForMiners → safe fallback to fee-100%, no bad-cb-amount risk', () => {
+        // Pathological case: accumulated pending exceeds what this block
+        // can cover. Pre-fix the code returned a distribution whose total
+        // exceeded blockReward (sum of miner totalSats > rewardForMiners
+        // plus the fee output), which would get rejected by Core with
+        // bad-cb-amount. Post-fix: we fall back to a safe fee-100% payout
+        // and preserve pending for future blocks.
+        const reward = 1_000_000; // tiny reward so pending can swamp it
+        const feePercent = 2;
+        const rewardForMiners = Math.floor(0.98 * reward); // 980 000
+        const bigPending = rewardForMiners + 100; // just over
+        const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+        try {
+            const r = buildCoinbaseDistribution({
+                addressShares: shares({ [ALICE]: 100 }),
+                pendingBalances: new Map([[BOB, bigPending]]),
+                blockRewardSats: reward,
+                feePercent,
+                feeAddress: FEE_ADDR,
+                coinbaseWeightBudget: DEFAULT_COINBASE_WEIGHT_BUDGET,
+            });
+            // Fallback: fee gets 100%.
+            expect(r.payouts).toEqual([{ address: FEE_ADDR, percent: 100 }]);
+            expect(r.totalPendingSettled).toBe(0);
+            // And the coinbase total does NOT exceed the block reward.
+            expect(sumSatsFromPayouts(r.payouts, reward)).toBeLessThanOrEqual(reward);
+            // And the critical log fired — operator needs a loud signal.
+            expect(errorSpy).toHaveBeenCalled();
+            expect(errorSpy.mock.calls[0][0]).toMatch(/CRITICAL/);
+        } finally {
+            errorSpy.mockRestore();
+        }
+    });
+
+    it('totalPending > rewardForMiners with no fee address → empty payouts', () => {
+        const reward = 1_000_000;
+        const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+        try {
+            const r = buildCoinbaseDistribution({
+                addressShares: shares({ [ALICE]: 100 }),
+                pendingBalances: new Map([[BOB, 2_000_000]]),
+                blockRewardSats: reward,
+                feePercent: 0,
+                feeAddress: '',
+                coinbaseWeightBudget: DEFAULT_COINBASE_WEIGHT_BUDGET,
+            });
+            expect(r.payouts).toEqual([]);
+            expect(r.totalPendingSettled).toBe(0);
+        } finally {
+            errorSpy.mockRestore();
+        }
+    });
+
     // ── Sum invariants under varied loads ──────────────────────
 
     it('sum of percents always ≤ 100 within tolerance', () => {

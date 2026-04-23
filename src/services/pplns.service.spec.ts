@@ -524,6 +524,85 @@ describe('PplnsService', () => {
       const afterBlock2 = balanceService._get('bc1qSmall')?.pendingSats ?? 0;
       expect(afterBlock2).toBeGreaterThan(afterBlock1);
     });
+
+    it('snapshot reward mismatch → falls back to window recalc instead of booking against wrong job', async () => {
+      // If coinbasevalue changes between the job whose snapshot got
+      // written and the job whose block was actually found (mempool
+      // churn between two concurrent jobs), the snapshot's distribution
+      // was computed for the wrong reward. Using it for bookkeeping
+      // would drift pool accounting from on-chain reality. The defensive
+      // check must detect and fall back.
+      const { service, payoutHistoryRepo } = createService({ feePercent: '2' });
+      service.setNetworkDifficulty(100_000);
+
+      // Build snapshot at reward R1.
+      const R1 = 100_000_000;
+      await service.recordShare('bc1qalice', 1000);
+      await service.getPayoutDistribution(R1);
+
+      // Block is found at a different reward R2 (mempool churned).
+      const R2 = 120_000_000;
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+      try {
+        await service.onBlockFound(800000, R2);
+      } finally {
+        warnSpy.mockRestore();
+      }
+
+      // History rows must be based on R2 (fallback path), not R1.
+      // Concretely: Alice's history row paidSats should reflect R2's
+      // rewardForMiners, not R1's. With one miner getting 100%, her
+      // paidSats ≈ 0.98 * R2 = 117_600_000, not 0.98 * R1 = 98_000_000.
+      const history = payoutHistoryRepo._getSaved() as any[];
+      const aliceRow = history.find(r => r.address === 'bc1qalice' && r.inCoinbase);
+      expect(aliceRow).toBeDefined();
+      expect(aliceRow.paidSats).toBeGreaterThan(100_000_000);
+    });
+
+    it('late-arriving shares (post-snapshot) are logged but NOT credited to pending — prevents double-counting', async () => {
+      // Scenario: pool builds a job, snapshot captures only Alice (Bob had no shares yet).
+      // Between snapshot-build and block-found, Bob submits shares.
+      // Alice then finds the block. The coinbase pays Alice via the snapshot.
+      // Bob's shares arrived too late for THIS block's coinbase. In PPLNS, the
+      // sliding window is NOT cleared, so Bob's shares remain in the window
+      // and will be paid via the NEXT block's snapshot. Crediting Bob to
+      // pending here would double-pay him — same class of bug group-solo
+      // fixed in commit 6ace1b8, patched here for PPLNS too.
+      const { service, balanceService, payoutHistoryRepo } = createService({ feePercent: '2' });
+      service.setNetworkDifficulty(100_000);
+
+      // Stage 1: only Alice has shares. Build snapshot.
+      await service.recordShare('bc1qalice', 1000);
+      await service.getPayoutDistribution(BLOCK_REWARD);
+
+      // Stage 2: Bob arrives AFTER snapshot was built.
+      await service.recordShare('bc1qbob', 2000);
+
+      // Stage 3: Alice finds the block. Snapshot-based bookkeeping runs.
+      await service.onBlockFound(800000, BLOCK_REWARD);
+
+      // Bob's balance must NOT have been credited anything — the coinbase
+      // already claimed 100% of the miner cut via Alice's snapshot entry,
+      // and Bob's shares stay in the window for the next block's snapshot.
+      const bobBalance = balanceService._get('bc1qbob');
+      expect(bobBalance?.pendingSats ?? 0).toBe(0);
+
+      // But Bob should have an audit history row with paidSats=0 so his
+      // submitted shares are visible in the ledger.
+      const history = payoutHistoryRepo._getSaved() as any[];
+      const bobRows = history.filter(r => r.address === 'bc1qbob');
+      expect(bobRows).toHaveLength(1);
+      expect(bobRows[0].paidSats).toBe(0);
+      expect(bobRows[0].inCoinbase).toBe(false);
+      expect(bobRows[0].rowType).toBe('pending');
+
+      // Miner-cut coinbase total (excluding fee) must not exceed rewardForMiners.
+      const rewardForMiners = Math.floor(0.98 * BLOCK_REWARD);
+      const minerCoinbasePaid = history
+        .filter(r => r.inCoinbase === true && r.address !== 'bc1qfee')
+        .reduce((sum, r) => sum + r.paidSats, 0);
+      expect(minerCoinbasePaid).toBeLessThanOrEqual(rewardForMiners);
+    });
   });
 
   // ── Window Stats ──────────────────────────────────────────────

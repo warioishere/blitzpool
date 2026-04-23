@@ -351,6 +351,34 @@ describe('GroupSoloService', () => {
         expect(minerCoinbasePaid).toBeLessThanOrEqual(rewardForMiners);
     });
 
+    it('snapshot reward mismatch → falls back to window recalc', async () => {
+        // Same defensive guard as PPLNS: if the snapshot was built for a
+        // job with coinbasevalue R1 but the block lands with reward R2,
+        // we must NOT book payouts against R1. Fallback path computes a
+        // fresh distribution from the current window using R2.
+        const { service, historyRepo, groupService } = makeService();
+        groupService._setMembership('bc1qalice', 'g1', true);
+
+        const R1 = 100_000_000;
+        await service.recordShare('bc1qalice', 1000);
+        await service.getPayoutDistribution('g1', R1);
+
+        const R2 = 120_000_000;
+        const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+        try {
+            await service.onBlockFound(900_000, R2, 'bc1qalice');
+        } finally {
+            warnSpy.mockRestore();
+        }
+
+        // Alice's history row must reflect R2 (fallback used), not R1.
+        const aliceRow = (historyRepo._rows as any[])
+            .find(r => r.address === 'bc1qalice' && r.inCoinbase === true);
+        expect(aliceRow).toBeDefined();
+        // Single miner with 100% of shares → paidSats ≈ 0.98 * R2 = 117_600_000
+        expect(aliceRow.paidSats).toBeGreaterThan(100_000_000);
+    });
+
     it('getRoundStats returns current round snapshot', async () => {
         const { service, groupService } = makeService();
         groupService._setMembership('bc1qalice', 'g1', true);

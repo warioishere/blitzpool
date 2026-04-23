@@ -279,7 +279,20 @@ export class GroupService implements OnModuleInit {
         token: string | undefined,
     ): Promise<{ group: PplnsGroupEntity; adminToken: string }> {
         const group = await this.requireAdminToken(groupId, token);
-        const newCreator = await this.memberRepo.findOneBy({ groupId, address: toAddress });
+
+        // Normalize the target address the same way createGroup / addMember
+        // do — bech32 is case-insensitive, and members are stored lowercased.
+        // Without this, a caller passing 'BC1Q...' would get 'not-member'
+        // against the normalized row in DB, and (worse, if by chance the
+        // case matched exactly) creatorAddress would end up in a different
+        // case than pplns_group_member.address, diverging from what
+        // getGroupForAddress / invitation emails will display.
+        const normalizedTo = normalizeBtcAddress(toAddress);
+        if (!normalizedTo) {
+            throw new GroupServiceError('invalid-address', 'Target address required');
+        }
+
+        const newCreator = await this.memberRepo.findOneBy({ groupId, address: normalizedTo });
         if (!newCreator) {
             throw new GroupServiceError('not-member', 'Target address is not a member of this group');
         }
@@ -297,7 +310,7 @@ export class GroupService implements OnModuleInit {
 
         const newToken = this.generateToken();
         group.adminTokenHash = this.hashToken(newToken);
-        group.creatorAddress = toAddress;
+        group.creatorAddress = normalizedTo;
         const saved = await this.groupRepo.save(group);
 
         await this.rebuildCache();

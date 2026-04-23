@@ -317,6 +317,22 @@ export class GroupSoloService implements OnModuleInit {
                 return;
             }
 
+            // Same defensive reward-mismatch check as PPLNS: if the snapshot
+            // was built for a job whose coinbasevalue differs from the block's
+            // real reward (concurrent jobs with mempool churn between them),
+            // the stored distribution is for the wrong job. Fall back to the
+            // window recalc path and drop the stale snapshot so it can't
+            // resurface on the next block-found.
+            if (snapshot.blockRewardSats !== blockRewardSats) {
+                console.warn(
+                    `[GroupSolo] Snapshot blockReward ${snapshot.blockRewardSats} != block's `
+                    + `${blockRewardSats} for group ${groupId} — falling back to window recalc`,
+                );
+                await this.deleteSnapshot(groupId);
+                await this.onBlockFoundFromWindow(groupId, blockHeight, blockRewardSats);
+                return;
+            }
+
             const reward = snapshot.blockRewardSats;
             const snapshotAddrs = new Set(snapshot.distribution.map(d => d.address));
             const keys = redisKeys(groupId);

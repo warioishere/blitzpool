@@ -164,6 +164,33 @@ export function buildCoinbaseDistribution(
     // ── Core math: settle pending out of the miner cut ──────────
     const rewardForMiners = Math.floor(((100 - feePercent) / 100) * blockRewardSats);
     const totalPending = Array.from(pendingBalances.values()).reduce((s, v) => s + v, 0);
+
+    // Pathological-case guard: if accumulated pending exceeds what this
+    // block's miner cut can cover, we cannot emit a valid coinbase — the
+    // per-miner totalSats would sum to > rewardForMiners, and combined
+    // with the fee output the coinbase total would exceed blockReward,
+    // causing Core to reject with `bad-cb-amount`. Pre-fix the code silently
+    // produced that invalid distribution because the remainder-sweep only
+    // handles the under-100% case.
+    //
+    // Safe fallback: emit a fee-100% payout (or empty array when no fee
+    // address is configured). The block still lands, the pool operator
+    // takes the fee for this block only, and all miners' pending is
+    // preserved for future blocks where the ratio recovers. A loud
+    // console.error is intentional — this must never happen silently.
+    if (totalPending > rewardForMiners) {
+        console.error(
+            `${label} CRITICAL: totalPending ${totalPending} > rewardForMiners ${rewardForMiners} `
+            + `(blockReward ${blockRewardSats}, fee ${feePercent}%). Emitting fee-100% fallback; `
+            + `miner pending preserved for future blocks. Investigate pending accumulation.`,
+        );
+        return {
+            payouts: feeAddress ? [{ address: feeAddress, percent: 100 }] : [],
+            consideredAddresses,
+            totalPendingSettled: 0,
+        };
+    }
+
     const effectiveMinerReward = Math.max(0, rewardForMiners - totalPending);
 
     const minerShares: { address: string; sats: number; percent: number }[] = [];

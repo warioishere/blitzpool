@@ -236,4 +236,32 @@ describe('GroupService', () => {
         await expect(service.requireAdminToken(group.id, newToken)).resolves.toBeDefined();
     });
 
+    it('transferCreator normalizes bech32 target address to lowercase', async () => {
+        // Wallet / QR-code presentations sometimes upper-case bech32. Members
+        // are stored normalized, and the cache looks them up normalized — so
+        // a raw uppercase toAddress would both fail the member lookup AND
+        // leave group.creatorAddress in the wrong case if it slipped past.
+        const { group, adminToken: oldToken } = await service.createGroup('group-one', 'bc1qalice');
+        await service.addMember(group.id, 'bc1qbob', oldToken);
+        const { group: saved, adminToken: newToken } =
+            await service.transferCreator(group.id, 'BC1QBOB', oldToken);
+        expect(newToken).not.toBe(oldToken);
+        expect(saved.creatorAddress).toBe('bc1qbob');
+
+        // And the member role transfer actually took effect — bob is now
+        // the creator, not still a plain member.
+        const members = Array.from(memberRepo._rows.values()) as any[];
+        expect(members.find(m => m.address === 'bc1qbob')?.role).toBe('creator');
+        expect(members.find(m => m.address === 'bc1qalice')?.role).toBe('member');
+    });
+
+    it('transferCreator rejects empty or malformed target address', async () => {
+        const { group, adminToken: oldToken } = await service.createGroup('group-one', 'bc1qalice');
+        await service.addMember(group.id, 'bc1qbob', oldToken);
+        await expect(service.transferCreator(group.id, '', oldToken))
+            .rejects.toMatchObject({ code: 'invalid-address' });
+        await expect(service.transferCreator(group.id, '   ', oldToken))
+            .rejects.toMatchObject({ code: 'invalid-address' });
+    });
+
 });

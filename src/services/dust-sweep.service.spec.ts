@@ -163,8 +163,11 @@ describe('DustSweepService', () => {
                 percent: 0,
                 inCoinbase: false,
                 rowType: 'dust-sweep',
-                blockHeight: 0,
             });
+            // blockHeight is a negative Unix-seconds marker (never a real
+            // block height) to keep the (blockHeight, address) unique
+            // index from colliding across repeat sweeps of the same miner.
+            expect(pplnsHistory[0].blockHeight).toBeLessThan(0);
         });
 
         it('is a no-op when no rows match', async () => {
@@ -188,6 +191,48 @@ describe('DustSweepService', () => {
             });
             await service.sweep();
             expect(pplnsBalance).toHaveLength(0);
+        });
+
+        it('does not collide on repeat sweeps of the same address — each run gets a fresh blockHeight marker', async () => {
+            // Same miner sweeps twice over time: first sweep removes the row;
+            // miner resumes mining, accumulates dust again, goes dormant 30d
+            // later; second sweep must not fail on the (blockHeight, address)
+            // unique index (that was the pre-fix bug).
+            const pplnsHistory: any[] = [];
+            const { service, pplnsBalance } = createService({
+                pplnsBalance: [
+                    { address: 'bc1qrepeat', pendingSats: 100, totalPaidSats: 0, lastAcceptedShareAt: daysAgo(50) },
+                ],
+                pplnsHistory,
+                dormantDays: 30,
+            });
+
+            // First sweep
+            const first = await service.sweep();
+            expect(first.pplnsSwept).toBe(1);
+            expect(pplnsBalance).toHaveLength(0);
+            expect(pplnsHistory).toHaveLength(1);
+
+            // Simulate same miner re-accumulating dust and going dormant a
+            // second time. Bump the system clock a second forward so the
+            // two sweep markers definitively differ.
+            pplnsBalance.push({
+                address: 'bc1qrepeat',
+                pendingSats: 200,
+                totalPaidSats: 0,
+                lastAcceptedShareAt: daysAgo(40),
+            });
+            await new Promise(r => setTimeout(r, 1100));
+            const second = await service.sweep();
+            expect(second.pplnsSwept).toBe(1);
+            expect(pplnsBalance).toHaveLength(0);
+            expect(pplnsHistory).toHaveLength(2);
+
+            // Two distinct blockHeight markers — the (blockHeight, address)
+            // unique index would trip if these were equal.
+            expect(pplnsHistory[0].blockHeight).not.toBe(pplnsHistory[1].blockHeight);
+            expect(pplnsHistory[0].blockHeight).toBeLessThan(0);
+            expect(pplnsHistory[1].blockHeight).toBeLessThan(0);
         });
     });
 
