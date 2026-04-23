@@ -31,6 +31,8 @@ services:
       - "0.0.0.0:3333:3333/tcp"
       - "0.0.0.0:3339:3339/tcp"
       - "0.0.0.0:3334:3334/tcp"
+      # PPLNS stratum port (address-routed payouts, sliding N=4×netdiff window)
+      - "0.0.0.0:3340:3340/tcp"
     volumes:
       - "./data/mainnet/public-pool:/public-pool/DB"
       - "./blitzpool.env:/public-pool/.env:ro"
