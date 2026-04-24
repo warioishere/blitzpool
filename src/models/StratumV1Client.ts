@@ -87,6 +87,18 @@ export class StratumV1Client {
     private difficultyCheckIntervalMs: number;
     private lastDifficultyCheck = 0;
 
+    /**
+     * Accepted-share counter for the payout-mode warmup gate. Shares
+     * 1..ledgerWarmupShares from a fresh session are validated but
+     * intentionally skip the PPLNS / group-solo ledger write — filters
+     * CPU miners that briefly reach the minimum diff but can't sustain
+     * a stream of shares. Not an address-level counter on purpose:
+     * every reconnect restarts warmup, which matches our intent (a
+     * miner that can't stay connected long enough to clear 10 shares
+     * isn't contributing meaningfully either).
+     */
+    private acceptedShareCount = 0;
+
     // Handshake timing monitoring
     private handshakeStartTime: number;
     private subscribeReceivedTime: number;
@@ -122,10 +134,22 @@ export class StratumV1Client {
         private readonly groupSoloService?: GroupSoloService,
         private readonly minerActiveModeService?: MinerActiveModeService,
         private readonly poolModeHashrateService?: PoolModeHashrateService,
+        /** VarDiff floor passed through from StratumPortConfig. */
+        private readonly minimumDifficulty: number = 0,
+        /**
+         * Per-session warmup gate: shares 1..N-1 are validated but not
+         * recorded in the PPLNS / group-solo ledger. See the PPLNS port
+         * config comment in protocol-detector.service.ts for rationale.
+         */
+        private readonly ledgerWarmupShares: number = 0,
     ) {
-        this.initialDifficulty = Number.isFinite(initialDifficulty)
-            ? initialDifficulty
-            : 16384;
+        const rawInitial = Number.isFinite(initialDifficulty) ? initialDifficulty : 16384;
+        // Clamp to the port's minimum: a PPLNS connection that somehow
+        // picks up a lower suggested-difficulty would otherwise get
+        // dropped straight below the floor.
+        this.initialDifficulty = this.minimumDifficulty > 0
+            ? Math.max(rawInitial, this.minimumDifficulty)
+            : rawInitial;
         this.sessionDifficulty = this.initialDifficulty;
         this.pendingSessionDifficulty = this.sessionDifficulty;
 
@@ -365,6 +389,7 @@ export class StratumV1Client {
                         this.sessionStart = new Date();
                         this.statistics = new StratumV1ClientStatistics(
                             this.targetSharesPerMinute,
+                            this.minimumDifficulty,
                         );
                         this.sessionId = this.getRandomHexString();
                         this.extraNonce = this.sessionId;
@@ -560,7 +585,12 @@ export class StratumV1Client {
                 }
 
                 this.clientSuggestedDifficulty = suggestDifficultyMessage;
-                this.sessionDifficulty = suggestDifficultyMessage.suggestedDifficulty;
+                // Clamp the client's suggestion to the port's floor. A
+                // PPLNS-port connection suggesting diff 64 would otherwise
+                // succeed and pollute the ledger with sub-dust shares.
+                this.sessionDifficulty = this.minimumDifficulty > 0
+                    ? Math.max(suggestDifficultyMessage.suggestedDifficulty, this.minimumDifficulty)
+                    : suggestDifficultyMessage.suggestedDifficulty;
                 await this.recordSessionDifficulty();
                 const success = await this.write(JSON.stringify(this.clientSuggestedDifficulty.response(this.sessionDifficulty)) + '\n');
                 if (!success) {
@@ -1073,13 +1103,25 @@ export class StratumV1Client {
                 // /api/pplns/mode/:address reflects the port the miner is
                 // ACTUALLY on right now. Marker has a 5-min TTL and is
                 // refreshed every share.
+                //
+                // PPLNS warmup gate: first `ledgerWarmupShares` shares
+                // of a fresh session are validated + counted in client
+                // stats, but skip the PPLNS ledger. CPU / low-GHz
+                // miners that briefly reach the minimum diff don't
+                // sustain enough shares to clear the gate. Gate applies
+                // ONLY to the PPLNS port — group-solo miners record
+                // every share (no min-diff / warmup configured there).
+                this.acceptedShareCount++;
                 const shareGroupId = this.activeGroupId();
                 let effectiveMode: 'solo' | 'pplns' | 'group-solo';
                 if (this.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
-                    await this.pplnsService.recordShare(
-                        this.clientAuthorization.address,
-                        this.sessionDifficulty,
-                    );
+                    const warmupCleared = this.acceptedShareCount > this.ledgerWarmupShares;
+                    if (warmupCleared) {
+                        await this.pplnsService.recordShare(
+                            this.clientAuthorization.address,
+                            this.sessionDifficulty,
+                        );
+                    }
                     effectiveMode = 'pplns';
                 } else if (shareGroupId) {
                     await this.groupSoloService!.recordShare(

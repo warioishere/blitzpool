@@ -22,6 +22,23 @@ export interface StratumPortConfig {
   allowSuggestedDifficulty: boolean;
   targetSharesPerMinute: number;
   payoutMode?: PayoutMode;
+  /**
+   * Optional VarDiff floor. When set, the per-session vardiff
+   * adjustment will never drop the client's target below this value,
+   * and the suggest-difficulty handshake is clamped to at least this.
+   * Used on the PPLNS port (`PPLNS_MIN_DIFFICULTY`) to keep sub-500 GH/s
+   * devices from polluting the ledger with sub-dust shares.
+   */
+  minimumDifficulty?: number;
+  /**
+   * Optional share warmup gate for payout-mode ports. Shares 1..N-1
+   * from a fresh session are still accepted by the pool and validated,
+   * but intentionally NOT written to the payout-mode ledger (PPLNS
+   * window / group-solo share set). This filters CPU/low-hashrate
+   * miners that briefly reach the minimum diff but can't sustain it.
+   * Zero = disabled (every share counts from the first).
+   */
+  ledgerWarmupShares?: number;
 }
 
 /**

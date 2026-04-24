@@ -151,17 +151,17 @@ function createMockBalanceBacking() {
     const rows: any[] = [];
     const find = (addr: string) => rows.find((r: any) => r.address === addr);
     const service = {
-        getAllWithPending: async () => rows.filter((r: any) => r.pendingSats > 0),
-        getPending: async (addr: string) => find(addr)?.pendingSats ?? 0,
-        addPending: async (addr: string, sats: number) => {
+        getAllWithBalance: async () => rows.filter((r: any) => r.balanceSats !== 0),
+        getBalanceSats: async (addr: string) => find(addr)?.balanceSats ?? 0,
+        addBalance: async (addr: string, sats: number) => {
             const existing = find(addr);
-            if (existing) existing.pendingSats += sats;
-            else rows.push({ address: addr, pendingSats: sats, totalPaidSats: 0 });
+            if (existing) existing.balanceSats += sats;
+            else rows.push({ address: addr, balanceSats: sats, totalPaidSats: 0 });
         },
         markPaid: async (addr: string, sats: number) => {
             const existing = find(addr);
             if (existing) {
-                existing.pendingSats = Math.max(0, existing.pendingSats - sats);
+                existing.balanceSats = Math.max(0, existing.balanceSats - sats);
                 existing.totalPaidSats += sats;
             }
         },
@@ -190,7 +190,7 @@ function createMockBalanceBacking() {
                 const set = new Set<string>(inOp._value);
                 return rows.filter((r: any) => set.has(r.address));
             }
-            if (q?.where?.pendingSats) return rows.filter((r: any) => r.pendingSats > 0);
+            if (q?.where?.balanceSats) return rows.filter((r: any) => r.balanceSats !== 0);
             return [...rows];
         },
         _rows: rows,
@@ -446,7 +446,7 @@ describe('PPLNS Regtest — 50-miner stress', () => {
         const subDustMiners = miners.filter(addr => !distributionAddresses.has(addr));
         expect(subDustMiners.length).toBeGreaterThan(0); // proves the dust filter actually ran
 
-        const pendingBalances = await balanceService.getAllWithPending();
+        const pendingBalances = await balanceService.getAllWithBalance();
         const pendingAddresses = new Set(pendingBalances.map((p: any) => p.address));
         // Every sub-dust miner with a positive per-share cut should have
         // received SOMETHING in pending (exact match — every one of them,
@@ -462,14 +462,14 @@ describe('PPLNS Regtest — 50-miner stress', () => {
         // ── Idempotency: replay onBlockFound is a no-op ──
         const rowCountBeforeReplay = historyRepo._rows.length;
         const balancesBeforeReplay = pendingBalances.map((p: any) => ({
-            address: p.address, pending: p.pendingSats, paid: p.totalPaidSats,
+            address: p.address, pending: p.balanceSats, paid: p.totalPaidSats,
         }));
 
         await service.onBlockFound(template.height, blockReward);
 
         expect(historyRepo._rows.length).toBe(rowCountBeforeReplay);
-        const balancesAfterReplay = (await balanceService.getAllWithPending())
-            .map((p: any) => ({ address: p.address, pending: p.pendingSats, paid: p.totalPaidSats }));
+        const balancesAfterReplay = (await balanceService.getAllWithBalance())
+            .map((p: any) => ({ address: p.address, pending: p.balanceSats, paid: p.totalPaidSats }));
         expect(balancesAfterReplay).toEqual(balancesBeforeReplay);
 
         console.log(`✅ 50-miner stress: block submit clean, distribution consistent, replay is no-op`);

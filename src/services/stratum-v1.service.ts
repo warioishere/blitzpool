@@ -117,6 +117,8 @@ export class StratumV1Service implements OnModuleInit {
       this.groupSoloService,
       this.minerActiveModeService,
       this.poolModeHashrateService,
+      portConfig.minimumDifficulty ?? 0,
+      portConfig.ledgerWarmupShares ?? 0,
     );
 
     socket.on('close', async (hadError: boolean) => {

@@ -146,6 +146,14 @@ export class StratumV2Client {
   private frameWriter: Sv2FrameWriter;
   private destroyed = false;
 
+  /**
+   * Per-session accepted-share counter for the PPLNS warmup gate.
+   * Mirrors the StratumV1 implementation: first `ledgerWarmupShares`
+   * shares are validated + counted in client stats but skip the PPLNS
+   * ledger write. Filters CPU / low-hashrate miners.
+   */
+  private acceptedShareCount = 0;
+
   // Multi-channel state
   private channels = new Map<number, StratumV2ChannelState>();
   private primaryChannelId: number | null = null;
@@ -221,9 +229,16 @@ export class StratumV2Client {
   ) {
     this.sessionId = this.generateSessionId();
     this.sessionStart = new Date();
-    this.sessionDifficulty = Number.isFinite(portConfig.initialDifficulty)
+    const rawInitial = Number.isFinite(portConfig.initialDifficulty)
       ? portConfig.initialDifficulty
       : 16384;
+    // Clamp initial difficulty to the port's floor (set on the PPLNS
+    // port via PPLNS_MIN_DIFFICULTY) so a hash-rate-derived auto-target
+    // can't dip below and let sub-500-GH/s miners pollute the ledger.
+    const portMinDiff = portConfig.minimumDifficulty ?? 0;
+    this.sessionDifficulty = portMinDiff > 0
+      ? Math.max(rawInitial, portMinDiff)
+      : rawInitial;
     this.debugMessages = process.env.SV2_DEBUG_MESSAGES === 'true';
 
     const networkConfig = this.configService.get('NETWORK');
@@ -242,6 +257,7 @@ export class StratumV2Client {
 
     this.statistics = new StratumV1ClientStatistics(
       portConfig.targetSharesPerMinute,
+      portMinDiff,
     );
 
     // Enable TCP_NODELAY to disable Nagle's algorithm (reduces latency)
@@ -1486,10 +1502,16 @@ export class StratumV2Client {
       // decision, write a Redis port-marker so /api/pplns/mode/:address
       // reflects the port the miner is ACTUALLY on right now. 5-min TTL,
       // refreshed every share.
+      // PPLNS warmup gate (see StratumV1Client for rationale). Only
+      // applies to the PPLNS port; group-solo / solo always record.
+      this.acceptedShareCount++;
       const shareGroupId = this.activeGroupId();
+      const warmupThreshold = this.portConfig.ledgerWarmupShares ?? 0;
       let effectiveMode: 'solo' | 'pplns' | 'group-solo';
       if (this.portConfig.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
-        await this.pplnsService.recordShare(this.address!, jobDifficulty);
+        if (this.acceptedShareCount > warmupThreshold) {
+          await this.pplnsService.recordShare(this.address!, jobDifficulty);
+        }
         effectiveMode = 'pplns';
       } else if (shareGroupId) {
         await this.groupSoloService!.recordShare(this.address!, jobDifficulty);

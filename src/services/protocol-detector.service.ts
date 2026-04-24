@@ -138,14 +138,49 @@ export class ProtocolDetectorService implements OnModuleInit {
           this.configService.get<string>('PPLNS_TARGET_SHARES_PER_MINUTE') ?? normalizedDefaultTargetShares.toString(),
         );
 
+        // VarDiff floor for the PPLNS port. Default 500 — matches ~500 GH/s
+        // devices at the default 6 shares/min target, which is the practical
+        // lower bound for a miner that can meaningfully participate in the
+        // PPLNS window without generating sub-dust ledger churn.
+        const pplnsMinDiffRaw = parseFloat(
+          this.configService.get<string>('PPLNS_MIN_DIFFICULTY') ?? '500',
+        );
+        const pplnsMinDifficulty = Number.isFinite(pplnsMinDiffRaw) && pplnsMinDiffRaw > 0
+          ? pplnsMinDiffRaw
+          : 500;
+
+        // Share warmup gate for the PPLNS ledger. First N shares from a
+        // fresh session are validated but not counted in the PPLNS window.
+        // A CPU miner that briefly reaches the minimum diff by luck will
+        // stall well before submitting N consecutive shares; a real
+        // 500 GH/s+ miner churns through the gate in < 2 minutes.
+        const pplnsWarmupRaw = parseInt(
+          this.configService.get<string>('PPLNS_WARMUP_SHARES') ?? '10',
+          10,
+        );
+        const pplnsWarmup = Number.isFinite(pplnsWarmupRaw) && pplnsWarmupRaw >= 0
+          ? pplnsWarmupRaw
+          : 10;
+
+        const clampedInitialDiff = Math.max(
+          Number.isNaN(pplnsDifficulty) ? normalizedDefaultDifficulty : pplnsDifficulty,
+          pplnsMinDifficulty,
+        );
+
         this.startUnifiedServer({
           port: Number.isNaN(pplnsPort) ? 3340 : pplnsPort,
-          initialDifficulty: Number.isNaN(pplnsDifficulty) ? normalizedDefaultDifficulty : pplnsDifficulty,
+          initialDifficulty: clampedInitialDiff,
           allowSuggestedDifficulty: true,
           targetSharesPerMinute: Number.isNaN(pplnsTargetShares) ? normalizedDefaultTargetShares : pplnsTargetShares,
           payoutMode: 'pplns',
+          minimumDifficulty: pplnsMinDifficulty,
+          ledgerWarmupShares: pplnsWarmup,
         });
-        console.log(`[ProtocolDetector] PPLNS port configured: ${pplnsPort}`);
+        console.log(
+          `[ProtocolDetector] PPLNS port ${pplnsPort} configured: `
+          + `initialDiff=${clampedInitialDiff}, minDiff=${pplnsMinDifficulty}, `
+          + `warmup=${pplnsWarmup} shares`,
+        );
       }
     }
 

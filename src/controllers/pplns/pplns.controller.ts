@@ -74,9 +74,11 @@ export class PplnsController {
 
     /**
      * GET /pplns/fees
-     * Pool-side fee + coinbase-shape configuration. The UI reads this
-     * to render fees on the groups-landing page and the PPLNS Info
-     * page without re-deploying when values change.
+     * Pool-side fee + coinbase-shape + PPLNS-port gate configuration.
+     * The UI reads this to render fees on the groups-landing page and
+     * the PPLNS Info / mining-modes page without re-deploying when
+     * values change.
+     *
      *   - feePercent: human percent (e.g. 2 for 2 %)
      *   - feeAddress: where the single fee coinbase output lands
      *   - coinbaseWeightBudget: max WU reserved for the whole coinbase
@@ -85,15 +87,25 @@ export class PplnsController {
      *   - coinbaseBaseWeight / coinbaseOutputWeight / coinbaseWitnessCommitmentWeight:
      *     the structural WU numbers the algorithm uses to decide
      *     "how many miners fit in this block's coinbase".
+     *   - minDifficulty: VarDiff floor on the PPLNS port
+     *     (PPLNS_MIN_DIFFICULTY, default 500). Sub-500-GH/s devices
+     *     cannot sustain this target and are effectively locked out.
+     *   - warmupShares: per-session ledger-warmup gate on the PPLNS
+     *     port (PPLNS_WARMUP_SHARES, default 10). First N shares are
+     *     validated but not added to the PPLNS ledger, filtering
+     *     CPU / low-hashrate miners that briefly reach the min diff.
      */
     @Get('fees')
     getFees() {
+        const gate = this.pplnsService.getPortGateConfig();
         return {
             ...this.pplnsService.getFeeConfig(),
             dustLimitSats: DUST_LIMIT_SATS,
             coinbaseBaseWeight: COINBASE_BASE_WEIGHT,
             coinbaseOutputWeight: COINBASE_OUTPUT_WEIGHT,
             coinbaseWitnessCommitmentWeight: COINBASE_WITNESS_COMMITMENT_WEIGHT,
+            minDifficulty: gate.minDifficulty,
+            warmupShares: gate.warmupShares,
         };
     }
 

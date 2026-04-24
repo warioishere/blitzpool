@@ -120,24 +120,24 @@ function createMockRedis() {
 }
 
 // ── Balance backing: single row store exposed as both service and repo
-// facades. onBlockFound reads via `this.balanceService.getAllWithPending()`
+// facades. onBlockFound reads via `this.balanceService.getAllWithBalance()`
 // outside the TX, then mutates via `em.getRepository(PplnsBalanceEntity)`
 // inside the TX — both must see the same state.
 function createMockBalanceBacking() {
     const rows: any[] = [];
     const find = (addr: string) => rows.find((r: any) => r.address === addr);
     const service = {
-        getAllWithPending: async () => rows.filter((r: any) => r.pendingSats > 0),
-        getPending: async (addr: string) => find(addr)?.pendingSats ?? 0,
-        addPending: async (addr: string, sats: number) => {
+        getAllWithBalance: async () => rows.filter((r: any) => r.balanceSats !== 0),
+        getBalanceSats: async (addr: string) => find(addr)?.balanceSats ?? 0,
+        addBalance: async (addr: string, sats: number) => {
             const existing = find(addr);
-            if (existing) existing.pendingSats += sats;
-            else rows.push({ address: addr, pendingSats: sats, totalPaidSats: 0 });
+            if (existing) existing.balanceSats += sats;
+            else rows.push({ address: addr, balanceSats: sats, totalPaidSats: 0 });
         },
         markPaid: async (addr: string, sats: number) => {
             const existing = find(addr);
             if (existing) {
-                existing.pendingSats = Math.max(0, existing.pendingSats - sats);
+                existing.balanceSats = Math.max(0, existing.balanceSats - sats);
                 existing.totalPaidSats += sats;
             }
         },
@@ -166,7 +166,7 @@ function createMockBalanceBacking() {
                 const set = new Set<string>(inOp._value);
                 return rows.filter((r: any) => set.has(r.address));
             }
-            if (q?.where?.pendingSats) return rows.filter((r: any) => r.pendingSats > 0);
+            if (q?.where?.balanceSats) return rows.filter((r: any) => r.balanceSats !== 0);
             return [...rows];
         },
         _rows: rows,
@@ -339,11 +339,11 @@ describe('PPLNS Regtest — pending-out-of-miner-cut invariant', () => {
         // Seed pending from prior sub-dust rounds: Charlie accumulated
         // 50 000 sats over time without mining to the current window.
         (balanceService._rows as any[]).push(
-            { address: ADDR_CHARLIE, pendingSats: 50_000, totalPaidSats: 0 },
+            { address: ADDR_CHARLIE, balanceSats: 50_000, totalPaidSats: 0 },
         );
         // Alice also has small pending from earlier block's rounding.
         (balanceService._rows as any[]).push(
-            { address: ADDR_ALICE, pendingSats: 1_500, totalPaidSats: 0 },
+            { address: ADDR_ALICE, balanceSats: 1_500, totalPaidSats: 0 },
         );
 
         // Alice + Bob mine actively this round.

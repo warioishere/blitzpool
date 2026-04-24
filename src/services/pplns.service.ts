@@ -184,6 +184,29 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         };
     }
 
+    /**
+     * Port-side gate config for the PPLNS port — surfaced via
+     * /api/pplns/fees so the UI can render "min 500 diff / 10 warmup
+     * shares" on the mining-modes page.
+     *
+     * Reads the same env vars consumed by `protocol-detector.service.ts`
+     * when it wires up the port; keeping the parse in one place risks
+     * drift if that file changes, but doing the parse twice keeps the
+     * pplns.service dependency graph light (no detour through the
+     * stratum layer).
+     *
+     * Defaults match the detector:
+     *   PPLNS_MIN_DIFFICULTY = 500
+     *   PPLNS_WARMUP_SHARES  = 10
+     */
+    getPortGateConfig(): { minDifficulty: number; warmupShares: number } {
+        const minRaw = parseFloat(this.configService.get<string>('PPLNS_MIN_DIFFICULTY') ?? '500');
+        const minDifficulty = Number.isFinite(minRaw) && minRaw > 0 ? minRaw : 500;
+        const warmupRaw = parseInt(this.configService.get<string>('PPLNS_WARMUP_SHARES') ?? '10', 10);
+        const warmupShares = Number.isFinite(warmupRaw) && warmupRaw >= 0 ? warmupRaw : 10;
+        return { minDifficulty, warmupShares };
+    }
+
     setNetworkDifficulty(difficulty: number): void {
         if (Number.isFinite(difficulty) && difficulty > 0) {
             this.networkDifficulty = difficulty;

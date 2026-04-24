@@ -357,9 +357,13 @@ describe('Group-Solo Regtest — End-to-End with Bitcoin Core', () => {
       expect(key).not.toMatch(/^groupsolo:grp-1:/);
     }
 
-    // A fresh distribution call should now return the fee-only fallback
+    // A fresh distribution call should now return the fee-only fallback.
+    // Shape changed with the signed-ledger refactor: entries now carry a
+    // `sats` field alongside percent/address.
     const freshDist = await service.getPayoutDistribution('grp-1', blockReward);
-    expect(freshDist).toEqual([{ address: ADDR_FEE, percent: 100 }]);
+    expect(freshDist).toHaveLength(1);
+    expect(freshDist[0].address).toBe(ADDR_FEE);
+    expect(freshDist[0].percent).toBe(100);
 
     console.log('✅ End-to-end flow verified: shares → distribution → block submit → round reset');
   }, 60000);

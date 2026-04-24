@@ -223,12 +223,16 @@ describe('PplnsController', () => {
     });
 
     describe('getFees', () => {
-        it('returns fee config + dust limit + coinbase weight constants', () => {
+        it('returns fee config + dust limit + coinbase weight constants + PPLNS-port gate', () => {
             const { controller, pplnsService } = setup({});
             (pplnsService as any).getFeeConfig = jest.fn().mockReturnValue({
                 feePercent: 2,
                 feeAddress: 'bc1qfee',
                 coinbaseWeightBudget: 50000,
+            });
+            (pplnsService as any).getPortGateConfig = jest.fn().mockReturnValue({
+                minDifficulty: 500,
+                warmupShares: 10,
             });
             const res: any = controller.getFees();
             expect(res.feePercent).toBe(2);
@@ -238,6 +242,8 @@ describe('PplnsController', () => {
             expect(res.coinbaseBaseWeight).toBe(328);
             expect(res.coinbaseOutputWeight).toBe(172);
             expect(res.coinbaseWitnessCommitmentWeight).toBe(188);
+            expect(res.minDifficulty).toBe(500);
+            expect(res.warmupShares).toBe(10);
         });
     });
 });
