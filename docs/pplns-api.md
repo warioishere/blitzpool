@@ -149,13 +149,14 @@ Historical hashrate time-series aggregated across all current PPLNS participants
 
 ## `GET /api/pplns/:address`
 
-PPLNS status for a single miner address: pending payout, total paid to date, and current share of the window.
+PPLNS status for a single miner address, exposing the **signed credit/debit ledger**: what the pool owes (or what the miner owes the pool), plus lifetime totals and current window share.
 
 ### Response
 
 ```json
 {
-  "pendingSats": 125000,
+  "balanceSats": 125000,
+  "balanceLabel": "credit",
   "totalPaidSats": 8750000,
   "currentWindowDifficulty": 3500000,
   "currentWindowPercent": 28.36
@@ -166,22 +167,24 @@ PPLNS status for a single miner address: pending payout, total paid to date, and
 
 | Field | Type | Meaning |
 |---|---|---|
-| `pendingSats` | number | Sats credited to this address but not yet paid out (from `pplns_balance` table). Used when a block-found payout couldn't include the miner in the coinbase directly (e.g. dust, weight budget exceeded). |
-| `totalPaidSats` | number | Lifetime sats paid to this address. |
-| `currentWindowDifficulty` | number | This address's work in the current window. |
+| `balanceSats` | integer (signed) | Signed ledger balance for this address. `> 0` pool owes the miner (pending credit from sub-dust / trim). `< 0` miner owes the pool (outstanding debit from an earlier on-chain bonus, settled automatically the next time they mine). `0` no open claim in either direction. |
+| `balanceLabel` | `'credit'` \| `'debit'` \| `'zero'` | Ready-to-render category for UI (green / red / neutral). Derived from `balanceSats`. |
+| `totalPaidSats` | number | Lifetime sats paid out to this address on-chain via the PPLNS engine. |
+| `currentWindowDifficulty` | number | This address's work in the current sliding window. |
 | `currentWindowPercent` | number | This address's share of the window, 0–100. |
 
 ### Notes
 
-- Returns zeros for all fields if the address has never mined or is not currently in the window.
-- `pendingSats` + `totalPaidSats` is the authoritative lifetime view; `currentWindowPercent` is ephemeral and changes as the window rolls.
-- Address is not validated — an unknown address returns a valid zero response.
+- Returns zeros / `'zero'` for all fields if the address has never mined.
+- Credits settle when `balanceSats + rawFair ≥ dust` in a subsequent block — the credit is added to the on-chain payout and balance resets to 0.
+- Debits settle when the miner mines again — their target becomes `rawFair + balanceOld` (less than rawFair), and the reduced on-chain payout repays the debt.
+- Address is not validated — an unknown address returns a valid `'zero'` response.
 
 ---
 
 ## `GET /api/pplns/:address/history`
 
-Per-block payout history for a specific address, newest first.
+Per-block payout history for a specific address, newest first. Includes both on-chain payouts and ledger-only events (credit accrual, pair-sweep cancellations) so the miner can trace their balance evolution block by block.
 
 ### Query Parameters
 
@@ -200,7 +203,28 @@ Per-block payout history for a specific address, newest first.
     "paidSats": 320000,
     "percent": 6.4,
     "inCoinbase": true,
+    "rowType": "coinbase",
     "createdAt": "2026-04-18T14:22:10.123Z"
+  },
+  {
+    "id": 1392,
+    "blockHeight": 891200,
+    "address": "bc1q...",
+    "paidSats": 0,
+    "percent": 0,
+    "inCoinbase": false,
+    "rowType": "pending",
+    "createdAt": "2026-04-18T13:40:02.512Z"
+  },
+  {
+    "id": 1120,
+    "blockHeight": -1761187200,
+    "address": "bc1q...",
+    "paidSats": 127,
+    "percent": 0,
+    "inCoinbase": false,
+    "rowType": "dust-sweep",
+    "createdAt": "2026-04-12T03:00:00.221Z"
   }
 ]
 ```
@@ -210,17 +234,60 @@ Per-block payout history for a specific address, newest first.
 | Field | Type | Meaning |
 |---|---|---|
 | `id` | number | Auto-increment primary key. |
-| `blockHeight` | number | Height of the block this payout is for. |
+| `blockHeight` | number | Real block height for `coinbase` / `pending` rows. `dust-sweep` rows encode negative Unix-seconds as a synthetic height so the `(blockHeight, address)` unique index stays collision-free across repeat sweeps. |
 | `address` | string | Payout address. |
-| `paidSats` | number | Amount paid to this address for this block. |
-| `percent` | number | This address's share of that block's coinbase distribution. |
-| `inCoinbase` | boolean | `true` if the payout went directly into the block's coinbase output; `false` if credited to `pendingSats` instead (dust, weight budget, etc.). |
+| `paidSats` | number | For `coinbase`: on-chain sats paid in the block. For `pending`: 0 (audit only — ledger moved, no on-chain output). For `dust-sweep`: absolute amount absorbed on this side of a pair-cancellation. |
+| `percent` | number | This address's share of that block's coinbase distribution (`coinbase` rows only; 0 for `pending` / `dust-sweep`). |
+| `inCoinbase` | boolean | `true` only for `rowType === 'coinbase'`. Legacy field; prefer `rowType`. |
+| `rowType` | `'coinbase'` \| `'pending'` \| `'dust-sweep'` | Semantic category: on-chain payout / signed ledger change without on-chain output / abandonment pair-cancellation absorption. |
 | `createdAt` | string (ISO 8601) | Row creation timestamp. |
 
 ### Notes
 
 - Sorted `createdAt DESC`. Returns `[]` if the address has no payout history.
-- Each block produces one row per paid address, so history rows can be compared across addresses by `blockHeight`.
+- Each block that affects the miner produces at least one row — one per rowType category if multiple categories apply (rare).
+- `pending` rows document that the signed ledger balance changed without an on-chain output (sub-dust credit accrued, matching debit absorbed via reduced rawFair, or just a late-arrival audit).
+- `dust-sweep` rows always come in pairs: one for the credit side, one for the debit side, sharing the same synthetic `blockHeight`.
+
+---
+
+## `GET /api/pplns/ledger`
+
+Pool-wide signed-ledger summary. Gives an operator dashboard (or the UI's "PPLNS Info" page) everything needed to render "what does the pool owe and what is owed to it" in a single call.
+
+### Response
+
+```json
+{
+  "totalCreditSats": 12450,
+  "totalDebitSats": 12418,
+  "netDriftSats": 32,
+  "creditHolderCount": 34,
+  "debitHolderCount": 6,
+  "abandonedCreditSats": 420,
+  "abandonedDebitSats": 0,
+  "lifetimePaidSats": 58421023547
+}
+```
+
+### Fields
+
+| Field | Type | Meaning |
+|---|---|---|
+| `totalCreditSats` | number | Sum of positive balances across every miner row (pool owes miners this much in total). |
+| `totalDebitSats` | number | Sum of absolute negative balances (miners owe pool this much in total). |
+| `netDriftSats` | number | Signed total: `totalCreditSats - totalDebitSats`. Hovers near 0 in a steady-state pool; persistent drift indicates floor-rounding accumulation on the largest miner (harmless, bounded by the sweep). |
+| `creditHolderCount` | number | Row count with `balanceSats > 0`. |
+| `debitHolderCount` | number | Row count with `balanceSats < 0`. |
+| `abandonedCreditSats` | number | Subset of `totalCreditSats` sitting in rows whose `lastAcceptedShareAt` is older than `ABANDONED_BALANCE_DAYS` — candidates for pair-cancellation on the next daily sweep. |
+| `abandonedDebitSats` | number | Same for debits. |
+| `lifetimePaidSats` | number | Sum of `totalPaidSats` across every miner row — lifetime on-chain payouts through the PPLNS engine. |
+
+### Notes
+
+- In a steady-state pool `totalCreditSats ≈ totalDebitSats` (pool-neutrality, bounded floor-rounding drift).
+- A big gap between `abandonedCreditSats` and `abandonedDebitSats` means the next sweep will be asymmetric: only the smaller side pair-cancels, the larger side stays in the ledger waiting for further counterparties.
+- Computed with a single full-table SUM / COUNT scan. Acceptable up to ~100 k rows; at scale, consider caching with a short TTL.
 
 ---
 
@@ -230,13 +297,16 @@ Per-block payout history for a specific address, newest first.
 # Pool-wide status
 curl http://localhost:3000/api/pplns/status
 
+# Pool-wide signed-ledger summary
+curl http://localhost:3000/api/pplns/ledger
+
 # Full distribution (who's mining right now, in what proportion)
 curl http://localhost:3000/api/pplns/distribution
 
-# One miner's status
+# One miner's status (includes signed balance + balanceLabel)
 curl http://localhost:3000/api/pplns/bc1qexampleaddr...
 
-# One miner's last 20 payouts
+# One miner's last 20 payouts (coinbase + pending + dust-sweep rows)
 curl "http://localhost:3000/api/pplns/bc1qexampleaddr.../history?limit=20"
 ```
 

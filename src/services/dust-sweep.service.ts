@@ -2,7 +2,7 @@ import { Injectable, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
-import { LessThan, Repository, And } from 'typeorm';
+import { Repository } from 'typeorm';
 
 import { PplnsBalanceEntity } from '../ORM/pplns-balance/pplns-balance.entity';
 import { PplnsPayoutHistoryEntity } from '../ORM/pplns-balance/pplns-payout-history.entity';
@@ -11,51 +11,73 @@ import { PplnsGroupBlockHistoryEntity } from '../ORM/pplns-group/pplns-group-blo
 import { DUST_LIMIT_SATS } from './coinbase-distribution';
 
 /**
- * Daily sweep of dormant sub-dust pending balances.
+ * Daily ledger maintenance for PPLNS balances.
  *
- * Why: a user who briefly tested PPLNS or got added to a group and left
- * shortly after may have a few hundred sats of pending that will never
- * reach the dust limit (no further mining). Those rows linger forever in
- * pplns_balance / pplns_group_balance, polluting queries and moral
- * expectation ("I have 31 sats!" that will never get paid).
+ * Runs two independent sweeps:
  *
- * What: once per day, find rows with
- *     pendingSats > 0 AND pendingSats < DUST_LIMIT_SATS
- *     AND lastAcceptedShareAt < NOW() - DUST_SWEEP_DORMANT_DAYS
- * Write a dedicated audit row (rowType='dust-sweep') so the history
- * remains explainable, then delete the balance row. No on-chain action —
- * the sats were never actually minted; the "pending" was purely a pool-
- * side ledger promise.
+ *   1. PPLNS pair-sweep (signed balances) —
+ *      Built for the credit/debit ledger introduced with the
+ *      RenamePplnsPendingToBalance migration. Finds dormant rows with
+ *      balanceSats != 0 (either sign) whose lastAcceptedShareAt is
+ *      older than ABANDONED_BALANCE_DAYS. Pairs the largest abandoned
+ *      credit against the largest abandoned debit and cancels
+ *      matching amounts on both sides. Unpaired remainders stay in
+ *      the ledger until a counterparty becomes available (either a
+ *      matching dormant row or the miner's own return to mining).
+ *
+ *      This preserves sum(balances) = 0 strictly — no silent drift
+ *      toward fee or other active miners. The physical sats that
+ *      back an abandoned credit already live on-chain in a past
+ *      coinbase output; the pool is non-custodial and cannot
+ *      redistribute them, so pair-cancellation is the one ledger
+ *      action that is materially neutral for everyone else.
+ *
+ *   2. Group-Solo dust sweep (unsigned, legacy) —
+ *      Group-Solo balances stay on the simpler "positive pending"
+ *      model because the feature intentionally forbids trim/sub-dust
+ *      accumulation (groups are capped small enough that every
+ *      member's share clears dust every block). Finds dormant rows
+ *      with 0 < pendingSats < DUST and lastAcceptedShareAt past the
+ *      cutoff, writes an audit row and deletes the balance.
+ *
+ * Why different: group-solo's ledger can only ever go positive
+ * (pendingSats is the old non-negative pending field; no bonus-
+ * redistribution happens for group rounds), so there is no
+ * counterparty to pair with. A single-sided dust absorption is
+ * semantically correct there.
+ *
+ * Env:
+ *   DUST_SWEEP_ENABLED        default 'true'   — set 'false' to disable
+ *   ABANDONED_BALANCE_DAYS    default '90'     — PPLNS sweep cutoff (3 months)
+ *   DUST_SWEEP_DORMANT_DAYS   default '30'     — legacy group-solo cutoff
+ *
+ * ABANDONED_BALANCE_DAYS defaults to 90 (3 months): long enough that
+ * a short-term Bitaxe operator who briefly tested the pool doesn't
+ * see their pending credit evaporate, but short enough that the
+ * ledger stays clean and dust rows don't pile up indefinitely. The
+ * group-solo dust cutoff keeps the original 30-day default because
+ * those balances are all < 546 sat remnants with no counterparty to
+ * wait for.
  *
  * blockHeight for audit rows: encoded as `-Math.floor(Date.now() / 1000)`
  * (negative Unix seconds). Two reasons:
  *   1. Audit rows aren't associated with any real block — a negative
  *      value cannot be confused with a real height.
- *   2. The unique index on (blockHeight, address) added in
- *      1776800000000-AddPayoutHistoryUniqueConstraints would otherwise
- *      block a second sweep of the same address: balance row is deleted
- *      after sweep, miner resumes mining, accumulates dust again, goes
- *      dormant → next sweep tries to insert (blockHeight=0, address) a
- *      second time → 23505. Using the current epoch makes the pair unique
- *      across sweep runs (second-granularity is enough given the 24h
- *      cadence).
+ *   2. The unique index on (blockHeight, address) would otherwise
+ *      block a second sweep of the same address once the row has
+ *      been recreated by fresh mining activity.
  *
- * Env:
- *   DUST_SWEEP_ENABLED       default 'true'   — set 'false' to disable
- *   DUST_SWEEP_DORMANT_DAYS  default '30'     — inactivity threshold
- *
- * NULL-handling: lastAcceptedShareAt IS NULL is treated as "no signal",
- * NOT as "infinitely stale". Pre-migration balance rows have NULL; they
- * get a timestamp on the miner's next accepted share and only become
- * sweep candidates after real inactivity. This is deliberately
- * conservative — we'd rather let a few legacy rows sit than wrongly
- * sweep an active miner.
+ * NULL-handling: lastAcceptedShareAt IS NULL is treated as "no signal"
+ * NOT as "infinitely stale". Pre-migration balance rows have NULL;
+ * they get a timestamp on the miner's next accepted share and only
+ * become sweep candidates after real inactivity.
  */
 @Injectable()
 export class DustSweepService implements OnModuleInit {
 
     private enabled = true;
     private dormantDays = 30;
+    private abandonedDays = 90;
 
     constructor(
         private readonly configService: ConfigService,
@@ -72,10 +94,22 @@ export class DustSweepService implements OnModuleInit {
     onModuleInit(): void {
         const enabledRaw = (this.configService.get<string>('DUST_SWEEP_ENABLED') ?? 'true').toLowerCase();
         this.enabled = enabledRaw !== 'false' && enabledRaw !== '0';
-        const daysRaw = parseInt(this.configService.get<string>('DUST_SWEEP_DORMANT_DAYS') ?? '30', 10);
-        this.dormantDays = Number.isFinite(daysRaw) && daysRaw > 0 ? daysRaw : 30;
+        const dormantRaw = parseInt(this.configService.get<string>('DUST_SWEEP_DORMANT_DAYS') ?? '30', 10);
+        this.dormantDays = Number.isFinite(dormantRaw) && dormantRaw > 0 ? dormantRaw : 30;
+        const abandonedRaw = parseInt(this.configService.get<string>('ABANDONED_BALANCE_DAYS') ?? '90', 10);
+        this.abandonedDays = Number.isFinite(abandonedRaw) && abandonedRaw > 0 ? abandonedRaw : 90;
 
-        console.log(`[DustSweep] enabled=${this.enabled}, dormantDays=${this.dormantDays}`);
+        console.log(`[DustSweep] enabled=${this.enabled}, dormantDays=${this.dormantDays}, abandonedDays=${this.abandonedDays}`);
+    }
+
+    /** PPLNS pair-sweep inactivity threshold in days (read-only for API / UI). */
+    getAbandonedDays(): number {
+        return this.abandonedDays;
+    }
+
+    /** Group-Solo legacy dust-sweep inactivity threshold in days. */
+    getDormantDays(): number {
+        return this.dormantDays;
     }
 
     /** 03:00 daily — low-traffic window, same cadence as other daily crons. */
@@ -90,64 +124,185 @@ export class DustSweepService implements OnModuleInit {
     }
 
     /**
-     * Public for tests and manual-trigger admin endpoints. Runs both
-     * pools (PPLNS main + group-solo) in sequence; each is independent
-     * so a failure in one doesn't block the other.
+     * Public for tests and manual-trigger admin endpoints.
+     *
+     * Returns a summary of what each sweep absorbed:
+     *   - pplnsPaired   — rows zeroed via credit↔debit pair match
+     *   - pplnsSatsPaired — abs-sum of paired amount (one side, not double)
+     *   - groupSwept    — group-solo legacy dust rows deleted
      */
-    async sweep(): Promise<{ pplnsSwept: number; groupSwept: number; }> {
-        const cutoff = new Date(Date.now() - this.dormantDays * 24 * 60 * 60 * 1000);
-        const pplnsSwept = await this.sweepPplns(cutoff);
-        const groupSwept = await this.sweepGroup(cutoff);
-        if (pplnsSwept > 0 || groupSwept > 0) {
-            console.log(`[DustSweep] absorbed ${pplnsSwept} PPLNS and ${groupSwept} group-solo dust rows (cutoff=${cutoff.toISOString()})`);
+    async sweep(): Promise<{
+        pplnsPaired: number;
+        pplnsSatsPaired: number;
+        groupSwept: number;
+    }> {
+        const abandonedCutoff = new Date(Date.now() - this.abandonedDays * 24 * 60 * 60 * 1000);
+        const dustCutoff = new Date(Date.now() - this.dormantDays * 24 * 60 * 60 * 1000);
+
+        const pplnsResult = await this.sweepPplnsPairs(abandonedCutoff);
+        const groupSwept = await this.sweepGroupDust(dustCutoff);
+
+        if (pplnsResult.pairsClosed > 0 || groupSwept > 0) {
+            console.log(
+                `[DustSweep] PPLNS paired ${pplnsResult.pairsClosed} rows `
+                + `(${pplnsResult.satsPaired} sats), group-solo swept ${groupSwept} dust rows `
+                + `(abandoned<${abandonedCutoff.toISOString()}, dust<${dustCutoff.toISOString()})`,
+            );
         }
-        return { pplnsSwept, groupSwept };
+
+        return {
+            pplnsPaired: pplnsResult.pairsClosed,
+            pplnsSatsPaired: pplnsResult.satsPaired,
+            groupSwept,
+        };
     }
 
     /**
      * Generate a blockHeight placeholder for audit rows that doesn't
-     * collide with prior dust-sweep rows for the same address. Negative
-     * Unix seconds — easy to recognise, fits in Postgres int, and unique
-     * across sweep runs at second granularity.
+     * collide with prior sweep rows for the same address. Negative
+     * Unix seconds.
      */
     private sweepBlockHeight(): number {
         return -Math.floor(Date.now() / 1000);
     }
 
-    private async sweepPplns(cutoff: Date): Promise<number> {
+    /**
+     * Pair-cancel dormant PPLNS credits and debits.
+     *
+     * Algorithm:
+     *   1. Load all rows whose lastAcceptedShareAt is older than the
+     *      abandoned cutoff and balanceSats != 0.
+     *   2. Split by sign. Sort credits by balance desc, debits by
+     *      |balance| desc.
+     *   3. Walk both lists, greedy-matching largest against largest.
+     *      For each pair, cancel min(credit, |debit|) on both sides.
+     *      Whichever side reaches zero is fully removed from the
+     *      ledger; the other side's row stays with its reduced
+     *      balance and original lastAcceptedShareAt timestamp (so
+     *      it remains a sweep candidate next run).
+     *   4. Each balance change is recorded as a dust-sweep audit row
+     *      in pplns_payout_history (paidSats = |amount cancelled|).
+     *      Matching rows share a blockHeight so an operator can see
+     *      which credit paired with which debit.
+     *
+     * Sum(balances) across the whole ledger is preserved strictly:
+     * a pair cancels +X on the credit side and -X on the debit side,
+     * delta = 0.
+     */
+    private async sweepPplnsPairs(cutoff: Date): Promise<{ pairsClosed: number; satsPaired: number }> {
         const candidates = await this.pplnsBalanceRepo
             .createQueryBuilder('b')
-            .where('b."pendingSats" > 0')
-            .andWhere('b."pendingSats" < :dust', { dust: DUST_LIMIT_SATS })
+            .where('b."balanceSats" != 0')
             .andWhere('b."lastAcceptedShareAt" IS NOT NULL')
             .andWhere('b."lastAcceptedShareAt" < :cutoff', { cutoff })
             .getMany();
 
-        let swept = 0;
-        for (const row of candidates) {
+        if (candidates.length === 0) return { pairsClosed: 0, satsPaired: 0 };
+
+        const credits = candidates
+            .filter(r => r.balanceSats > 0)
+            .sort((a, b) => b.balanceSats - a.balanceSats);
+        const debits = candidates
+            .filter(r => r.balanceSats < 0)
+            .sort((a, b) => a.balanceSats - b.balanceSats);   // most-negative first
+
+        if (credits.length === 0 || debits.length === 0) {
+            console.log(
+                `[DustSweep] PPLNS: ${candidates.length} abandoned rows but no counterparty `
+                + `to pair (${credits.length} credits / ${debits.length} debits) — leaving in ledger`,
+            );
+            return { pairsClosed: 0, satsPaired: 0 };
+        }
+
+        let pairsClosed = 0;
+        let satsPaired = 0;
+        const blockHeight = this.sweepBlockHeight();
+
+        let i = 0, j = 0;
+        while (i < credits.length && j < debits.length) {
+            const credit = credits[i];
+            const debit = debits[j];
+
+            const amount = Math.min(credit.balanceSats, -debit.balanceSats);
+            if (amount <= 0) break;   // sanity
+
             try {
                 await this.pplnsHistoryRepo.manager.transaction(async (em) => {
                     const history = em.getRepository(PplnsPayoutHistoryEntity);
                     const balance = em.getRepository(PplnsBalanceEntity);
-                    await history.save(history.create({
-                        blockHeight: this.sweepBlockHeight(),
-                        address: row.address,
-                        paidSats: row.pendingSats,
-                        percent: 0,
-                        inCoinbase: false,
-                        rowType: 'dust-sweep',
-                    }));
-                    await balance.delete({ address: row.address });
+
+                    await history.save([
+                        history.create({
+                            blockHeight,
+                            address: credit.address,
+                            paidSats: amount,
+                            percent: 0,
+                            inCoinbase: false,
+                            rowType: 'dust-sweep',
+                        }),
+                        history.create({
+                            blockHeight,
+                            address: debit.address,
+                            paidSats: amount,
+                            percent: 0,
+                            inCoinbase: false,
+                            rowType: 'dust-sweep',
+                        }),
+                    ]);
+
+                    credit.balanceSats -= amount;
+                    debit.balanceSats += amount;
+
+                    if (credit.balanceSats === 0) {
+                        await balance.delete({ address: credit.address });
+                    } else {
+                        await balance.update({ address: credit.address }, { balanceSats: credit.balanceSats });
+                    }
+                    if (debit.balanceSats === 0) {
+                        await balance.delete({ address: debit.address });
+                    } else {
+                        await balance.update({ address: debit.address }, { balanceSats: debit.balanceSats });
+                    }
                 });
-                swept++;
+
+                pairsClosed += 2;
+                satsPaired += amount;
+                console.log(
+                    `[DustSweep] paired ${credit.address} credit <-> ${debit.address} debit `
+                    + `(${amount} sats each side cancelled)`,
+                );
             } catch (err) {
-                console.warn(`[DustSweep] pplns row ${row.address} failed:`, (err as Error).message);
+                console.warn(
+                    `[DustSweep] pair ${credit.address}/${debit.address} failed:`,
+                    (err as Error).message,
+                );
+                // Still advance the pointer that was exhausted — stale
+                // loop is worse than a skipped pair.
             }
+
+            if (credit.balanceSats === 0) i++;
+            if (debit.balanceSats === 0) j++;
         }
-        return swept;
+
+        const unpairedCredits = credits.length - i;
+        const unpairedDebits = debits.length - j;
+        if (unpairedCredits > 0 || unpairedDebits > 0) {
+            console.log(
+                `[DustSweep] PPLNS: ${unpairedCredits} abandoned credits + `
+                + `${unpairedDebits} abandoned debits unpaired (waiting for counterparty)`,
+            );
+        }
+
+        return { pairsClosed, satsPaired };
     }
 
-    private async sweepGroup(cutoff: Date): Promise<number> {
+    /**
+     * Legacy group-solo dust absorption. Group balances are still on
+     * the unsigned-pending model (no trim / no sub-dust by design),
+     * so the single-sided sweep is correct: positive rows < dust that
+     * haven't mined in dormantDays are deleted with an audit row.
+     */
+    private async sweepGroupDust(cutoff: Date): Promise<number> {
         const candidates = await this.groupBalanceRepo
             .createQueryBuilder('b')
             .where('b."pendingSats" > 0')

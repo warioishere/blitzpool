@@ -36,15 +36,29 @@ Just you versus Bitcoin. You submit shares against the full network difficulty; 
 
 ### 🔗 PPLNS (Pay Per Last N Shares)
 
-Sliding-window pooled mining with a **multi-output coinbase**. Every miner in the window gets their proportional share written as their own output in the same coinbase transaction that mints the block. No pool wallet touches the sats.
+Sliding-window pooled mining with a **multi-output coinbase** and a **signed credit/debit ledger**. Every miner in the window gets their proportional share written as their own output in the same coinbase transaction that mints the block. No pool wallet touches the sats.
 
 - Window size: `4 × networkDifficulty` in diff-1-weighted shares
 - Anti-hop by design (sliding window, not per-block reset)
-- Sub-dust shares accumulate in pending across rounds until they cross the 546-sat dust floor
-- Fee is a single coinbase output to `PPLNS_FEE_ADDRESS`
+- Sub-dust or weight-trimmed shares accumulate as a signed **pending credit** on the miner's ledger row; bonus recipients of the same block pick up a matching **pending debit**
+- Fee is a single coinbase output to `PPLNS_FEE_ADDRESS` — exact feePercent, never padded by trim / sub-dust sweep
 - Dedicated port, default `PPLNS_PORT=3340`
 
 **When it fits:** mid-size ASIC, wants more regular variance smoothing than Solo, still values non-custodial payouts over FPPS convenience.
+
+#### The signed credit/debit ledger
+
+PPLNS's non-custodial guarantee is enforced by a per-miner signed balance (`pplns_balance.balanceSats`):
+
+- **`balanceSats > 0`** — pool owes the miner this much (pending credit, accumulated from sub-dust rounds or weight-trimmed blocks where their on-chain output didn't fit).
+- **`balanceSats < 0`** — miner owes the pool this much (debit booked when they received an on-chain bonus from another miner's trimmed / sub-dust share; settled automatically the next time they mine by reducing their rawFair).
+- **`balanceSats == 0`** — no open claim in either direction.
+
+Every sat a miner earns stays with that miner. Trimmed and sub-dust sats become a *credit* for the miner who earned them; the bonus recipient of the same block picks up a matching *debit*. The fee output gets exactly `feePercent`, never padded by sweep leftovers. The sum of all balances across the whole pool stays at `0` (bounded drift of up to `numMiners` sats per block from floor-rounding).
+
+**Abandonment:** when a miner goes dormant for `ABANDONED_BALANCE_DAYS` days (default 90 = 3 months), the daily sweep cron pair-matches their balance against abandoned counterparties (largest-credit ↔ largest-debit) and cancels both sides. Unpaired remainders stay in the ledger until a counterparty also becomes abandoned or the debitor returns. No active miner's fair share is ever touched by another miner's abandonment.
+
+See `src/services/coinbase-distribution.ts` for the full algorithm (5 phases incl. solvency cap) and `src/services/dust-sweep.service.ts` for the pair-aware sweep.
 
 ### 👥 Group-Solo
 

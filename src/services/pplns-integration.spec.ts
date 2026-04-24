@@ -119,22 +119,22 @@ function createMockRedis() {
 }
 
 function createMockBalanceBacking() {
-  const balances = new Map<string, { address: string; pendingSats: number; totalPaidSats: number }>();
+  const balances = new Map<string, { address: string; balanceSats: number; totalPaidSats: number }>();
   const service = {
     addPending: jest.fn(async (address: string, sats: number) => {
       const existing = balances.get(address);
-      if (existing) { existing.pendingSats += sats; }
-      else { balances.set(address, { address, pendingSats: sats, totalPaidSats: 0 }); }
+      if (existing) { existing.balanceSats += sats; }
+      else { balances.set(address, { address, balanceSats: sats, totalPaidSats: 0 }); }
     }),
-    getPending: jest.fn(async (address: string) => balances.get(address)?.pendingSats ?? 0),
+    getBalanceSats: jest.fn(async (address: string) => balances.get(address)?.balanceSats ?? 0),
     getBalance: jest.fn(async (address: string) => balances.get(address) ?? null),
-    getAllWithPending: jest.fn(async () =>
-      Array.from(balances.values()).filter(b => b.pendingSats > 0),
+    getAllWithBalance: jest.fn(async () =>
+      Array.from(balances.values()).filter(b => b.balanceSats !== 0),
     ),
     markPaid: jest.fn(async (address: string, sats: number) => {
       const existing = balances.get(address);
       if (existing) {
-        existing.pendingSats = Math.max(0, existing.pendingSats - sats);
+        existing.balanceSats = Math.max(0, existing.balanceSats - sats);
         existing.totalPaidSats += sats;
       }
     }),
@@ -144,7 +144,7 @@ function createMockBalanceBacking() {
   const applySave = (row: any) => {
     const existing = balances.get(row.address);
     if (existing) Object.assign(existing, row);
-    else balances.set(row.address, { address: row.address, pendingSats: row.pendingSats ?? 0, totalPaidSats: row.totalPaidSats ?? 0 });
+    else balances.set(row.address, { address: row.address, balanceSats: row.balanceSats ?? 0, totalPaidSats: row.totalPaidSats ?? 0 });
     return row;
   };
   const repo: any = {
@@ -159,8 +159,8 @@ function createMockBalanceBacking() {
         const set = new Set<string>(inOp._value);
         return Array.from(balances.values()).filter(b => set.has(b.address));
       }
-      if (q?.where?.pendingSats) {
-        return Array.from(balances.values()).filter(b => b.pendingSats > 0);
+      if (q?.where?.balanceSats) {
+        return Array.from(balances.values()).filter(b => b.balanceSats !== 0);
       }
       return Array.from(balances.values());
     }),
@@ -349,7 +349,7 @@ describe('PPLNS Integration', () => {
 
       // Block 1: Miner 2 gets sub-dust → pending
       await service.onBlockFound(800_000, BLOCK_REWARD);
-      const pending1 = balanceService._get(ADDR_MINER2)?.pendingSats ?? 0;
+      const pending1 = balanceService._get(ADDR_MINER2)?.balanceSats ?? 0;
       expect(pending1).toBeGreaterThan(0);
       expect(pending1).toBeLessThan(546); // sub-dust
       console.log(`\nBlock 1: Miner2 pending = ${pending1} sats`);
@@ -358,7 +358,7 @@ describe('PPLNS Integration', () => {
       for (let i = 1; i <= 19; i++) {
         await service.onBlockFound(800_000 + i, BLOCK_REWARD);
       }
-      const pending20 = balanceService._get(ADDR_MINER2)?.pendingSats ?? 0;
+      const pending20 = balanceService._get(ADDR_MINER2)?.balanceSats ?? 0;
       console.log(`Block 20: Miner2 pending = ${pending20} sats`);
 
       // After enough blocks, pending should exceed dust

@@ -57,11 +57,13 @@ interface StoredSnapshot {
     distribution: GroupSoloPayoutEntry[];
     blockRewardSats: number;
     consideredAddresses: string[];
+    balanceAfter: Array<[string, number]>;
 }
 
 export interface GroupSoloPayoutEntry {
     address: string;
     percent: number;
+    sats: number;
 }
 
 @Injectable()
@@ -207,13 +209,13 @@ export class GroupSoloService implements OnModuleInit {
             addressShares.set(addr, (addressShares.get(addr) ?? 0) + diff);
         }
 
-        const pendingEntities = await this.balanceRepo.find({ where: { groupId } });
-        const pendingBalances = new Map<string, number>();
-        for (const p of pendingEntities) pendingBalances.set(p.address, p.pendingSats);
+        const balanceEntities = await this.balanceRepo.find({ where: { groupId } });
+        const balances = new Map<string, number>();
+        for (const p of balanceEntities) balances.set(p.address, p.pendingSats);
 
-        const { payouts, consideredAddresses } = buildCoinbaseDistribution({
+        const result = buildCoinbaseDistribution({
             addressShares,
-            pendingBalances,
+            balances,
             blockRewardSats,
             feePercent: this.feePercent,
             feeAddress: this.feeAddress,
@@ -221,13 +223,17 @@ export class GroupSoloService implements OnModuleInit {
             logLabel: `[GroupSolo ${groupId}]`,
         });
 
-        const result = payouts.length > 0 ? payouts : this.fallback();
+        const payouts: GroupSoloPayoutEntry[] = result.payouts.length > 0
+            ? result.payouts.map(p => ({ address: p.address, percent: p.percent, sats: p.sats }))
+            : this.fallback(blockRewardSats);
+
         await this.writeSnapshot(groupId, {
-            distribution: result,
+            distribution: payouts,
             blockRewardSats,
-            consideredAddresses: Array.from(consideredAddresses),
+            consideredAddresses: Array.from(result.consideredAddresses),
+            balanceAfter: Array.from(result.balanceAfter.entries()),
         });
-        return result;
+        return payouts;
     }
 
     private async writeSnapshot(groupId: string, snapshot: StoredSnapshot): Promise<void> {
@@ -248,6 +254,7 @@ export class GroupSoloService implements OnModuleInit {
         distribution: GroupSoloPayoutEntry[];
         blockRewardSats: number;
         consideredAddresses: Set<string>;
+        balanceAfter: Map<string, number>;
     } | null> {
         const keys = redisKeys(groupId);
         const raw = await this.redis.get(keys.snapshot);
@@ -255,9 +262,14 @@ export class GroupSoloService implements OnModuleInit {
         try {
             const parsed: StoredSnapshot = JSON.parse(raw);
             return {
-                distribution: parsed.distribution,
+                distribution: parsed.distribution.map(d => ({
+                    address: d.address,
+                    percent: d.percent,
+                    sats: d.sats ?? Math.floor((d.percent / 100) * parsed.blockRewardSats),
+                })),
                 blockRewardSats: parsed.blockRewardSats,
-                consideredAddresses: new Set(parsed.consideredAddresses),
+                consideredAddresses: new Set(parsed.consideredAddresses ?? []),
+                balanceAfter: new Map(parsed.balanceAfter ?? []),
             };
         } catch {
             return null;
@@ -269,8 +281,14 @@ export class GroupSoloService implements OnModuleInit {
         await this.redis.del(keys.snapshot);
     }
 
-    private fallback(): GroupSoloPayoutEntry[] {
-        if (this.feeAddress) return [{ address: this.feeAddress, percent: 100 }];
+    private fallback(blockRewardSats?: number): GroupSoloPayoutEntry[] {
+        if (this.feeAddress) {
+            return [{
+                address: this.feeAddress,
+                percent: 100,
+                sats: blockRewardSats ?? 0,
+            }];
+        }
         return [];
     }
 
@@ -333,22 +351,19 @@ export class GroupSoloService implements OnModuleInit {
                 return;
             }
 
-            const reward = snapshot.blockRewardSats;
             const snapshotAddrs = new Set(snapshot.distribution.map(d => d.address));
             const keys = redisKeys(groupId);
             const windowEntries = await this.redis.zRange(keys.shares, 0, -1);
-
-            // Aggregate window diff per-address once (O(shares) but bounded
-            // by round — group-solo resets per block, so it never grows
-            // unbounded the way PPLNS does).
-            const addressDiff = new Map<string, number>();
-            let totalDiff = 0;
+            const windowAddrs = new Set<string>();
+            let totalDiffRound = 0;
+            const diffByAddr = new Map<string, number>();
             if (windowEntries && windowEntries.length > 0) {
                 for (const e of windowEntries) {
                     const [addr, diffStr] = e.split(':');
                     const diff = parseFloat(diffStr) || 0;
-                    addressDiff.set(addr, (addressDiff.get(addr) ?? 0) + diff);
-                    totalDiff += diff;
+                    windowAddrs.add(addr);
+                    diffByAddr.set(addr, (diffByAddr.get(addr) ?? 0) + diff);
+                    totalDiffRound += diff;
                 }
             }
 
@@ -358,17 +373,12 @@ export class GroupSoloService implements OnModuleInit {
                     const balanceRepo = em.getRepository(PplnsGroupBalanceEntity);
 
                     // Single IN-list fetch for every balance row we might
-                    // touch — snapshot miners (non-fee) + window miners that
-                    // were considered. At 2 000 miners in a group this is
-                    // one query instead of ~2 000 findOneBy round-trips.
+                    // touch — anyone in balanceAfter, plus snapshot miners
+                    // (for totalPaidSats).
                     const addrsNeedingBalance = new Set<string>();
+                    for (const addr of snapshot.balanceAfter.keys()) addrsNeedingBalance.add(addr);
                     for (const d of snapshot.distribution) {
                         if (d.address !== this.feeAddress) addrsNeedingBalance.add(d.address);
-                    }
-                    for (const addr of addressDiff.keys()) {
-                        if (!snapshotAddrs.has(addr) && snapshot.consideredAddresses.has(addr)) {
-                            addrsNeedingBalance.add(addr);
-                        }
                     }
                     const existingBalances = addrsNeedingBalance.size > 0
                         ? await balanceRepo.find({ where: { groupId, address: In(Array.from(addrsNeedingBalance)) } })
@@ -377,74 +387,78 @@ export class GroupSoloService implements OnModuleInit {
 
                     const balancesToSave = new Map<string, PplnsGroupBalanceEntity>();
                     const historyRows: PplnsGroupBlockHistoryEntity[] = [];
+                    const now = new Date();
 
-                    // Miners in the snapshot get paid via coinbase; clear any prior pending.
+                    // 1. Apply absolute balanceAfter values from snapshot.
+                    for (const [addr, newBalance] of snapshot.balanceAfter) {
+                        let balance = balanceMap.get(addr);
+                        if (!balance) {
+                            balance = balanceRepo.create({
+                                address: addr, groupId,
+                                pendingSats: newBalance,
+                                totalPaidSats: 0,
+                                lastAcceptedShareAt: now,
+                            });
+                            balanceMap.set(addr, balance);
+                        } else {
+                            balance.pendingSats = newBalance;
+                            balance.lastAcceptedShareAt = now;
+                        }
+                        balancesToSave.set(balance.address, balance);
+                    }
+
+                    // 2. Coinbase outputs: history rows + totalPaidSats bump.
                     for (const d of snapshot.distribution) {
-                        const paidSats = Math.floor((d.percent / 100) * reward);
                         const isFee = d.address === this.feeAddress;
                         if (!isFee) {
-                            const existing = balanceMap.get(d.address);
-                            if (existing && existing.pendingSats > 0) {
-                                existing.totalPaidSats += existing.pendingSats;
-                                existing.pendingSats = 0;
-                                balancesToSave.set(existing.address, existing);
+                            let balance = balanceMap.get(d.address);
+                            if (!balance) {
+                                balance = balanceRepo.create({
+                                    address: d.address, groupId,
+                                    pendingSats: 0, totalPaidSats: 0,
+                                    lastAcceptedShareAt: now,
+                                });
+                                balanceMap.set(d.address, balance);
                             }
+                            balance.totalPaidSats += d.sats;
+                            balancesToSave.set(balance.address, balance);
                         }
                         historyRows.push(historyRepo.create({
                             groupId, blockHeight, address: d.address,
-                            paidSats, percent: d.percent,
-                            sharesInRound: 0, totalSharesInRound: 0,
+                            paidSats: d.sats, percent: d.percent,
+                            sharesInRound: Math.round(diffByAddr.get(d.address) ?? 0),
+                            totalSharesInRound: Math.round(totalDiffRound),
                             inCoinbase: true, rowType: 'coinbase',
                         }));
                     }
 
-                    // For each window address not in snapshot.distribution:
-                    //   - was considered (sub-dust / weight-trimmed) → credit to pending
-                    //   - not considered (late arriver) → audit row only
-                    const rewardForMiners = Math.floor(((100 - this.feePercent) / 100) * reward);
-                    for (const [addr, diff] of addressDiff) {
+                    // 3. Ledger-change audit rows for addresses whose balance
+                    //    shifted without appearing on-chain.
+                    for (const addr of snapshot.balanceAfter.keys()) {
                         if (snapshotAddrs.has(addr)) continue;
-                        const wasConsidered = snapshot.consideredAddresses.has(addr);
-                        if (wasConsidered) {
-                            const sats = totalDiff > 0 ? Math.floor((diff / totalDiff) * rewardForMiners) : 0;
-                            if (sats > 0) {
-                                const now = new Date();
-                                let existing = balanceMap.get(addr);
-                                if (!existing) {
-                                    existing = balanceRepo.create({
-                                        address: addr, groupId, pendingSats: 0, totalPaidSats: 0,
-                                        lastAcceptedShareAt: now,
-                                    });
-                                    balanceMap.set(addr, existing);
-                                }
-                                existing.pendingSats += sats;
-                                existing.lastAcceptedShareAt = now;
-                                balancesToSave.set(existing.address, existing);
-                                historyRows.push(historyRepo.create({
-                                    groupId, blockHeight, address: addr,
-                                    paidSats: sats,
-                                    percent: (diff / totalDiff) * (100 - this.feePercent),
-                                    sharesInRound: Math.round(diff),
-                                    totalSharesInRound: Math.round(totalDiff),
-                                    inCoinbase: false, rowType: 'pending',
-                                }));
-                            }
-                        } else {
-                            // Late arriver — audit row only, no payout.
-                            historyRows.push(historyRepo.create({
-                                groupId, blockHeight, address: addr,
-                                paidSats: 0,
-                                percent: 0,
-                                sharesInRound: Math.round(diff),
-                                totalSharesInRound: Math.round(totalDiff),
-                                inCoinbase: false, rowType: 'pending',
-                            }));
-                            console.log(`[GroupSolo]   ${addr}: ${diff.toFixed(2)} shares in round but not in coinbase snapshot (late arrival, PROP rules)`);
-                        }
+                        historyRows.push(historyRepo.create({
+                            groupId, blockHeight, address: addr,
+                            paidSats: 0, percent: 0,
+                            sharesInRound: Math.round(diffByAddr.get(addr) ?? 0),
+                            totalSharesInRound: Math.round(totalDiffRound),
+                            inCoinbase: false, rowType: 'pending',
+                        }));
                     }
 
-                    // Batch persist — one save for balances, one insert for
-                    // history rows. Replaces the O(miners) round-trip pattern.
+                    // 4. Late arrivers: in window but not considered at
+                    //    snapshot-build time → audit only, no ledger impact.
+                    for (const addr of windowAddrs) {
+                        if (snapshot.consideredAddresses.has(addr)) continue;
+                        historyRows.push(historyRepo.create({
+                            groupId, blockHeight, address: addr,
+                            paidSats: 0, percent: 0,
+                            sharesInRound: Math.round(diffByAddr.get(addr) ?? 0),
+                            totalSharesInRound: Math.round(totalDiffRound),
+                            inCoinbase: false, rowType: 'pending',
+                        }));
+                        console.log(`[GroupSolo]   ${addr}: ${(diffByAddr.get(addr) ?? 0).toFixed(2)} shares in round but not in coinbase snapshot (late arrival, PROP rules)`);
+                    }
+
                     if (balancesToSave.size > 0) {
                         await balanceRepo.save(Array.from(balancesToSave.values()));
                     }

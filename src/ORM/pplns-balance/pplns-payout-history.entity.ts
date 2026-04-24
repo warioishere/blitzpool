@@ -29,7 +29,10 @@ export class PplnsPayoutHistoryEntity {
     /**
      * Discriminator for row semantics:
      *   - 'coinbase'    : paid on-chain via the block's coinbase tx
-     *   - 'pending'     : sub-dust / weight-trimmed, credited to pendingSats
+     *   - 'pending'     : signed ledger change without an on-chain output
+     *                     (sub-dust / weight-trimmed credit, or a debit
+     *                     booked against a bonus-receiving miner — see
+     *                     pplns_balance.balanceSats)
      *   - 'dust-sweep'  : absorbed by the daily sweep cron after inactivity
      *
      * Existing rows default to 'coinbase' via the migration backfill —

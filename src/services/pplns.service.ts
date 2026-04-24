@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
 import { InjectRepository } from '@nestjs/typeorm';
-import { EntityManager, In, Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { Subscription } from 'rxjs';
 import { PplnsBalanceService } from '../ORM/pplns-balance/pplns-balance.service';
 import { PplnsBalanceEntity } from '../ORM/pplns-balance/pplns-balance.entity';
@@ -11,7 +11,7 @@ import { PplnsPayoutHistoryEntity } from '../ORM/pplns-balance/pplns-payout-hist
 import { StratumV1JobsService } from './stratum-v1-jobs.service';
 import {
     buildCoinbaseDistribution,
-    DUST_LIMIT_SATS,
+    CoinbaseDistributionEntry,
     DEFAULT_COINBASE_WEIGHT_BUDGET,
     COINBASE_BASE_WEIGHT,
     COINBASE_OUTPUT_WEIGHT,
@@ -22,7 +22,8 @@ import {
  * PPLNS (Pay Per Last N Shares) engine.
  *
  * Tracks shares in a Redis sorted set and computes coinbase payout
- * distributions.  Window size = 4 * network_difficulty (diff1-equivalent).
+ * distributions using a signed credit/debit ledger (see pplns_balance.
+ * balanceSats). Window size = 4 × network_difficulty (diff-1-equivalent).
  *
  * Only active when PPLNS_PORT is configured.
  */
@@ -31,32 +32,34 @@ const PPLNS_WINDOW_FACTOR = 4;
 const REDIS_KEY_SHARES = 'pplns:shares';
 const REDIS_KEY_COUNTER = 'pplns:counter';
 const REDIS_KEY_WINDOW_TOTAL = 'pplns:window:total';
-// Per-address diff-1 aggregate for the current window. Maintained in lock-
-// step with REDIS_KEY_SHARES: recordShare increments, trimWindow decrements.
-// Hot-path readers (getPayoutDistribution, onBlockFound) use hGetAll on this
-// hash instead of zRange 0 -1 over the raw share set, so lookup cost is O(N
-// distinct miners) rather than O(M individual shares). At 2 000 miners ×
-// ~1 share/second the raw set holds >1M entries in a normal window — the
-// aggregate is a handful of kilobytes.
+// Per-address diff-1 aggregate for the current window. Maintained in
+// lock-step with REDIS_KEY_SHARES: recordShare increments, trimWindow
+// decrements. Hot-path readers use hGetAll on this hash instead of
+// zRange 0 -1 over the raw share set, so lookup cost is O(N distinct
+// miners) rather than O(M individual shares). At 2 000 miners ×
+// ~1 share/second the raw set holds >1M entries in a normal window —
+// the aggregate is a handful of kilobytes.
 //
 // Drift: hIncrByFloat accumulates float error over very long runs. Same
 // failsafe as REDIS_KEY_WINDOW_TOTAL — every 1000 trims we do a full
 // recalculate from REDIS_KEY_SHARES to reset accumulated drift.
 const REDIS_KEY_WINDOW_BY_ADDRESS = 'pplns:window:by-address';
-// Coinbase snapshot — JSON-encoded distribution that was actually used to
-// build the latest coinbase. Persisted in Redis (not an in-memory Map) so
-// a pool restart between getPayoutDistribution and onBlockFound doesn't
-// lose it and force onBlockFoundFromWindow (whose distribution can differ
-// from what's already on-chain).
+
+// Coinbase snapshot — the distribution that was actually used to build
+// the latest coinbase, plus the signed balance state we committed to at
+// that moment. Persisted in Redis (not an in-memory Map) so a pool
+// restart between getPayoutDistribution and onBlockFound doesn't lose it.
 //
-// `consideredAddresses` captures every address that was in addressShares
-// or pendingBalances at snapshot-build time (including sub-dust miners
-// filtered out of the coinbase). onBlockFound uses it to distinguish two
-// classes of "not in coinbase" miners — sub-dust (was considered, credit
-// to pending) vs late arriver (submitted after snapshot, audit only).
-// Without this, late-arriver shares get credited to pending AND stay in
-// the sliding window for future blocks → double-paid. Same fix pattern
-// as group-solo (commit 6ace1b8).
+// The snapshot carries:
+//   - distribution:          the coinbase output list (percent + sats per address)
+//   - blockRewardSats:       the coinbase value this snapshot was built for
+//   - consideredAddresses:   every address that was in shares or balances
+//                            at build time; lets onBlockFound distinguish
+//                            late arrivers (submitted after snapshot) from
+//                            sub-dust / trimmed miners (were in the set)
+//   - balanceAfter:          new absolute balance per address that changed,
+//                            produced by buildCoinbaseDistribution. Applied
+//                            as absolute writes in the block-found TX.
 const REDIS_KEY_SNAPSHOT = 'pplns:snapshot';
 const SNAPSHOT_TTL_SECONDS = 60 * 60; // 1h — covers worst-case block-find + restart window.
 
@@ -64,16 +67,18 @@ interface StoredPplnsSnapshot {
     distribution: PplnsPayoutEntry[];
     blockRewardSats: number;
     consideredAddresses: string[];
+    balanceAfter: Array<[string, number]>;   // signed; empty list = no ledger changes
 }
 
-// DUST_LIMIT_SATS + coinbase weight constants live in ./coinbase-distribution.ts
-// (the shared pure module used by both PPLNS and Group-Solo). Single source of
-// truth so fee dust-gate / weight-budget-trim / pending-out-of-miner-cut all
-// stay in sync across payout modes.
+// DUST_LIMIT_SATS + coinbase weight constants live in
+// ./coinbase-distribution.ts — single source of truth.
 
 export interface PplnsPayoutEntry {
     address: string;
+    /** Share of the block reward (0–100). */
     percent: number;
+    /** On-chain sats this output carries. Authoritative; `percent` is derived. */
+    sats: number;
 }
 
 @Injectable()
@@ -86,25 +91,23 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
     private jobSubscription: Subscription | null = null;
     private readonly coinbaseWeightBudget: number;
 
-    // Distribution cache — avoids re-reading entire Redis sorted set on every job
+    // Distribution cache — avoids re-reading entire Redis state + re-running
+    // the math on every new job.
     private cachedDistribution: PplnsPayoutEntry[] | null = null;
     private cachedDistributionReward = 0;
     private cachedDistributionAt = 0;
-    private static readonly DISTRIBUTION_CACHE_TTL_MS = 30_000; // 30 seconds max
+    private static readonly DISTRIBUTION_CACHE_TTL_MS = 30_000;
 
-    // Coinbase snapshot is persisted via Redis (see REDIS_KEY_SNAPSHOT /
-    // SNAPSHOT_TTL_SECONDS). The helpers `writeSnapshot` / `readSnapshot` /
-    // `deleteSnapshot` wrap the (de)serialization so no in-memory state
-    // needs to survive a pool restart for onBlockFound to book payouts
-    // against the exact distribution that went on-chain.
-
-    // Block-found lock — prevents concurrent onBlockFound calls from double-processing
+    // Block-found lock — prevents concurrent onBlockFound within this
+    // process from double-processing. Cross-process idempotency is handled
+    // by the pre-check on pplns_payout_history + the unique index.
     private blockFoundInProgress = false;
 
-    // NOTE: The PPLNS share window intentionally does NOT reset after a block is found.
-    // This is correct PPLNS behavior — shares within the window contribute to multiple
-    // blocks. A reset would be PROP (proportional) payout, not PPLNS. The sliding window
-    // protects against pool-hopping attacks.
+    // NOTE: The PPLNS share window intentionally does NOT reset after a
+    // block is found. This is correct PPLNS behavior — shares within the
+    // window contribute to multiple blocks. A reset would be PROP
+    // (proportional) payout, not PPLNS. The sliding window protects
+    // against pool-hopping attacks.
 
     constructor(
         private readonly configService: ConfigService,
@@ -141,9 +144,6 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         // a single entry, and the next getPayoutDistribution would read
         // that lone entry as "the whole window" — silently excluding
         // every pre-deploy miner from the distribution.
-        //
-        // On startup, if the raw set has shares but the hash is empty,
-        // rebuild the hash from scratch before serving any traffic.
         if (this.redis) {
             try {
                 const aggEmpty = Object.keys((await this.redis.hGetAll(REDIS_KEY_WINDOW_BY_ADDRESS)) ?? {}).length === 0;
@@ -176,11 +176,6 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         return this.enabled && !!this.redis;
     }
 
-    /**
-     * Pool fee config exposed to the UI so the landing pages can show current
-     * fees dynamically without hard-coding them. Same config is reused by the
-     * group-solo path, so one endpoint covers both modes.
-     */
     getFeeConfig(): { feePercent: number; feeAddress: string; coinbaseWeightBudget: number } {
         return {
             feePercent: this.feePercent,
@@ -189,29 +184,16 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         };
     }
 
-    /**
-     * Update network difficulty (called when new block template arrives).
-     */
     setNetworkDifficulty(difficulty: number): void {
         if (Number.isFinite(difficulty) && difficulty > 0) {
             this.networkDifficulty = difficulty;
         }
     }
 
-    /**
-     * Get the current PPLNS window size in diff1-equivalent shares.
-     */
     getWindowSize(): number {
         return PPLNS_WINDOW_FACTOR * this.networkDifficulty;
     }
 
-    /**
-     * Max miner outputs that fit in the coinbase weight budget. Mirrors
-     * the formula in `buildCoinbaseDistribution`: base + witness-commitment
-     * are always present; fee output is present only when `feeAddress` is
-     * configured; the rest of the budget splits into miner outputs at
-     * `COINBASE_OUTPUT_WEIGHT` each.
-     */
     getMaxCoinbaseOutputs(): number {
         const feeOutputCount = this.feeAddress ? 1 : 0;
         return Math.floor(
@@ -225,9 +207,6 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
 
     // ── Share Recording ──────────────────────────────────────────
 
-    /**
-     * Record an accepted share from a PPLNS miner.
-     */
     async recordShare(address: string, difficulty: number): Promise<void> {
         if (!this.redis || !this.enabled) return;
 
@@ -235,16 +214,10 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         const entry = `${address}:${difficulty}:${Date.now()}`;
         await this.redis.zAdd(REDIS_KEY_SHARES, { score: counter, value: entry });
         await this.redis.incrByFloat(REDIS_KEY_WINDOW_TOTAL, difficulty);
-        // Maintain the per-address aggregate in lock-step with the raw
-        // share set so hot-path readers can skip the zRange 0 -1 scan.
         await this.redis.hIncrByFloat(REDIS_KEY_WINDOW_BY_ADDRESS, address, difficulty);
 
-        // Invalidate cached distribution — share weights changed
         this.cachedDistribution = null;
 
-        // Keep pplns_balance.lastAcceptedShareAt fresh so the dust-sweep
-        // cron can distinguish "miner still active" from "dormant pending
-        // leftover". No-op if the miner has no balance row yet.
         this.balanceService.touchLastAcceptedShareAt(address).catch(err => {
             console.warn(`[PPLNS] touchLastAcceptedShareAt failed for ${address}:`, (err as Error).message);
         });
@@ -254,9 +227,6 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
 
     private trimCounter = 0;
 
-    /**
-     * Trim oldest shares to keep window within N = 4 * networkDifficulty.
-     */
     private async trimWindow(): Promise<void> {
         const windowSize = this.getWindowSize();
         if (windowSize <= 0) return;
@@ -264,15 +234,11 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         const totalStr = await this.redis.get(REDIS_KEY_WINDOW_TOTAL);
         let total = parseFloat(totalStr) || 0;
 
-        // Trim in batches of 100 for efficiency
         while (total > windowSize) {
             const oldest = await this.redis.zRange(REDIS_KEY_SHARES, 0, 99);
             if (!oldest || oldest.length === 0) break;
 
             let removedDiff = 0;
-            // Group removed diff per-address so we can decrement the
-            // per-address aggregate with one hIncrByFloat per miner
-            // instead of one per share.
             const removedByAddr = new Map<string, number>();
             for (const entry of oldest) {
                 const parts = entry.split(':');
@@ -291,9 +257,6 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
 
         this.trimCounter++;
 
-        // Every 1000 trims, recalculate total + per-address aggregate from
-        // the raw sorted set to fix accumulated float drift. Same failsafe
-        // cadence as the existing window-total recalc.
         if (this.trimCounter % 1000 === 0) {
             total = await this.recalculateWindowTotal();
             await this.recalculateWindowByAddress();
@@ -302,13 +265,6 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         await this.redis.set(REDIS_KEY_WINDOW_TOTAL, total.toString());
     }
 
-    /**
-     * Recalculate the per-address window aggregate by scanning the raw
-     * sorted set. Expensive (O(M shares)) but runs at most every 1000
-     * trims, so amortized cost per share is tiny. Zero-or-negative entries
-     * are removed from the hash to keep `hGetAll` cheap for downstream
-     * readers.
-     */
     private async recalculateWindowByAddress(): Promise<void> {
         const entries = await this.redis.zRange(REDIS_KEY_SHARES, 0, -1);
         const byAddr = new Map<string, number>();
@@ -317,10 +273,6 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
             const diff = parseFloat(parts[1]) || 0;
             byAddr.set(parts[0], (byAddr.get(parts[0]) ?? 0) + diff);
         }
-        // Rebuild atomically: clear then repopulate. At the volumes the
-        // recalc runs (every 1000 trims), the brief hGetAll-miss window
-        // is a non-issue — getPayoutDistribution returns fallback-to-fee
-        // if the aggregate reads empty, and the next recordShare repopulates.
         await this.redis.del(REDIS_KEY_WINDOW_BY_ADDRESS);
         for (const [addr, diff] of byAddr) {
             if (diff > 0) {
@@ -329,10 +281,6 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         }
     }
 
-    /**
-     * Recalculate window total from all entries in the sorted set.
-     * Fixes accumulated floating-point drift.
-     */
     private async recalculateWindowTotal(): Promise<number> {
         const entries = await this.redis.zRange(REDIS_KEY_SHARES, 0, -1);
         let total = 0;
@@ -342,14 +290,6 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         return total;
     }
 
-    /**
-     * Read the current PPLNS window grouped by address. Uses the
-     * per-address aggregate hash (O(distinct miners)) instead of scanning
-     * the raw sorted set (O(M shares) — can be millions at scale). Falls
-     * back to the sorted-set scan if the aggregate is empty, which covers
-     * pre-this-optimization Redis state and edge cases right after a
-     * recalculate.
-     */
     private async readWindowByAddress(): Promise<Map<string, number>> {
         const out = new Map<string, number>();
         const hash = (await this.redis.hGetAll(REDIS_KEY_WINDOW_BY_ADDRESS)) ?? {};
@@ -370,17 +310,18 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
     // ── Payout Distribution ──────────────────────────────────────
 
     /**
-     * Calculate the current PPLNS payout distribution for coinbase construction.
-     * Returns an array of {address, percent} suitable for MiningJob.
-     *
-     * @param blockRewardSats - Total block reward in satoshis
+     * Build the current PPLNS payout distribution for coinbase construction.
+     * Returns `{address, percent, sats}` entries — callers pass the array
+     * straight to MiningJob. A snapshot of the full distribution result
+     * (including `balanceAfter`) is persisted to Redis so that the
+     * eventual onBlockFound mutates the ledger against the exact state
+     * we committed at template-build time, even across a pool restart.
      */
     async getPayoutDistribution(blockRewardSats: number): Promise<PplnsPayoutEntry[]> {
         if (!this.redis || !this.enabled) {
-            return this.fallbackDistribution();
+            return this.fallbackDistribution(blockRewardSats);
         }
 
-        // Return cached distribution if still valid (same reward, not expired, not invalidated)
         if (
             this.cachedDistribution &&
             this.cachedDistributionReward === blockRewardSats &&
@@ -389,31 +330,18 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
             return this.cachedDistribution;
         }
 
-        // 1. Read per-address aggregate (O(distinct miners), not O(shares)).
-        //    recordShare / trimWindow keep this in lock-step with the raw
-        //    share set. readWindowByAddress handles legacy-state fallback
-        //    to the sorted-set scan.
         const addressShares = await this.readWindowByAddress();
         if (addressShares.size === 0) {
-            return this.fallbackDistribution();
+            return this.fallbackDistribution(blockRewardSats);
         }
 
-        // 3. Load pending balances
-        const pendingEntities = await this.balanceService.getAllWithPending();
-        const pendingBalances = new Map<string, number>();
-        for (const e of pendingEntities) {
-            pendingBalances.set(e.address, e.pendingSats);
-        }
+        const balanceEntities = await this.balanceService.getAllWithBalance();
+        const balances = new Map<string, number>();
+        for (const e of balanceEntities) balances.set(e.address, e.balanceSats);
 
-        // 4. Delegate the math to the shared pure builder. Handles:
-        //    - pending settled out of miner cut (no bad-cb-amount)
-        //    - sub-dust filter + weight-budget trim
-        //    - fee dust-gate
-        //    - remainder sweep
-        //    - fallback-to-fee-100% when no usable work
-        const { payouts, consideredAddresses } = buildCoinbaseDistribution({
+        const result = buildCoinbaseDistribution({
             addressShares,
-            pendingBalances,
+            balances,
             blockRewardSats,
             feePercent: this.feePercent,
             feeAddress: this.feeAddress,
@@ -421,32 +349,32 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
             logLabel: '[PPLNS]',
         });
 
-        const result = payouts.length > 0 ? payouts : this.fallbackDistribution();
+        const payouts: PplnsPayoutEntry[] = result.payouts.length > 0
+            ? result.payouts.map(this.toPayoutEntry)
+            : this.fallbackDistribution(blockRewardSats);
 
-        // Cache the result
-        this.cachedDistribution = result;
+        this.cachedDistribution = payouts;
         this.cachedDistributionReward = blockRewardSats;
         this.cachedDistributionAt = Date.now();
 
-        // Save snapshot to Redis — onBlockFound will use it for bookkeeping.
-        // consideredAddresses distinguishes sub-dust (was in the window at
-        // snapshot time) from late arrivers (submitted after), preventing
-        // double-credit in the sliding-window PPLNS payout path.
         await this.writeSnapshot({
-            distribution: result,
+            distribution: payouts,
             blockRewardSats,
-            consideredAddresses: Array.from(consideredAddresses),
+            consideredAddresses: Array.from(result.consideredAddresses),
+            balanceAfter: Array.from(result.balanceAfter.entries()),
         });
 
-        return result;
+        return payouts;
+    }
+
+    private toPayoutEntry(entry: CoinbaseDistributionEntry): PplnsPayoutEntry {
+        return { address: entry.address, percent: entry.percent, sats: entry.sats };
     }
 
     private async writeSnapshot(snapshot: StoredPplnsSnapshot): Promise<void> {
         try {
             await this.redis.set(REDIS_KEY_SNAPSHOT, JSON.stringify(snapshot), { EX: SNAPSHOT_TTL_SECONDS });
         } catch {
-            // Older node-redis / ioredis variants don't accept the options
-            // object — fall back to set + expire.
             await this.redis.set(REDIS_KEY_SNAPSHOT, JSON.stringify(snapshot));
             if (typeof this.redis.expire === 'function') {
                 await this.redis.expire(REDIS_KEY_SNAPSHOT, SNAPSHOT_TTL_SECONDS);
@@ -458,19 +386,23 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         distribution: PplnsPayoutEntry[];
         blockRewardSats: number;
         consideredAddresses: Set<string>;
+        balanceAfter: Map<string, number>;
     } | null> {
         const raw = await this.redis.get(REDIS_KEY_SNAPSHOT);
         if (!raw) return null;
         try {
             const parsed: StoredPplnsSnapshot = JSON.parse(raw);
             return {
-                distribution: parsed.distribution,
+                distribution: parsed.distribution.map(d => ({
+                    address: d.address,
+                    percent: d.percent,
+                    // Legacy snapshots pre-signed-ledger don't carry sats;
+                    // derive it from percent to stay compatible during rollout.
+                    sats: d.sats ?? Math.floor((d.percent / 100) * parsed.blockRewardSats),
+                })),
                 blockRewardSats: parsed.blockRewardSats,
-                // Legacy snapshots (pre-this-fix) don't carry the field.
-                // Treat as empty set — every non-snapshot address is then
-                // classed as late arriver, which is the safer side (no
-                // phantom pending credit) during the rollout transition.
                 consideredAddresses: new Set(parsed.consideredAddresses ?? []),
+                balanceAfter: new Map(parsed.balanceAfter ?? []),
             };
         } catch {
             return null;
@@ -481,12 +413,9 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         await this.redis.del(REDIS_KEY_SNAPSHOT);
     }
 
-    /**
-     * Fallback: all reward goes to pool fee address.
-     */
-    private fallbackDistribution(): PplnsPayoutEntry[] {
+    private fallbackDistribution(blockRewardSats: number): PplnsPayoutEntry[] {
         if (this.feeAddress) {
-            return [{ address: this.feeAddress, percent: 100 }];
+            return [{ address: this.feeAddress, percent: 100, sats: blockRewardSats }];
         }
         return [];
     }
@@ -494,25 +423,19 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
     // ── Block Found ──────────────────────────────────────────────
 
     /**
-     * Called when a block is found on a PPLNS port.
-     * Uses the coinbase snapshot (the distribution that was actually used to build the coinbase)
-     * so bookkeeping matches exactly what's on-chain.
+     * Called when a block is found on a PPLNS port. Applies the snapshot's
+     * payout distribution (history rows + absolute balance writes) atomically
+     * in one Postgres transaction.
      *
-     * Idempotency: every history-write + balance-update happens inside one
-     * Postgres transaction, guarded by a pre-check on
-     * pplns_payout_history.blockHeight. A crash mid-processing rolls back
-     * the whole TX — no partial state. On restart the pre-check sees no
-     * rows and replays cleanly. Defense-in-depth: the unique index on
-     * (blockHeight, address) would surface 23505 even if the pre-check
-     * ever raced.
+     * Idempotency: pre-check on pplns_payout_history.blockHeight + unique
+     * index defense-in-depth. A crash mid-TX rolls back everything;
+     * replay re-runs from scratch.
      */
     async onBlockFound(blockHeight: number, blockRewardSats: number): Promise<void> {
         if (!this.redis || !this.enabled) return;
 
-        // Invalidate cache — pending balances are about to change
         this.cachedDistribution = null;
 
-        // Prevent concurrent block-found processing (multiple miners finding a block simultaneously)
         if (this.blockFoundInProgress) {
             console.warn(`[PPLNS] Block ${blockHeight} — skipping, another block-found is already being processed`);
             return;
@@ -520,9 +443,6 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         this.blockFoundInProgress = true;
 
         try {
-            // Idempotency pre-check: a prior onBlockFound for this block
-            // already wrote rows → don't replay (would only be caught by
-            // the 23505 below otherwise, but pre-check avoids the abort).
             const alreadyProcessed = await this.payoutHistoryRepo.findOneBy({ blockHeight });
             if (alreadyProcessed) {
                 console.log(`[PPLNS] Block ${blockHeight} already processed — skipping replay`);
@@ -531,158 +451,34 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
 
             console.log(`[PPLNS] Block ${blockHeight} found! Processing payouts...`);
 
-            // Use the coinbase snapshot — this is the exact distribution that went into the block.
-            // If no snapshot exists (e.g. first block, or Redis flushed), fall back to recalculating.
             const snapshot = await this.readSnapshot();
             if (!snapshot || snapshot.distribution.length === 0) {
-                console.warn(`[PPLNS] No coinbase snapshot available for block ${blockHeight} — falling back to window recalculation`);
-                await this.onBlockFoundFromWindow(blockHeight, blockRewardSats);
+                console.warn(`[PPLNS] No coinbase snapshot available for block ${blockHeight} — recomputing from current window`);
+                await this.applyDistributionWithoutSnapshot(blockHeight, blockRewardSats);
                 return;
             }
 
-            // Defensive check: if the block's reward doesn't match the snapshot's
-            // reward, the snapshot was built for a different job (e.g. coinbasevalue
-            // changed between concurrent jobs as mempool churned). Booking payouts
-            // against the wrong distribution would drift from on-chain reality, so
-            // fall back to the window-recalc path — it produces its own fresh
-            // distribution from the current window and uses the real blockReward.
             if (snapshot.blockRewardSats !== blockRewardSats) {
                 console.warn(
                     `[PPLNS] Snapshot blockReward ${snapshot.blockRewardSats} != block's `
-                    + `${blockRewardSats} — snapshot is for a different job, falling back to window recalc`,
+                    + `${blockRewardSats} — snapshot is for a different job, recomputing from window`,
                 );
                 await this.deleteSnapshot();
-                await this.onBlockFoundFromWindow(blockHeight, blockRewardSats);
+                await this.applyDistributionWithoutSnapshot(blockHeight, blockRewardSats);
                 return;
             }
 
-            // Snapshot is consumed only after the TX commits (delete after),
-            // so a crash mid-TX leaves it for replay.
-
-            const reward = snapshot.blockRewardSats;
-            const snapshotAddresses = new Set(snapshot.distribution.map(d => d.address));
-            // O(distinct miners), not O(shares) — see readWindowByAddress.
             const windowByAddr = await this.readWindowByAddress();
 
-            try {
-                await this.payoutHistoryRepo.manager.transaction(async (em) => {
-                    const historyRepo = em.getRepository(PplnsPayoutHistoryEntity);
-                    const balanceRepo = em.getRepository(PplnsBalanceEntity);
+            await this.applyDistribution({
+                blockHeight,
+                distribution: snapshot.distribution,
+                balanceAfter: snapshot.balanceAfter,
+                consideredAddresses: snapshot.consideredAddresses,
+                currentWindow: windowByAddr,
+                label: 'from coinbase snapshot',
+            });
 
-                    // Single round-trip to fetch every balance row we might
-                    // touch, instead of one findOneBy per miner. At 2 000
-                    // miners the former is ~2 000 × 2–10 ms (4–40 s per TX)
-                    // → an IN-list lookup is a single query.
-                    const addrsNeedingBalance = new Set<string>();
-                    for (const entry of snapshot.distribution) {
-                        if (entry.address !== this.feeAddress) addrsNeedingBalance.add(entry.address);
-                    }
-                    for (const addr of windowByAddr.keys()) {
-                        if (!snapshotAddresses.has(addr) && snapshot.consideredAddresses.has(addr)) {
-                            addrsNeedingBalance.add(addr);
-                        }
-                    }
-                    const existingBalances = addrsNeedingBalance.size > 0
-                        ? await balanceRepo.find({ where: { address: In(Array.from(addrsNeedingBalance)) } })
-                        : [];
-                    const balanceMap = new Map(existingBalances.map(b => [b.address, b]));
-
-                    const balancesToSave = new Map<string, PplnsBalanceEntity>();
-                    const historyRows: PplnsPayoutHistoryEntity[] = [];
-
-                    // Process snapshot distribution (fee + miners that
-                    // made it into the coinbase)
-                    for (const entry of snapshot.distribution) {
-                        const paidSats = Math.floor((entry.percent / 100) * reward);
-                        const isFee = entry.address === this.feeAddress;
-
-                        if (!isFee) {
-                            const balance = balanceMap.get(entry.address);
-                            if (balance && balance.pendingSats > 0) {
-                                balance.totalPaidSats += balance.pendingSats;
-                                balance.pendingSats = 0;
-                                balancesToSave.set(balance.address, balance);
-                            }
-                        }
-
-                        historyRows.push(historyRepo.create({
-                            blockHeight, address: entry.address, paidSats, percent: entry.percent, inCoinbase: true,
-                        }));
-
-                        if (isFee) {
-                            console.log(`[PPLNS]   ${entry.address}: ${paidSats} sats (pool fee, ${entry.percent.toFixed(2)}%)`);
-                        } else {
-                            console.log(`[PPLNS]   ${entry.address}: ${paidSats} sats (paid in coinbase, ${entry.percent.toFixed(2)}%)`);
-                        }
-                    }
-
-                    // For each window address not in the snapshot distribution,
-                    // distinguish:
-                    //   - sub-dust / weight-trimmed: was in the window at
-                    //     snapshot-build time (consideredAddresses) → credit to
-                    //     pending for a future block
-                    //   - late arriver: submitted after snapshot build → audit
-                    //     row only, NO pending credit. The PPLNS window is
-                    //     sliding, so the late arriver's shares stay in the
-                    //     window and get paid via the NEXT block's snapshot;
-                    //     crediting here in addition would be a double-pay.
-                    const totalDiff = Array.from(windowByAddr.values()).reduce((s, v) => s + v, 0);
-                    const rewardForMiners = Math.floor(((100 - this.feePercent) / 100) * reward);
-                    for (const [addr, diff] of windowByAddr) {
-                        if (snapshotAddresses.has(addr)) continue;
-                        const wasConsidered = snapshot.consideredAddresses.has(addr);
-                        if (wasConsidered) {
-                            const sats = totalDiff > 0 ? Math.floor((diff / totalDiff) * rewardForMiners) : 0;
-                            if (sats > 0) {
-                                const now = new Date();
-                                let balance = balanceMap.get(addr);
-                                if (!balance) {
-                                    balance = balanceRepo.create({
-                                        address: addr, pendingSats: 0, totalPaidSats: 0,
-                                        lastAcceptedShareAt: now,
-                                    });
-                                    balanceMap.set(addr, balance);
-                                }
-                                balance.pendingSats += sats;
-                                balance.lastAcceptedShareAt = now;
-                                balancesToSave.set(balance.address, balance);
-                                historyRows.push(historyRepo.create({
-                                    blockHeight, address: addr, paidSats: sats, percent: (diff / totalDiff) * (100 - this.feePercent), inCoinbase: false, rowType: 'pending',
-                                }));
-                                console.log(`[PPLNS]   ${addr}: ${sats} sats → pending (sub-dust / weight-trimmed)`);
-                            }
-                        } else {
-                            // Late arriver — audit row only, no payout.
-                            historyRows.push(historyRepo.create({
-                                blockHeight, address: addr, paidSats: 0, percent: 0, inCoinbase: false, rowType: 'pending',
-                            }));
-                            console.log(`[PPLNS]   ${addr}: ${diff.toFixed(2)} shares in window but not in snapshot (late arrival, stays in sliding window for next block)`);
-                        }
-                    }
-
-                    // Batch persist everything — one save for all balance
-                    // rows, one insert for all history rows. Avoids the
-                    // O(miners) round-trip explosion of the old per-miner
-                    // save() calls.
-                    if (balancesToSave.size > 0) {
-                        await balanceRepo.save(Array.from(balancesToSave.values()));
-                    }
-                    if (historyRows.length > 0) {
-                        await historyRepo.insert(historyRows);
-                    }
-                });
-            } catch (e: any) {
-                // Unique-violation on (blockHeight, address) — some other
-                // process (clustered pool?) processed this block already.
-                // Safe to skip; pre-check catches the normal replay case.
-                if (e?.code === '23505') {
-                    console.warn(`[PPLNS] Block ${blockHeight} raced against duplicate write — skipping (23505)`);
-                    return;
-                }
-                throw e;
-            }
-
-            // Snapshot consumed only after the TX committed.
             await this.deleteSnapshot();
 
             console.log(`[PPLNS] Block ${blockHeight} payouts processed (from coinbase snapshot)`);
@@ -692,34 +488,86 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
     }
 
     /**
-     * Fallback: recalculate from current window when no snapshot is available.
-     * All writes atomic in one TX so a crash mid-processing leaves no partial
-     * state (the pre-check in onBlockFound guards replay).
+     * Fallback when no snapshot is available (first block after deploy,
+     * Redis flushed, reward mismatch). Rebuilds the distribution against
+     * the current window + current balances, then applies it.
+     *
+     * The on-chain coinbase may not exactly match what we compute here if
+     * shares changed between template-send and block-find, but it's the
+     * best approximation possible without a snapshot — and the block IS
+     * already on-chain, so the ledger converges to "close-enough" based
+     * on current state.
      */
-    private async onBlockFoundFromWindow(blockHeight: number, blockRewardSats: number): Promise<void> {
-        const addressDiff = await this.readWindowByAddress();
-        if (addressDiff.size === 0) return;
+    private async applyDistributionWithoutSnapshot(blockHeight: number, blockRewardSats: number): Promise<void> {
+        const addressShares = await this.readWindowByAddress();
+        if (addressShares.size === 0) return;
 
-        const totalDiff = Array.from(addressDiff.values()).reduce((s, v) => s + v, 0);
-        if (totalDiff <= 0) return;
+        const balanceEntities = await this.balanceService.getAllWithBalance();
+        const balances = new Map<string, number>();
+        for (const e of balanceEntities) balances.set(e.address, e.balanceSats);
 
-        const rewardForMiners = Math.floor(((100 - this.feePercent) / 100) * blockRewardSats);
-        const pendingEntities = await this.balanceService.getAllWithPending();
-        const totalPending = pendingEntities.reduce((s, e) => s + (e.pendingSats ?? 0), 0);
-        const effectiveMinerReward = Math.max(0, rewardForMiners - totalPending);
+        const result = buildCoinbaseDistribution({
+            addressShares,
+            balances,
+            blockRewardSats,
+            feePercent: this.feePercent,
+            feeAddress: this.feeAddress,
+            coinbaseWeightBudget: this.coinbaseWeightBudget,
+            logLabel: `[PPLNS fallback ${blockHeight}]`,
+        });
+
+        await this.applyDistribution({
+            blockHeight,
+            distribution: result.payouts.map(p => ({
+                address: p.address, percent: p.percent, sats: p.sats,
+            })),
+            balanceAfter: result.balanceAfter,
+            consideredAddresses: result.consideredAddresses,
+            currentWindow: addressShares,
+            label: 'from window recomputation',
+        });
+    }
+
+    /**
+     * Persist a computed distribution to the database in one TX:
+     *   1. Fetch existing balance rows we'll need (one IN-list round-trip)
+     *   2. For each address in balanceAfter: set balance = new absolute value
+     *   3. For each address in the coinbase distribution: if not-fee, flush
+     *      any pending credit that's being paid out (totalPaidSats += paid)
+     *   4. Insert history rows for every coinbase output and every
+     *      ledger-changed address (so the miner's payout history is
+     *      complete — both on-chain payments and pending-balance shifts)
+     */
+    private async applyDistribution(args: {
+        blockHeight: number;
+        distribution: PplnsPayoutEntry[];
+        balanceAfter: Map<string, number>;
+        consideredAddresses: Set<string>;
+        currentWindow: Map<string, number>;
+        label: string;
+    }): Promise<void> {
+        const {
+            blockHeight,
+            distribution,
+            balanceAfter,
+            consideredAddresses,
+            currentWindow,
+            label,
+        } = args;
 
         try {
             await this.payoutHistoryRepo.manager.transaction(async (em) => {
                 const historyRepo = em.getRepository(PplnsPayoutHistoryEntity);
                 const balanceRepo = em.getRepository(PplnsBalanceEntity);
 
-                // Single IN-list fetch for every address we might touch
-                // — window miners + pending-only miners — instead of one
-                // findOneBy per row.
-                const addrsNeedingBalance = new Set<string>([
-                    ...addressDiff.keys(),
-                    ...pendingEntities.map(e => e.address),
-                ]);
+                const addrsNeedingBalance = new Set<string>();
+                for (const addr of balanceAfter.keys()) addrsNeedingBalance.add(addr);
+                // Also miners in the coinbase (for totalPaidSats update
+                // even if their balance goes from 0 to 0).
+                for (const entry of distribution) {
+                    if (entry.address !== this.feeAddress) addrsNeedingBalance.add(entry.address);
+                }
+
                 const existingBalances = addrsNeedingBalance.size > 0
                     ? await balanceRepo.find({ where: { address: In(Array.from(addrsNeedingBalance)) } })
                     : [];
@@ -729,71 +577,101 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
                 const historyRows: PplnsPayoutHistoryEntity[] = [];
                 const now = new Date();
 
-                for (const [addr, diff] of addressDiff) {
-                    const ratio = diff / totalDiff;
-                    const sats = Math.floor(ratio * effectiveMinerReward);
+                // 1. Apply balanceAfter (absolute writes): set every
+                //    non-fee ledger entry to its new value.
+                for (const [addr, newBalance] of balanceAfter) {
                     let balance = balanceMap.get(addr);
-                    const pending = balance?.pendingSats ?? 0;
-                    const totalSats = sats + pending;
-                    const percent = (totalSats / blockRewardSats) * 100;
+                    if (!balance) {
+                        balance = balanceRepo.create({
+                            address: addr,
+                            balanceSats: newBalance,
+                            totalPaidSats: 0,
+                            lastAcceptedShareAt: now,
+                        });
+                        balanceMap.set(addr, balance);
+                    } else {
+                        balance.balanceSats = newBalance;
+                        balance.lastAcceptedShareAt = now;
+                    }
+                    balancesToSave.set(balance.address, balance);
+                }
 
-                    if (totalSats >= DUST_LIMIT_SATS) {
-                        if (balance && pending > 0) {
-                            balance.totalPaidSats += pending;
-                            balance.pendingSats = 0;
-                            balance.lastAcceptedShareAt = now;
-                            balancesToSave.set(balance.address, balance);
-                        }
-                        historyRows.push(historyRepo.create({
-                            blockHeight, address: addr, paidSats: totalSats, percent, inCoinbase: true, rowType: 'coinbase',
-                        }));
-                    } else if (sats > 0) {
+                // 2. Coinbase outputs: history rows + totalPaidSats for miners.
+                const snapshotAddresses = new Set(distribution.map(d => d.address));
+                for (const entry of distribution) {
+                    const isFee = entry.address === this.feeAddress;
+                    if (!isFee) {
+                        let balance = balanceMap.get(entry.address);
                         if (!balance) {
                             balance = balanceRepo.create({
-                                address: addr, pendingSats: 0, totalPaidSats: 0,
+                                address: entry.address,
+                                balanceSats: 0,
+                                totalPaidSats: 0,
                                 lastAcceptedShareAt: now,
                             });
-                            balanceMap.set(addr, balance);
+                            balanceMap.set(entry.address, balance);
                         }
-                        balance.pendingSats += sats;
-                        balance.lastAcceptedShareAt = now;
+                        balance.totalPaidSats += entry.sats;
                         balancesToSave.set(balance.address, balance);
-                        historyRows.push(historyRepo.create({
-                            blockHeight, address: addr, paidSats: sats, percent, inCoinbase: false, rowType: 'pending',
-                        }));
                     }
-                }
 
-                // Pending-only addresses (not mining this round, ≥ dust) —
-                // pay them out in the coinbase.
-                const processed = new Set(addressDiff.keys());
-                for (const entity of pendingEntities) {
-                    if (processed.has(entity.address)) continue;
-                    if (entity.pendingSats >= DUST_LIMIT_SATS) {
-                        const row = balanceMap.get(entity.address);
-                        if (row) {
-                            const paidAmount = row.pendingSats;
-                            row.totalPaidSats += row.pendingSats;
-                            row.pendingSats = 0;
-                            balancesToSave.set(row.address, row);
-                            historyRows.push(historyRepo.create({
-                                blockHeight, address: entity.address, paidSats: paidAmount,
-                                percent: (paidAmount / blockRewardSats) * 100, inCoinbase: true,
-                            }));
-                        }
-                    }
-                }
+                    historyRows.push(historyRepo.create({
+                        blockHeight,
+                        address: entry.address,
+                        paidSats: entry.sats,
+                        percent: entry.percent,
+                        inCoinbase: true,
+                        rowType: 'coinbase',
+                    }));
 
-                if (this.feeAddress) {
-                    const feeSats = Math.floor((this.feePercent / 100) * blockRewardSats);
-                    if (feeSats >= DUST_LIMIT_SATS) {
-                        historyRows.push(historyRepo.create({
-                            blockHeight, address: this.feeAddress, paidSats: feeSats,
-                            percent: this.feePercent, inCoinbase: true,
-                        }));
+                    if (isFee) {
+                        console.log(`[PPLNS]   ${entry.address}: ${entry.sats} sats (pool fee, ${entry.percent.toFixed(3)} %)`);
                     } else {
-                        console.warn(`[PPLNS] Fallback: fee output ${feeSats} sats < dust — omitting fee history row`);
+                        console.log(`[PPLNS]   ${entry.address}: ${entry.sats} sats (on-chain, ${entry.percent.toFixed(3)} %)`);
                     }
+                }
+
+                // 3. Ledger-change audit rows for addresses whose balance
+                //    shifted without appearing in the coinbase — these are
+                //    sub-dust / trimmed / bonus-recipient miners. Gives the
+                //    miner full transparency: every block that changed
+                //    their pending balance is visible in their history.
+                for (const [addr, newBalance] of balanceAfter) {
+                    if (snapshotAddresses.has(addr)) continue;  // already recorded as coinbase row
+                    const oldBalance = balanceMap.get(addr)?.balanceSats === newBalance
+                        ? 0 /* was newly created, old = 0 */
+                        : 0; /* we don't track old balance separately here; the row records the delta */
+                    // Simpler: always record with paidSats = 0, percent = 0,
+                    // and the new balanceSats captured in the row's own
+                    // balanceSats field (future migration). For now, a
+                    // minimal pending-type row documents that we touched
+                    // this address.
+                    historyRows.push(historyRepo.create({
+                        blockHeight,
+                        address: addr,
+                        paidSats: 0,
+                        percent: 0,
+                        inCoinbase: false,
+                        rowType: 'pending',
+                    }));
+                }
+
+                // 4. Late arrivers: addresses in the current window that
+                //    were NOT in consideredAddresses (submitted after
+                //    snapshot). Audit-only row, no ledger impact — their
+                //    shares remain in the sliding window and will be paid
+                //    via the next block's snapshot.
+                for (const addr of currentWindow.keys()) {
+                    if (consideredAddresses.has(addr)) continue;
+                    historyRows.push(historyRepo.create({
+                        blockHeight,
+                        address: addr,
+                        paidSats: 0,
+                        percent: 0,
+                        inCoinbase: false,
+                        rowType: 'pending',
+                    }));
+                    console.log(`[PPLNS]   ${addr}: shares in window but not in snapshot (late arrival, stays for next block)`);
                 }
 
                 if (balancesToSave.size > 0) {
@@ -805,7 +683,7 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
             });
         } catch (e: any) {
             if (e?.code === '23505') {
-                console.warn(`[PPLNS] Block ${blockHeight} (fallback) raced against duplicate write — skipping (23505)`);
+                console.warn(`[PPLNS] Block ${blockHeight} (${label}) raced against duplicate write — skipping (23505)`);
                 return;
             }
             throw e;
@@ -841,10 +719,15 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
     }
 
     /**
-     * Get PPLNS status for a specific address.
+     * Signed-ledger status for a specific address. `balanceSats > 0` means
+     * the pool owes the miner (pending credit from sub-dust / trim).
+     * `balanceSats < 0` means the miner got an on-chain bonus in an
+     * earlier block and owes the pool that much, to be offset in a
+     * future block. `totalPaidSats` is the lifetime sum the miner has
+     * received on-chain from this pool.
      */
     async getAddressStatus(address: string): Promise<{
-        pendingSats: number;
+        balanceSats: number;
         totalPaidSats: number;
         currentWindowDifficulty: number;
         currentWindowPercent: number;
@@ -873,17 +756,13 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         }
 
         return {
-            pendingSats: balance?.pendingSats ?? 0,
+            balanceSats: balance?.balanceSats ?? 0,
             totalPaidSats: balance?.totalPaidSats ?? 0,
             currentWindowDifficulty,
             currentWindowPercent,
         };
     }
 
-    /**
-     * Get current distribution (all miners and their share).
-     * `totalShares` is diff-1-weighted real work, not raw share count.
-     */
     async getCurrentDistribution(): Promise<{ address: string; totalShares: number; percent: number }[]> {
         if (!this.redis) return [];
 
@@ -909,8 +788,81 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
     }
 
     /**
-     * Get payout history for an address.
+     * Pool-wide signed-ledger summary. Gives the UI (and an operator
+     * dashboard) one call with everything needed to render the
+     * "what does the pool owe and what is owed to it" picture:
+     *
+     *   - totalCreditSats:  sum of positive balances (pool owes miners)
+     *   - totalDebitSats:   sum of absolute negative balances (miners owe pool)
+     *   - netDriftSats:     signed sum of all balances. In a steady-state
+     *                       pool this hovers near 0; persistent drift
+     *                       indicates floor-rounding accumulation on the
+     *                       largest miner (harmless, bounded by the sweep).
+     *   - creditHolderCount / debitHolderCount: row counts by sign.
+     *   - abandonedCreditSats / abandonedDebitSats: amounts sitting in
+     *                       rows whose lastAcceptedShareAt is older than
+     *                       the sweep cutoff — candidates for pair-
+     *                       cancellation on the next sweep run.
+     *   - lifetimePaidSats: sum of totalPaidSats across every miner row
+     *                       (lifetime on-chain payouts via this engine).
+     *
+     * Expensive path? The pplns_balance table has one row per miner who
+     * ever had a non-zero balance (roughly the lifetime unique miner
+     * count). That's typically < 10 000 rows, so a single SUM / COUNT
+     * query pair is fine without pagination.
      */
+    async getLedgerSummary(abandonedDays = 90): Promise<{
+        totalCreditSats: number;
+        totalDebitSats: number;
+        netDriftSats: number;
+        creditHolderCount: number;
+        debitHolderCount: number;
+        abandonedCreditSats: number;
+        abandonedDebitSats: number;
+        lifetimePaidSats: number;
+    }> {
+        const all = await this.balanceService.getAll();
+        const cutoff = new Date(Date.now() - abandonedDays * 24 * 60 * 60 * 1000);
+
+        let totalCreditSats = 0;
+        let totalDebitSats = 0;
+        let creditHolderCount = 0;
+        let debitHolderCount = 0;
+        let abandonedCreditSats = 0;
+        let abandonedDebitSats = 0;
+        let lifetimePaidSats = 0;
+
+        for (const row of all) {
+            lifetimePaidSats += row.totalPaidSats;
+            const bal = row.balanceSats;
+            if (bal === 0) continue;
+
+            const isAbandoned = row.lastAcceptedShareAt !== null
+                && row.lastAcceptedShareAt < cutoff;
+
+            if (bal > 0) {
+                totalCreditSats += bal;
+                creditHolderCount++;
+                if (isAbandoned) abandonedCreditSats += bal;
+            } else {
+                totalDebitSats += -bal;
+                debitHolderCount++;
+                if (isAbandoned) abandonedDebitSats += -bal;
+            }
+        }
+
+        return {
+            totalCreditSats,
+            totalDebitSats,
+            netDriftSats: totalCreditSats - totalDebitSats,
+            creditHolderCount,
+            debitHolderCount,
+            abandonedCreditSats,
+            abandonedDebitSats,
+            lifetimePaidSats,
+        };
+    }
+
     async getPayoutHistory(address: string, limit = 50): Promise<PplnsPayoutHistoryEntity[]> {
         return this.payoutHistoryRepo.find({
             where: { address },

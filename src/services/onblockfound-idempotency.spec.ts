@@ -218,22 +218,24 @@ describe('PplnsService.onBlockFound — idempotency', () => {
 
         // PplnsBalanceService facade — backed by the same rows as the repo.
         const balanceService: any = {
-            getAllWithPending: async () =>
-                (balanceRepo._rows as any[]).filter((r: any) => r.pendingSats > 0),
-            getPending: async (addr: string) =>
-                ((balanceRepo._rows as any[]).find((r: any) => r.address === addr)?.pendingSats) ?? 0,
+            getAllWithBalance: async () =>
+                (balanceRepo._rows as any[]).filter((r: any) => r.balanceSats !== 0),
+            getBalanceSats: async (addr: string) =>
+                ((balanceRepo._rows as any[]).find((r: any) => r.address === addr)?.balanceSats) ?? 0,
             getBalance: async (addr: string) =>
                 (balanceRepo._rows as any[]).find((r: any) => r.address === addr) ?? null,
-            addPending: async (addr: string, sats: number) => {
+            addBalance: async (addr: string, delta: number) => {
+                if (delta === 0) return;
                 const existing = (balanceRepo._rows as any[]).find((r: any) => r.address === addr);
-                if (existing) existing.pendingSats += sats;
-                else (balanceRepo._rows as any[]).push({ address: addr, pendingSats: sats, totalPaidSats: 0 });
+                if (existing) existing.balanceSats += delta;
+                else (balanceRepo._rows as any[]).push({ address: addr, balanceSats: delta, totalPaidSats: 0 });
             },
             markPaid: async (addr: string, sats: number) => {
                 const existing = (balanceRepo._rows as any[]).find((r: any) => r.address === addr);
                 if (existing) {
-                    existing.pendingSats = Math.max(0, existing.pendingSats - sats);
-                    existing.totalPaidSats += sats;
+                    const taken = Math.min(Math.max(0, existing.balanceSats), sats);
+                    existing.balanceSats -= taken;
+                    existing.totalPaidSats += taken;
                 }
             },
             touchLastAcceptedShareAt: async (_addr: string) => undefined,
@@ -298,24 +300,33 @@ describe('PplnsService.onBlockFound — idempotency', () => {
     it('pending balance not double-cleared on replay', async () => {
         const { service, historyRepo, balanceRepo } = makeService();
 
-        // Seed Alice with 5000 sats pending.
-        (balanceRepo._rows as any[]).push({ address: 'bc1qalice', pendingSats: 5000, totalPaidSats: 0 });
+        // Pool-neutral: Alice +5000 credit, Bob -5000 matching debit,
+        // both miners active so the credit pays out against Bob's
+        // reduced rawFair in one block.
+        (balanceRepo._rows as any[]).push(
+            { address: 'bc1qalice', balanceSats: 5000, totalPaidSats: 0 },
+            { address: 'bc1qbob', balanceSats: -5000, totalPaidSats: 0 },
+        );
 
-        await service.recordShare('bc1qalice', 1000);
+        await service.recordShare('bc1qalice', 500);
+        await service.recordShare('bc1qbob', 500);
         const BLOCK_REWARD = 100_000_000;
         await service.getPayoutDistribution(BLOCK_REWARD);
 
         await service.onBlockFound(900_002, BLOCK_REWARD);
         const aliceAfter1 = (balanceRepo._rows as any[]).find((r: any) => r.address === 'bc1qalice');
-        // First call should have moved 5000 from pending → totalPaid
-        expect(aliceAfter1?.pendingSats).toBe(0);
-        expect(aliceAfter1?.totalPaidSats).toBe(5000);
+        const bobAfter1 = (balanceRepo._rows as any[]).find((r: any) => r.address === 'bc1qbob');
+        // Alice's credit paid out, Bob's debit cleared via reduced rawFair.
+        expect(aliceAfter1?.balanceSats).toBe(0);
+        expect(aliceAfter1?.totalPaidSats).toBeGreaterThanOrEqual(5000);
+        expect(bobAfter1?.balanceSats).toBe(0);
+        const alicePaid1 = aliceAfter1?.totalPaidSats ?? 0;
 
-        // Replay — MUST NOT re-increment totalPaidSats.
+        // Replay — pre-check short-circuits, no second round of writes.
         await service.onBlockFound(900_002, BLOCK_REWARD);
         const aliceAfter2 = (balanceRepo._rows as any[]).find((r: any) => r.address === 'bc1qalice');
-        expect(aliceAfter2?.pendingSats).toBe(0);
-        expect(aliceAfter2?.totalPaidSats).toBe(5000); // unchanged
+        expect(aliceAfter2?.balanceSats).toBe(0);
+        expect(aliceAfter2?.totalPaidSats).toBe(alicePaid1); // unchanged
     });
 });
 
@@ -382,9 +393,13 @@ describe('GroupSoloService.onBlockFound — idempotency', () => {
     it('pending balance not double-cleared on replay', async () => {
         const { service, historyRepo, balanceRepo } = makeService();
 
-        (balanceRepo._rows as any[]).push({
-            address: 'bc1qalice', groupId: 'g1', pendingSats: 8000, totalPaidSats: 0,
-        });
+        // Pool-neutral: Alice +8000 credit, Bob -8000 matching debit.
+        // Buildcoinbase's solvency cap fires otherwise because an
+        // unpaired credit overshoots rewardForMiners.
+        (balanceRepo._rows as any[]).push(
+            { address: 'bc1qalice', groupId: 'g1', pendingSats: 8000, totalPaidSats: 0 },
+            { address: 'bc1qbob',   groupId: 'g1', pendingSats: -8000, totalPaidSats: 0 },
+        );
 
         await service.recordShare('bc1qalice', 1000);
         await service.recordShare('bc1qbob', 500);
@@ -393,18 +408,21 @@ describe('GroupSoloService.onBlockFound — idempotency', () => {
 
         await service.onBlockFound(900_001, BLOCK_REWARD, 'bc1qalice');
         const aliceAfter1 = (balanceRepo._rows as any[]).find((r: any) => r.address === 'bc1qalice');
-        expect(aliceAfter1?.pendingSats).toBe(0);
-        expect(aliceAfter1?.totalPaidSats).toBe(8000);
+        // Floor-rounding residuum may leave a ≤ 1 sat drift in balance.
+        expect(Math.abs(aliceAfter1?.pendingSats ?? 0)).toBeLessThanOrEqual(1);
+        expect(aliceAfter1?.totalPaidSats).toBeGreaterThanOrEqual(8000);
         const rowsAfterFirst = historyRepo._rows.length;
 
         // Replay with fresh snapshot + shares — must skip via pre-check.
         await service.recordShare('bc1qalice', 100);
         await service.getPayoutDistribution('g1', BLOCK_REWARD);
+        const alicePaid1 = aliceAfter1?.totalPaidSats ?? 0;
+        const aliceBalance1 = aliceAfter1?.pendingSats ?? 0;
         await service.onBlockFound(900_001, BLOCK_REWARD, 'bc1qalice');
 
         const aliceAfter2 = (balanceRepo._rows as any[]).find((r: any) => r.address === 'bc1qalice');
-        expect(aliceAfter2?.pendingSats).toBe(0);
-        expect(aliceAfter2?.totalPaidSats).toBe(8000); // unchanged
+        expect(aliceAfter2?.pendingSats).toBe(aliceBalance1); // unchanged on replay
+        expect(aliceAfter2?.totalPaidSats).toBe(alicePaid1);
         expect(historyRepo._rows.length).toBe(rowsAfterFirst);
     });
 

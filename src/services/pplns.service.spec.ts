@@ -71,33 +71,33 @@ function createMockRedis() {
 // state, so we back them with one Map.
 
 function createMockBalanceBacking() {
-  const balances = new Map<string, { address: string; pendingSats: number; totalPaidSats: number }>();
+  const balances = new Map<string, { address: string; balanceSats: number; totalPaidSats: number }>();
 
   const service = {
     addPending: jest.fn(async (address: string, sats: number) => {
       const existing = balances.get(address);
       if (existing) {
-        existing.pendingSats += sats;
+        existing.balanceSats += sats;
       } else {
-        balances.set(address, { address, pendingSats: sats, totalPaidSats: 0 });
+        balances.set(address, { address, balanceSats: sats, totalPaidSats: 0 });
       }
     }),
-    getPending: jest.fn(async (address: string) => balances.get(address)?.pendingSats ?? 0),
+    getBalanceSats: jest.fn(async (address: string) => balances.get(address)?.balanceSats ?? 0),
     getBalance: jest.fn(async (address: string) => balances.get(address) ?? null),
-    getAllWithPending: jest.fn(async () =>
-      Array.from(balances.values()).filter(b => b.pendingSats > 0),
+    getAllWithBalance: jest.fn(async () =>
+      Array.from(balances.values()).filter(b => b.balanceSats !== 0),
     ),
     markPaid: jest.fn(async (address: string, sats: number) => {
       const existing = balances.get(address);
       if (existing) {
-        existing.pendingSats = Math.max(0, existing.pendingSats - sats);
+        existing.balanceSats = Math.max(0, existing.balanceSats - sats);
         existing.totalPaidSats += sats;
       }
     }),
     touchLastAcceptedShareAt: jest.fn(async () => undefined),
     // Helpers
-    _set: (address: string, pendingSats: number, totalPaidSats = 0) => {
-      balances.set(address, { address, pendingSats, totalPaidSats });
+    _set: (address: string, balanceSats: number, totalPaidSats = 0) => {
+      balances.set(address, { address, balanceSats, totalPaidSats });
     },
     _get: (address: string) => balances.get(address),
   };
@@ -105,7 +105,7 @@ function createMockBalanceBacking() {
   const applySave = (row: any) => {
     const existing = balances.get(row.address);
     if (existing) Object.assign(existing, row);
-    else balances.set(row.address, { address: row.address, pendingSats: row.pendingSats ?? 0, totalPaidSats: row.totalPaidSats ?? 0 });
+    else balances.set(row.address, { address: row.address, balanceSats: row.balanceSats ?? 0, totalPaidSats: row.totalPaidSats ?? 0 });
     return row;
   };
   const repo: any = {
@@ -125,8 +125,8 @@ function createMockBalanceBacking() {
         const set = new Set<string>(inOp._value);
         return Array.from(balances.values()).filter(b => set.has(b.address));
       }
-      if (q?.where?.pendingSats) {
-        return Array.from(balances.values()).filter(b => b.pendingSats > 0);
+      if (q?.where?.balanceSats) {
+        return Array.from(balances.values()).filter(b => b.balanceSats !== 0);
       }
       return Array.from(balances.values());
     }),
@@ -515,11 +515,13 @@ describe('PplnsService', () => {
     });
 
     it('should include pending-only addresses above dust', async () => {
+      // Pool-neutral: C has +1000 credit, A has matching -1000 debit
+      // (the signed-ledger model requires a counterparty for credits).
       const { service, balanceService } = createService({ feePercent: '2' });
       service.setNetworkDifficulty(100000);
 
-      // Miner C has no current shares but enough pending
-      balanceService._set('bc1qC', 1000); // 1000 sats pending >= 546
+      balanceService._set('bc1qC', 1000);    // credit
+      balanceService._set('bc1qA', -1000);   // matching debit, active miner
 
       await recordShares(service, [
         { address: 'bc1qA', difficulty: 500 },
@@ -569,10 +571,13 @@ describe('PplnsService', () => {
     const BLOCK_REWARD = 312_500_000;
 
     it('should mark pending as paid for above-dust miners', async () => {
+      // Pool-neutral: A has +5000 credit, B has matching -5000 debit.
+      // After the block, A's credit pays out via B's reduced rawFair.
       const { service, balanceService } = createService({ feePercent: '2' });
       service.setNetworkDifficulty(100000);
 
-      balanceService._set('bc1qA', 5000); // 5000 sats pending
+      balanceService._set('bc1qA', 5000);     // credit
+      balanceService._set('bc1qB', -5000);    // matching debit
 
       await recordShares(service, [
         { address: 'bc1qA', difficulty: 500 },
@@ -581,10 +586,14 @@ describe('PplnsService', () => {
 
       await service.onBlockFound(800000, BLOCK_REWARD);
 
-      // A's pending should be cleared
+      // A's credit cleared; totalPaidSats reflects A's actual on-chain payout,
+      // which is rawFair + credit.
       const balA = balanceService._get('bc1qA');
-      expect(balA!.pendingSats).toBe(0);
-      expect(balA!.totalPaidSats).toBe(5000);
+      expect(balA!.balanceSats).toBe(0);
+      expect(balA!.totalPaidSats).toBeGreaterThanOrEqual(5000);
+      // B's debit also cleared via reduced rawFair.
+      const balB = balanceService._get('bc1qB');
+      expect(balB!.balanceSats).toBe(0);
     });
 
     it('should accumulate pending for sub-dust miners', async () => {
@@ -605,16 +614,17 @@ describe('PplnsService', () => {
       // shared backing store rather than the legacy service-facade spy.
       const balTiny = balanceService._get('bc1qTiny');
       expect(balTiny).toBeDefined();
-      expect(balTiny!.pendingSats).toBeGreaterThan(0);
+      expect(balTiny!.balanceSats).toBeGreaterThan(0);
       expect(balTiny!.totalPaidSats).toBe(0);
     });
 
     it('should process pending-only addresses', async () => {
+      // Pool-neutral: C has +1000 pending (no shares), A has -1000 matching debit.
       const { service, balanceService } = createService({ feePercent: '2' });
       service.setNetworkDifficulty(100000);
 
-      // Miner C has pending from previous blocks but no current shares
-      balanceService._set('bc1qC', 1000);
+      balanceService._set('bc1qC', 1000);     // pending-only credit
+      balanceService._set('bc1qA', -1000);    // matching debit, active
 
       await recordShares(service, [
         { address: 'bc1qA', difficulty: 500 },
@@ -622,10 +632,13 @@ describe('PplnsService', () => {
 
       await service.onBlockFound(800000, BLOCK_REWARD);
 
-      // C's pending should be marked as paid (>= 546 dust)
+      // C's credit paid out, balance cleared.
       const balC = balanceService._get('bc1qC');
-      expect(balC!.pendingSats).toBe(0);
+      expect(balC!.balanceSats).toBe(0);
       expect(balC!.totalPaidSats).toBe(1000);
+      // A's debit cleared via reduced rawFair.
+      const balA = balanceService._get('bc1qA');
+      expect(balA!.balanceSats).toBe(0);
     });
 
     it('should NOT process pending-only addresses below dust', async () => {
@@ -643,7 +656,7 @@ describe('PplnsService', () => {
 
       // C's pending should remain untouched
       const balC = balanceService._get('bc1qC');
-      expect(balC!.pendingSats).toBe(200);
+      expect(balC!.balanceSats).toBe(200);
       expect(balC!.totalPaidSats).toBe(0);
     });
 
@@ -680,12 +693,12 @@ describe('PplnsService', () => {
       ]);
 
       await service.onBlockFound(800000, BLOCK_REWARD);
-      const afterBlock1 = balanceService._get('bc1qSmall')?.pendingSats ?? 0;
+      const afterBlock1 = balanceService._get('bc1qSmall')?.balanceSats ?? 0;
       expect(afterBlock1).toBeGreaterThan(0);
 
       // Block 2: accumulate more (same window shares)
       await service.onBlockFound(800001, BLOCK_REWARD);
-      const afterBlock2 = balanceService._get('bc1qSmall')?.pendingSats ?? 0;
+      const afterBlock2 = balanceService._get('bc1qSmall')?.balanceSats ?? 0;
       expect(afterBlock2).toBeGreaterThan(afterBlock1);
     });
 
@@ -749,7 +762,7 @@ describe('PplnsService', () => {
       // already claimed 100% of the miner cut via Alice's snapshot entry,
       // and Bob's shares stay in the window for the next block's snapshot.
       const bobBalance = balanceService._get('bc1qbob');
-      expect(bobBalance?.pendingSats ?? 0).toBe(0);
+      expect(bobBalance?.balanceSats ?? 0).toBe(0);
 
       // But Bob should have an audit history row with paidSats=0 so his
       // submitted shares are visible in the ledger.
@@ -804,7 +817,7 @@ describe('PplnsService', () => {
       ]);
 
       const status = await service.getAddressStatus('bc1qA');
-      expect(status.pendingSats).toBe(5000);
+      expect(status.balanceSats).toBe(5000);
       expect(status.totalPaidSats).toBe(50000);
       expect(status.currentWindowDifficulty).toBe(600);
       expect(status.currentWindowPercent).toBeCloseTo(60, 0);
@@ -815,7 +828,7 @@ describe('PplnsService', () => {
       service.setNetworkDifficulty(100000);
 
       const status = await service.getAddressStatus('bc1qUnknown');
-      expect(status.pendingSats).toBe(0);
+      expect(status.balanceSats).toBe(0);
       expect(status.totalPaidSats).toBe(0);
       expect(status.currentWindowDifficulty).toBe(0);
       expect(status.currentWindowPercent).toBe(0);

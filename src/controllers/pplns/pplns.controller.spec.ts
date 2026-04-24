@@ -17,6 +17,22 @@ describe('PplnsController', () => {
             getWindowStats: jest.fn().mockResolvedValue(opts.windowStats ?? {
                 totalDifficulty: 0, windowSize: 0, shareCount: 0, minerCount: 0,
             }),
+            getAddressStatus: jest.fn().mockResolvedValue({
+                balanceSats: 0,
+                totalPaidSats: 0,
+                currentWindowDifficulty: 0,
+                currentWindowPercent: 0,
+            }),
+            getLedgerSummary: jest.fn().mockResolvedValue({
+                totalCreditSats: 0,
+                totalDebitSats: 0,
+                netDriftSats: 0,
+                creditHolderCount: 0,
+                debitHolderCount: 0,
+                abandonedCreditSats: 0,
+                abandonedDebitSats: 0,
+                lifetimePaidSats: 0,
+            }),
         };
         const clientStatisticsService = {
             getChartDataForAddress: jest.fn(async (address: string) =>
@@ -33,14 +49,19 @@ describe('PplnsController', () => {
             getChart: jest.fn().mockResolvedValue([]),
             incrementAccepted: jest.fn(),
         };
+        const dustSweepService = {
+            getAbandonedDays: jest.fn().mockReturnValue(180),
+            getDormantDays: jest.fn().mockReturnValue(30),
+        };
         const controller = new PplnsController(
             pplnsService as any,
             clientStatisticsService as any,
             clientService as any,
             miningModeService as any,
             poolModeHashrateService as any,
+            dustSweepService as any,
         );
-        return { controller, pplnsService, clientStatisticsService, clientService, miningModeService, poolModeHashrateService };
+        return { controller, pplnsService, clientStatisticsService, clientService, miningModeService, poolModeHashrateService, dustSweepService };
     }
 
     describe('info', () => {
@@ -134,6 +155,89 @@ describe('PplnsController', () => {
             const res = await controller.getMiningMode('bc1qfoo');
             expect(miningModeService.getMode).toHaveBeenCalledWith('bc1qfoo');
             expect(res).toEqual({ mode: 'pplns' });
+        });
+    });
+
+    describe('getAddressStatus (signed ledger)', () => {
+        it('returns "credit" label for positive balance', async () => {
+            const { controller, pplnsService } = setup({});
+            (pplnsService.getAddressStatus as jest.Mock).mockResolvedValue({
+                balanceSats: 1234,
+                totalPaidSats: 5000,
+                currentWindowDifficulty: 100,
+                currentWindowPercent: 25,
+            });
+            const res = await controller.getAddressStatus('bc1qa');
+            expect(res.balanceSats).toBe(1234);
+            expect(res.balanceLabel).toBe('credit');
+        });
+
+        it('returns "debit" label for negative balance', async () => {
+            const { controller, pplnsService } = setup({});
+            (pplnsService.getAddressStatus as jest.Mock).mockResolvedValue({
+                balanceSats: -500,
+                totalPaidSats: 20000,
+                currentWindowDifficulty: 50,
+                currentWindowPercent: 10,
+            });
+            const res = await controller.getAddressStatus('bc1qa');
+            expect(res.balanceSats).toBe(-500);
+            expect(res.balanceLabel).toBe('debit');
+        });
+
+        it('returns "zero" label for balance of 0', async () => {
+            const { controller } = setup({});
+            const res = await controller.getAddressStatus('bc1qa');
+            expect(res.balanceSats).toBe(0);
+            expect(res.balanceLabel).toBe('zero');
+        });
+    });
+
+    describe('getLedgerSummary', () => {
+        it('returns pool-wide signed-ledger aggregates + abandonment threshold', async () => {
+            const { controller, pplnsService, dustSweepService } = setup({});
+            (pplnsService.getLedgerSummary as jest.Mock).mockResolvedValue({
+                totalCreditSats: 5000,
+                totalDebitSats: 4800,
+                netDriftSats: 200,
+                creditHolderCount: 12,
+                debitHolderCount: 3,
+                abandonedCreditSats: 700,
+                abandonedDebitSats: 200,
+                lifetimePaidSats: 12_345_678,
+            });
+            (dustSweepService.getAbandonedDays as jest.Mock).mockReturnValue(180);
+            const res = await controller.getLedgerSummary();
+            expect(dustSweepService.getAbandonedDays).toHaveBeenCalled();
+            expect(pplnsService.getLedgerSummary).toHaveBeenCalledWith(180);
+            expect(res.totalCreditSats).toBe(5000);
+            expect(res.totalDebitSats).toBe(4800);
+            expect(res.netDriftSats).toBe(200);
+            expect(res.creditHolderCount).toBe(12);
+            expect(res.debitHolderCount).toBe(3);
+            expect(res.abandonedCreditSats).toBe(700);
+            expect(res.abandonedDebitSats).toBe(200);
+            expect(res.lifetimePaidSats).toBe(12_345_678);
+            expect(res.abandonedDays).toBe(180);
+        });
+    });
+
+    describe('getFees', () => {
+        it('returns fee config + dust limit + coinbase weight constants', () => {
+            const { controller, pplnsService } = setup({});
+            (pplnsService as any).getFeeConfig = jest.fn().mockReturnValue({
+                feePercent: 2,
+                feeAddress: 'bc1qfee',
+                coinbaseWeightBudget: 50000,
+            });
+            const res: any = controller.getFees();
+            expect(res.feePercent).toBe(2);
+            expect(res.feeAddress).toBe('bc1qfee');
+            expect(res.coinbaseWeightBudget).toBe(50000);
+            expect(res.dustLimitSats).toBe(546);
+            expect(res.coinbaseBaseWeight).toBe(328);
+            expect(res.coinbaseOutputWeight).toBe(172);
+            expect(res.coinbaseWitnessCommitmentWeight).toBe(188);
         });
     });
 });

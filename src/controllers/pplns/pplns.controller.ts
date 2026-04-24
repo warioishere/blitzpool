@@ -4,6 +4,13 @@ import { ClientStatisticsService } from '../../ORM/client-statistics/client-stat
 import { ClientService } from '../../ORM/client/client.service';
 import { MiningModeService } from '../../services/mining-mode.service';
 import { PoolModeHashrateService } from '../../ORM/pool-mode-hashrate/pool-mode-hashrate.service';
+import { DustSweepService } from '../../services/dust-sweep.service';
+import {
+    DUST_LIMIT_SATS,
+    COINBASE_BASE_WEIGHT,
+    COINBASE_OUTPUT_WEIGHT,
+    COINBASE_WITNESS_COMMITMENT_WEIGHT,
+} from '../../services/coinbase-distribution';
 
 @Controller('pplns')
 export class PplnsController {
@@ -14,6 +21,7 @@ export class PplnsController {
         private readonly clientService: ClientService,
         private readonly miningModeService: MiningModeService,
         private readonly poolModeHashrateService: PoolModeHashrateService,
+        private readonly dustSweepService: DustSweepService,
     ) {}
 
     /**
@@ -66,15 +74,27 @@ export class PplnsController {
 
     /**
      * GET /pplns/fees
-     * Pool-side fee configuration shared by PPLNS and group-solo payout paths.
-     * The UI reads this to render current fees on the groups-landing page
-     * without having to re-deploy when fees change. `feePercent` is a human
-     * percentage (e.g. 2 for 2%), `feeAddress` is the BTC address where the
-     * pool fee output lands in the coinbase transaction.
+     * Pool-side fee + coinbase-shape configuration. The UI reads this
+     * to render fees on the groups-landing page and the PPLNS Info
+     * page without re-deploying when values change.
+     *   - feePercent: human percent (e.g. 2 for 2 %)
+     *   - feeAddress: where the single fee coinbase output lands
+     *   - coinbaseWeightBudget: max WU reserved for the whole coinbase
+     *   - dustLimitSats: per-output minimum (546 — outputs below stay
+     *     in the ledger as pending credit)
+     *   - coinbaseBaseWeight / coinbaseOutputWeight / coinbaseWitnessCommitmentWeight:
+     *     the structural WU numbers the algorithm uses to decide
+     *     "how many miners fit in this block's coinbase".
      */
     @Get('fees')
     getFees() {
-        return this.pplnsService.getFeeConfig();
+        return {
+            ...this.pplnsService.getFeeConfig(),
+            dustLimitSats: DUST_LIMIT_SATS,
+            coinbaseBaseWeight: COINBASE_BASE_WEIGHT,
+            coinbaseOutputWeight: COINBASE_OUTPUT_WEIGHT,
+            coinbaseWitnessCommitmentWeight: COINBASE_WITNESS_COMMITMENT_WEIGHT,
+        };
     }
 
     /**
@@ -107,12 +127,53 @@ export class PplnsController {
     }
 
     /**
+     * GET /pplns/ledger
+     * Pool-wide signed-ledger summary plus the abandonment window the
+     * UI renders on the PPLNS Info page.
+     *
+     * Fields:
+     *   - totalCreditSats:    sum of positive balances (pool owes miners)
+     *   - totalDebitSats:     sum of absolute negative balances (miners owe pool)
+     *   - netDriftSats:       signed sum (hovers near 0)
+     *   - creditHolderCount / debitHolderCount
+     *   - abandonedCreditSats / abandonedDebitSats: rows whose miner has
+     *     been inactive longer than `abandonedDays`; next nightly sweep
+     *     will pair-cancel credit ↔ debit matches.
+     *   - abandonedDays: configured inactivity threshold in days
+     *     (ABANDONED_BALANCE_DAYS, default 90 = 3 months). Exposed so
+     *     the UI can render "abandoned after N days" in its own locale.
+     *   - lifetimePaidSats:   sum of totalPaidSats across every miner row
+     */
+    @Get('ledger')
+    async getLedgerSummary() {
+        const abandonedDays = this.dustSweepService.getAbandonedDays();
+        const summary = await this.pplnsService.getLedgerSummary(abandonedDays);
+        return { ...summary, abandonedDays };
+    }
+
+    /**
      * GET /pplns/:address
      * PPLNS status for a specific miner address.
+     *
+     * Response includes:
+     *   - balanceSats: signed ledger balance
+     *                     > 0  pool owes miner (pending credit)
+     *                     < 0  miner owes pool (outstanding debit from
+     *                          an earlier on-chain bonus)
+     *                     = 0  no open claim
+     *   - balanceLabel: 'credit' | 'debit' | 'zero' — ready-to-render category
+     *   - totalPaidSats: lifetime on-chain payouts via this engine
+     *   - currentWindowDifficulty / currentWindowPercent
      */
     @Get(':address')
     async getAddressStatus(@Param('address') address: string) {
-        return this.pplnsService.getAddressStatus(address);
+        const status = await this.pplnsService.getAddressStatus(address);
+        const balanceLabel = status.balanceSats > 0
+            ? 'credit'
+            : status.balanceSats < 0
+                ? 'debit'
+                : 'zero';
+        return { ...status, balanceLabel };
     }
 
     /**
