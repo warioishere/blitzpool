@@ -79,6 +79,15 @@ export class DustSweepService implements OnModuleInit {
     private dormantDays = 30;
     private abandonedDays = 90;
 
+    /**
+     * Last blockHeight returned by `sweepBlockHeight()`. Kept in memory
+     * so sub-second re-triggers (manual `service.sweep()` calls from a
+     * test or admin endpoint) stay strictly monotonic and don't collide
+     * with the previous run on the `(blockHeight, address)` unique
+     * index.
+     */
+    private lastSweepBlockHeight: number | null = null;
+
     constructor(
         private readonly configService: ConfigService,
         @InjectRepository(PplnsBalanceEntity)
@@ -160,10 +169,22 @@ export class DustSweepService implements OnModuleInit {
     /**
      * Generate a blockHeight placeholder for audit rows that doesn't
      * collide with prior sweep rows for the same address. Negative
-     * Unix seconds.
+     * Unix seconds, kept strictly monotonic across calls so a
+     * sub-second re-trigger (manual `service.sweep()` from a test or
+     * admin endpoint) doesn't reuse the previous call's value and
+     * break the `(blockHeight, address)` unique index.
      */
     private sweepBlockHeight(): number {
-        return -Math.floor(Date.now() / 1000);
+        const now = -Math.floor(Date.now() / 1000);
+        if (this.lastSweepBlockHeight !== null && now >= this.lastSweepBlockHeight) {
+            // Sub-second re-trigger: the wall-clock value would match
+            // or exceed the last one (values are negative, "smaller"
+            // means later). Step back by one to stay unique.
+            this.lastSweepBlockHeight = this.lastSweepBlockHeight - 1;
+        } else {
+            this.lastSweepBlockHeight = now;
+        }
+        return this.lastSweepBlockHeight;
     }
 
     /**

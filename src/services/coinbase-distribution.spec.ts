@@ -835,6 +835,75 @@ describe('buildCoinbaseDistribution — credit/debit ledger model', () => {
     });
 
     /**
+     * L5 regression (signed-ledger audit finding): Phase 5a has an
+     * "no kept active miners" branch that fires when trimmed.shares>0
+     * miners exist but every kept miner is pending-only (shares=0).
+     * In that case the trim total can't be redistributed (nothing
+     * active to receive the bonus) and Phase 5a just warns. No test
+     * previously exercised that branch — the finding flagged it as
+     * practically unreachable on a real pool but still worth a
+     * regression so a future refactor doesn't silently break it.
+     *
+     * Construction: 2 massive pending-only credits (target 1e10 each)
+     * + 1 active miner with a regular rawFair target that's smaller.
+     * coinbase weight budget keeps only 2 outputs → both pending
+     * credits kept, active trimmed. keptActive.length = 0, branch
+     * enters the else.
+     *
+     * After Phase 5a.5 solvency cap, the two pending credits get
+     * clipped proportionally to fit rewardForMiners. No fee-100 %
+     * fallback. Coinbase sum <= blockReward. No NaN/Infinity.
+     */
+    it('regression L5: trimmed active + all kept pending-only → warn, no fee-100% fallback, coinbase sane', () => {
+        const reward = 5_000_000_000;
+        // 11 pending-only creditors (balance=1e9 each, target=1e9) so
+        // they fill the kept set. 1 active miner with share=1 gets a
+        // huge rawFair (full pool of shares) but target=rawFair stays
+        // smaller than 1e9 pending-only targets when we crank balances
+        // up. Use balance 1e10 to guarantee the sort order.
+        const pendingBalances = new Map<string, number>();
+        for (let i = 0; i < 11; i++) pendingBalances.set(`bc1qp${i}`, 10_000_000_000);
+        const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+        const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+
+        try {
+            const r = buildCoinbaseDistribution({
+                addressShares: shares({ [ALICE]: 1 }),   // lone active miner
+                balances: pendingBalances,
+                blockRewardSats: reward,
+                feePercent: 2,
+                feeAddress: FEE_ADDR,
+                // Keep exactly 11 outputs — forces alice (smallest target) to trim.
+                coinbaseWeightBudget: 11 * 172 + 328 + 188 + 172,
+            });
+
+            // No fee-100 % fallback (coinbase has more than just the fee row).
+            const feeOnly = r.payouts.length === 1
+                && r.payouts[0].address === FEE_ADDR
+                && r.payouts[0].percent === 100;
+            expect(feeOnly).toBe(false);
+
+            // Coinbase sum must not exceed block reward (undershoot is OK
+            // when the warn-branch fires, as documented in the code).
+            expect(sumOnChainSats(r.payouts)).toBeLessThanOrEqual(reward);
+
+            // Warn emitted for "trimmed X sats but no active kept miners".
+            const warnCalls = warnSpy.mock.calls
+                .map(args => args.join(' '))
+                .filter(s => s.includes('no active kept miners'));
+            expect(warnCalls.length).toBeGreaterThan(0);
+
+            // All balance values finite.
+            for (const v of r.balanceAfter.values()) {
+                expect(Number.isFinite(v)).toBe(true);
+            }
+        } finally {
+            warnSpy.mockRestore();
+            errorSpy.mockRestore();
+        }
+    });
+
+    /**
      * M2 regression (signed-ledger audit finding): single-block tests
      * above cover the math in isolation, but do not exercise the
      * credit/debit matching *across* blocks. A fee-100% fallback can

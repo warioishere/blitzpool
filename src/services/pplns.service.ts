@@ -684,21 +684,19 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
                     }
                 }
 
+                // Track which addresses already have a row emitted this
+                // block so step 4 (late-arriver audit) can't append a
+                // second pending-row for the same (blockHeight, address)
+                // and trigger the unique-index 23505 path.
+                const emittedThisBlock = new Set<string>(snapshotAddresses);
+
                 // 3. Ledger-change audit rows for addresses whose balance
                 //    shifted without appearing in the coinbase — these are
                 //    sub-dust / trimmed / bonus-recipient miners. Gives the
                 //    miner full transparency: every block that changed
                 //    their pending balance is visible in their history.
-                for (const [addr, newBalance] of balanceAfter) {
-                    if (snapshotAddresses.has(addr)) continue;  // already recorded as coinbase row
-                    const oldBalance = balanceMap.get(addr)?.balanceSats === newBalance
-                        ? 0 /* was newly created, old = 0 */
-                        : 0; /* we don't track old balance separately here; the row records the delta */
-                    // Simpler: always record with paidSats = 0, percent = 0,
-                    // and the new balanceSats captured in the row's own
-                    // balanceSats field (future migration). For now, a
-                    // minimal pending-type row documents that we touched
-                    // this address.
+                for (const addr of balanceAfter.keys()) {
+                    if (emittedThisBlock.has(addr)) continue;   // already a coinbase row
                     historyRows.push(historyRepo.create({
                         blockHeight,
                         address: addr,
@@ -707,6 +705,7 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
                         inCoinbase: false,
                         rowType: 'pending',
                     }));
+                    emittedThisBlock.add(addr);
                 }
 
                 // 4. Late arrivers: addresses in the current window that
@@ -716,6 +715,7 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
                 //    via the next block's snapshot.
                 for (const addr of currentWindow.keys()) {
                     if (consideredAddresses.has(addr)) continue;
+                    if (emittedThisBlock.has(addr)) continue;   // already a pending row from step 3
                     historyRows.push(historyRepo.create({
                         blockHeight,
                         address: addr,
@@ -724,6 +724,7 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
                         inCoinbase: false,
                         rowType: 'pending',
                     }));
+                    emittedThisBlock.add(addr);
                     console.log(`[PPLNS]   ${addr}: shares in window but not in snapshot (late arrival, stays for next block)`);
                 }
 

@@ -82,7 +82,7 @@ balanceSats  <  0  →  Miner owes the pool (outstanding debit)
 balanceSats  == 0  →  No open claim in either direction
 ```
 
-**Pool-neutrality invariant**: `sum(balanceSats)` across the whole table stays close to `0`. It drifts by at most `N` sats per block (N = miners in that block) from floor-rounding — see §5b below.
+**Pool-neutrality invariant**: `sum(balanceSats)` across the whole table stays close to `0`. Each block adds at most `N` sats of floor-rounding drift, where `N` equals the number of distinct addresses involved that block (active kept miners + pending-only credit-holders whose rows move). The property test in `coinbase-distribution.spec.ts` uses the full address count as the upper bound — the active-kept-miner count is the tighter bound in practice. See §5b.
 
 ### How a balance becomes non-zero
 
