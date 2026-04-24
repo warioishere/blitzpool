@@ -221,6 +221,16 @@ export class GroupSoloService implements OnModuleInit {
             feeAddress: this.feeAddress,
             coinbaseWeightBudget: this.coinbaseWeightBudget,
             logLabel: `[GroupSolo ${groupId}]`,
+            // Group-Solo stays on the unsigned-pending ledger model: pendingSats
+            // is always ≥ 0. This means Phase 5a trim redistribution and Phase
+            // 5b floor-rounding residuum go to the fee output instead of
+            // creating matching debits on active members. Cost: ~1–10 sats per
+            // block donated to the fee (trivial relative to the fee percent
+            // the pool already collects). Benefit: the legacy single-sided
+            // dust sweep keeps working, member-kick redistribution stays
+            // sane, and there's no second signed-ledger maintenance machinery
+            // to build just for group-solo.
+            suppressMatchingDebits: true,
         });
 
         const payouts: GroupSoloPayoutEntry[] = result.payouts.length > 0

@@ -172,6 +172,26 @@ export interface CoinbaseDistributionInput {
      * operators can trace which engine fired.
      */
     logLabel?: string;
+    /**
+     * When true, Phase 5a (trim redistribution) and Phase 5b (floor-
+     * rounding residuum) do NOT create matching debits on kept active
+     * miners. Instead, any unassigned sats go to the fee output. If no
+     * fee address is configured, they remain unemitted (block coinbase
+     * undershoots by that amount — at most a few sats per block).
+     *
+     * Used by Group-Solo so member balances stay on the simpler
+     * unsigned-pending model: `pplns_group_balance.pendingSats` is
+     * always ≥ 0, the legacy single-sided dust sweep works as
+     * designed, and member-kick redistribution semantics stay intact.
+     *
+     * The cost is that floor-rounding residuum (~1–10 sats/block for
+     * a 10-member group) is donated to the fee rather than absorbed
+     * by a miner. For PPLNS this tradeoff is undesirable (miners
+     * should keep every sat they earn, even if it means carrying a
+     * tiny debit); for Group-Solo the simpler model outweighs the
+     * cost of a few hundred thousand sats/year per active group.
+     */
+    suppressMatchingDebits?: boolean;
 }
 
 export interface CoinbaseDistributionEntry {
@@ -242,6 +262,7 @@ export function buildCoinbaseDistribution(
         feeAddress,
         coinbaseWeightBudget,
         logLabel,
+        suppressMatchingDebits,
     } = input;
 
     const label = logLabel ?? '[CoinbaseDist]';
@@ -352,42 +373,64 @@ export function buildCoinbaseDistribution(
     // pure "work this block" signal). Only active miners get bonus;
     // pending-only miners don't receive redistribution (they weren't
     // doing work this round).
+    //
+    // Only redistribute the portion of each trimmed miner's target that
+    // represents sats earned THIS BLOCK (rawFair + current balanceOld of
+    // active miners). Pending-only trimmed miners (shares=0, target=
+    // balanceOld) have a claim on past-block sats; those cannot be
+    // physically redistributed this block without creating phantom sats
+    // that the Phase 5a.5 solvency cap cannot absorb. Their balanceNew
+    // stays as target (credit carries forward unchanged).
     let trimmedTotal = 0;
-    for (const c of trimmed) trimmedTotal += c.target;
+    for (const c of trimmed) trimmedTotal += c.shares > 0 ? c.target : 0;
+
+    // Fee-bonus accumulator for suppressMatchingDebits mode: trim
+    // redistribution + Phase 5b residuum get added to the fee output
+    // instead of creating matching debits on active miners.
+    let feeBonusSats = 0;
 
     if (trimmedTotal > 0) {
-        const keptActive = kept.filter(c => c.shares > 0);
-        let keptActiveShares = 0;
-        for (const c of keptActive) keptActiveShares += c.shares;
-
-        if (keptActiveShares > 0) {
-            let bonusAssigned = 0;
-            // Floor per-miner, then rounding residuum goes to the single
-            // largest bonus recipient so the sum stays ≤ trimmedTotal.
-            for (const c of keptActive) {
-                const bonus = Math.floor(trimmedTotal * c.shares / keptActiveShares);
-                c.onChain += bonus;
-                c.balanceNew -= bonus;   // recipient now owes the pool this bonus
-                bonusAssigned += bonus;
-            }
-            const bonusResiduum = trimmedTotal - bonusAssigned;
-            if (bonusResiduum > 0 && keptActive.length > 0) {
-                // Push the residuum to the largest bonus recipient.
-                const sortedByShares = [...keptActive].sort((a, b) => b.shares - a.shares);
-                const biggest = sortedByShares[0];
-                biggest.onChain += bonusResiduum;
-                biggest.balanceNew -= bonusResiduum;
-            }
+        if (suppressMatchingDebits) {
+            // Group-Solo path: donate trim leftovers to fee. No matching
+            // debits means no negative balances on members' pending rows.
+            // In practice this branch is unreachable for groups
+            // (member count << maxMinerOutputs), but handled for
+            // completeness so the invariant holds everywhere.
+            feeBonusSats += trimmedTotal;
         } else {
-            // Edge: trimmed miners exist but no kept active miners got
-            // the bonus (e.g. kept set is all pending-only). The trimmed
-            // sats would be unclaimed. Log loud; the trimmed miners'
-            // balanceNew = target still records their claim, and the
-            // block coinbase will undershoot rewardForMiners slightly.
-            console.warn(
-                `${label} trimmed ${trimmedTotal} sats but no active kept miners `
-                + `to receive redistribution — block coinbase will undershoot`,
-            );
+            const keptActive = kept.filter(c => c.shares > 0);
+            let keptActiveShares = 0;
+            for (const c of keptActive) keptActiveShares += c.shares;
+
+            if (keptActiveShares > 0) {
+                let bonusAssigned = 0;
+                // Floor per-miner, then rounding residuum goes to the single
+                // largest bonus recipient so the sum stays ≤ trimmedTotal.
+                for (const c of keptActive) {
+                    const bonus = Math.floor(trimmedTotal * c.shares / keptActiveShares);
+                    c.onChain += bonus;
+                    c.balanceNew -= bonus;   // recipient now owes the pool this bonus
+                    bonusAssigned += bonus;
+                }
+                const bonusResiduum = trimmedTotal - bonusAssigned;
+                if (bonusResiduum > 0 && keptActive.length > 0) {
+                    // Push the residuum to the largest bonus recipient.
+                    const sortedByShares = [...keptActive].sort((a, b) => b.shares - a.shares);
+                    const biggest = sortedByShares[0];
+                    biggest.onChain += bonusResiduum;
+                    biggest.balanceNew -= bonusResiduum;
+                }
+            } else {
+                // Edge: trimmed miners exist but no kept active miners got
+                // the bonus (e.g. kept set is all pending-only). The trimmed
+                // sats would be unclaimed. Log loud; the trimmed miners'
+                // balanceNew = target still records their claim, and the
+                // block coinbase will undershoot rewardForMiners slightly.
+                console.warn(
+                    `${label} trimmed ${trimmedTotal} sats but no active kept miners `
+                    + `to receive redistribution — block coinbase will undershoot`,
+                );
+            }
         }
     }
 
@@ -476,33 +519,43 @@ export function buildCoinbaseDistribution(
     let onChainTotal = 0;
     for (const c of computations.values()) onChainTotal += c.onChain;
 
-    const residuum = rewardForMiners - onChainTotal;
+    const residuum = rewardForMiners - onChainTotal -
+        /* fee bonus from Phase 5a still needs to "fit" under the total */
+        (suppressMatchingDebits ? feeBonusSats : 0);
     if (residuum > 0) {
-        const keptActive = kept.filter(c => c.shares > 0);
-        let keptActiveShares = 0;
-        for (const c of keptActive) keptActiveShares += c.shares;
+        if (suppressMatchingDebits) {
+            // Group-Solo path: donate floor-rounding residuum to fee.
+            // Typical magnitude: 1–10 sats per block. No matching-debit
+            // bookkeeping means member balances stay non-negative, which
+            // is the whole point of Option B for C2.
+            feeBonusSats += residuum;
+        } else {
+            const keptActive = kept.filter(c => c.shares > 0);
+            let keptActiveShares = 0;
+            for (const c of keptActive) keptActiveShares += c.shares;
 
-        if (keptActiveShares > 0) {
-            let assigned = 0;
-            for (const c of keptActive) {
-                const bonus = Math.floor(residuum * c.shares / keptActiveShares);
-                c.onChain += bonus;
-                c.balanceNew -= bonus;
-                assigned += bonus;
+            if (keptActiveShares > 0) {
+                let assigned = 0;
+                for (const c of keptActive) {
+                    const bonus = Math.floor(residuum * c.shares / keptActiveShares);
+                    c.onChain += bonus;
+                    c.balanceNew -= bonus;
+                    assigned += bonus;
+                }
+                const residual = residuum - assigned;
+                if (residual > 0) {
+                    // Floor-rounding tail (< keptActive.length sats): push
+                    // to the single largest active miner so the on-chain
+                    // sum exactly matches rewardForMiners.
+                    const sortedByShares = [...keptActive].sort((a, b) => b.shares - a.shares);
+                    sortedByShares[0].onChain += residual;
+                    sortedByShares[0].balanceNew -= residual;
+                }
             }
-            const residual = residuum - assigned;
-            if (residual > 0) {
-                // Floor-rounding tail (< keptActive.length sats): push
-                // to the single largest active miner so the on-chain
-                // sum exactly matches rewardForMiners.
-                const sortedByShares = [...keptActive].sort((a, b) => b.shares - a.shares);
-                sortedByShares[0].onChain += residual;
-                sortedByShares[0].balanceNew -= residual;
-            }
+            // If no kept active miners, the residuum stays unclaimed —
+            // block coinbase undershoots by that amount (rare: requires
+            // kept set to be all pending-only credit-claimers).
         }
-        // If no kept active miners, the residuum stays unclaimed —
-        // block coinbase undershoots by that amount (rare: requires
-        // kept set to be all pending-only credit-claimers).
     } else if (residuum < 0) {
         // After the Phase 5a.5 solvency cap this can't happen — the
         // cap either fixed overshoot or triggered the fee-100% fallback.
@@ -523,11 +576,19 @@ export function buildCoinbaseDistribution(
     // ── Phase 6: build payouts + balanceAfter ──────────────────────
     const payouts: CoinbaseDistributionEntry[] = [];
 
+    // In suppressMatchingDebits mode, any sats that would normally have
+    // been redistributed to active miners with a matching debit go to
+    // the fee output instead. If no fee address is configured, those
+    // sats are unemitted (coinbase undershoots by feeBonusSats — a
+    // handful of sats; acceptable for the group-solo use case).
+    const totalFeeSats = feeEmitted
+        ? feeSats + (suppressMatchingDebits ? feeBonusSats : 0)
+        : feeSats;
     if (feeEmitted) {
         payouts.push({
             address: feeAddress,
-            percent: feePercent,
-            sats: feeSats,
+            percent: (totalFeeSats / blockRewardSats) * 100,
+            sats: totalFeeSats,
         });
     }
 

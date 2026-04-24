@@ -272,6 +272,105 @@ describe('buildCoinbaseDistribution — credit/debit ledger model', () => {
         expect(trimmedWithPositiveCredit).toBeGreaterThan(0);
     });
 
+    // ── Regression: pending-only trimmed credit-holders must not overshoot ─
+
+    it('regression C1: many pending-only credit-holders trimmed → no fee-100% fallback, no overshoot', () => {
+        // Scenario (pool-aged, real reachable state): 300 abandoned-but-
+        // not-yet-swept pending-only credit-holders at +600 sats each +
+        // 1 active miner "Alice" with all the shares. Default weight
+        // budget fits ~286 outputs, so 15 credit-holders get trimmed.
+        //
+        // Pre-fix bug: trimmedTotal = 15 × 600 = 9_000 gets redistributed
+        // to Alice as on-chain bonus + matching debit. Alice's on-chain =
+        // rawFair + 9_000 = rewardForMiners + 9_000. Phase 5a.5 sees
+        // overshoot = 9_000 + 285×600 = 180_000 but totalCredit-in-kept
+        // is only 285×600 = 171_000. overshoot > totalCredit → falls
+        // through to CRITICAL fee-100% fallback → miners lose full block.
+        //
+        // Post-fix: trimmedTotal only counts active trimmed (none here),
+        // so no Phase 5a bonus. Phase 5a.5 cuts the kept credit-holders
+        // proportionally; trimmed credit-holders carry their 600 forward
+        // unchanged. No overshoot, no fallback.
+        const reward = 5_000_000_000;
+        const feePercent = 2;
+        const feeSats = Math.floor(reward * feePercent / 100);
+        const rewardForMiners = reward - feeSats;
+
+        const balancesIn = new Map<string, number>();
+        for (let i = 0; i < 300; i++) balancesIn.set(`bc1qpend${i}`, 600);
+
+        const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+        const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+        try {
+            const r = buildCoinbaseDistribution({
+                addressShares: shares({ [ALICE]: 100 }),
+                balances: balancesIn,
+                blockRewardSats: reward,
+                feePercent,
+                feeAddress: FEE_ADDR,
+                coinbaseWeightBudget: DEFAULT_COINBASE_WEIGHT_BUDGET,
+            });
+
+            // Fee-100% fallback did NOT fire — there are ≥ 2 on-chain outputs
+            // (fee + Alice + some of the kept creditors).
+            expect(r.payouts.length).toBeGreaterThan(1);
+            const fee = r.payouts.find(p => p.address === FEE_ADDR)!;
+            expect(fee.percent).toBe(feePercent);
+            expect(fee.sats).toBe(feeSats);
+
+            // Alice got her full rawFair (~rewardForMiners minus the tiny
+            // portion used to pay kept credit-holders on-chain).
+            const alice = r.payouts.find(p => p.address === ALICE)!;
+            expect(alice).toBeDefined();
+            expect(alice.sats).toBeGreaterThan(rewardForMiners - 200_000);
+
+            // On-chain never exceeds the block reward.
+            expect(sumOnChainSats(r.payouts)).toBeLessThanOrEqual(reward);
+            const minersOnChain = r.payouts
+                .filter(p => p.address !== FEE_ADDR)
+                .reduce((s, p) => s + p.sats, 0);
+            expect(minersOnChain).toBeLessThanOrEqual(rewardForMiners);
+
+            // No CRITICAL fee-100% log emitted.
+            const criticalLogs = errorSpy.mock.calls
+                .flat()
+                .filter((msg: any) => typeof msg === 'string' && msg.includes('CRITICAL'));
+            expect(criticalLogs).toHaveLength(0);
+
+            // Trimmed pending-only credit-holders carried their 600 sat
+            // balance forward unchanged (no phantom-sat redistribution).
+            const trimmedCreditors = [...balancesIn.keys()].filter(addr => {
+                const paid = r.payouts.find(p => p.address === addr);
+                return !paid;
+            });
+            expect(trimmedCreditors.length).toBeGreaterThan(0);
+            for (const addr of trimmedCreditors) {
+                const carry = r.balanceAfter.get(addr);
+                // Either unchanged at 600 (pure trimmed) or partially cut
+                // back by the Phase 5a.5 solvency cap — but never negative,
+                // never larger than the original claim.
+                expect(carry).toBeGreaterThanOrEqual(0);
+                expect(carry).toBeLessThanOrEqual(600);
+            }
+
+            // Sum conservation: sum(balanceAfter) ≈ sum(balanceBefore) ± N.
+            let sumBefore = 0;
+            for (const v of balancesIn.values()) sumBefore += v;
+            const allAddrs = new Set<string>([ALICE, ...balancesIn.keys()]);
+            let sumAfter = 0;
+            for (const a of allAddrs) {
+                sumAfter += r.balanceAfter.has(a)
+                    ? r.balanceAfter.get(a)!
+                    : (balancesIn.get(a) ?? 0);
+            }
+            const drift = sumAfter - sumBefore;
+            expect(Math.abs(drift)).toBeLessThanOrEqual(allAddrs.size);
+        } finally {
+            warnSpy.mockRestore();
+            errorSpy.mockRestore();
+        }
+    });
+
     // ── Phase 5a.5: Solvency cap (EdgeCase A: abandoned-debtor overshoot) ──
 
     it('EdgeCase A: abandoned debtor + pending-only creditor → solvency cap delays credit claim', () => {
@@ -443,6 +542,153 @@ describe('buildCoinbaseDistribution — credit/debit ledger model', () => {
         const activeDebits = -(aBal + bBal + cBal);   // positive total debt
         expect(activeDebits).toBeGreaterThanOrEqual(subDustCredits);
         expect(activeDebits - subDustCredits).toBeLessThanOrEqual(totalMiners);
+    });
+
+    // ── C2: suppressMatchingDebits (group-solo mode) ──────────
+
+    describe('suppressMatchingDebits (group-solo mode)', () => {
+
+        it('regression C2: Phase 5b residuum goes to fee, not to active miners as debit', () => {
+            // 3 miners with uneven shares to guarantee floor-rounding residuum.
+            // In normal mode Alice (largest) would get the residuum + matching
+            // debit. In suppress mode the residuum goes to the fee.
+            const reward = 5_000_000_000;
+            const feePercent = 2;
+            const feeSats = Math.floor(reward * feePercent / 100);
+            const rewardForMiners = reward - feeSats;
+
+            const r = buildCoinbaseDistribution({
+                addressShares: shares({ [ALICE]: 111, [BOB]: 100, [CHARLIE]: 100 }),
+                balances: new Map(),
+                blockRewardSats: reward,
+                feePercent,
+                feeAddress: FEE_ADDR,
+                coinbaseWeightBudget: DEFAULT_COINBASE_WEIGHT_BUDGET,
+                suppressMatchingDebits: true,
+            });
+
+            // Every miner's balanceAfter is 0 (or absent) — NO matching debits.
+            for (const addr of [ALICE, BOB, CHARLIE]) {
+                const bal = r.balanceAfter.get(addr) ?? 0;
+                expect(bal).toBe(0);
+            }
+
+            // Fee output absorbed the residuum (floor-rounding tail).
+            const fee = r.payouts.find(p => p.address === FEE_ADDR)!;
+            expect(fee.sats).toBeGreaterThanOrEqual(feeSats);
+            // Upper bound: can't be more than feeSats + N_miners sats of residuum.
+            expect(fee.sats).toBeLessThanOrEqual(feeSats + 3);
+
+            // Coinbase sum still = block reward.
+            expect(sumOnChainSats(r.payouts)).toBe(reward);
+
+            // Miners' on-chain totals = floor(share_i/total × rewardForMiners),
+            // no bonus added.
+            const total = 311;
+            for (const [addr, shareCount] of [[ALICE, 111], [BOB, 100], [CHARLIE, 100]] as const) {
+                const p = r.payouts.find(pp => pp.address === addr)!;
+                expect(p.sats).toBe(Math.floor(shareCount / total * rewardForMiners));
+            }
+        });
+
+        it('regression C2: trim redistribution goes to fee instead of creating debits', () => {
+            // Tight budget → many miners trimmed. In normal mode the trim
+            // total would be redistributed to the top 4 active miners with
+            // matching debits. In suppress mode: fee absorbs it.
+            const addressSharesMap = new Map<string, number>();
+            for (let i = 0; i < 20; i++) addressSharesMap.set(`bc1qm${i}`, 100_000 - i * 1000);
+
+            const reward = 5_000_000_000;
+            const feeSats = Math.floor(reward * 0.02);
+
+            const r = buildCoinbaseDistribution({
+                addressShares: addressSharesMap,
+                balances: new Map(),
+                blockRewardSats: reward,
+                feePercent: 2,
+                feeAddress: FEE_ADDR,
+                coinbaseWeightBudget: 1500,   // fits ~4 miner outputs
+                suppressMatchingDebits: true,
+            });
+
+            // No miner has a negative (debit) balance after — invariant for groups.
+            for (const v of r.balanceAfter.values()) {
+                expect(v).toBeGreaterThanOrEqual(0);
+            }
+
+            // Fee output is larger than the base feeSats (absorbed trim total).
+            const fee = r.payouts.find(p => p.address === FEE_ADDR)!;
+            expect(fee.sats).toBeGreaterThan(feeSats);
+
+            // Coinbase sum still = block reward.
+            expect(sumOnChainSats(r.payouts)).toBe(reward);
+
+            // Trimmed miners' balanceAfter = their target (carry-forward as credit),
+            // never negative.
+            const keptAddrs = new Set(r.payouts.filter(p => p.address !== FEE_ADDR).map(p => p.address));
+            const trimmedAddrs = [...addressSharesMap.keys()].filter(a => !keptAddrs.has(a));
+            for (const addr of trimmedAddrs) {
+                const bal = r.balanceAfter.get(addr) ?? 0;
+                expect(bal).toBeGreaterThanOrEqual(0);
+            }
+        });
+
+        it('suppressMatchingDebits without fee address → residuum unemitted (undershoot OK)', () => {
+            // Edge: if the pool has no fee configured, residuum has nowhere
+            // to go. Coinbase undershoots by that amount. Documented; not
+            // a panic — the group accepts the tiny donation to subsidy.
+            const reward = 5_000_000_000;
+            const r = buildCoinbaseDistribution({
+                addressShares: shares({ [ALICE]: 111, [BOB]: 100, [CHARLIE]: 100 }),
+                balances: new Map(),
+                blockRewardSats: reward,
+                feePercent: 0,
+                feeAddress: '',
+                coinbaseWeightBudget: DEFAULT_COINBASE_WEIGHT_BUDGET,
+                suppressMatchingDebits: true,
+            });
+
+            // No matching debits.
+            for (const v of r.balanceAfter.values()) expect(v).toBeGreaterThanOrEqual(0);
+
+            // Coinbase ≤ reward (may undershoot slightly due to residuum).
+            expect(sumOnChainSats(r.payouts)).toBeLessThanOrEqual(reward);
+            // Should be within N-miner sats of reward.
+            expect(sumOnChainSats(r.payouts)).toBeGreaterThanOrEqual(reward - 3);
+        });
+
+        it('suppress mode preserves Phase 5a.5 solvency cap for positive pre-existing credits', () => {
+            // A group member has an accumulated sub-dust credit from prior
+            // blocks (pendingSats=+500). Next block, the targets overshoot
+            // rewardForMiners. The cap must still trigger — suppression
+            // is about MATCHING DEBITS, not about Phase 5a.5 itself.
+            const reward = 1_000_000;   // small reward to force an overshoot
+            const feePercent = 0;
+            const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+            try {
+                const r = buildCoinbaseDistribution({
+                    addressShares: shares({ [ALICE]: 100, [BOB]: 100 }),
+                    balances: new Map([[ALICE, 800_000]]),   // huge pre-existing credit
+                    blockRewardSats: reward,
+                    feePercent,
+                    feeAddress: FEE_ADDR,
+                    coinbaseWeightBudget: DEFAULT_COINBASE_WEIGHT_BUDGET,
+                    suppressMatchingDebits: true,
+                });
+
+                // Alice's claim survives the cut — balanceAfter > 0.
+                const aliceCarry = r.balanceAfter.get(ALICE) ?? 0;
+                expect(aliceCarry).toBeGreaterThan(0);
+
+                // Bob is untouched (active, no pre-existing balance, no debit either).
+                expect(r.balanceAfter.get(BOB) ?? 0).toBe(0);
+
+                // Coinbase ≤ reward.
+                expect(sumOnChainSats(r.payouts)).toBeLessThanOrEqual(reward);
+            } finally {
+                warnSpy.mockRestore();
+            }
+        });
     });
 
     // ── Dust gates ────────────────────────────────────────────
