@@ -104,6 +104,11 @@ export class PplnsController {
             coinbaseBaseWeight: COINBASE_BASE_WEIGHT,
             coinbaseOutputWeight: COINBASE_OUTPUT_WEIGHT,
             coinbaseWitnessCommitmentWeight: COINBASE_WITNESS_COMMITMENT_WEIGHT,
+            // Exposed so the UI doesn't re-derive this from the weight
+            // numbers above — keeps frontend and backend aligned on the
+            // exact "max miner outputs fitting a coinbase" count even
+            // when feeEmitted is false (no fee address configured).
+            maxMinerOutputs: this.pplnsService.getMaxCoinbaseOutputs(),
             minDifficulty: gate.minDifficulty,
             warmupShares: gate.warmupShares,
         };

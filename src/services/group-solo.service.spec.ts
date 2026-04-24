@@ -521,6 +521,61 @@ describe('GroupSoloService', () => {
         expect(best.address).toBeNull();
     });
 
+    /**
+     * M3 regression (signed-ledger audit finding): Group-Solo routes
+     * through the shared `buildCoinbaseDistribution` with
+     * `suppressMatchingDebits=true` (the C2 fix). That flag re-routes
+     * Phase 5b residuum to the fee output instead of creating negative
+     * pendingSats. This test locks in the guarantee: with 10 members
+     * and uneven shares (forcing floor-rounding residuum every block),
+     * NO member's pendingSats ever goes negative across 5 rounds.
+     *
+     * If the `suppressMatchingDebits` flag regresses, this test will
+     * catch it because at least one member will end up with a negative
+     * pendingSats from the Phase 5b matching-debit pass — exactly the
+     * C2 bug the flag prevents.
+     */
+    it('regression M3: 10-member group-solo over 5 rounds — no member ever has negative pendingSats', async () => {
+        const { service, balanceRepo, historyRepo, groupService } = makeService();
+        const members = Array.from({ length: 10 }, (_, i) => `bc1qm${i}`);
+        for (const m of members) groupService._setMembership(m, 'g1', true);
+
+        const BLOCK_REWARD = 5_000_000_000;   // 50 BTC, realistic
+        let height = 900_000;
+
+        // Run 5 rounds. Each round:
+        //   1. 10 members record shares with intentionally uneven counts
+        //      (prime-ish values) to guarantee floor-rounding residuum.
+        //   2. getPayoutDistribution populates the snapshot.
+        //   3. onBlockFound writes history rows + resets round.
+        //   4. Assert no pendingSats in the group-balance repo is < 0.
+        for (let round = 0; round < 5; round++) {
+            // Uneven shares → Phase 5b residuum always non-zero.
+            const baseShares = [101, 107, 113, 127, 131, 137, 139, 149, 151, 157];
+            for (let i = 0; i < members.length; i++) {
+                await service.recordShare(members[i], baseShares[i] * (round + 1));
+            }
+
+            await service.getPayoutDistribution('g1', BLOCK_REWARD);
+            await service.onBlockFound(height++, BLOCK_REWARD, members[0]);
+
+            // Invariant: no pendingSats goes negative across all group rows.
+            const groupRows = (balanceRepo._rows as any[]).filter(r => r.groupId === 'g1');
+            for (const row of groupRows) {
+                expect(row.pendingSats).toBeGreaterThanOrEqual(0);
+            }
+        }
+
+        // End state: history rows reference all 5 blocks. At least the
+        // fee rows should appear (often more if the group is PROP'd).
+        const distinctBlocks = new Set(
+            (historyRepo._rows as any[])
+                .filter(r => r.groupId === 'g1')
+                .map(r => r.blockHeight),
+        );
+        expect(distinctBlocks.size).toBe(5);
+    });
+
     it('removeMemberState redistributes pending balance + in-round shares to remaining members', async () => {
         const { service, redis, groupService, balanceRepo } = makeService();
         groupService._setMembership('bc1qalice', 'g1', true);

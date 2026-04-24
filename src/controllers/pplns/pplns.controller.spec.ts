@@ -234,6 +234,7 @@ describe('PplnsController', () => {
                 minDifficulty: 500,
                 warmupShares: 10,
             });
+            (pplnsService as any).getMaxCoinbaseOutputs = jest.fn().mockReturnValue(286);
             const res: any = controller.getFees();
             expect(res.feePercent).toBe(2);
             expect(res.feeAddress).toBe('bc1qfee');
@@ -242,6 +243,7 @@ describe('PplnsController', () => {
             expect(res.coinbaseBaseWeight).toBe(328);
             expect(res.coinbaseOutputWeight).toBe(172);
             expect(res.coinbaseWitnessCommitmentWeight).toBe(188);
+            expect(res.maxMinerOutputs).toBe(286);
             expect(res.minDifficulty).toBe(500);
             expect(res.warmupShares).toBe(10);
         });

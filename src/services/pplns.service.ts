@@ -515,11 +515,16 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
      * Redis flushed, reward mismatch). Rebuilds the distribution against
      * the current window + current balances, then applies it.
      *
-     * The on-chain coinbase may not exactly match what we compute here if
-     * shares changed between template-send and block-find, but it's the
-     * best approximation possible without a snapshot — and the block IS
-     * already on-chain, so the ledger converges to "close-enough" based
-     * on current state.
+     * **Important caveat** (M1 audit finding): the on-chain coinbase
+     * was built from the TEMPLATE's distribution (which the miner saw
+     * at solve-time). If shares arrived between template-send and
+     * block-find, the reconstructed distribution here diverges from
+     * the on-chain one. The ledger writes then reflect a best-effort
+     * approximation, NOT the exact on-chain payouts. This path logs
+     * a loud CRITICAL warning with a full per-miner dump so the
+     * operator can manually reconcile against the block explorer;
+     * the idempotency pre-check prevents any automatic retry from
+     * fixing it later.
      */
     private async applyDistributionWithoutSnapshot(blockHeight: number, blockRewardSats: number): Promise<void> {
         const addressShares = await this.readWindowByAddress();
@@ -539,6 +544,31 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
             logLabel: `[PPLNS fallback ${blockHeight}]`,
         });
 
+        // Loud operator warning: the ledger is about to be written from
+        // a recomputed distribution that MAY disagree with what the
+        // miner actually included in the coinbase. Dump enough info for
+        // manual reconciliation against the block-explorer view.
+        const onChainTotal = result.payouts.reduce((s, p) => s + p.sats, 0);
+        const ledgerDelta = Array.from(result.balanceAfter.entries())
+            .reduce((s, [addr, newBal]) => {
+                const oldBal = balances.get(addr) ?? 0;
+                return s + (newBal - oldBal);
+            }, 0);
+        console.warn(
+            `[PPLNS CRITICAL RECOMPUTE] Block ${blockHeight} applying `
+            + `RECOMPUTED distribution (no valid snapshot). ⚠️ This MAY `
+            + `diverge from the actual on-chain coinbase if shares shifted `
+            + `between template-send and block-find. Manually verify `
+            + `against the block explorer before trusting miner payout `
+            + `history for this block.\n`
+            + `  blockReward:     ${blockRewardSats} sats\n`
+            + `  onChain total:   ${onChainTotal} sats across ${result.payouts.length} outputs\n`
+            + `  ledger delta:    ${ledgerDelta >= 0 ? '+' : ''}${ledgerDelta} sats (sum of balance changes)\n`
+            + `  window miners:   ${addressShares.size}\n`
+            + `  open balances:   ${balances.size}\n`
+            + `  coinbase dump:   ${JSON.stringify(result.payouts.map(p => ({ a: p.address, s: p.sats })))}`,
+        );
+
         await this.applyDistribution({
             blockHeight,
             distribution: result.payouts.map(p => ({
@@ -547,7 +577,7 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
             balanceAfter: result.balanceAfter,
             consideredAddresses: result.consideredAddresses,
             currentWindow: addressShares,
-            label: 'from window recomputation',
+            label: 'from window recomputation (RECOMPUTED — verify vs on-chain)',
         });
     }
 
