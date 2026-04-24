@@ -51,8 +51,20 @@ export const DEFAULT_COINBASE_WEIGHT_BUDGET = 50_000;
  * builder in src/models/MiningJob.ts (createCoinbaseTransaction).
  *
  * BASE    — version + input (coinbase prev-out, script, sequence) +
- *           output-count byte + locktime + witness-reserved-value.
- *           ~420 WU on the wire; 320 is conservative-low for headroom.
+ *           output-count varint + locktime + witness-reserved-value.
+ *           Set to 328 WU = base-fixed (~320) + 8 WU headroom to absorb
+ *           the varint-encoding growth of the output-count prefix. A
+ *           coinbase with ≤ 252 outputs uses a single-byte varint; at
+ *           253 or more outputs the varint expands to 3 bytes (0xfd +
+ *           uint16_le), costing 8 WU extra on the wire. A stock
+ *           `PPLNS_COINBASE_WEIGHT_BUDGET=50000` already produces 286
+ *           miner outputs (+ fee + witness-commitment = 288 total)
+ *           which lands inside the wider-varint regime, so the +8 WU
+ *           must be paid back here — otherwise the real coinbase
+ *           exceeds `blockreservedweight` by 8 WU on a saturated block
+ *           and bitcoind rejects it with `bad-blk-weight`. Cheap to
+ *           always pay (8 WU ≈ 0.0002 % of a block); no conditional
+ *           branching needed.
  *
  * OUTPUT  — P2TR upper bound: 34-byte scriptPubKey → 43 bytes serialized
  *           → 172 WU. Chosen over P2WPKH (124 WU) so a group of all-
@@ -63,7 +75,7 @@ export const DEFAULT_COINBASE_WEIGHT_BUDGET = 50_000;
  *           Earlier code reserved 124 here (treated it as a regular
  *           output) and under-counted by ~64 WU per block.
  */
-export const COINBASE_BASE_WEIGHT = 320;
+export const COINBASE_BASE_WEIGHT = 328;
 export const COINBASE_OUTPUT_WEIGHT = 172;
 export const COINBASE_WITNESS_COMMITMENT_WEIGHT = 188;
 

@@ -881,9 +881,12 @@ describe('PplnsService', () => {
     });
 
     it('should trim outputs when miners exceed weight budget', async () => {
-      // Budget sized for exactly 3 miner outputs:
-      // (B - 320 - 188 - 172) / 172 = 3  →  B = 3*172 + 680 = 1196
-      const { service } = createService({ weightBudget: '1200' });
+      // Budget sized for exactly 3 miner outputs under the current
+      // constants (base 328 WU post-varint-fix, commitment 188,
+      // output 172, fee output 172):
+      //   (B − 328 − 188 − 172) / 172 = 3  →  B = 3·172 + 688 = 1204
+      // We use 1208 as a small safety headroom above the exact cutoff.
+      const { service } = createService({ weightBudget: '1208' });
       service.setNetworkDifficulty(100_000_000); // large window
 
       // Add 10 miners with equal shares
@@ -904,8 +907,11 @@ describe('PplnsService', () => {
     });
 
     it('should keep largest miners when trimming', async () => {
-      // Budget for 3 miner outputs under the new P2TR constants.
-      const { service } = createService({ weightBudget: '1200' });
+      // Budget for exactly 3 miner outputs — same math as the previous
+      // test. Bumped from 1200 to 1208 after COINBASE_BASE_WEIGHT went
+      // 320 → 328 (absorbs the 3-byte output-count varint at ≥ 253
+      // outputs).
+      const { service } = createService({ weightBudget: '1208' });
       service.setNetworkDifficulty(100_000_000);
 
       // Miners with very different shares
