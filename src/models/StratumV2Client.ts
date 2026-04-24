@@ -582,6 +582,18 @@ export class StratumV2Client {
     }
     // SV2 spec: server must not assign a target exceeding the client's declared maxTarget
     channelDifficulty = DifficultyUtils.clampDifficultyToMaxTarget(channelDifficulty, msg.maxTarget);
+    // Port floor (PPLNS_MIN_DIFFICULTY): prevent low-hashrate SV2 miners
+    // from slipping under the floor via a tiny nominalHashRate. Always
+    // spec-safe to raise assigned difficulty — a harder target is
+    // strictly smaller than maxTarget, so the maxTarget constraint is
+    // never violated. A miner whose hardware genuinely can't meet the
+    // floor will simply see its shares rejected as difficulty-too-low
+    // until it disconnects (same outcome SV1 already produces on this
+    // port via the suggest_difficulty / nearestDifficultyStep floor).
+    const portMinDiff = this.portConfig.minimumDifficulty ?? 0;
+    if (portMinDiff > 0 && channelDifficulty < portMinDiff) {
+      channelDifficulty = portMinDiff;
+    }
     // Update connection-level difficulty for vardiff baseline
     if (isFirstChannel) {
       this.sessionDifficulty = channelDifficulty;
@@ -748,6 +760,12 @@ export class StratumV2Client {
     }
     // SV2 spec: server must not assign a target exceeding the client's declared maxTarget
     channelDifficulty = DifficultyUtils.clampDifficultyToMaxTarget(channelDifficulty, msg.maxTarget);
+    // Port floor (see OpenStandardMiningChannel for rationale) — same
+    // floor applies to the BitAxe / ESP-MINER extended-channel path.
+    const extPortMinDiff = this.portConfig.minimumDifficulty ?? 0;
+    if (extPortMinDiff > 0 && channelDifficulty < extPortMinDiff) {
+      channelDifficulty = extPortMinDiff;
+    }
     if (isFirstChannel) {
       this.sessionDifficulty = channelDifficulty;
     }
@@ -853,6 +871,13 @@ export class StratumV2Client {
     }
     // SV2 spec: server MUST reflect the maximum_target if smaller (harder) than current
     newDifficulty = DifficultyUtils.clampDifficultyToMaxTarget(newDifficulty, msg.maximumTarget);
+    // Port floor (see OpenStandardMiningChannel) — prevent a miner
+    // from softening its maxTarget via UpdateChannel to drop below
+    // PPLNS_MIN_DIFFICULTY after the channel was opened.
+    const updatePortMinDiff = this.portConfig.minimumDifficulty ?? 0;
+    if (updatePortMinDiff > 0 && newDifficulty < updatePortMinDiff) {
+      newDifficulty = updatePortMinDiff;
+    }
 
     const diffChanged = newDifficulty !== channel.sessionDifficulty;
     console.log(`[SV2 ${this.sessionId}] UpdateChannel ${msg.channelId} (nominalHashRate=${msg.nominalHashRate}, difficulty=${channel.sessionDifficulty.toFixed(4)} → ${newDifficulty.toFixed(4)}${diffChanged ? '' : ' (unchanged)'})`);
