@@ -72,8 +72,8 @@ function makeQb<T extends Record<string, any>>(rows: T[]) {
             return qb;
         },
         andWhere: (expr: string, params?: any) => {
-            if (expr === 'b."pendingSats" < :dust') {
-                addClause(r => r.pendingSats < params.dust);
+            if (expr === 'b."pendingSats" < :minPayout') {
+                addClause(r => r.pendingSats < params.minPayout);
             } else if (expr === 'b."lastAcceptedShareAt" IS NOT NULL') {
                 addClause(r => r.lastAcceptedShareAt != null);
             } else if (expr === 'b."lastAcceptedShareAt" < :cutoff') {

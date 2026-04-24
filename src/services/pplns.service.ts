@@ -13,6 +13,8 @@ import {
     buildCoinbaseDistribution,
     CoinbaseDistributionEntry,
     DEFAULT_COINBASE_WEIGHT_BUDGET,
+    DEFAULT_MIN_PAYOUT_SATS,
+    DUST_LIMIT_SATS,
     COINBASE_BASE_WEIGHT,
     COINBASE_OUTPUT_WEIGHT,
     COINBASE_WITNESS_COMMITMENT_WEIGHT,
@@ -90,6 +92,7 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
     private networkDifficulty = 0;
     private jobSubscription: Subscription | null = null;
     private readonly coinbaseWeightBudget: number;
+    private readonly minPayoutSats: number;
 
     // Distribution cache — avoids re-reading entire Redis state + re-running
     // the math on every new job.
@@ -120,6 +123,17 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         this.feeAddress = this.configService.get('PPLNS_FEE_ADDRESS') ?? '';
         this.feePercent = parseFloat(this.configService.get('PPLNS_FEE_PERCENT') ?? '2');
         this.coinbaseWeightBudget = parseInt(this.configService.get('PPLNS_COINBASE_WEIGHT_BUDGET') ?? DEFAULT_COINBASE_WEIGHT_BUDGET.toString(), 10) || DEFAULT_COINBASE_WEIGHT_BUDGET;
+        // Operational minimum payout — clamped to the Bitcoin Core dust
+        // policy floor (DUST_LIMIT_SATS = 546). Setting this below that
+        // would let us emit outputs Core rejects as standard.
+        const rawMinPayout = parseInt(
+            this.configService.get('PPLNS_MIN_PAYOUT_SATS') ?? DEFAULT_MIN_PAYOUT_SATS.toString(),
+            10,
+        );
+        this.minPayoutSats = Math.max(
+            DUST_LIMIT_SATS,
+            Number.isFinite(rawMinPayout) && rawMinPayout > 0 ? rawMinPayout : DEFAULT_MIN_PAYOUT_SATS,
+        );
         this.enabled = !!this.configService.get('PPLNS_PORT');
     }
 
@@ -215,6 +229,16 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
 
     getWindowSize(): number {
         return PPLNS_WINDOW_FACTOR * this.networkDifficulty;
+    }
+
+    /**
+     * Pool's effective minimum on-chain payout (after env-clamping to
+     * the Bitcoin Core dust policy floor). Surfaced to the UI via
+     * `/api/pplns/fees` so the credit-progress bar can target the
+     * actual payout threshold instead of the protocol-policy 546.
+     */
+    getMinPayoutSats(): number {
+        return this.minPayoutSats;
     }
 
     getMaxCoinbaseOutputs(): number {
@@ -369,6 +393,7 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
             feePercent: this.feePercent,
             feeAddress: this.feeAddress,
             coinbaseWeightBudget: this.coinbaseWeightBudget,
+            minPayoutSats: this.minPayoutSats,
             logLabel: '[PPLNS]',
         });
 
@@ -541,6 +566,7 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
             feePercent: this.feePercent,
             feeAddress: this.feeAddress,
             coinbaseWeightBudget: this.coinbaseWeightBudget,
+            minPayoutSats: this.minPayoutSats,
             logLabel: `[PPLNS fallback ${blockHeight}]`,
         });
 

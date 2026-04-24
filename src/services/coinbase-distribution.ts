@@ -116,7 +116,28 @@
  *   sum = 0.
  */
 
+/**
+ * Bitcoin Core's default dust policy value for P2PKH at
+ * `dustRelayFee = 3000 sat/kvB`. Outputs below this amount can't be
+ * relayed as standard transactions, so it's the absolute lower bound
+ * for any on-chain coinbase output we emit. Operationally the pool
+ * uses a higher "minimum payout" value (see `DEFAULT_MIN_PAYOUT_SATS`
+ * and the `minPayoutSats` parameter) because 546-sat outputs are
+ * economically unspendable at realistic network fee rates (~8 sat/vB
+ * break-even for P2WPKH).
+ */
 export const DUST_LIMIT_SATS = 546;
+
+/**
+ * Pool's default minimum on-chain payout. Outputs below this amount
+ * stay as pending credit in the signed ledger until they accumulate
+ * past the threshold. Overridable per deployment via
+ * `PPLNS_MIN_PAYOUT_SATS` (clamped to ≥ DUST_LIMIT_SATS in service).
+ * Chosen so outputs remain spendable at fee rates up to ~73 sat/vB
+ * for P2WPKH inputs.
+ */
+export const DEFAULT_MIN_PAYOUT_SATS = 5_000;
+
 export const DEFAULT_COINBASE_WEIGHT_BUDGET = 50_000;
 
 /**
@@ -192,6 +213,16 @@ export interface CoinbaseDistributionInput {
      * cost of a few hundred thousand sats/year per active group.
      */
     suppressMatchingDebits?: boolean;
+    /**
+     * Pool's chosen minimum on-chain output. Outputs whose target
+     * (rawFair + balanceOld) falls below this amount stay as pending
+     * credit instead of becoming a coinbase output. Defaults to
+     * `DUST_LIMIT_SATS` (546) — the Bitcoin Core policy floor — so
+     * existing tests keep their meaning. Production services pass a
+     * higher value (default 5 000) to avoid emitting outputs that
+     * are economically unspendable at realistic network fee rates.
+     */
+    minPayoutSats?: number;
 }
 
 export interface CoinbaseDistributionEntry {
@@ -263,10 +294,19 @@ export function buildCoinbaseDistribution(
         coinbaseWeightBudget,
         logLabel,
         suppressMatchingDebits,
+        minPayoutSats,
     } = input;
 
     const label = logLabel ?? '[CoinbaseDist]';
     const budget = coinbaseWeightBudget > 0 ? coinbaseWeightBudget : DEFAULT_COINBASE_WEIGHT_BUDGET;
+    // Effective minimum-payout floor. Defaults to DUST_LIMIT_SATS so
+    // unit tests that don't pass the param keep their old behavior.
+    // Always enforce a hard lower bound at DUST_LIMIT_SATS — emitting
+    // outputs below that violates Bitcoin Core relay policy.
+    const minPayout = Math.max(
+        DUST_LIMIT_SATS,
+        (minPayoutSats !== undefined && minPayoutSats > 0) ? minPayoutSats : DUST_LIMIT_SATS,
+    );
 
     const consideredAddresses = new Set<string>(addressShares.keys());
     for (const addr of balances.keys()) consideredAddresses.add(addr);
@@ -304,7 +344,7 @@ export function buildCoinbaseDistribution(
             rawFair,
             balanceOld,
             target,
-            eligible: target >= DUST_LIMIT_SATS,
+            eligible: target >= minPayout,
             onChain: 0,
             balanceNew: target,       // default if not picked up in a block
         });
@@ -321,14 +361,16 @@ export function buildCoinbaseDistribution(
             rawFair: 0,
             balanceOld,
             target,
-            eligible: target >= DUST_LIMIT_SATS,
+            eligible: target >= minPayout,
             onChain: 0,
             balanceNew: target,
         });
     }
 
     // ── Phase 3+4: eligibility + weight-budget trim ────────────────
-    const feeEmitted = !!feeAddress && feeSats >= DUST_LIMIT_SATS;
+    // Fee output gate uses the same minPayout floor — emitting a tiny
+    // fee output that's economically unspendable burns operator sats.
+    const feeEmitted = !!feeAddress && feeSats >= minPayout;
     const feeOutputCount = feeEmitted ? 1 : 0;
     const maxMinerOutputs = Math.floor(
         (budget

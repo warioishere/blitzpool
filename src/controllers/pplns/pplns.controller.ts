@@ -100,7 +100,15 @@ export class PplnsController {
         const gate = this.pplnsService.getPortGateConfig();
         return {
             ...this.pplnsService.getFeeConfig(),
+            // Bitcoin Core's relay-policy dust floor (P2PKH @ 3000 sat/kvB).
+            // Outputs below this are always rejected; kept in the
+            // response for transparency / debugging.
             dustLimitSats: DUST_LIMIT_SATS,
+            // Pool's operational minimum payout — the threshold the UI
+            // should use for "credit progress" + "min payout" hints.
+            // Defaults to 5 000 sats, configurable via PPLNS_MIN_PAYOUT_SATS,
+            // clamped to ≥ DUST_LIMIT_SATS.
+            minPayoutSats: this.pplnsService.getMinPayoutSats(),
             coinbaseBaseWeight: COINBASE_BASE_WEIGHT,
             coinbaseOutputWeight: COINBASE_OUTPUT_WEIGHT,
             coinbaseWitnessCommitmentWeight: COINBASE_WITNESS_COMMITMENT_WEIGHT,

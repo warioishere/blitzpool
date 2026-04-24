@@ -343,37 +343,36 @@ describe('PPLNS Integration', () => {
       const { service, balanceService } = createPplnsService(ADDR_FEE, '2');
       service.setNetworkDifficulty(10_000_000); // large window
 
-      // Miner 1 dominates, Miner 2 is tiny (sub-dust per block)
+      // Miner 1 dominates, Miner 2 is tiny (sub-payout-floor per block).
+      // Ratio 100 / (10_000_000 + 100) × (rewardForMiners ≈ 306M)
+      // ≈ ~3 062 sats/block — under the default PPLNS_MIN_PAYOUT_SATS
+      // (5 000) on the FIRST block, accumulating across a couple of
+      // blocks until the cumulative balance crosses the floor and pays
+      // out on-chain. Same accumulate-then-pay semantic the old test
+      // exercised against the 546 floor, just retuned for 5 000.
       await service.recordShare(ADDR_MINER1, 10_000_000);
-      await service.recordShare(ADDR_MINER2, 1); // ~30 sats per block
+      await service.recordShare(ADDR_MINER2, 100);
 
-      // Block 1: Miner 2 gets sub-dust → pending
+      // Block 1: Miner 2 gets sub-floor → pending
       await service.onBlockFound(800_000, BLOCK_REWARD);
       const pending1 = balanceService._get(ADDR_MINER2)?.balanceSats ?? 0;
       expect(pending1).toBeGreaterThan(0);
-      expect(pending1).toBeLessThan(546); // sub-dust
+      expect(pending1).toBeLessThan(5000); // sub-floor at default 5 000
       console.log(`\nBlock 1: Miner2 pending = ${pending1} sats`);
 
-      // Blocks 2-20: accumulate
+      // Blocks 2-20: accumulate. 20 × ~6 100 sats = ~12 200 — well past 5 000.
+      // Whichever block crosses the floor pays out — afterwards balance
+      // resets, and accumulation begins again.
       for (let i = 1; i <= 19; i++) {
         await service.onBlockFound(800_000 + i, BLOCK_REWARD);
       }
       const pending20 = balanceService._get(ADDR_MINER2)?.balanceSats ?? 0;
-      console.log(`Block 20: Miner2 pending = ${pending20} sats`);
+      const totalPaid = balanceService._get(ADDR_MINER2)?.totalPaidSats ?? 0;
+      console.log(`Block 20: Miner2 pending = ${pending20}, totalPaid = ${totalPaid}`);
 
-      // After enough blocks, pending should exceed dust
-      if (pending20 >= 546) {
-        console.log('Miner2 has accumulated enough for coinbase payout!');
-        // Next distribution should include Miner 2
-        const dist = await service.getPayoutDistribution(BLOCK_REWARD);
-        const miner2InDist = dist.find(d => d.address === ADDR_MINER2);
-        expect(miner2InDist).toBeDefined();
-      } else {
-        // Need more blocks — calculate how many
-        const perBlock = pending20 / 20;
-        const blocksNeeded = Math.ceil(546 / perBlock);
-        console.log(`Miner2 needs ~${blocksNeeded} blocks to reach dust limit`);
-      }
+      // Strong assertion: across 20 blocks miner2 must have crossed the
+      // floor at least once and received some on-chain sats.
+      expect(totalPaid).toBeGreaterThan(0);
     });
 
     it('should create valid coinbase for large miner count', async () => {

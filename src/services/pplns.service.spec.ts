@@ -514,14 +514,16 @@ describe('PplnsService', () => {
       expect(minerB).toBeDefined(); // Should be in coinbase (pending + base > dust)
     });
 
-    it('should include pending-only addresses above dust', async () => {
-      // Pool-neutral: C has +1000 credit, A has matching -1000 debit
+    it('should include pending-only addresses above the operational floor', async () => {
+      // Pool-neutral: C has +6000 credit, A has matching -6000 debit
       // (the signed-ledger model requires a counterparty for credits).
+      // Value is above the default operational floor (5 000 sats), so
+      // C's pending becomes a coinbase output this block.
       const { service, balanceService } = createService({ feePercent: '2' });
       service.setNetworkDifficulty(100000);
 
-      balanceService._set('bc1qC', 1000);    // credit
-      balanceService._set('bc1qA', -1000);   // matching debit, active miner
+      balanceService._set('bc1qC', 6000);    // credit, above PPLNS_MIN_PAYOUT_SATS default
+      balanceService._set('bc1qA', -6000);   // matching debit, active miner
 
       await recordShares(service, [
         { address: 'bc1qA', difficulty: 500 },
@@ -618,13 +620,15 @@ describe('PplnsService', () => {
       expect(balTiny!.totalPaidSats).toBe(0);
     });
 
-    it('should process pending-only addresses', async () => {
-      // Pool-neutral: C has +1000 pending (no shares), A has -1000 matching debit.
+    it('should process pending-only addresses above operational floor', async () => {
+      // Pool-neutral: C has +6000 pending (no shares), A has -6000 matching debit.
+      // 6 000 sats is above the default PPLNS_MIN_PAYOUT_SATS (5 000),
+      // so C's pending becomes an actual coinbase output here.
       const { service, balanceService } = createService({ feePercent: '2' });
       service.setNetworkDifficulty(100000);
 
-      balanceService._set('bc1qC', 1000);     // pending-only credit
-      balanceService._set('bc1qA', -1000);    // matching debit, active
+      balanceService._set('bc1qC', 6000);     // pending-only credit, above floor
+      balanceService._set('bc1qA', -6000);    // matching debit, active
 
       await recordShares(service, [
         { address: 'bc1qA', difficulty: 500 },
@@ -635,7 +639,7 @@ describe('PplnsService', () => {
       // C's credit paid out, balance cleared.
       const balC = balanceService._get('bc1qC');
       expect(balC!.balanceSats).toBe(0);
-      expect(balC!.totalPaidSats).toBe(1000);
+      expect(balC!.totalPaidSats).toBe(6000);
       // A's debit cleared via reduced rawFair.
       const balA = balanceService._get('bc1qA');
       expect(balA!.balanceSats).toBe(0);

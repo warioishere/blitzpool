@@ -11,6 +11,7 @@ import {
     buildCoinbaseDistribution,
     DUST_LIMIT_SATS,
     DEFAULT_COINBASE_WEIGHT_BUDGET,
+    DEFAULT_MIN_PAYOUT_SATS,
 } from './coinbase-distribution';
 
 /**
@@ -74,6 +75,7 @@ export class GroupSoloService implements OnModuleInit {
     private feeAddress: string;
     private feePercent: number;
     private readonly coinbaseWeightBudget: number;
+    private readonly minPayoutSats: number;
 
     /**
      * Coinbase snapshot per group, persisted in Redis (see redisKeys().snapshot).
@@ -112,6 +114,17 @@ export class GroupSoloService implements OnModuleInit {
             this.configService.get('PPLNS_COINBASE_WEIGHT_BUDGET') ?? DEFAULT_COINBASE_WEIGHT_BUDGET.toString(),
             10,
         ) || DEFAULT_COINBASE_WEIGHT_BUDGET;
+        // Operational minimum payout — same env var as the PPLNS engine
+        // so groups inherit the pool's dust-vs-bloat policy. Clamped to
+        // the Bitcoin Core dust policy floor (DUST_LIMIT_SATS = 546).
+        const rawMinPayout = parseInt(
+            this.configService.get('PPLNS_MIN_PAYOUT_SATS') ?? DEFAULT_MIN_PAYOUT_SATS.toString(),
+            10,
+        );
+        this.minPayoutSats = Math.max(
+            DUST_LIMIT_SATS,
+            Number.isFinite(rawMinPayout) && rawMinPayout > 0 ? rawMinPayout : DEFAULT_MIN_PAYOUT_SATS,
+        );
         // Group-solo is always enabled if the service is loaded — routing is
         // address-driven via the GroupService's address→group cache.
         this.enabled = true;
@@ -220,6 +233,7 @@ export class GroupSoloService implements OnModuleInit {
             feePercent: this.feePercent,
             feeAddress: this.feeAddress,
             coinbaseWeightBudget: this.coinbaseWeightBudget,
+            minPayoutSats: this.minPayoutSats,
             logLabel: `[GroupSolo ${groupId}]`,
             // Group-Solo stays on the unsigned-pending ledger model: pendingSats
             // is always ≥ 0. This means Phase 5a trim redistribution and Phase
@@ -548,7 +562,7 @@ export class GroupSoloService implements OnModuleInit {
                     const totalSats = sats + pending;
                     const percent = (totalSats / blockRewardSats) * 100;
 
-                    if (totalSats >= DUST_LIMIT_SATS) {
+                    if (totalSats >= this.minPayoutSats) {
                         if (existing && pending > 0) {
                             existing.totalPaidSats += pending;
                             existing.pendingSats = 0;
@@ -585,7 +599,7 @@ export class GroupSoloService implements OnModuleInit {
 
                 if (this.feeAddress) {
                     const feeSats = blockRewardSats - rewardForMiners;
-                    if (feeSats >= DUST_LIMIT_SATS) {
+                    if (feeSats >= this.minPayoutSats) {
                         historyRows.push(historyRepo.create({
                             groupId, blockHeight, address: this.feeAddress,
                             paidSats: feeSats, percent: this.feePercent,

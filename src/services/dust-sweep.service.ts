@@ -8,7 +8,7 @@ import { PplnsBalanceEntity } from '../ORM/pplns-balance/pplns-balance.entity';
 import { PplnsPayoutHistoryEntity } from '../ORM/pplns-balance/pplns-payout-history.entity';
 import { PplnsGroupBalanceEntity } from '../ORM/pplns-group/pplns-group-balance.entity';
 import { PplnsGroupBlockHistoryEntity } from '../ORM/pplns-group/pplns-group-block-history.entity';
-import { DUST_LIMIT_SATS } from './coinbase-distribution';
+import { DEFAULT_MIN_PAYOUT_SATS, DUST_LIMIT_SATS } from './coinbase-distribution';
 
 /**
  * Daily ledger maintenance for PPLNS balances.
@@ -78,6 +78,12 @@ export class DustSweepService implements OnModuleInit {
     private enabled = true;
     private dormantDays = 30;
     private abandonedDays = 90;
+    /**
+     * Group-solo sweep threshold. Reads `PPLNS_MIN_PAYOUT_SATS` so the
+     * sweep absorbs anything below the operational payout floor — not
+     * just sub-protocol-dust. Clamped to ≥ DUST_LIMIT_SATS.
+     */
+    private minPayoutSats = DEFAULT_MIN_PAYOUT_SATS;
 
     /**
      * Last blockHeight returned by `sweepBlockHeight()`. Kept in memory
@@ -107,8 +113,19 @@ export class DustSweepService implements OnModuleInit {
         this.dormantDays = Number.isFinite(dormantRaw) && dormantRaw > 0 ? dormantRaw : 30;
         const abandonedRaw = parseInt(this.configService.get<string>('ABANDONED_BALANCE_DAYS') ?? '90', 10);
         this.abandonedDays = Number.isFinite(abandonedRaw) && abandonedRaw > 0 ? abandonedRaw : 90;
+        const minPayoutRaw = parseInt(
+            this.configService.get<string>('PPLNS_MIN_PAYOUT_SATS') ?? DEFAULT_MIN_PAYOUT_SATS.toString(),
+            10,
+        );
+        this.minPayoutSats = Math.max(
+            DUST_LIMIT_SATS,
+            Number.isFinite(minPayoutRaw) && minPayoutRaw > 0 ? minPayoutRaw : DEFAULT_MIN_PAYOUT_SATS,
+        );
 
-        console.log(`[DustSweep] enabled=${this.enabled}, dormantDays=${this.dormantDays}, abandonedDays=${this.abandonedDays}`);
+        console.log(
+            `[DustSweep] enabled=${this.enabled}, dormantDays=${this.dormantDays}, `
+            + `abandonedDays=${this.abandonedDays}, groupMinPayout=${this.minPayoutSats}`,
+        );
     }
 
     /** PPLNS pair-sweep inactivity threshold in days (read-only for API / UI). */
@@ -348,7 +365,11 @@ export class DustSweepService implements OnModuleInit {
         const candidates = await this.groupBalanceRepo
             .createQueryBuilder('b')
             .where('b."pendingSats" > 0')
-            .andWhere('b."pendingSats" < :dust', { dust: DUST_LIMIT_SATS })
+            // Sweep anything below the operational payout floor — sub-
+            // dust outputs that would never become economically spendable
+            // anyway. Tracks `PPLNS_MIN_PAYOUT_SATS`, not just the raw
+            // 546 protocol-policy value.
+            .andWhere('b."pendingSats" < :minPayout', { minPayout: this.minPayoutSats })
             .andWhere('b."lastAcceptedShareAt" IS NOT NULL')
             .andWhere('b."lastAcceptedShareAt" < :cutoff', { cutoff })
             .getMany();
