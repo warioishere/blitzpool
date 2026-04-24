@@ -287,6 +287,106 @@ describe('DustSweepService', () => {
             expect(result.pplnsPaired).toBe(0);
             expect(pplnsBalance).toHaveLength(2);
         });
+
+        /**
+         * H2 regression (signed-ledger audit finding): the pre-fix code
+         * mutated `credit.balanceSats` / `debit.balanceSats` *inside* the
+         * TX callback, BEFORE the DB write. If the DB write threw, the
+         * TX rolled back on the DB side but the in-memory objects kept
+         * their speculative zero. The outer loop's advance-check then
+         * read stale state, skipped the (still-full) rows, and proceeded
+         * to the next pair — silently leaving the DB row unpaired forever.
+         *
+         * This test injects a TX failure on the FIRST pair and verifies:
+         *   1. DB rows of the failed pair are unchanged (TX rolled back).
+         *   2. No sats counted as paired for that pair.
+         *   3. The loop still makes progress (no infinite spin).
+         *   4. A SECOND independent pair in the same run still succeeds.
+         *   5. Sum(balances) is preserved for both the failed pair
+         *      (nothing moved) and the succeeded pair (0 net delta).
+         */
+        it('regression H2: TX failure leaves DB + in-memory consistent, loop advances, later pairs still processed', async () => {
+            // Two fully-abandoned pairs. We will make the transaction
+            // throw ONLY when a specific credit address is processed.
+            const balances = [
+                // Pair 1 — will fail (largest, sorted first).
+                { address: 'bc1qcred_fail', balanceSats: 1000, totalPaidSats: 0, lastAcceptedShareAt: daysAgo(200) },
+                { address: 'bc1qdebt_fail', balanceSats: -1000, totalPaidSats: 0, lastAcceptedShareAt: daysAgo(200) },
+                // Pair 2 — should succeed after pair 1's failure forces
+                // pointer advance past the failing pair.
+                { address: 'bc1qcred_ok', balanceSats: 500, totalPaidSats: 0, lastAcceptedShareAt: daysAgo(200) },
+                { address: 'bc1qdebt_ok', balanceSats: -500, totalPaidSats: 0, lastAcceptedShareAt: daysAgo(200) },
+            ];
+            const { service, pplnsBalance, pplnsHistory } = createService({
+                pplnsBalance: balances,
+                abandonedDays: 180,
+            });
+
+            // Intercept the transaction function to throw on the first
+            // pair (the one containing bc1qcred_fail). We do this by
+            // wrapping the real TX: inspect the DB writes the callback
+            // makes, and if any touches the failing address, roll back
+            // by throwing BEFORE the in-memory mock applies the change.
+            const pplnsHistoryRepo: any = (service as any).pplnsHistoryRepo;
+            const origTx = pplnsHistoryRepo.manager.transaction;
+            pplnsHistoryRepo.manager.transaction = async (cb: any) => {
+                // Run the callback against a scratch entity manager that
+                // throws when either side of the pair is the failing
+                // address. We snapshot pplnsBalance + pplnsHistory here
+                // and restore on throw, so the mock mimics real TX rollback.
+                const balanceSnapshot = pplnsBalance.map((r: any) => ({ ...r }));
+                const historySnapshot = pplnsHistory.map((r: any) => ({ ...r }));
+                try {
+                    await origTx(cb);
+                    // Post-commit check: if the committed state touched
+                    // the failing address, restore and throw.
+                    const failingAddressWritten = pplnsHistory.some((r: any) =>
+                        r.address === 'bc1qcred_fail' || r.address === 'bc1qdebt_fail',
+                    );
+                    if (failingAddressWritten) {
+                        pplnsBalance.length = 0;
+                        pplnsBalance.push(...balanceSnapshot);
+                        pplnsHistory.length = 0;
+                        pplnsHistory.push(...historySnapshot);
+                        throw new Error('simulated DB failure on pair 1');
+                    }
+                } catch (err) {
+                    // Mirror real TX rollback: restore both tables to the
+                    // pre-TX snapshot, then re-throw so the service's
+                    // catch runs.
+                    pplnsBalance.length = 0;
+                    pplnsBalance.push(...balanceSnapshot);
+                    pplnsHistory.length = 0;
+                    pplnsHistory.push(...historySnapshot);
+                    throw err;
+                }
+            };
+
+            const result = await service.sweep();
+
+            // Only pair 2 succeeded (2 rows = 2 audit entries).
+            expect(result.pplnsPaired).toBe(2);
+            expect(result.pplnsSatsPaired).toBe(500);
+
+            // Pair 1 DB state: BOTH rows intact at original balances.
+            const credFail = pplnsBalance.find((r: any) => r.address === 'bc1qcred_fail');
+            const debtFail = pplnsBalance.find((r: any) => r.address === 'bc1qdebt_fail');
+            expect(credFail).toMatchObject({ balanceSats: 1000 });
+            expect(debtFail).toMatchObject({ balanceSats: -1000 });
+
+            // Pair 2 DB state: both rows fully cancelled and deleted.
+            expect(pplnsBalance.find((r: any) => r.address === 'bc1qcred_ok')).toBeUndefined();
+            expect(pplnsBalance.find((r: any) => r.address === 'bc1qdebt_ok')).toBeUndefined();
+
+            // Audit rows: only pair 2's two sides present. None for pair 1.
+            const auditAddrs = pplnsHistory.map((r: any) => r.address).sort();
+            expect(auditAddrs).toEqual(['bc1qcred_ok', 'bc1qdebt_ok']);
+
+            // Sum(balances) across remaining rows: 1000 + (-1000) = 0
+            // (pair 1 untouched; pair 2 cancelled cleanly).
+            const sumAfter = pplnsBalance.reduce((s: number, r: any) => s + r.balanceSats, 0);
+            expect(sumAfter).toBe(0);
+        });
     });
 
     describe('Group-Solo dust sweep (legacy unsigned path)', () => {

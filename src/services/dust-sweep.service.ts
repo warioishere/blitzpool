@@ -226,6 +226,14 @@ export class DustSweepService implements OnModuleInit {
             const amount = Math.min(credit.balanceSats, -debit.balanceSats);
             if (amount <= 0) break;   // sanity
 
+            // Compute post-cancel values WITHOUT mutating the in-memory
+            // rows yet. If the TX rolls back (DB write fails, FK glitch,
+            // connection drop), in-memory must stay at its pre-TX value
+            // so the outer loop's advance-check reads reality, not a
+            // speculative state that was never persisted.
+            const newCreditBalance = credit.balanceSats - amount;
+            const newDebitBalance = debit.balanceSats + amount;
+
             try {
                 await this.pplnsHistoryRepo.manager.transaction(async (em) => {
                     const history = em.getRepository(PplnsPayoutHistoryEntity);
@@ -250,20 +258,23 @@ export class DustSweepService implements OnModuleInit {
                         }),
                     ]);
 
-                    credit.balanceSats -= amount;
-                    debit.balanceSats += amount;
-
-                    if (credit.balanceSats === 0) {
+                    if (newCreditBalance === 0) {
                         await balance.delete({ address: credit.address });
                     } else {
-                        await balance.update({ address: credit.address }, { balanceSats: credit.balanceSats });
+                        await balance.update({ address: credit.address }, { balanceSats: newCreditBalance });
                     }
-                    if (debit.balanceSats === 0) {
+                    if (newDebitBalance === 0) {
                         await balance.delete({ address: debit.address });
                     } else {
-                        await balance.update({ address: debit.address }, { balanceSats: debit.balanceSats });
+                        await balance.update({ address: debit.address }, { balanceSats: newDebitBalance });
                     }
                 });
+
+                // TX committed — reflect the cancellation in memory now
+                // so the outer loop's pointer-advance check sees the
+                // same state the DB has.
+                credit.balanceSats = newCreditBalance;
+                debit.balanceSats = newDebitBalance;
 
                 pairsClosed += 2;
                 satsPaired += amount;
@@ -276,8 +287,18 @@ export class DustSweepService implements OnModuleInit {
                     `[DustSweep] pair ${credit.address}/${debit.address} failed:`,
                     (err as Error).message,
                 );
-                // Still advance the pointer that was exhausted — stale
-                // loop is worse than a skipped pair.
+                // TX rolled back; both in-memory balances untouched and
+                // DB rows unchanged. Force progress past the failing
+                // pair — next sweep run retries against the identical
+                // DB state. Advance both pointers unconditionally to
+                // avoid spinning: we don't know which side caused the
+                // failure, so skip the pair entirely and let the next
+                // run (24 h later) retry at pair A/X against fresh DB
+                // context. Remaining non-failing rows in credits[i+1..]
+                // and debits[j+1..] still pair normally in this run.
+                i++;
+                j++;
+                continue;
             }
 
             if (credit.balanceSats === 0) i++;
