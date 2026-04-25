@@ -355,11 +355,13 @@ describe('GroupSoloService.onBlockFound — idempotency', () => {
             PPLNS_FEE_ADDRESS: 'bc1qfee',
             PPLNS_FEE_PERCENT: '2',
         };
+        const groupRepo: any = { findOneBy: jest.fn(async () => null), update: jest.fn() };
         const service = new GroupSoloService(
             { get: (k: string) => env[k] } as any,
             { store: {} } as any,
             historyRepo as any,
             balanceRepo as any,
+            groupRepo as any,
             groupService as any,
         );
         (service as any).redis = redis;

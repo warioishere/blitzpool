@@ -186,6 +186,7 @@ function makeService(envOverrides: Record<string, string> = {}) {
     const cacheManager = { store: {} };
     const historyRepo = createMockRepo();
     const balanceRepo = createMockRepo();
+    const groupRepo = createMockRepo();
     const groupService = createMockGroupService();
     attachMockTxManager([
         [PplnsGroupBlockHistoryEntity, historyRepo],
@@ -196,6 +197,7 @@ function makeService(envOverrides: Record<string, string> = {}) {
         cacheManager as any,
         historyRepo as any,
         balanceRepo as any,
+        groupRepo as any,
         groupService as any,
     );
     const redis = createMockRedis();
@@ -574,6 +576,103 @@ describe('GroupSoloService', () => {
                 .map(r => r.blockHeight),
         );
         expect(distinctBlocks.size).toBe(5);
+    });
+
+    describe('scheduledRoundReset (Variant B — wipe everything)', () => {
+
+        it('wipes Redis round state + ALL pending balances + updates lastRoundResetAt', async () => {
+            const { service, redis, groupService, balanceRepo } = makeService();
+            groupService._setMembership('bc1qalice', 'g1', true);
+            groupService._setMembership('bc1qbob', 'g1', true);
+
+            await service.recordShare('bc1qalice', 100);
+            await service.recordShare('bc1qbob', 200);
+
+            (balanceRepo._rows as any[]).push(
+                { address: 'bc1qalice', groupId: 'g1', pendingSats: 800, totalPaidSats: 0 },
+                { address: 'bc1qbob', groupId: 'g1', pendingSats: 1200, totalPaidSats: 0 },
+            );
+
+            // Mock the group repo for this test
+            const groupRepo = (service as any).groupRepo;
+            groupRepo.findOneBy = jest.fn(async () => ({
+                id: 'g1',
+                dissolvedAt: null,
+                lastRoundResetAt: null,
+            }));
+            groupRepo.update = jest.fn();
+
+            await service.scheduledRoundReset('g1');
+
+            // Redis fully wiped
+            expect(redis._store.has('groupsolo:g1:shares')).toBe(false);
+            expect(redis._store.has('groupsolo:g1:total')).toBe(false);
+            expect(redis._store.has('groupsolo:g1:counter')).toBe(false);
+            expect(redis._store.has('groupsolo:g1:rejected-shares')).toBe(false);
+            expect(redis._store.has('groupsolo:g1:last-share-at')).toBe(false);
+            expect(redis._store.has('groupsolo:g1:snapshot')).toBe(false);
+
+            // ALL pending balances gone (positive forfeit + symmetric)
+            expect((balanceRepo._rows as any[]).length).toBe(0);
+
+            // lastRoundResetAt updated
+            expect(groupRepo.update).toHaveBeenCalledWith(
+                { id: 'g1' },
+                expect.objectContaining({ lastRoundResetAt: expect.any(Date) }),
+            );
+        });
+
+        it('skips when a block-found is already in flight (lock guard)', async () => {
+            const { service, balanceRepo } = makeService();
+            (balanceRepo._rows as any[]).push(
+                { address: 'bc1qalice', groupId: 'g1', pendingSats: 500, totalPaidSats: 0 },
+            );
+            // Simulate block-found in progress
+            (service as any).blockFoundLocks.add('g1');
+
+            await service.scheduledRoundReset('g1');
+
+            // Pending balance untouched
+            expect((balanceRepo._rows as any[]).length).toBe(1);
+        });
+
+        it('skips when a recent reset (< 60s ago) already happened', async () => {
+            const { service, balanceRepo } = makeService();
+            (balanceRepo._rows as any[]).push(
+                { address: 'bc1qalice', groupId: 'g1', pendingSats: 500, totalPaidSats: 0 },
+            );
+
+            const groupRepo = (service as any).groupRepo;
+            groupRepo.findOneBy = jest.fn(async () => ({
+                id: 'g1',
+                dissolvedAt: null,
+                lastRoundResetAt: new Date(Date.now() - 30_000),  // 30s ago
+            }));
+            groupRepo.update = jest.fn();
+
+            await service.scheduledRoundReset('g1');
+
+            // Pending balance untouched (debounce kicked in)
+            expect((balanceRepo._rows as any[]).length).toBe(1);
+            expect(groupRepo.update).not.toHaveBeenCalled();
+        });
+
+        it('skips when the group has been dissolved', async () => {
+            const { service, balanceRepo } = makeService();
+            (balanceRepo._rows as any[]).push(
+                { address: 'bc1qalice', groupId: 'g1', pendingSats: 500, totalPaidSats: 0 },
+            );
+            const groupRepo = (service as any).groupRepo;
+            groupRepo.findOneBy = jest.fn(async () => ({
+                id: 'g1',
+                dissolvedAt: new Date(),
+                lastRoundResetAt: null,
+            }));
+
+            await service.scheduledRoundReset('g1');
+
+            expect((balanceRepo._rows as any[]).length).toBe(1);
+        });
     });
 
     it('removeMemberState redistributes pending balance + in-round shares to remaining members', async () => {

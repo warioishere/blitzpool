@@ -6,6 +6,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { PplnsGroupBlockHistoryEntity } from '../ORM/pplns-group/pplns-group-block-history.entity';
 import { PplnsGroupBalanceEntity } from '../ORM/pplns-group/pplns-group-balance.entity';
+import { PplnsGroupEntity } from '../ORM/pplns-group/pplns-group.entity';
 import { GroupService } from './group.service';
 import {
     buildCoinbaseDistribution,
@@ -105,6 +106,8 @@ export class GroupSoloService implements OnModuleInit {
         private readonly historyRepo: Repository<PplnsGroupBlockHistoryEntity>,
         @InjectRepository(PplnsGroupBalanceEntity)
         private readonly balanceRepo: Repository<PplnsGroupBalanceEntity>,
+        @InjectRepository(PplnsGroupEntity)
+        private readonly groupRepo: Repository<PplnsGroupEntity>,
         @Inject(forwardRef(() => GroupService))
         private readonly groupService: GroupService,
     ) {
@@ -740,6 +743,79 @@ export class GroupSoloService implements OnModuleInit {
         }
         await this.balanceRepo.delete({ groupId });
         await this.historyRepo.delete({ groupId });
+    }
+
+    /**
+     * Scheduled timer-driven round reset (Variant B = wipe everything).
+     *
+     * Triggered by `GroupRoundResetService` per the group's configured
+     * `roundResetIntervalDays` + `roundResetHourLocal` + TZ. Wipes the
+     * full round state AND every member's pending balance — semantics
+     * the user chose explicitly: "miner die nicht mehr in der Woche
+     * drin sind, bekommen garnichts" plus the symmetric forgive-debt
+     * effect (negative balances are also cleared).
+     *
+     * What gets wiped:
+     *   - Redis live shares, counter, total, rejectedShares
+     *   - Redis lastShareAt (members start "fresh" inactivity-wise)
+     *   - Redis distribution snapshot
+     *   - All `pplns_group_balance` rows for this group
+     *
+     * What survives:
+     *   - `pplns_group_block_history` (audit trail of past payouts —
+     *     not round state)
+     *   - `pplns_group` row + member roster
+     *
+     * Idempotency:
+     *   - Skipped if a block-found wipe ran in the last 60 s (the
+     *     block path is the more authoritative trigger; we don't want
+     *     to double-wipe and we don't want to race against an
+     *     in-flight onBlockFound transaction)
+     *
+     * Block-found behaviour is unchanged — only timed resets wipe
+     * the pending balances. See `onBlockFound` for the per-block
+     * settlement flow.
+     */
+    async scheduledRoundReset(groupId: string): Promise<void> {
+        // Skip if a block-found is in flight. Block-found is the more
+        // authoritative trigger and already wipes the round; racing
+        // with it would corrupt the snapshot/history transaction.
+        if (this.blockFoundLocks.has(groupId)) {
+            console.log(`[GroupSolo] Skipping scheduled reset for ${groupId} — block-found in progress`);
+            return;
+        }
+
+        const group = await this.groupRepo.findOneBy({ id: groupId });
+        if (!group || group.dissolvedAt) {
+            console.warn(`[GroupSolo] Skipping scheduled reset — group ${groupId} not found or dissolved`);
+            return;
+        }
+
+        // Anti-double-fire: if a recent reset (block-found OR scheduled)
+        // ran less than ~60 s ago, the round is essentially empty —
+        // resetting again would just be noise.
+        const lastResetAt = group.lastRoundResetAt?.getTime() ?? 0;
+        if (Date.now() - lastResetAt < 60_000) {
+            console.log(`[GroupSolo] Skipping scheduled reset for ${groupId} — last reset ${Date.now() - lastResetAt}ms ago`);
+            return;
+        }
+
+        console.log(`[GroupSolo] Scheduled timer-reset firing for group ${groupId} (full wipe incl. pending)`);
+
+        if (this.isEnabled()) {
+            await this.resetRound(groupId);
+            const keys = redisKeys(groupId);
+            await this.redis.del(keys.lastShareAt);
+            await this.redis.del(keys.snapshot);
+        }
+
+        // Variant B: wipe ALL pending balances. Positive balances are
+        // forfeit, negative are forgiven — symmetric, ledger-neutral
+        // at the per-group level (the pool's books absorb the net).
+        await this.balanceRepo.delete({ groupId });
+
+        // Mark the reset for the anti-double-fire guard above.
+        await this.groupRepo.update({ id: groupId }, { lastRoundResetAt: new Date() });
     }
 
     // ── Stats (for API) ──────────────────────────────────────────

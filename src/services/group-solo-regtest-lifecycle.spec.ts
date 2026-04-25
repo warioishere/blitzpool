@@ -208,11 +208,13 @@ function makeService(env: Record<string, string>) {
         [PplnsGroupBlockHistoryEntity, historyRepo],
         [PplnsGroupBalanceEntity, balanceRepo],
     ]);
+    const groupRepo: any = { findOneBy: jest.fn(async () => null), update: jest.fn() };
     const service = new GroupSoloService(
         { get: (k: string) => env[k] } as any,
         { store: {} } as any,
         historyRepo as any,
         balanceRepo as any,
+        groupRepo as any,
         { getGroupForAddress: (a: string) => addressToGroup.get(a) } as any,
     );
     const redis = createMockRedis();
@@ -458,6 +460,7 @@ describe('Group-Solo Regtest Lifecycle', () => {
             { store: {} } as any,
             historyRepo as any,
             balanceRepo as any,
+            { findOneBy: jest.fn(async () => null), update: jest.fn() } as any,
             { getGroupForAddress: (a: string) => addressToGroup.get(a) } as any,
         );
         (svcB as any).redis = redis;
