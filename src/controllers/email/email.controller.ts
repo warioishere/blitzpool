@@ -72,6 +72,7 @@ export class EmailController {
         if (e instanceof AddressEmailServiceError) {
             const status = e.code === 'not-found' ? HttpStatus.NOT_FOUND
                 : e.code === 'expired' ? HttpStatus.GONE
+                : e.code === 'already-bound' ? HttpStatus.CONFLICT
                 : e.code === 'email-disabled' || e.code === 'config-missing' ? HttpStatus.SERVICE_UNAVAILABLE
                 : HttpStatus.BAD_REQUEST;
             return new HttpException({ code: e.code, message: e.message }, status);

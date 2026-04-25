@@ -20,6 +20,15 @@ interface VerificationEmailContext {
     expiresAt: Date;
 }
 
+interface BindingChangeAttemptContext {
+    /** Currently-bound email — recipient of this notification. */
+    to: string;
+    /** Mining address whose binding someone tried to overwrite. */
+    address: string;
+    /** Masked form of the email that was just attempted (e.g. `a***@example.com`). */
+    attemptedEmailMasked: string;
+}
+
 export type CapacityAlertLevel = 'warning' | 'urgent' | 'recovery';
 
 export interface CapacityAlertContext {
@@ -93,6 +102,29 @@ export class EmailService implements OnModuleInit {
         const subject = 'Confirm your email address — Blitz Pool';
         const html = renderVerificationHtml(ctx);
         const text = renderVerificationText(ctx);
+        await this.transport.sendMail({
+            from: this.fromAddress,
+            to: ctx.to,
+            subject,
+            html,
+            text,
+        });
+    }
+
+    /**
+     * K1-minimal: notify the bound email when someone tries to overwrite
+     * the address↔email binding. Sent by AddressEmailService.register
+     * whenever the FCFS-lock refuses a re-registration. Informational
+     * only — no action required from the recipient — but flags any
+     * attempted takeover so the legitimate owner can investigate.
+     */
+    async sendBindingChangeAttempt(ctx: BindingChangeAttemptContext): Promise<void> {
+        if (!this.enabled || !this.transport) {
+            throw new Error('EmailService not configured');
+        }
+        const subject = 'Attempted email-binding change on your mining address — Blitz Pool';
+        const html = renderBindingChangeAttemptHtml(ctx);
+        const text = renderBindingChangeAttemptText(ctx);
         await this.transport.sendMail({
             from: this.fromAddress,
             to: ctx.to,
@@ -293,6 +325,52 @@ function renderInvitationText(ctx: InvitationEmailContext): string {
         ``,
         `Invitation expires ${ctx.expiresAt.toUTCString()}.`,
         `If you don't recognise the inviter, decline.`,
+    ].join('\n');
+}
+
+function renderBindingChangeAttemptHtml(ctx: BindingChangeAttemptContext): string {
+    const body = `
+<table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:0 0 20px;">
+  <tr><td style="background:#FFB74D;color:${COLOR_PRIMARY_TEXT};padding:4px 12px;border-radius:4px;font-size:11px;font-weight:700;letter-spacing:0.1em;">
+    NOTICE
+  </td></tr>
+</table>
+<h1 style="margin:0 0 16px;font-size:22px;font-weight:600;color:${COLOR_TEXT};">Attempted email-binding change</h1>
+<p style="margin:0 0 16px;font-size:14px;line-height:1.6;color:${COLOR_TEXT};">
+  Someone just tried to register a different email against your mining address:
+</p>
+<p style="margin:0 0 24px;padding:12px 16px;background:${COLOR_BG};border-radius:6px;font-family:'Roboto Mono',monospace;font-size:13px;color:${COLOR_PRIMARY};word-break:break-all;">
+  ${escapeHtml(ctx.address)}
+</p>
+<p style="margin:0 0 8px;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:${COLOR_MUTED};">Attempted new email</p>
+<p style="margin:0 0 24px;font-family:'Roboto Mono',monospace;font-size:14px;color:${COLOR_TEXT};">
+  ${escapeHtml(ctx.attemptedEmailMasked)}
+</p>
+<p style="margin:0 0 16px;font-size:14px;line-height:1.6;color:${COLOR_TEXT};">
+  The attempt was <strong style="color:${COLOR_PRIMARY};">refused</strong>. Your existing binding is still active and group invitations continue to come to this email address.
+</p>
+<p style="margin:0 0 16px;font-size:14px;line-height:1.6;color:${COLOR_TEXT};">
+  No action is required if this was you (e.g. you typed your address by mistake on a friend's device). If you don't recognise this, your address may be on a public block-finder list — there is no exposure beyond this notification.
+</p>
+<p style="margin:0;font-size:12px;color:${COLOR_MUTED};">
+  This is an automated security notification. You will not receive a separate email per attempt — only the first within a short window.
+</p>
+`;
+    return shellHtml('Attempted email-binding change', body);
+}
+
+function renderBindingChangeAttemptText(ctx: BindingChangeAttemptContext): string {
+    return [
+        `Attempted email-binding change on Blitz Pool`,
+        ``,
+        `Someone tried to register a different email against your mining address:`,
+        `  ${ctx.address}`,
+        ``,
+        `Attempted new email: ${ctx.attemptedEmailMasked}`,
+        ``,
+        `The attempt was REFUSED. Your existing binding is still active and group invitations continue to come to this email address.`,
+        ``,
+        `No action is required. If you don't recognise this, your address is likely on a public block-finder list — there is no exposure beyond this notification.`,
     ].join('\n');
 }
 

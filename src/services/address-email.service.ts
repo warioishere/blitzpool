@@ -8,6 +8,7 @@ import { AddressEmailEntity } from '../ORM/address-email/address-email.entity';
 import { EmailVerificationEntity } from '../ORM/address-email/email-verification.entity';
 import { EmailService } from './email.service';
 import { normalizeBtcAddress } from '../utils/btc-address.utils';
+import { maskEmail } from '../utils/email-mask.utils';
 
 const VERIFICATION_TTL_HOURS = 24;
 // Loose RFC 5322 sanity check, not a full validator. The MX/handshake
@@ -43,9 +44,17 @@ export class AddressEmailService {
 
     /**
      * Submit an email for an address. Sends a verification email and stores
-     * a pending token. Re-submitting a different email overwrites any
-     * existing pending verifications for the address but does NOT erase
-     * an already-verified binding until the new one is confirmed.
+     * a pending token.
+     *
+     * K1-minimal (FCFS-lock): if a verified binding already exists for this
+     * address with a DIFFERENT email, the call is refused (`already-bound`)
+     * and a notification is sent to the bound email. This closes the
+     * silent-takeover where an attacker re-binds a victim's address by
+     * registering their own email before the legitimate owner does. Once
+     * the owner has registered, no one else can replace the binding via
+     * this endpoint.
+     *
+     * Same-email re-registration is allowed (idempotent re-confirm flow).
      */
     async register(address: string, email: string): Promise<{ token: string }> {
         const normalizedAddress = normalizeBtcAddress(address);
@@ -57,6 +66,27 @@ export class AddressEmailService {
         }
         if (!this.emailService.isEnabled()) {
             throw new AddressEmailServiceError('email-disabled', 'Email service not configured on server');
+        }
+
+        // FCFS-lock check (see method docstring).
+        const existing = await this.bindingRepo.findOneBy({ address });
+        if (existing?.verifiedAt && existing.email.toLowerCase() !== normalizedEmail) {
+            // Fire-and-forget the notification — its failure must NOT
+            // change the refusal outcome (otherwise the attacker can
+            // probe for binding presence by varying SMTP-deliverability
+            // patterns).
+            this.emailService.sendBindingChangeAttempt({
+                to: existing.email,
+                address,
+                attemptedEmailMasked: maskEmail(normalizedEmail),
+            }).catch(err => this.logger.warn(
+                `binding-change notification failed for ${maskEmail(existing.email)}: ${(err as Error).message}`,
+            ));
+            throw new AddressEmailServiceError(
+                'already-bound',
+                'This address already has a verified email binding. ' +
+                'A notification has been sent to the bound email.',
+            );
         }
 
         // Drop prior pending tokens for this address — only the latest one is
@@ -102,10 +132,25 @@ export class AddressEmailService {
             throw new AddressEmailServiceError('expired', 'Verification link expired — request a new one');
         }
 
-        // Replace any existing binding for this address.
+        // K1-minimal defense-in-depth: even if a stale pending token exists
+        // from before the FCFS lock was deployed, do not overwrite a
+        // verified binding here. Same-email re-verify is idempotent;
+        // different-email re-verify is refused.
         const existing = await this.bindingRepo.findOneBy({ address: pending.address });
         let saved: AddressEmailEntity;
-        if (existing) {
+        if (existing?.verifiedAt) {
+            if (existing.email.toLowerCase() !== pending.email.toLowerCase()) {
+                await this.verificationRepo.delete({ token });
+                throw new AddressEmailServiceError(
+                    'already-bound',
+                    'A different email is already verified for this address.',
+                );
+            }
+            // Same email — idempotent re-verify, refresh verifiedAt.
+            existing.verifiedAt = new Date();
+            saved = await this.bindingRepo.save(existing);
+        } else if (existing) {
+            // Row exists but never finished verification (legacy) — overwrite.
             existing.email = pending.email;
             existing.verifiedAt = new Date();
             saved = await this.bindingRepo.save(existing);
