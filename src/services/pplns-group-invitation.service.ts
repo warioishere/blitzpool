@@ -11,6 +11,7 @@ import { GroupService, GroupServiceError } from './group.service';
 import { AddressEmailService } from './address-email.service';
 import { EmailService } from './email.service';
 import { normalizeBtcAddress } from '../utils/btc-address.utils';
+import { maskEmail } from '../utils/email-mask.utils';
 
 const INVITATION_TTL_DAYS = 7;
 
@@ -349,16 +350,3 @@ export class PplnsGroupInvitationService {
     }
 }
 
-/**
- * Mask an email for public display: first char of the local part + domain.
- * Gives the recipient enough of a hint to know which inbox to check
- * without exposing the full address to anyone who knows their mining
- * address.
- */
-function maskEmail(email: string): string {
-    if (!email) return '';
-    const [local, domain] = email.split('@');
-    if (!domain) return '***';
-    const head = local.slice(0, 1);
-    return `${head}***@${domain}`;
-}

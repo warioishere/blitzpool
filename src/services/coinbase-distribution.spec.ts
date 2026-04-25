@@ -65,6 +65,51 @@ describe('buildCoinbaseDistribution — credit/debit ledger model', () => {
         expect(r.balanceAfter.size).toBe(0);
     });
 
+    it('regression K3: feePercent set but feeAddress unset → full reward to miners (no burn)', () => {
+        // K3 (audit): feeSats was unconditionally subtracted from
+        // miner reward, but the fee output was only emitted if a
+        // feeAddress was configured. With no feeAddress, the
+        // configured fee% would be silently dropped — the coinbase
+        // under-claimed by feeSats and those sats were forfeited.
+        // Fix: when feeAddress is empty, feeSats must be 0 and miners
+        // get the full subsidy.
+        const reward = 5_000_000_000;
+        const r = buildCoinbaseDistribution({
+            addressShares: shares({ [ALICE]: 100, [BOB]: 100 }),
+            balances: new Map(),
+            blockRewardSats: reward,
+            feePercent: 2,
+            feeAddress: '',
+            coinbaseWeightBudget: DEFAULT_COINBASE_WEIGHT_BUDGET,
+        });
+        const totalOnChain = r.payouts.reduce((s, p) => s + p.sats, 0);
+        expect(totalOnChain).toBe(reward);
+        expect(r.payouts.find(p => p.address === '')).toBeUndefined();
+    });
+
+    it('regression K3: feeAddress set but fee below dust → fee suppressed, miners get full reward', () => {
+        // Same forfeit-class bug as above but triggered by tiny fee%
+        // on a small reward (regtest, late-halving mainnet). The
+        // existing test "tiny fee percent → fee output is dust → fee
+        // omitted" was the canary that pre-fix asserted the WRONG
+        // behaviour: miners still saw the deduction. After the fix,
+        // when the fee is below minPayout the deduction is undone.
+        const reward = 100_000;        // tiny block reward
+        const r = buildCoinbaseDistribution({
+            addressShares: shares({ [ALICE]: 100, [BOB]: 100 }),
+            balances: new Map(),
+            blockRewardSats: reward,
+            feePercent: 0.01,          // → 10 sats, well below dust
+            feeAddress: FEE_ADDR,
+            coinbaseWeightBudget: DEFAULT_COINBASE_WEIGHT_BUDGET,
+        });
+        expect(r.payouts.find(p => p.address === FEE_ADDR)).toBeUndefined();
+        const totalOnChain = r.payouts.reduce((s, p) => s + p.sats, 0);
+        // All sats either paid on-chain or kept in balanceAfter — none lost.
+        const totalPending = Array.from(r.balanceAfter.values()).reduce((s, b) => s + b, 0);
+        expect(totalOnChain + totalPending).toBe(reward);
+    });
+
     it('two miners equal shares, no balance, 2 % fee → ~49/49/2', () => {
         const reward = 5_000_000_000;
         const r = buildCoinbaseDistribution({

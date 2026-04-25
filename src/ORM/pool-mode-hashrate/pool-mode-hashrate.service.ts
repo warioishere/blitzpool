@@ -26,18 +26,35 @@ export class PoolModeHashrateService {
      * Add `difficulty` to the current end-time slot for `mode`. UPSERT-style
      * so parallel shares don't create dupe rows. Fire-and-forget; swallow
      * errors so a failed stats write never blocks a share submit.
+     *
+     * M1: previously used raw SQL with `INSERT … ON CONFLICT … DO UPDATE`
+     * + Postgres-only `$N` parameter syntax. SQLite (used in some dev
+     * environments) silently rejected every call — every share lost
+     * its stat row with only a console.warn. Switched to TypeORM's
+     * database-agnostic Repository.increment() / insert() flow:
+     *   1. Try increment — succeeds when the slot row already exists.
+     *   2. If affected == 0, insert a fresh row with the initial value.
+     *   3. If insert collides on the unique (mode, time) index (a
+     *      concurrent share won the race), retry the increment.
+     * Two round-trips on cold-slot writes, one on warm-slot writes.
+     * Stats path, never on a hot loop.
      */
     async incrementAccepted(mode: MiningMode, difficulty: number): Promise<void> {
         if (!Number.isFinite(difficulty) || difficulty <= 0) return;
         const slot = TimeSlotHelper.getCurrentSlot();
         try {
-            await this.repo.query(
-                `INSERT INTO pool_mode_hashrate (mode, "time", diff)
-                 VALUES ($1, $2, $3)
-                 ON CONFLICT (mode, "time")
-                 DO UPDATE SET diff = pool_mode_hashrate.diff + EXCLUDED.diff`,
-                [mode, slot, difficulty],
-            );
+            const updated = await this.repo.increment({ mode, time: slot }, 'diff', difficulty);
+            if ((updated.affected ?? 0) > 0) return;
+
+            try {
+                await this.repo.insert({ mode, time: slot, diff: difficulty });
+            } catch {
+                // Concurrent insert won the unique-index race — fall
+                // back to incrementing the row the other writer just
+                // created. Final state is identical to the single-
+                // writer case.
+                await this.repo.increment({ mode, time: slot }, 'diff', difficulty);
+            }
         } catch (err) {
             console.warn(`[PoolModeHashrate] increment failed for ${mode}:`, (err as Error).message);
         }

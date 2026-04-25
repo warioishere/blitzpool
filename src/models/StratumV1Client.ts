@@ -813,7 +813,14 @@ export class StratumV1Client {
             payoutInformation = await this.pplnsService.getPayoutDistribution(jobTemplate.blockData.coinbasevalue);
             this.noFee = false;
             if (!payoutInformation || payoutInformation.length === 0) {
-                // Fallback: no miners in window yet, skip job
+                // No miners in window yet — skip the job rather than build a
+                // solo coinbase. Only realistic at pool cold-start or
+                // post-Redis-flush; once a share lands the next job builds
+                // a real PPLNS distribution. SV2 has the same K4 fix.
+                console.warn(
+                    `[StratumV1Client] PPLNS window empty — skipping job for ` +
+                    `${this.clientAuthorization?.address ?? '<unauth>'}, will retry on next template`,
+                );
                 return;
             }
         } else if (jobGroupId) {

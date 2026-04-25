@@ -1132,9 +1132,11 @@ export class StratumV2Client {
     if (this.templateDistributionService) {
       const stored = this.templateDistributionService.getLatestTemplate();
       if (stored) {
-        // Build payout information and create a proper MiningJob with real coinbase outputs
-        const payoutInformation = await this.buildPayoutInformationAsync(stored.jobTemplate.blockData.coinbasevalue)
-          ?? this.buildPayoutInformation();
+        // Build payout information and create a proper MiningJob with real coinbase outputs.
+        // K4: drop the sync fallback — async returns null only when the miner is on a
+        // PPLNS or group-solo port with an empty window, which must skip the job
+        // (not silently produce a solo coinbase). Solo path is reached inside async.
+        const payoutInformation = await this.buildPayoutInformationAsync(stored.jobTemplate.blockData.coinbasevalue);
         if (!payoutInformation) return;
 
         const jobIdStr = this.stratumV1JobsService.getNextId();
@@ -1244,9 +1246,9 @@ export class StratumV2Client {
       return;
     }
 
-    // Build payout information and create a proper MiningJob with real coinbase outputs
-    const payoutInformation = await this.buildPayoutInformationAsync(jobTemplate.blockData.coinbasevalue)
-      ?? this.buildPayoutInformation();
+    // Build payout information and create a proper MiningJob with real coinbase outputs.
+    // K4: see buildPayoutInformationAsync — async-only contract, no sync fallback.
+    const payoutInformation = await this.buildPayoutInformationAsync(jobTemplate.blockData.coinbasevalue);
     if (!payoutInformation) return;
 
     const jobIdStr = this.stratumV1JobsService.getNextId();
@@ -1670,7 +1672,7 @@ export class StratumV2Client {
       return;
     }
 
-    const { result, blockHex, height } = response;
+    const { result, blockHex, height, coinbasevalue } = response;
 
     // Save block to DB and send notifications
     await this.ensureEntity();
@@ -1692,6 +1694,20 @@ export class StratumV2Client {
       console.log(`[SV2 ${this.sessionId}] SubmitSolution: block accepted by network!`);
       await this.addressSettingsService.resetBestDifficultyAndShares();
       await this.addressSettingsCacheService.clear();
+
+      // K5: TDP block submission was missing the PPLNS / group-solo
+      // onBlockFound dispatch. Without this, a TDP-path miner that
+      // finds a block while on the PPLNS port (or in an active
+      // group) gets the block accepted on-chain but no payout
+      // snapshot is taken — the round / window is never reset and
+      // no one is credited. Mirror of the extended-channel routing
+      // (PPLNS port > group-membership > solo).
+      const foundGroupId = this.activeGroupId();
+      if (this.portConfig.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
+        await this.pplnsService.onBlockFound(height, coinbasevalue);
+      } else if (foundGroupId) {
+        await this.groupSoloService!.onBlockFound(height, coinbasevalue, this.address!);
+      }
     } else {
       console.warn(`[SV2 ${this.sessionId}] SubmitSolution: rejected (${result})`);
     }
@@ -1807,27 +1823,18 @@ export class StratumV2Client {
 
   // ── Send Mining Job ───────────────────────────────────────────────
 
-  private buildPayoutInformation(blockRewardSats?: number): { address: string; percent: number }[] | null {
+  /**
+   * Solo-only payout builder. After K4 this is reached only via
+   * `buildPayoutInformationAsync` for the genuine solo path (not on a
+   * PPLNS port, not in an active group). External callers must use
+   * the async variant — it owns the PPLNS / group-solo branches and
+   * the empty-window skip semantics.
+   */
+  private buildPayoutInformation(): { address: string; percent: number }[] | null {
     if (this.entity && this.address) {
       this.hashRate = this.statistics.hashRate;
     }
 
-    // Routing priority (matches recordShare / onBlockFound / SV1):
-    // PPLNS port > group-membership > solo. Both PPLNS and group paths
-    // need an async distribution call, so they're handled upstream in
-    // buildPayoutInformationAsync; sync variant just returns null to
-    // signal "come back async".
-    if (this.portConfig.payoutMode === 'pplns' && this.pplnsService?.isEnabled() && blockRewardSats) {
-      this.noFee = false;
-      return null;
-    }
-
-    if (blockRewardSats && this.activeGroupId()) {
-      this.noFee = false;
-      return null;
-    }
-
-    // Solo mode: existing behavior
     const devFeeAddress = this.configService.get('DEV_FEE_ADDRESS');
     const devFeePercent = parseFloat(this.configService.get('DEV_FEE_PERCENT') ?? '1.5');
 
@@ -1856,6 +1863,18 @@ export class StratumV2Client {
         this.noFee = false;
         return distribution;
       }
+      // K4: empty PPLNS window — skip the job. The previous behavior
+      // fell through to buildPayoutInformation() (sync, no blockReward
+      // arg → sync guard didn't fire → solo coinbase). That silently
+      // paid the lone miner 100 % on a port he opted into PPLNS for.
+      // Only realistic at pool cold-start or post-Redis-flush; once
+      // any share lands the window is no longer empty and the next
+      // job builds a real PPLNS distribution.
+      console.warn(
+        `[StratumV2Client] PPLNS window empty — skipping job for ${this.address ?? '<unauth>'}, ` +
+        `will retry on next template`,
+      );
+      return null;
     }
     const asyncGroupId = this.activeGroupId();
     if (asyncGroupId) {
@@ -1864,6 +1883,16 @@ export class StratumV2Client {
         this.noFee = false;
         return distribution;
       }
+      // Group-solo equivalent of the K4 PPLNS empty-window case. A
+      // group with no shares this round has no distribution to build
+      // — fall-through to solo would skim the round's first block
+      // for the lone miner. Skip instead; round will fill on the
+      // next share.
+      console.warn(
+        `[StratumV2Client] group-solo round empty for group ${asyncGroupId} — ` +
+        `skipping job for ${this.address ?? '<unauth>'}`,
+      );
+      return null;
     }
     return this.buildPayoutInformation();
   }
@@ -1887,8 +1916,8 @@ export class StratumV2Client {
     const channel = this.channels.get(targetChannelId);
     if (!channel) return;
 
-    const payoutInformation = await this.buildPayoutInformationAsync(jobTemplate.blockData.coinbasevalue)
-      ?? this.buildPayoutInformation();
+    // K4: see buildPayoutInformationAsync — async-only contract, no sync fallback.
+    const payoutInformation = await this.buildPayoutInformationAsync(jobTemplate.blockData.coinbasevalue);
     if (!payoutInformation) return;
 
     const job = new MiningJob(

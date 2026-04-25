@@ -173,7 +173,7 @@ export class TemplateDistributionService implements OnModuleInit {
     return latest;
   }
 
-  async handleSubmitSolution(solution: Sv2TdpSubmitSolution): Promise<{ result: string; blockHex: string; height: number } | string> {
+  async handleSubmitSolution(solution: Sv2TdpSubmitSolution): Promise<{ result: string; blockHex: string; height: number; coinbasevalue: number } | string> {
     console.log(`[TDP] 📤 SubmitSolution: templateId=${solution.templateId}, version=0x${solution.version.toString(16)}, nonce=0x${solution.headerNonce.toString(16).padStart(8, '0')}, coinbaseTxLen=${solution.coinbaseTx.length}`);
 
     const stored = this.activeTemplates.get(solution.templateId);
@@ -221,6 +221,16 @@ export class TemplateDistributionService implements OnModuleInit {
       console.warn(`[TDP] ❌ Block rejected: ${result}`);
     }
 
-    return { result, blockHex, height: jobTemplate.blockData.height };
+    return {
+        result,
+        blockHex,
+        height: jobTemplate.blockData.height,
+        // K5: needed by StratumV2Client.handleSubmitSolution to route
+        // pplnsService.onBlockFound / groupSoloService.onBlockFound
+        // after a successful TDP-path block submit. The extended-channel
+        // path has the value via its in-memory jobTemplate; the TDP
+        // path goes through the SRI template store, so we surface it here.
+        coinbasevalue: jobTemplate.blockData.coinbasevalue,
+    };
   }
 }

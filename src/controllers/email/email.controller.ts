@@ -1,6 +1,7 @@
 import { Body, Controller, Get, HttpException, HttpStatus, Param, Post } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { AddressEmailService, AddressEmailServiceError } from '../../services/address-email.service';
+import { maskEmail } from '../../utils/email-mask.utils';
 
 interface RegisterDto {
     address: string;
@@ -53,18 +54,18 @@ export class EmailController {
 
     /**
      * GET /api/email/by-address/:address
-     * Lookup the verified-email binding for an address. Returns
-     * { email, verifiedAt } if bound, or { email: null } if not — used
-     * by the dashboard settings page to show the current state without
-     * leaking the email address itself unnecessarily (we only return it
-     * when explicitly requested by someone visiting that address's page,
-     * matching the existing trust model).
+     * Lookup the verified-email binding for an address. The endpoint is
+     * unauthenticated and `/app/:address` is a public URL, so the email
+     * is returned MASKED (`a***@domain`) — the address owner already
+     * knows their full email, and the masked form is enough for the
+     * Settings page to confirm "yes, a binding exists, prefix is `a***`".
+     * Returns `{ email: null }` when no verified binding exists.
      */
     @Get('by-address/:address')
     async byAddress(@Param('address') address: string): Promise<{ email: string | null; verifiedAt: Date | null }> {
         const binding = await this.addressEmailService.getVerified(address);
         if (!binding) return { email: null, verifiedAt: null };
-        return { email: binding.email, verifiedAt: binding.verifiedAt };
+        return { email: maskEmail(binding.email), verifiedAt: binding.verifiedAt };
     }
 
     private toHttp(e: any): HttpException {

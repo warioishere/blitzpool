@@ -26,6 +26,11 @@ import { PplnsGroupEntity } from './src/ORM/pplns-group/pplns-group.entity';
 import { PplnsGroupMemberEntity } from './src/ORM/pplns-group/pplns-group-member.entity';
 import { PplnsGroupBlockHistoryEntity } from './src/ORM/pplns-group/pplns-group-block-history.entity';
 import { PplnsGroupBalanceEntity } from './src/ORM/pplns-group/pplns-group-balance.entity';
+import { PplnsGroupInvitationEntity } from './src/ORM/pplns-group/pplns-group-invitation.entity';
+import { AddressEmailEntity } from './src/ORM/address-email/address-email.entity';
+import { EmailVerificationEntity } from './src/ORM/address-email/email-verification.entity';
+import { PoolModeHashrateEntity } from './src/ORM/pool-mode-hashrate/pool-mode-hashrate.entity';
+import { WorkerSharesEntity } from './src/ORM/worker-shares/worker-shares.entity';
 
 loadEnv({ path: process.env.TYPEORM_ENV_PATH ?? '.env' });
 
@@ -54,6 +59,11 @@ const entities = [
     PplnsGroupMemberEntity,
     PplnsGroupBlockHistoryEntity,
     PplnsGroupBalanceEntity,
+    PplnsGroupInvitationEntity,
+    AddressEmailEntity,
+    EmailVerificationEntity,
+    PoolModeHashrateEntity,
+    WorkerSharesEntity,
 ];
 
 const { autoLoadEntities, ...rest } = moduleOptions as DataSourceOptions & { autoLoadEntities?: boolean };

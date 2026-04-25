@@ -215,4 +215,55 @@ describe('TemplateDistributionService', () => {
     });
     expect(result).toBe('template-not-found');
   });
+
+  it('regression K5: handleSubmitSolution success returns coinbasevalue for onBlockFound routing', async () => {
+    // The TDP submit handler used to return only { result, blockHex,
+    // height } — StratumV2Client.handleSubmitSolution then had no way
+    // to call pplnsService.onBlockFound / groupSoloService.onBlockFound,
+    // so a TDP-path block submission silently skipped the PPLNS
+    // snapshot / group round reset and miners weren't credited.
+    // K5: the response now carries coinbasevalue (= block reward) so
+    // the caller can route the onBlockFound dispatch correctly.
+    const setNewPrevHash: Sv2TdpSetNewPrevHash = {
+      templateId: 42n,
+      prevHash: Buffer.alloc(32, 0x77),
+      headerTimestamp: 1700000000,
+      nBits: 0x1d00ffff,
+      target: Buffer.alloc(32, 0xff),
+    };
+    const newTemplate: Sv2TdpNewTemplate = {
+      templateId: 42n,
+      futureTemplate: false,
+      version: 0x20000000,
+      coinbaseTxVersion: 2,
+      coinbasePrefix: Buffer.from('03a08601', 'hex'),
+      coinbaseTxInputSequence: 0xffffffff,
+      coinbaseTxValueRemaining: 625000000n,
+      coinbaseTxOutputsCount: 0,
+      coinbaseTxOutputs: Buffer.alloc(0),
+      coinbaseTxLocktime: 0,
+      merklePath: [],
+    };
+
+    // Seed via the same path the runtime uses
+    (service as any).activeTemplates.set(42n, {
+      newTemplate,
+      setNewPrevHash,
+      jobTemplate: createMockJobTemplate({ height: 800000, coinbasevalue: 625000000 }),
+    });
+
+    const result = await service.handleSubmitSolution({
+      templateId: 42n,
+      version: 0x20000000,
+      headerTimestamp: 1700000000,
+      headerNonce: 0,
+      coinbaseTx: Buffer.alloc(0),
+    });
+
+    expect(typeof result).toBe('object');
+    if (typeof result === 'object') {
+      expect(result.height).toBe(800000);
+      expect(result.coinbasevalue).toBe(625000000);
+    }
+  });
 });

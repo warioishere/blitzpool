@@ -13,10 +13,22 @@ import { DIFFICULTY_1 } from '../../constants/mining.constants';
  * scheme was exactly what caused the 10-min divergence in prod.
  */
 
-function makeRepo(recordedInserts: any[][], chartRows: any[]) {
+interface RecordedOp {
+    op: 'increment' | 'insert';
+    args: any[];
+}
+
+function makeRepo(ops: RecordedOp[], chartRows: any[], opts: { rowExists?: boolean; insertThrows?: boolean } = {}) {
+    let rowExists = opts.rowExists ?? false;
     return {
-        query: jest.fn(async (..._args: any[]) => {
-            recordedInserts.push(_args);
+        increment: jest.fn(async (...args: any[]) => {
+            ops.push({ op: 'increment', args });
+            return { affected: rowExists ? 1 : 0, raw: undefined, generatedMaps: [] };
+        }),
+        insert: jest.fn(async (...args: any[]) => {
+            ops.push({ op: 'insert', args });
+            if (opts.insertThrows) throw new Error('duplicate key');
+            rowExists = true;  // subsequent increments now succeed
         }),
         createQueryBuilder: (_alias: string) => {
             const captured: Record<string, any> = {};
@@ -41,37 +53,66 @@ function makeRepo(recordedInserts: any[][], chartRows: any[]) {
 describe('PoolModeHashrateService', () => {
 
     describe('incrementAccepted', () => {
-        it('writes with TimeSlotHelper.getCurrentSlot() as the bucket key', async () => {
-            const inserts: any[][] = [];
-            const repo = makeRepo(inserts, []);
+        it('cold slot: increment misses → insert creates the row', async () => {
+            const ops: RecordedOp[] = [];
+            const repo = makeRepo(ops, [], { rowExists: false });
             const service = new PoolModeHashrateService(repo as any);
 
             const expectedSlot = TimeSlotHelper.getCurrentSlot();
             await service.incrementAccepted('pplns', 500);
 
-            expect(inserts).toHaveLength(1);
-            // [sql, [mode, slot, difficulty]]
-            const [, params] = inserts[0];
-            expect(params[0]).toBe('pplns');
-            expect(params[1]).toBe(expectedSlot);
-            expect(params[2]).toBe(500);
+            expect(ops).toHaveLength(2);
+            expect(ops[0].op).toBe('increment');
+            expect(ops[0].args[0]).toEqual({ mode: 'pplns', time: expectedSlot });
+            expect(ops[0].args[1]).toBe('diff');
+            expect(ops[0].args[2]).toBe(500);
+
+            expect(ops[1].op).toBe('insert');
+            expect(ops[1].args[0]).toEqual({ mode: 'pplns', time: expectedSlot, diff: 500 });
+        });
+
+        it('warm slot: increment hits → no insert', async () => {
+            const ops: RecordedOp[] = [];
+            const repo = makeRepo(ops, [], { rowExists: true });
+            const service = new PoolModeHashrateService(repo as any);
+
+            await service.incrementAccepted('pplns', 250);
+
+            expect(ops).toHaveLength(1);
+            expect(ops[0].op).toBe('increment');
+        });
+
+        it('regression M1: race between two cold-slot writers retries the increment', async () => {
+            // Two concurrent writers see no row → both try insert. The
+            // second insert collides on UQ_pool_mode_hashrate_mode_time.
+            // The race-loser must retry the increment (now warm) so its
+            // difficulty isn't lost to a silent rollback.
+            const ops: RecordedOp[] = [];
+            const repo = makeRepo(ops, [], { rowExists: false, insertThrows: true });
+            const service = new PoolModeHashrateService(repo as any);
+
+            await service.incrementAccepted('pplns', 100);
+
+            expect(ops).toHaveLength(3);
+            expect(ops.map(o => o.op)).toEqual(['increment', 'insert', 'increment']);
         });
 
         it('ignores non-positive or NaN difficulties', async () => {
-            const inserts: any[][] = [];
-            const repo = makeRepo(inserts, []);
+            const ops: RecordedOp[] = [];
+            const repo = makeRepo(ops, []);
             const service = new PoolModeHashrateService(repo as any);
 
             await service.incrementAccepted('pplns', 0);
             await service.incrementAccepted('pplns', -1);
             await service.incrementAccepted('pplns', NaN);
 
-            expect(inserts).toHaveLength(0);
+            expect(ops).toHaveLength(0);
         });
 
         it('swallows DB errors — share submit must never fail on stats write', async () => {
             const repo = {
-                query: jest.fn().mockRejectedValue(new Error('boom')),
+                increment: jest.fn().mockRejectedValue(new Error('boom')),
+                insert: jest.fn(),
             } as any;
             const service = new PoolModeHashrateService(repo);
 

@@ -327,7 +327,15 @@ export function buildCoinbaseDistribution(
         };
     }
 
-    const feeSats = Math.floor((feePercent / 100) * blockRewardSats);
+    // Fee is only deducted from miner reward when it will actually be
+    // emitted as a coinbase output. Two cases skip it: feeAddress is
+    // unset (no recipient configured), or the would-be fee is below
+    // minPayout (Bitcoin Core relay policy rejects sub-dust outputs).
+    // Without this guard the coinbase under-claims by feeSats and those
+    // sats are forfeited — no one is paid, and miners are short-changed.
+    const wantFeeSats = Math.floor((feePercent / 100) * blockRewardSats);
+    const feeEmitted = !!feeAddress && wantFeeSats >= minPayout;
+    const feeSats = feeEmitted ? wantFeeSats : 0;
     const rewardForMiners = blockRewardSats - feeSats;
 
     // ── Phase 1 + 2: compute rawFair + target per miner ────────────
@@ -368,9 +376,9 @@ export function buildCoinbaseDistribution(
     }
 
     // ── Phase 3+4: eligibility + weight-budget trim ────────────────
-    // Fee output gate uses the same minPayout floor — emitting a tiny
-    // fee output that's economically unspendable burns operator sats.
-    const feeEmitted = !!feeAddress && feeSats >= minPayout;
+    // feeEmitted was decided above (alongside feeSats / rewardForMiners)
+    // so that miner reward and the fee-output gate stay consistent —
+    // i.e. the fee is either subtracted AND emitted, or neither.
     const feeOutputCount = feeEmitted ? 1 : 0;
     const maxMinerOutputs = Math.floor(
         (budget
