@@ -292,9 +292,19 @@ async function ensureWallet(name: string): Promise<void> {
 
 async function ensureChainHeight(wallet: string, target: number): Promise<void> {
     const info = await rpcCall('getblockchaininfo');
-    if (info.blocks >= target) return;
-    const addr = await walletRpc(wallet, 'getnewaddress');
-    await walletRpc(wallet, 'generatetoaddress', [target - info.blocks, addr]);
+    if (info.blocks < target) {
+        const addr = await walletRpc(wallet, 'getnewaddress');
+        await walletRpc(wallet, 'generatetoaddress', [target - info.blocks, addr]);
+    }
+    // A freshly-created `mempool_test_wallet` has no balance even when chain
+    // height is already past `target` (because earlier specs mined to the
+    // `default` wallet). Mine 110 blocks to this wallet to get 10 mature
+    // coinbases (>100 maturity), enough to populate a fat mempool.
+    const balance = await walletRpc(wallet, 'getbalance');
+    if (balance < 1) {
+        const addr = await walletRpc(wallet, 'getnewaddress');
+        await walletRpc(wallet, 'generatetoaddress', [110, addr]);
+    }
 }
 
 /**
@@ -351,6 +361,13 @@ describe('Group-Solo Regtest — fat-mempool block validity', () => {
         await ensureWallet(WALLET_NAME);
         await ensureChainHeight(WALLET_NAME, MIN_CHAIN_HEIGHT);
     }, 60_000);
+
+    afterAll(async () => {
+        // Unload the test wallet so subsequent specs see a single-wallet node.
+        // Otherwise unscoped wallet RPCs in other regtest specs fail with
+        // "Multiple wallets are loaded".
+        try { await rpcCall('unloadwallet', [WALLET_NAME]); } catch { /* not loaded */ }
+    });
 
     it('block with multi-type mempool transactions submits cleanly', async () => {
         const { service } = makeService();

@@ -323,8 +323,18 @@ describe('PPLNS Regtest — pending-out-of-miner-cut invariant', () => {
         try {
             const info = await rpcCall('getblockchaininfo');
             expect(info.chain).toBe('regtest');
-            if (info.blocks < 17) {
+            // Force single-wallet state — unscoped wallet RPCs are ambiguous
+            // if a stale wallet from a prior session is still attached.
+            const wallets: string[] = await rpcCall('listwallets');
+            for (const name of wallets) {
+                if (name !== 'default') {
+                    try { await rpcCall('unloadwallet', [name]); } catch { /* ignore */ }
+                }
+            }
+            if (!wallets.includes('default')) {
                 try { await rpcCall('createwallet', ['default']); } catch { /* already */ }
+            }
+            if (info.blocks < 17) {
                 const addr = await rpcCall('getnewaddress');
                 await rpcCall('generatetoaddress', [17 - info.blocks, addr]);
             }

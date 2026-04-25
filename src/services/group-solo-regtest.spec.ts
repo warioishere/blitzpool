@@ -269,13 +269,23 @@ describe('Group-Solo Regtest — End-to-End with Bitcoin Core', () => {
     try {
       const info = await rpcCall('getblockchaininfo');
       expect(info.chain).toBe('regtest');
+      // Force single-wallet state — unscoped wallet RPCs are ambiguous if a
+      // stale wallet from a prior session is still attached.
+      const wallets: string[] = await rpcCall('listwallets');
+      for (const name of wallets) {
+        if (name !== 'default') {
+          try { await rpcCall('unloadwallet', [name]); } catch { /* ignore */ }
+        }
+      }
+      if (!wallets.includes('default')) {
+        try { await rpcCall('createwallet', ['default']); } catch { /* already exists */ }
+      }
       // BIP34 requires the coinbase scriptSig to start with the block height as a minimally-encoded
       // scriptNum. For heights 1–16 that means OP_N, which bitcoinjs.script.number.encode() encodes
       // as an empty buffer (caller is expected to use the OP opcode). To keep the coinbase builder
       // simple we require chain height ≥ 17 so the height always fits in the length-prefixed bytes
       // encoding. Auto-mine up to that threshold if needed.
       if (info.blocks < 17) {
-        try { await rpcCall('createwallet', ['default']); } catch { /* already exists */ }
         const addr = await rpcCall('getnewaddress');
         await rpcCall('generatetoaddress', [17 - info.blocks, addr]);
       }

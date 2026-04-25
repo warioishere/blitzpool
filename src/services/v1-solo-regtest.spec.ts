@@ -124,9 +124,20 @@ describe('V1 Solo Regtest — MiningJob produces blocks Bitcoin Core accepts', (
     try {
       const info = await rpcCall('getblockchaininfo');
       expect(info.chain).toBe('regtest');
+      // Unscoped wallet RPCs (getnewaddress, generatetoaddress, …) fail with
+      // "Multiple wallets are loaded" if a stale wallet from a prior session is
+      // still attached. Force the node into a single-wallet state.
+      const wallets: string[] = await rpcCall('listwallets');
+      for (const name of wallets) {
+        if (name !== 'default') {
+          try { await rpcCall('unloadwallet', [name]); } catch { /* ignore */ }
+        }
+      }
+      if (!wallets.includes('default')) {
+        try { await rpcCall('createwallet', ['default']); } catch { /* already exists */ }
+      }
       // Bump chain past BIP34 small-height ambiguity (OP_N encoding for heights ≤ 16)
       if (info.blocks < 17) {
-        try { await rpcCall('createwallet', ['default']); } catch { /* already exists */ }
         const addr = await rpcCall('getnewaddress');
         await rpcCall('generatetoaddress', [17 - info.blocks, addr]);
       }
