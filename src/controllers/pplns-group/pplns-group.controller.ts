@@ -521,13 +521,28 @@ export class PplnsGroupController {
 
     // ── Helpers ───────────────────────────────────────────────────
 
-    private publicGroupView(group: { id: string; name: string; creatorAddress: string; active: boolean; createdAt: Date }) {
+    private publicGroupView(group: {
+        id: string; name: string; creatorAddress: string; active: boolean; createdAt: Date;
+        roundResetIntervalDays?: number | null;
+        roundResetHourLocal?: number | null;
+        roundResetTimezone?: string | null;
+        finderBonusSats?: number | null;
+        lastRoundResetAt?: Date | null;
+    }) {
+        // Round-reset config + finder bonus are intentionally exposed on the
+        // public view — every member needs them to render the "next reset in
+        // Xd Yh Zm" countdown and finder-bonus badge in their dashboard.
         return {
             id: group.id,
             name: group.name,
             creatorAddress: group.creatorAddress,
             active: group.active,
             createdAt: group.createdAt,
+            roundResetIntervalDays: group.roundResetIntervalDays ?? null,
+            roundResetHourLocal: group.roundResetHourLocal ?? null,
+            roundResetTimezone: group.roundResetTimezone ?? null,
+            finderBonusSats: group.finderBonusSats ?? 0,
+            lastRoundResetAt: group.lastRoundResetAt ?? null,
         };
     }
 
