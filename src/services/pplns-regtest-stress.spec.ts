@@ -375,20 +375,28 @@ describe('PPLNS Regtest — 50-miner stress', () => {
         // the sub-dust filter, weight-budget trim, and percent math all
         // get exercised by values they'd actually see in production.
         //
-        //   miner  0..4:   heavy (diff ~1M)   — stay in coinbase
+        //   miner  0..4:   heavy (diff ~1M)  — stay in coinbase
         //   miner  5..19:  medium (diff ~100k) — stay in coinbase
-        //   miner 20..49:  tiny (diff ~0.01)  — sub-dust → pending
+        //   miner 20..49:  tiny (diff = 1)    — sub-dust → pending
         //
-        // Spread is wide enough that the tiny miners' cut of the 50 BTC
-        // regtest block-reward ends up below DUST_LIMIT (546 sats). With
-        // heavy : tiny ratio of 1e8 and ~6.5M total diff-weight, a tiny
-        // miner gets ~7 sats at current reward — comfortably sub-dust.
+        // Spread is wide enough that the tiny miners' cut of the regtest
+        // block-reward stays below DUST_LIMIT (546 sats) but well above
+        // the 1-sat rounding floor. With heavy : tiny ratio of 1e6 and
+        // ~6.5M total diff-weight, a tiny miner gets ≈ percent_share ×
+        // reward sats. At the lowest realistic regtest reward (8 halvings
+        // → 0.39 BTC) that's still ≈ 6 sats — over the 1-sat floor so
+        // the pending-row gets created, far below dust so the row stays
+        // in pending instead of leaking into a coinbase output.
+        //
+        // (Earlier this used weight=0.01, which gave ~7 sats at the
+        // initial 50-BTC reward but slipped below 1 sat after 3 halvings
+        // and broke the "every sub-dust miner has pending" assertion.)
         //
         // Each miner submits 5 shares to exercise the zAdd concurrency.
         const weightFor = (i: number): number =>
             i < 5 ? 1_000_000 + i * 1000
             : i < 20 ? 100_000 + i
-            : 0.01;
+            : 1;
 
         const submissions: Promise<void>[] = [];
         for (let i = 0; i < MINER_COUNT; i++) {
