@@ -715,24 +715,39 @@ export class StratumV2Client {
 
     const channelId = this.stratumV2Service.getNextChannelId();
 
-    // Allocate extranonce prefix via manager
+    // Allocate extranonce prefix via manager.
     let extranoncePrefix: Buffer;
-    let extranonceSize: number;
     if (this.extranonceManager) {
       extranoncePrefix = this.extranonceManager.allocate(channelId);
-      extranonceSize = this.extranonceManager.minerExtranonceSize + extranoncePrefix.length;
     } else {
       extranoncePrefix = this.stratumV2Service.generateExtranoncePrefix();
-      extranonceSize = 8; // default: 4 prefix + 4 miner
     }
 
-    // Ensure we meet the miner's minimum extranonce size request.
-    // min_extranonce_size is the miner's ROLLABLE portion (not including prefix),
-    // so we must add prefix length to compare against total.
-    // Cap rollable portion at (12 - prefixLength) to stay within Bitcoin script limits.
+    // SV2 spec (05-Mining-Protocol.md):
+    // `extranonce_size` on the wire is the MINER's rollable portion ONLY —
+    // it does NOT include the pool-assigned prefix. Full coinbase extranonce
+    // = extranonce_prefix + extranonce(miner), total = prefix.length + extranonce_size.
+    //
+    // Store `channel.extranonceSize` as the rollable-only value to match wire
+    // semantics and the SRI reference implementation (which calls the same
+    // field `rollable_extranonce_size`). Total extranonce bytes is always
+    // computed explicitly as `prefix.length + channel.extranonceSize`.
+    //
+    // Honor `min_extranonce_size` from the miner literally. SRI's reference
+    // pool (pool-apps/pool) passes `msg.min_extranonce_size` directly to the
+    // extranonce factory without upscaling to a pool-side default — if we
+    // advertise a larger rollable size than the miner asked for, some
+    // firmwares (Bitaxe, NerdQAxe) ignore our response and keep submitting
+    // their originally-requested size, producing "Extranonce size mismatch"
+    // warnings and suppressing block submission. Cap only at the upper end
+    // (12 − prefixLength) so total coinbase extranonce stays ≤ 12 bytes.
+    const defaultRollable = this.extranonceManager
+      ? this.extranonceManager.minerExtranonceSize
+      : Math.max(0, 8 - extranoncePrefix.length);
     const maxRollable = 12 - extranoncePrefix.length;
-    const requestedRollable = Math.min(msg.minExtranonceSize, maxRollable);
-    const totalExtranonceSize = Math.max(extranonceSize, extranoncePrefix.length + requestedRollable);
+    const rollableExtranonceSize = msg.minExtranonceSize > 0
+      ? Math.min(msg.minExtranonceSize, maxRollable)
+      : defaultRollable;
 
     // Check if this is a JD client (has corresponding JDP connection)
     const isJdClient = this.stratumV2Service.hasJdpConnectionFromIp(this.getRemoteAddress());
@@ -775,7 +790,7 @@ export class StratumV2Client {
       channelId,
       channelType: 'extended',
       extranoncePrefix,
-      extranonceSize: totalExtranonceSize,
+      extranonceSize: rollableExtranonceSize,
       sessionDifficulty: channelDifficulty,
       jobIdToDifficulty: new Map(),
       extendedJobs: new Map(),
@@ -809,13 +824,14 @@ export class StratumV2Client {
       requestId: msg.requestId,
       channelId,
       target,
-      extranonceSize: totalExtranonceSize - extranoncePrefix.length,  // SV2 spec: miner-rollable portion only
+      extranonceSize: rollableExtranonceSize,  // SV2 spec: miner-rollable portion only
       extranoncePrefix,
       groupChannelId: 0,
     });
     await this.sendFrame(Sv2MsgType.OPEN_EXTENDED_MINING_CHANNEL_SUCCESS, successPayload, 0);
 
-    console.log(`[SV2 ${this.sessionId}] 🔧 OpenExtendedChannel ${channelId}: address=${this.address}.${this.workerName}, nominalHashRate=${msg.nominalHashRate}, difficulty=${channelState.sessionDifficulty.toFixed(4)}, extranonceSize=${totalExtranonceSize - extranoncePrefix.length} (total=${totalExtranonceSize}, prefix=${extranoncePrefix.length}), prefix=${extranoncePrefix.toString('hex')}`);
+    const totalExtranonceBytes = extranoncePrefix.length + rollableExtranonceSize;
+    console.log(`[SV2 ${this.sessionId}] 🔧 OpenExtendedChannel ${channelId}: address=${this.address}.${this.workerName}, nominalHashRate=${msg.nominalHashRate}, difficulty=${channelState.sessionDifficulty.toFixed(4)}, minExtranonceSize(requested)=${msg.minExtranonceSize}, extranonceSize(granted)=${rollableExtranonceSize}, prefix=${extranoncePrefix.length} bytes, total=${totalExtranonceBytes} bytes in coinbase, prefixHex=${extranoncePrefix.toString('hex')}`);
 
     if (isFirstChannel) {
       if (isJdClient || this.workSelectionEnabled) {
@@ -1128,8 +1144,10 @@ export class StratumV2Client {
         this.stratumV1JobsService.addJob(job);
 
         // Extract non-witness coinbase prefix/suffix from MiningJob
-        // Patch the scriptSig length varint if this channel's extranonce size != 8
-        const coinbasePrefix = this.patchCoinbasePrefixVarint(job.getCoinbasePrefixBuffer(), channel.extranonceSize);
+        // Patch the scriptSig length varint if this channel's total extranonce
+        // size (prefix + rollable) != 8 bytes (the default MiningJob assumes).
+        const totalExtranonceBytes = (channel.extranoncePrefix?.length ?? 0) + channel.extranonceSize;
+        const coinbasePrefix = this.patchCoinbasePrefixVarint(job.getCoinbasePrefixBuffer(), totalExtranonceBytes);
         const coinbaseSuffix = job.getCoinbaseSuffixBuffer();
 
         const jobPayload = serializeNewExtendedMiningJob({
@@ -1241,8 +1259,10 @@ export class StratumV2Client {
     const merklePath = merkleBranchToBuffers(jobTemplate.merkle_branch);
 
     // Extract non-witness coinbase prefix/suffix from MiningJob
-    // Patch the scriptSig length varint if this channel's extranonce size != 8
-    const coinbasePrefix = this.patchCoinbasePrefixVarint(job.getCoinbasePrefixBuffer(), channel.extranonceSize);
+    // Patch the scriptSig length varint if this channel's total extranonce
+    // size (prefix + rollable) != 8 bytes (the default MiningJob assumes).
+    const totalExtranonceBytes = (channel.extranoncePrefix?.length ?? 0) + channel.extranonceSize;
+    const coinbasePrefix = this.patchCoinbasePrefixVarint(job.getCoinbasePrefixBuffer(), totalExtranonceBytes);
     const coinbaseSuffix = job.getCoinbaseSuffixBuffer();
 
     const jobPayload = serializeNewExtendedMiningJob({
@@ -1301,7 +1321,7 @@ export class StratumV2Client {
     const reader = new BufferReader(payload);
     const submission = deserializeSubmitSharesExtended(reader);
 
-    console.log(`[SV2 ${this.sessionId}] 📤 SubmitSharesExtended: channel=${submission.channelId}, jobId=${submission.jobId}, nonce=0x${submission.nonce.toString(16).padStart(8, '0')}, extranonce=${submission.extranonce.toString('hex')}`);
+    if (this.debugMessages) console.log(`[SV2 ${this.sessionId}] 📤 SubmitSharesExtended: channel=${submission.channelId}, jobId=${submission.jobId}, nonce=0x${submission.nonce.toString(16).padStart(8, '0')}, extranonce=${submission.extranonce.toString('hex')}`);
 
     // Look up channel
     const channel = this.channels.get(submission.channelId);
@@ -1337,13 +1357,18 @@ export class StratumV2Client {
       return;
     }
 
-    // Validate extranonce size — the miner must send exactly the negotiated size.
-    // If wrong, the coinbase bytes are malformed (varint mismatch) and no valid
-    // block can be produced.  We still accept the share for stats but flag it.
-    const expectedMinerExtranonceSize = channel.extranonceSize - (channel.extranoncePrefix?.length ?? 0);
+    // Validate extranonce size — the miner must send exactly the negotiated
+    // size. `channel.extranonceSize` IS the wire value (miner-rollable bytes,
+    // same as `rollable_extranonce_size` in the SRI reference), so the
+    // submitted extranonce length must equal it directly — no prefix math.
+    // Mismatch means malformed coinbase varint, skip block submission.
+    const expectedMinerExtranonceSize = channel.extranonceSize;
     const extranonceValid = submission.extranonce.length === expectedMinerExtranonceSize;
     if (!extranonceValid) {
       console.warn(`[SV2 ${this.sessionId}] ⚠️  Extranonce size mismatch: got=${submission.extranonce.length}, expected=${expectedMinerExtranonceSize} (block submission will be skipped)`);
+    } else if (!channel.firstShareLogged) {
+      channel.firstShareLogged = true;
+      console.log(`[SV2 ${this.sessionId}] ✅ First extended share: extranonce length ok, got=${submission.extranonce.length} bytes (matches negotiated ${expectedMinerExtranonceSize})`);
     }
 
     // 1. Reconstruct coinbase transaction (non-witness serialization)
@@ -1378,7 +1403,7 @@ export class StratumV2Client {
     // 5. Calculate difficulty
     const { submissionDifficulty } = DifficultyUtils.calculateDifficulty(header);
 
-    console.log(`[SV2 ${this.sessionId}] 🎯 Extended share difficulty: ${submissionDifficulty.toFixed(2)} (target: ${jobDifficulty.toFixed(2)})`);
+    if (this.debugMessages) console.log(`[SV2 ${this.sessionId}] 🎯 Extended share difficulty: ${submissionDifficulty.toFixed(2)} (target: ${jobDifficulty.toFixed(2)})`);
 
     if (submissionDifficulty >= jobDifficulty) {
       // Only reconstruct full block when the share actually meets network difficulty
@@ -1470,7 +1495,7 @@ export class StratumV2Client {
     this.sendFrame(Sv2MsgType.SUBMIT_SHARES_SUCCESS, successPayload, SV2_CHANNEL_MSG_FLAG).catch(err =>
       console.error(`[SV2 ${this.sessionId}] Failed to send share success:`, err)
     );
-    console.log(`[SV2 ${this.sessionId}] ✅ Extended share accepted: seq=${submission.sequenceNumber}, totalAccepted=${channel.acceptedShareCount}, totalDiff=${channel.acceptedShareDifficultySum.toString()}`);
+    if (this.debugMessages) console.log(`[SV2 ${this.sessionId}] ✅ Extended share accepted: seq=${submission.sequenceNumber}, totalAccepted=${channel.acceptedShareCount}, totalDiff=${channel.acceptedShareDifficultySum.toString()}`);
 
     // Accounting and block submission below — all fully awaited, nothing skipped
     await this.poolShareStatisticsService.addAcceptedShare(jobDifficulty);
@@ -1698,7 +1723,9 @@ export class StratumV2Client {
     //   [coinbase_prefix] [EXTRANONCE] [sequence:4] [outputs_with_count] [locktime:4]
     //                     ^-- split here
 
-    const fullExtranonceSize = channel.extranonceSize;
+    // Total extranonce bytes = pool prefix + miner-rollable portion.
+    // `channel.extranonceSize` is the rollable-only value, matching SV2 spec.
+    const fullExtranonceSize = (channel.extranoncePrefix?.length ?? 0) + channel.extranonceSize;
     const scriptSigLen = msg.coinbasePrefix.length + fullExtranonceSize;
 
     // Encode script_sig length as Bitcoin varint
@@ -1930,7 +1957,7 @@ export class StratumV2Client {
     const reader = new BufferReader(payload);
     const submission = deserializeSubmitSharesStandard(reader);
 
-    console.log(`[SV2 ${this.sessionId}] 📤 SubmitSharesStandard: channel=${submission.channelId}, jobId=0x${submission.jobId.toString(16)}, nonce=0x${submission.nonce.toString(16).padStart(8, '0')}, version=0x${submission.version.toString(16).padStart(8, '0')}`);
+    if (this.debugMessages) console.log(`[SV2 ${this.sessionId}] 📤 SubmitSharesStandard: channel=${submission.channelId}, jobId=0x${submission.jobId.toString(16)}, nonce=0x${submission.nonce.toString(16).padStart(8, '0')}, version=0x${submission.version.toString(16).padStart(8, '0')}`);
 
     // Look up channel
     const channel = this.channels.get(submission.channelId);
@@ -1992,7 +2019,7 @@ export class StratumV2Client {
     // Look up job-specific difficulty (SV2 spec: validate against target from when job was sent)
     const jobDifficulty = channel.jobIdToDifficulty.get(submission.jobId) ?? channel.sessionDifficulty;
 
-    console.log(`[SV2 ${this.sessionId}] 🎯 Share difficulty: ${submissionDifficulty.toFixed(2)} (target: ${jobDifficulty.toFixed(2)})`);
+    if (this.debugMessages) console.log(`[SV2 ${this.sessionId}] 🎯 Share difficulty: ${submissionDifficulty.toFixed(2)} (target: ${jobDifficulty.toFixed(2)})`);
 
     if (submissionDifficulty >= jobDifficulty) {
       await this.handleValidShare(submission, submissionDifficulty, jobTemplate, updatedJobBlock, header, channel, jobDifficulty);

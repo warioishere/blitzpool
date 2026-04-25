@@ -30,4 +30,5 @@ export interface StratumV2ChannelState {
   miningSubmissionHashes: Set<string>;
   declaredMaxTarget: Buffer;  // SV2 spec: client's declared maximum target — pool must not assign easier targets
   isJdClient?: boolean; // JD clients manage their own jobs via Job Declaration Protocol
+  firstShareLogged?: boolean; // One-shot flag for logging actual extranonce length on first share
 }

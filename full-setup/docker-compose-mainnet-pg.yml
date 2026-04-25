@@ -158,7 +158,7 @@ services:
       - PG_DATABASE=${PG_DATABASE:-public_pool}
       - PG_SSL=false
       - DB_RUN_MIGRATIONS=true
-      - DB_MIGRATE_SQLITE_ON_BOOT=true
+      - DB_MIGRATE_SQLITE_ON_BOOT=false
       # PostgreSQL connection pooling
       - PG_POOL_SIZE=10
       - PG_MAX_QUERY_TIME=30000

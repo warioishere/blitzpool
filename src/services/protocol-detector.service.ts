@@ -1,4 +1,6 @@
 import { Injectable, OnModuleInit, Inject, forwardRef } from '@nestjs/common';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import { Cache } from 'cache-manager';
 import { ConfigService } from '@nestjs/config';
 import { Server, Socket, createConnection } from 'net';
 
@@ -7,40 +9,117 @@ import { StratumV1Service } from './stratum-v1.service';
 import { StratumV2Service } from './stratum-v2.service';
 import { JobDeclarationService } from './job-declaration.service';
 
-// Shared fail-ban state (static, accessible without DI)
-const failCounts = new Map<string, { count: number; resetAt: number }>();
-const bannedIps = new Map<string, number>(); // ip → ban expires timestamp
-let banConfig = { maxFailures: 5, banDurationMs: 60 * 60 * 1000 };
+// Shared fail-ban state — Redis-backed, with in-memory fallback
+let redisClient: any = null;
+let banConfig = { maxFailures: 10, banDurationMs: 60 * 60 * 1000 };
+
+// In-memory fallback (used if Redis unavailable) and fast-path cache for isConnectionBanned
+const fallbackFailCounts = new Map<string, { count: number; resetAt: number }>();
+const fallbackBannedIps = new Map<string, number>();
+const banCache = new Map<string, number>(); // ip → expires timestamp (mirrors Redis for fast sync read)
+
+const FAIL_KEY = (ip: string) => `failban:fail:${ip}`;
+const BAN_KEY = (ip: string) => `failban:ban:${ip}`;
 
 /**
- * Record a connection failure for an IP (invalid address, auth failure, etc.)
- * After exceeding threshold, the IP is banned.
- * Call this from anywhere — no DI needed.
+ * Record a connection failure for an IP. Stored in Redis (with in-memory fallback).
+ * Fire-and-forget — caller doesn't await.
  */
 export function recordConnectionFailure(ip: string): void {
   if (!ip) return;
+
+  if (redisClient) {
+    // Redis path: INCR with TTL window
+    (async () => {
+      try {
+        const count = await redisClient.incr(FAIL_KEY(ip));
+        if (count === 1) {
+          await redisClient.expire(FAIL_KEY(ip), 60);
+        }
+        if (count > banConfig.maxFailures) {
+          const ttl = Math.ceil(banConfig.banDurationMs / 1000);
+          await redisClient.setEx(BAN_KEY(ip), ttl, '1');
+          await redisClient.del(FAIL_KEY(ip));
+          banCache.set(ip, Date.now() + banConfig.banDurationMs);
+          console.warn(`[FailBan] ${ip} banned for ${ttl / 60}min after ${count} failures`);
+        }
+      } catch (err) {
+        console.error(`[FailBan] Redis error for ${ip}:`, (err as Error).message);
+      }
+    })();
+    return;
+  }
+
+  // In-memory fallback
   const now = Date.now();
-  let entry = failCounts.get(ip);
+  let entry = fallbackFailCounts.get(ip);
   if (!entry || now > entry.resetAt) {
     entry = { count: 0, resetAt: now + 60000 };
-    failCounts.set(ip, entry);
+    fallbackFailCounts.set(ip, entry);
   }
   entry.count++;
   if (entry.count > banConfig.maxFailures) {
-    bannedIps.set(ip, now + banConfig.banDurationMs);
-    failCounts.delete(ip);
-    console.warn(`[FailBan] ${ip} banned for ${banConfig.banDurationMs / 60000}min after ${entry.count} failures`);
+    const expiresAt = now + banConfig.banDurationMs;
+    fallbackBannedIps.set(ip, expiresAt);
+    banCache.set(ip, expiresAt);
+    fallbackFailCounts.delete(ip);
+    console.warn(`[FailBan] ${ip} banned for ${banConfig.banDurationMs / 60000}min after ${entry.count} failures (in-memory)`);
   }
 }
 
+/**
+ * Check if an IP is banned. Sync — uses local cache that's refreshed by recordConnectionFailure
+ * and by the periodic warmup. For exact ban removal, use Redis: DEL failban:ban:<ip>
+ */
 export function isConnectionBanned(ip: string): boolean {
-  const expiresAt = bannedIps.get(ip);
+  const expiresAt = banCache.get(ip);
   if (!expiresAt) return false;
   if (Date.now() > expiresAt) {
-    bannedIps.delete(ip);
+    banCache.delete(ip);
+    fallbackBannedIps.delete(ip);
     return false;
   }
   return true;
+}
+
+/** Internal: set the Redis client and start cache sync. Called from ProtocolDetectorService. */
+export function _setBanRedisClient(client: any): void {
+  redisClient = client;
+}
+
+/** Internal: configure ban thresholds. Called from ProtocolDetectorService. */
+export function _setBanConfig(cfg: { maxFailures: number; banDurationMs: number }): void {
+  banConfig = cfg;
+}
+
+/** Internal: refresh the local ban cache from Redis (called periodically). */
+export async function _refreshBanCache(): Promise<void> {
+  if (!redisClient) return;
+  try {
+    const keys: string[] = [];
+    let cursor = '0';
+    do {
+      const result = await redisClient.scan(cursor, { MATCH: 'failban:ban:*', COUNT: 100 });
+      cursor = result.cursor.toString();
+      keys.push(...result.keys);
+    } while (cursor !== '0');
+
+    const seen = new Set<string>();
+    for (const key of keys) {
+      const ip = key.substring('failban:ban:'.length);
+      seen.add(ip);
+      const ttl = await redisClient.ttl(key);
+      if (ttl > 0) {
+        banCache.set(ip, Date.now() + ttl * 1000);
+      }
+    }
+    // Drop cached entries that no longer exist in Redis (admin removed them)
+    for (const ip of banCache.keys()) {
+      if (!seen.has(ip)) banCache.delete(ip);
+    }
+  } catch (err) {
+    console.error('[FailBan] cache refresh failed:', (err as Error).message);
+  }
 }
 
 @Injectable()
@@ -48,6 +127,7 @@ export class ProtocolDetectorService implements OnModuleInit {
 
   constructor(
     private readonly configService: ConfigService,
+    @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
     @Inject(forwardRef(() => StratumV1Service))
     private readonly stratumV1Service: StratumV1Service,
     @Inject(forwardRef(() => StratumV2Service))
@@ -56,25 +136,33 @@ export class ProtocolDetectorService implements OnModuleInit {
     private readonly jobDeclarationService: JobDeclarationService,
   ) {
     // Configure shared ban settings from env
-    banConfig = {
-      maxFailures: parseInt(this.configService.get<string>('STRATUM_MAX_FAILURES_PER_MINUTE') ?? '5', 10),
+    _setBanConfig({
+      maxFailures: parseInt(this.configService.get<string>('STRATUM_MAX_FAILURES_PER_MINUTE') ?? '10', 10),
       banDurationMs: parseInt(this.configService.get<string>('STRATUM_BAN_DURATION_MINUTES') ?? '60', 10) * 60 * 1000,
-    };
+    });
   }
 
   async onModuleInit(): Promise<void> {
+    // Wire up Redis for shared ban state across instances and admin-removable bans
+    try {
+      const store: any = this.cacheManager.store;
+      if (store && store.client) {
+        _setBanRedisClient(store.client);
+        await _refreshBanCache();
+        console.log('[ProtocolDetector] Using Redis for fail-ban state');
+      } else {
+        console.log('[ProtocolDetector] Redis not available, using in-memory fail-ban');
+      }
+    } catch (err) {
+      console.warn('[ProtocolDetector] Failed to attach Redis for fail-ban:', (err as Error).message);
+    }
+
     this.startPorts();
 
-    // Periodically clean up expired entries (every 5 minutes)
+    // Periodically refresh the local ban cache from Redis (picks up admin removals)
     setInterval(() => {
-      const now = Date.now();
-      for (const [ip, expiresAt] of bannedIps) {
-        if (now > expiresAt) bannedIps.delete(ip);
-      }
-      for (const [ip, entry] of failCounts) {
-        if (now > entry.resetAt) failCounts.delete(ip);
-      }
-    }, 5 * 60 * 1000);
+      _refreshBanCache().catch(() => {});
+    }, 60 * 1000);
   }
 
   private startPorts(): void {

@@ -11,7 +11,7 @@ export class AddressSettingsEntity extends TrackedEntity {
     @Column({ type: 'double precision', default: 0 })
     shares: number;
 
-    @Column({ type: 'real', default: 0 })
+    @Column({ type: 'double precision', default: 0 })
     bestDifficulty: number;
 
     @Column({ nullable: true })
