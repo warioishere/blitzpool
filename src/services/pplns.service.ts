@@ -666,19 +666,41 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
 
                 // 1. Apply balanceAfter (absolute writes): set every
                 //    non-fee ledger entry to its new value.
+                //
+                //    lastAcceptedShareAt is the abandonment-sweep clock —
+                //    "no inbound shares for 90 days → eligible for
+                //    pair-cancellation". It must reflect the LAST TIME
+                //    THE MINER ACTUALLY SUBMITTED A SHARE, not "the last
+                //    time their balance row was touched". Touching it on
+                //    pure-pending miners (whose balance changes only via
+                //    redistribution / settlement) would reset their
+                //    abandonment clock every block they were carried
+                //    forward — a long-quit miner with pending credit
+                //    would never become sweep-eligible. recordShare
+                //    already keeps the timestamp fresh for active miners
+                //    via touchLastAcceptedShareAt, so leave the field
+                //    alone here for existing rows.
+                const activeAddresses = new Set(currentWindow.keys());
                 for (const [addr, newBalance] of balanceAfter) {
                     let balance = balanceMap.get(addr);
+                    const isActive = activeAddresses.has(addr);
                     if (!balance) {
                         balance = balanceRepo.create({
                             address: addr,
                             balanceSats: newBalance,
                             totalPaidSats: 0,
-                            lastAcceptedShareAt: now,
+                            // New rows: only stamp now() if the miner
+                            // actually mined this block. Pure-pending
+                            // first-time entries (e.g. carry-forward
+                            // from a snapshot) start with null.
+                            lastAcceptedShareAt: isActive ? now : null,
                         });
                         balanceMap.set(addr, balance);
                     } else {
                         balance.balanceSats = newBalance;
-                        balance.lastAcceptedShareAt = now;
+                        if (isActive) {
+                            balance.lastAcceptedShareAt = now;
+                        }
                     }
                     balancesToSave.set(balance.address, balance);
                 }

@@ -1,6 +1,7 @@
 import { Body, Controller, Delete, Get, Headers, HttpException, HttpStatus, Param, Post, Query } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { GroupService, GroupServiceError } from '../../services/group.service';
+import { normalizeBtcAddress } from '../../utils/btc-address.utils';
 import { GroupSoloService } from '../../services/group-solo.service';
 import { InvitationServiceError, PplnsGroupInvitationService } from '../../services/pplns-group-invitation.service';
 import { AddressEmailService } from '../../services/address-email.service';
@@ -347,16 +348,21 @@ export class PplnsGroupController {
         // Pre-validate the admin token once by attempting to create the
         // first invitation. If that fails on token, abort the batch. All
         // subsequent calls reuse the same token through the service.
+        //
+        // Dedup BEFORE normalisation would let ['BC1Q...', 'bc1q...']
+        // through as two distinct entries — both then collapse onto the
+        // same row inside createInvitation, masking the duplicate.
         const addresses = (body.addresses ?? []).map(a => (a ?? '').trim()).filter(a => !!a);
         const invited: { address: string; email: string; expiresAt: Date }[] = [];
         const skipped: { address: string; reason: string }[] = [];
         const seen = new Set<string>();
         for (const addr of addresses) {
-            if (seen.has(addr)) {
+            const dedupKey = normalizeBtcAddress(addr) || addr;
+            if (seen.has(dedupKey)) {
                 skipped.push({ address: addr, reason: 'duplicate-in-batch' });
                 continue;
             }
-            seen.add(addr);
+            seen.add(dedupKey);
             try {
                 const r = await this.invitationService.createInvitation(id, addr, token);
                 invited.push({ address: addr, email: r.email, expiresAt: r.expiresAt });

@@ -4,12 +4,13 @@ import { GroupService, GroupServiceError } from './group.service';
 
 // ── Mock Repos ──────────────────────────────────────────────────
 
-function createMockRepo<T extends { id?: any }>() {
+function createMockRepo<T extends { id?: any }>(target: string = 'unknown') {
     const rows = new Map<any, T>();
     let nextNumeric = 1;
 
     return {
         _rows: rows,
+        target,
         save: jest.fn(async (row: T) => {
             if (!row.id) {
                 (row as any).id = typeof (row as any).id === 'number'
@@ -103,9 +104,28 @@ describe('GroupService', () => {
     let service: GroupService;
 
     beforeEach(async () => {
-        groupRepo = createMockRepo();
-        memberRepo = createMockRepo();
+        groupRepo = createMockRepo('group');
+        memberRepo = createMockRepo('member');
         groupSolo = createMockGroupSolo();
+
+        // Simulated EntityManager: every getRepository(target) hands back
+        // the SAME mock instance keyed by `target`, so writes inside the
+        // transaction are visible on the outer mock after commit.
+        const repoByTarget: Record<string, any> = {
+            group: groupRepo,
+            member: memberRepo,
+        };
+        const manager = {
+            transaction: jest.fn(async (cb: (em: any) => Promise<any>) => {
+                const em = {
+                    getRepository: (target: string) => repoByTarget[target] ?? createMockRepo(target),
+                };
+                return cb(em);
+            }),
+        };
+        (groupRepo as any).manager = manager;
+        (memberRepo as any).manager = manager;
+
         const config = createMockConfig();
         service = new GroupService(
             groupRepo as any,

@@ -254,7 +254,6 @@ export class DustSweepService implements OnModuleInit {
 
         let pairsClosed = 0;
         let satsPaired = 0;
-        const blockHeight = this.sweepBlockHeight();
 
         let i = 0, j = 0;
         while (i < credits.length && j < debits.length) {
@@ -271,6 +270,13 @@ export class DustSweepService implements OnModuleInit {
             // speculative state that was never persisted.
             const newCreditBalance = credit.balanceSats - amount;
             const newDebitBalance = debit.balanceSats + amount;
+
+            // Unique blockHeight per pair so the (blockHeight, address)
+            // index doesn't reject the second iteration when a single
+            // debit row gets matched against multiple smaller credits
+            // across pairs (or vice-versa). Both rows of THIS pair still
+            // share the same value so an operator can group them.
+            const blockHeight = this.sweepBlockHeight();
 
             try {
                 await this.pplnsHistoryRepo.manager.transaction(async (em) => {

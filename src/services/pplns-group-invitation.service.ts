@@ -254,8 +254,14 @@ export class PplnsGroupInvitationService {
         createdAt: Date;
         expiresAt: Date;
     }[]> {
+        // Normalise (lowercase bech32) so the lookup key matches what
+        // createInvitation stored. Without this, a banner request from
+        // /api/pplns/invitations/by-address/BC1Q... silently misses the
+        // pending row that was created against bc1q... by the admin.
+        const normalized = normalizeBtcAddress(address);
+        if (!normalized) return [];
         const rows = await this.invitationRepo.find({
-            where: { address, status: 'pending' },
+            where: { address: normalized, status: 'pending' },
             order: { createdAt: 'DESC' },
         });
         const now = Date.now();

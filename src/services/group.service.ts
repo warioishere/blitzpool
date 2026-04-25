@@ -263,9 +263,40 @@ export class GroupService implements OnModuleInit {
             .filter(m => m.address !== address)
             .map(m => m.address);
 
-        await this.groupSoloService.removeMemberState(groupId, address, remainingAddresses);
-        await this.memberRepo.delete({ groupId, address });
-        await this.recomputeActive(groupId);
+        // DB-side mutations (member delete + active recompute) atomically:
+        // a crash mid-removal that left the member row intact but the
+        // group flagged inactive (or vice-versa) was the original H6 bug.
+        // Redis state-cleanup runs AFTER the TX commits — if the DB
+        // commit fails, no Redis state is touched and the kick is a
+        // no-op the admin can retry. If Redis fails after a successful
+        // commit, the member is gone in DB; their in-flight round
+        // shares are stale until the next round but the source of truth
+        // is consistent.
+        await this.memberRepo.manager.transaction(async (em) => {
+            const memberRepo = em.getRepository(this.memberRepo.target);
+            const groupRepo = em.getRepository(this.groupRepo.target);
+
+            await memberRepo.delete({ groupId, address });
+
+            const remaining = await memberRepo.count({ where: { groupId } });
+            const grp = await groupRepo.findOneBy({ id: groupId });
+            if (grp && !grp.dissolvedAt) {
+                const shouldBeActive = remaining >= MIN_MEMBERS_ACTIVE;
+                if (grp.active !== shouldBeActive) {
+                    grp.active = shouldBeActive;
+                    await groupRepo.save(grp);
+                }
+            }
+        });
+
+        try {
+            await this.groupSoloService.removeMemberState(groupId, address, remainingAddresses);
+        } catch (err) {
+            // DB is consistent (member is gone); Redis side may have
+            // left stale round-state. Logged so an operator can decide
+            // whether to flush manually.
+            console.warn(`[GroupService] removeMemberState failed for ${address} in ${groupId} after DB commit:`, (err as Error).message);
+        }
         await this.rebuildCache();
     }
 
