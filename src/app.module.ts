@@ -59,6 +59,7 @@ import { PplnsPayoutHistoryEntity } from './ORM/pplns-balance/pplns-payout-histo
 import { PplnsController } from './controllers/pplns/pplns.controller';
 import { GroupSoloService } from './services/group-solo.service';
 import { GroupService } from './services/group.service';
+import { GroupRoundResetService } from './services/group-round-reset.service';
 import { EmailService } from './services/email.service';
 import { AddressEmailService } from './services/address-email.service';
 import { CoinbaseCapacityMonitorService } from './services/coinbase-capacity-monitor.service';
@@ -216,6 +217,7 @@ const ORMModules = [
         PplnsBalanceService,
         GroupSoloService,
         GroupService,
+        GroupRoundResetService,
         MiningModeService,
         MinerActiveModeService,
         DustSweepService,
