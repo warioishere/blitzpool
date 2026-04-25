@@ -5,6 +5,7 @@ import { Cache } from 'cache-manager';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { Subscription } from 'rxjs';
+import { normalizeBtcAddress } from '../utils/btc-address.utils';
 import { PplnsBalanceService } from '../ORM/pplns-balance/pplns-balance.service';
 import { PplnsBalanceEntity } from '../ORM/pplns-balance/pplns-balance.entity';
 import { PplnsPayoutHistoryEntity } from '../ORM/pplns-balance/pplns-payout-history.entity';
@@ -256,6 +257,13 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
 
     async recordShare(address: string, difficulty: number): Promise<void> {
         if (!this.redis || !this.enabled) return;
+
+        // Normalise (lowercase bech32) so callers that bypass the
+        // stratum entry-points (tests, admin tools) can't fragment the
+        // window across case variants. Stratum clients already
+        // normalise at authorize-time — this is belt-and-suspenders.
+        address = normalizeBtcAddress(address);
+        if (!address) return;
 
         const counter = await this.redis.incr(REDIS_KEY_COUNTER);
         const entry = `${address}:${difficulty}:${Date.now()}`;

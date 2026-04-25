@@ -6,6 +6,7 @@ import { Socket } from 'net';
 import { firstValueFrom, skip, Subscription } from 'rxjs';
 
 import { recordConnectionFailure } from '../services/protocol-detector.service';
+import { normalizeBtcAddress } from '../utils/btc-address.utils';
 import { StratumPortConfig } from './interfaces/unified-stratum.interfaces';
 import { StratumV2ChannelState, ExtendedJobData } from './interfaces/stratum-v2-channel.interface';
 import { StratumV2Service } from '../services/stratum-v2.service';
@@ -520,7 +521,10 @@ export class StratumV2Client {
 
     // Parse user_identity: "address.worker" or just "address"
     const parts = msg.user_identity.split('.');
-    const rawAddress = parts[0];
+    // Normalise bech32 (lowercase) at the entry point so every downstream
+    // lookup (PPLNS window, group cache, ledger) keys on the canonical
+    // form regardless of the case the miner happened to type.
+    const rawAddress = normalizeBtcAddress(parts[0]);
     const workerName = parts.length > 1 ? parts.slice(1).join('.') : 'default';
 
     // Validate address
@@ -669,7 +673,8 @@ export class StratumV2Client {
 
     // Parse user_identity: "address.worker" or just "address"
     const parts = msg.userIdentity.split('.');
-    const rawAddress = parts[0];
+    // Normalise bech32 (lowercase) — see handleOpenChannel for rationale.
+    const rawAddress = normalizeBtcAddress(parts[0]);
     const workerName = parts.length > 1 ? parts.slice(1).join('.') : 'default';
 
     // Validate address

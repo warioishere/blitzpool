@@ -226,21 +226,41 @@ describe('PplnsService', () => {
       const { service, redis } = createService();
       service.setNetworkDifficulty(1000);
 
-      await service.recordShare('bc1qminerA', 500);
-      await service.recordShare('bc1qminerB', 300);
+      await service.recordShare('bc1qminera', 500);
+      await service.recordShare('bc1qminerb', 300);
 
       const entries = await redis.zRange('pplns:shares', 0, -1);
       expect(entries).toHaveLength(2);
-      expect(entries[0]).toContain('bc1qminerA:500:');
-      expect(entries[1]).toContain('bc1qminerB:300:');
+      expect(entries[0]).toContain('bc1qminera:500:');
+      expect(entries[1]).toContain('bc1qminerb:300:');
+    });
+
+    // Regression for H1: bech32 input must be normalised to lowercase
+    // before it reaches Redis, otherwise the same logical address
+    // submitted in different casings would fragment the window.
+    it('normalises mixed-case bech32 input (H1)', async () => {
+      const { service, redis } = createService();
+      service.setNetworkDifficulty(1000);
+
+      await service.recordShare('BC1QMINERA', 500);
+      await service.recordShare('bc1qMinerA', 250);
+
+      const entries = await redis.zRange('pplns:shares', 0, -1);
+      expect(entries).toHaveLength(2);
+      expect(entries[0]).toContain('bc1qminera:500:');
+      expect(entries[1]).toContain('bc1qminera:250:');
+
+      const hash = await redis.hGetAll('pplns:window:by-address');
+      expect(parseFloat(hash['bc1qminera'] ?? '0')).toBeCloseTo(750);
+      expect(hash['BC1QMINERA']).toBeUndefined();
     });
 
     it('should update the window total', async () => {
       const { service, redis } = createService();
       service.setNetworkDifficulty(100000);
 
-      await service.recordShare('bc1qminerA', 500);
-      await service.recordShare('bc1qminerB', 300);
+      await service.recordShare('bc1qminera', 500);
+      await service.recordShare('bc1qminerb', 300);
 
       const total = parseFloat(await redis.get('pplns:window:total') ?? '0');
       expect(total).toBe(800);
@@ -315,9 +335,9 @@ describe('PplnsService', () => {
 
       // Seed the raw set directly, bypassing recordShare (so the hash
       // stays empty, matching a pre-deploy Redis state).
-      await redis.zAdd('pplns:shares', { score: 1, value: 'bc1qA:100:1000' });
-      await redis.zAdd('pplns:shares', { score: 2, value: 'bc1qB:200:2000' });
-      await redis.zAdd('pplns:shares', { score: 3, value: 'bc1qA:50:3000' });
+      await redis.zAdd('pplns:shares', { score: 1, value: 'bc1qa:100:1000' });
+      await redis.zAdd('pplns:shares', { score: 2, value: 'bc1qb:200:2000' });
+      await redis.zAdd('pplns:shares', { score: 3, value: 'bc1qa:50:3000' });
       expect(redis._getHash('pplns:window:by-address')).toBeUndefined();
 
       // Trigger onModuleInit explicitly. The existing createService
@@ -328,14 +348,14 @@ describe('PplnsService', () => {
       const hash = redis._getHash('pplns:window:by-address');
       expect(hash).toBeDefined();
       // A had 100 + 50 = 150; B had 200.
-      expect(parseFloat(hash!.get('bc1qA') ?? '0')).toBeCloseTo(150);
-      expect(parseFloat(hash!.get('bc1qB') ?? '0')).toBeCloseTo(200);
+      expect(parseFloat(hash!.get('bc1qa') ?? '0')).toBeCloseTo(150);
+      expect(parseFloat(hash!.get('bc1qb') ?? '0')).toBeCloseTo(200);
 
       // And getPayoutDistribution now sees both miners (would have
       // silently excluded them pre-fix).
       const dist = await service.getPayoutDistribution(100_000_000);
-      expect(dist.find(d => d.address === 'bc1qA')).toBeDefined();
-      expect(dist.find(d => d.address === 'bc1qB')).toBeDefined();
+      expect(dist.find(d => d.address === 'bc1qa')).toBeDefined();
+      expect(dist.find(d => d.address === 'bc1qb')).toBeDefined();
     });
 
     it('onModuleInit is a no-op when hash already matches (warm restart)', async () => {
@@ -344,15 +364,15 @@ describe('PplnsService', () => {
 
       // Normal state: shares flow through recordShare, hash stays in
       // sync. A restart where both exist should just leave it alone.
-      await service.recordShare('bc1qA', 100);
-      await service.recordShare('bc1qB', 200);
+      await service.recordShare('bc1qa', 100);
+      await service.recordShare('bc1qb', 200);
       const before = { ...redis._getHash('pplns:window:by-address')! };
 
       await (service as any).onModuleInit();
 
       const after = redis._getHash('pplns:window:by-address')!;
-      expect(parseFloat(after.get('bc1qA') ?? '0')).toBeCloseTo(100);
-      expect(parseFloat(after.get('bc1qB') ?? '0')).toBeCloseTo(200);
+      expect(parseFloat(after.get('bc1qa') ?? '0')).toBeCloseTo(100);
+      expect(parseFloat(after.get('bc1qb') ?? '0')).toBeCloseTo(200);
     });
   });
 
@@ -364,14 +384,14 @@ describe('PplnsService', () => {
       service.setNetworkDifficulty(10_000_000);
 
       await recordShares(service, [
-        { address: 'bc1qA', difficulty: 100 },
-        { address: 'bc1qA', difficulty: 50 },
-        { address: 'bc1qB', difficulty: 200 },
+        { address: 'bc1qa', difficulty: 100 },
+        { address: 'bc1qa', difficulty: 50 },
+        { address: 'bc1qb', difficulty: 200 },
       ]);
 
       const hash = redis._getHash('pplns:window:by-address');
-      expect(parseFloat(hash!.get('bc1qA') ?? '0')).toBeCloseTo(150);
-      expect(parseFloat(hash!.get('bc1qB') ?? '0')).toBeCloseTo(200);
+      expect(parseFloat(hash!.get('bc1qa') ?? '0')).toBeCloseTo(150);
+      expect(parseFloat(hash!.get('bc1qb') ?? '0')).toBeCloseTo(200);
     });
 
     it('trimWindow decrements the aggregate for removed shares', async () => {
@@ -381,15 +401,15 @@ describe('PplnsService', () => {
 
       // Fill >> windowSize (4 * 10 = 40) so trim is forced.
       for (let i = 0; i < 150; i++) {
-        await service.recordShare('bc1qA', 1);
+        await service.recordShare('bc1qa', 1);
       }
 
       const hash = redis._getHash('pplns:window:by-address');
-      // After trim the aggregate for bc1qA should equal the total of
+      // After trim the aggregate for bc1qa should equal the total of
       // entries still in the window — NOT 150 (untrimmed total). Upper
       // bound is windowSize + one batch's worth of residual (trim
       // condition is `total > windowSize`, not `<=`).
-      const aggA = parseFloat(hash!.get('bc1qA') ?? '0');
+      const aggA = parseFloat(hash!.get('bc1qa') ?? '0');
       expect(aggA).toBeLessThanOrEqual(100);
       expect(aggA).toBeGreaterThan(0);
 
@@ -407,20 +427,20 @@ describe('PplnsService', () => {
       const { service, redis } = createService({ feePercent: '2' });
       service.setNetworkDifficulty(10_000_000);
 
-      for (let i = 0; i < 50; i++) await service.recordShare('bc1qA', 2);
-      for (let i = 0; i < 30; i++) await service.recordShare('bc1qB', 1);
+      for (let i = 0; i < 50; i++) await service.recordShare('bc1qa', 2);
+      for (let i = 0; i < 30; i++) await service.recordShare('bc1qb', 1);
 
       const dist = await service.getPayoutDistribution(100_000_000);
-      const a = dist.find(d => d.address === 'bc1qA');
-      const b = dist.find(d => d.address === 'bc1qB');
+      const a = dist.find(d => d.address === 'bc1qa');
+      const b = dist.find(d => d.address === 'bc1qb');
       // A contributes 100 units, B 30; miner cut split 100:30.
       expect(a!.percent).toBeGreaterThan(b!.percent);
 
       // And the aggregate hash is the single source we read — clear the
       // raw zset and the distribution still works.
       const dist2 = await service.getPayoutDistribution(100_000_001); // miss cache
-      expect(dist2.find(d => d.address === 'bc1qA')).toBeDefined();
-      expect(dist2.find(d => d.address === 'bc1qB')).toBeDefined();
+      expect(dist2.find(d => d.address === 'bc1qa')).toBeDefined();
+      expect(dist2.find(d => d.address === 'bc1qb')).toBeDefined();
     });
   });
 
@@ -434,9 +454,9 @@ describe('PplnsService', () => {
       service.setNetworkDifficulty(100000);
 
       await recordShares(service, [
-        { address: 'bc1qA', difficulty: 500 },
-        { address: 'bc1qB', difficulty: 300 },
-        { address: 'bc1qC', difficulty: 200 },
+        { address: 'bc1qa', difficulty: 500 },
+        { address: 'bc1qb', difficulty: 300 },
+        { address: 'bc1qc', difficulty: 200 },
       ]);
 
       const dist = await service.getPayoutDistribution(BLOCK_REWARD);
@@ -452,8 +472,8 @@ describe('PplnsService', () => {
       expect(dist[0].percent).toBeCloseTo(2, 0);
 
       // Miner A should have highest share
-      const minerA = dist.find(d => d.address === 'bc1qA');
-      const minerB = dist.find(d => d.address === 'bc1qB');
+      const minerA = dist.find(d => d.address === 'bc1qa');
+      const minerB = dist.find(d => d.address === 'bc1qb');
       expect(minerA!.percent).toBeGreaterThan(minerB!.percent);
     });
 
@@ -463,13 +483,13 @@ describe('PplnsService', () => {
 
       // 50/50 split
       await recordShares(service, [
-        { address: 'bc1qA', difficulty: 500 },
-        { address: 'bc1qB', difficulty: 500 },
+        { address: 'bc1qa', difficulty: 500 },
+        { address: 'bc1qb', difficulty: 500 },
       ]);
 
       const dist = await service.getPayoutDistribution(BLOCK_REWARD);
-      const minerA = dist.find(d => d.address === 'bc1qA')!;
-      const minerB = dist.find(d => d.address === 'bc1qB')!;
+      const minerA = dist.find(d => d.address === 'bc1qa')!;
+      const minerB = dist.find(d => d.address === 'bc1qb')!;
 
       // Each miner should get 49% (half of 98%)
       expect(minerA.percent).toBeCloseTo(49, 0);
@@ -488,12 +508,12 @@ describe('PplnsService', () => {
       // Miner B has negligible shares → sub-dust
       // ratio = 1/10_000_001 ≈ 1e-7, baseSats = floor(1e-7 * 306_250_000) = 30 < 546
       await recordShares(service, [
-        { address: 'bc1qA', difficulty: 10_000_000 },
-        { address: 'bc1qB', difficulty: 1 },
+        { address: 'bc1qa', difficulty: 10_000_000 },
+        { address: 'bc1qb', difficulty: 1 },
       ]);
 
       const dist = await service.getPayoutDistribution(BLOCK_REWARD);
-      const minerB = dist.find(d => d.address === 'bc1qB');
+      const minerB = dist.find(d => d.address === 'bc1qb');
       expect(minerB).toBeUndefined(); // Not in coinbase — sub-dust
     });
 
@@ -502,15 +522,15 @@ describe('PplnsService', () => {
       service.setNetworkDifficulty(100000);
 
       // Miner B has small shares but large pending
-      balanceService._set('bc1qB', 100_000); // 100k sats pending
+      balanceService._set('bc1qb', 100_000); // 100k sats pending
 
       await recordShares(service, [
-        { address: 'bc1qA', difficulty: 900 },
-        { address: 'bc1qB', difficulty: 100 },
+        { address: 'bc1qa', difficulty: 900 },
+        { address: 'bc1qb', difficulty: 100 },
       ]);
 
       const dist = await service.getPayoutDistribution(BLOCK_REWARD);
-      const minerB = dist.find(d => d.address === 'bc1qB');
+      const minerB = dist.find(d => d.address === 'bc1qb');
       expect(minerB).toBeDefined(); // Should be in coinbase (pending + base > dust)
     });
 
@@ -522,15 +542,15 @@ describe('PplnsService', () => {
       const { service, balanceService } = createService({ feePercent: '2' });
       service.setNetworkDifficulty(100000);
 
-      balanceService._set('bc1qC', 6000);    // credit, above PPLNS_MIN_PAYOUT_SATS default
-      balanceService._set('bc1qA', -6000);   // matching debit, active miner
+      balanceService._set('bc1qc', 6000);    // credit, above PPLNS_MIN_PAYOUT_SATS default
+      balanceService._set('bc1qa', -6000);   // matching debit, active miner
 
       await recordShares(service, [
-        { address: 'bc1qA', difficulty: 500 },
+        { address: 'bc1qa', difficulty: 500 },
       ]);
 
       const dist = await service.getPayoutDistribution(BLOCK_REWARD);
-      const minerC = dist.find(d => d.address === 'bc1qC');
+      const minerC = dist.find(d => d.address === 'bc1qc');
       expect(minerC).toBeDefined();
     });
 
@@ -551,8 +571,8 @@ describe('PplnsService', () => {
       // Two miners, one gets filtered as sub-dust
       // The sub-dust miner's share goes to fee as remainder
       await recordShares(service, [
-        { address: 'bc1qA', difficulty: 500 },
-        { address: 'bc1qB', difficulty: 500 },
+        { address: 'bc1qa', difficulty: 500 },
+        { address: 'bc1qb', difficulty: 500 },
       ]);
 
       const dist = await service.getPayoutDistribution(BLOCK_REWARD);
@@ -578,23 +598,23 @@ describe('PplnsService', () => {
       const { service, balanceService } = createService({ feePercent: '2' });
       service.setNetworkDifficulty(100000);
 
-      balanceService._set('bc1qA', 5000);     // credit
-      balanceService._set('bc1qB', -5000);    // matching debit
+      balanceService._set('bc1qa', 5000);     // credit
+      balanceService._set('bc1qb', -5000);    // matching debit
 
       await recordShares(service, [
-        { address: 'bc1qA', difficulty: 500 },
-        { address: 'bc1qB', difficulty: 500 },
+        { address: 'bc1qa', difficulty: 500 },
+        { address: 'bc1qb', difficulty: 500 },
       ]);
 
       await service.onBlockFound(800000, BLOCK_REWARD);
 
       // A's credit cleared; totalPaidSats reflects A's actual on-chain payout,
       // which is rawFair + credit.
-      const balA = balanceService._get('bc1qA');
+      const balA = balanceService._get('bc1qa');
       expect(balA!.balanceSats).toBe(0);
       expect(balA!.totalPaidSats).toBeGreaterThanOrEqual(5000);
       // B's debit also cleared via reduced rawFair.
-      const balB = balanceService._get('bc1qB');
+      const balB = balanceService._get('bc1qb');
       expect(balB!.balanceSats).toBe(0);
     });
 
@@ -605,8 +625,8 @@ describe('PplnsService', () => {
 
       // ratio = 1/10_000_001 ≈ 1e-7, baseSats = floor(1e-7 * 306_250_000) = 30
       await recordShares(service, [
-        { address: 'bc1qBig', difficulty: 10_000_000 },
-        { address: 'bc1qTiny', difficulty: 1 },
+        { address: 'bc1qbig', difficulty: 10_000_000 },
+        { address: 'bc1qtiny', difficulty: 1 },
       ]);
 
       await service.onBlockFound(800000, BLOCK_REWARD);
@@ -614,7 +634,7 @@ describe('PplnsService', () => {
       // 30 sats < 546 → Tiny goes to pending. onBlockFound now writes
       // through the transactional balance-repo path, so we verify the
       // shared backing store rather than the legacy service-facade spy.
-      const balTiny = balanceService._get('bc1qTiny');
+      const balTiny = balanceService._get('bc1qtiny');
       expect(balTiny).toBeDefined();
       expect(balTiny!.balanceSats).toBeGreaterThan(0);
       expect(balTiny!.totalPaidSats).toBe(0);
@@ -627,21 +647,21 @@ describe('PplnsService', () => {
       const { service, balanceService } = createService({ feePercent: '2' });
       service.setNetworkDifficulty(100000);
 
-      balanceService._set('bc1qC', 6000);     // pending-only credit, above floor
-      balanceService._set('bc1qA', -6000);    // matching debit, active
+      balanceService._set('bc1qc', 6000);     // pending-only credit, above floor
+      balanceService._set('bc1qa', -6000);    // matching debit, active
 
       await recordShares(service, [
-        { address: 'bc1qA', difficulty: 500 },
+        { address: 'bc1qa', difficulty: 500 },
       ]);
 
       await service.onBlockFound(800000, BLOCK_REWARD);
 
       // C's credit paid out, balance cleared.
-      const balC = balanceService._get('bc1qC');
+      const balC = balanceService._get('bc1qc');
       expect(balC!.balanceSats).toBe(0);
       expect(balC!.totalPaidSats).toBe(6000);
       // A's debit cleared via reduced rawFair.
-      const balA = balanceService._get('bc1qA');
+      const balA = balanceService._get('bc1qa');
       expect(balA!.balanceSats).toBe(0);
     });
 
@@ -650,16 +670,16 @@ describe('PplnsService', () => {
       service.setNetworkDifficulty(100000);
 
       // Miner C has pending below dust
-      balanceService._set('bc1qC', 200); // < 546
+      balanceService._set('bc1qc', 200); // < 546
 
       await recordShares(service, [
-        { address: 'bc1qA', difficulty: 500 },
+        { address: 'bc1qa', difficulty: 500 },
       ]);
 
       await service.onBlockFound(800000, BLOCK_REWARD);
 
       // C's pending should remain untouched
-      const balC = balanceService._get('bc1qC');
+      const balC = balanceService._get('bc1qc');
       expect(balC!.balanceSats).toBe(200);
       expect(balC!.totalPaidSats).toBe(0);
     });
@@ -669,8 +689,8 @@ describe('PplnsService', () => {
       service.setNetworkDifficulty(100000);
 
       await recordShares(service, [
-        { address: 'bc1qA', difficulty: 600 },
-        { address: 'bc1qB', difficulty: 400 },
+        { address: 'bc1qa', difficulty: 600 },
+        { address: 'bc1qb', difficulty: 400 },
       ]);
 
       await service.onBlockFound(800000, BLOCK_REWARD);
@@ -692,17 +712,17 @@ describe('PplnsService', () => {
 
       // ratio = 1/10_000_001 → baseSats ≈ 30
       await recordShares(service, [
-        { address: 'bc1qBig', difficulty: 10_000_000 },
-        { address: 'bc1qSmall', difficulty: 1 },
+        { address: 'bc1qbig', difficulty: 10_000_000 },
+        { address: 'bc1qsmall', difficulty: 1 },
       ]);
 
       await service.onBlockFound(800000, BLOCK_REWARD);
-      const afterBlock1 = balanceService._get('bc1qSmall')?.balanceSats ?? 0;
+      const afterBlock1 = balanceService._get('bc1qsmall')?.balanceSats ?? 0;
       expect(afterBlock1).toBeGreaterThan(0);
 
       // Block 2: accumulate more (same window shares)
       await service.onBlockFound(800001, BLOCK_REWARD);
-      const afterBlock2 = balanceService._get('bc1qSmall')?.balanceSats ?? 0;
+      const afterBlock2 = balanceService._get('bc1qsmall')?.balanceSats ?? 0;
       expect(afterBlock2).toBeGreaterThan(afterBlock1);
     });
 
@@ -794,9 +814,9 @@ describe('PplnsService', () => {
       service.setNetworkDifficulty(1000); // window = 4000
 
       await recordShares(service, [
-        { address: 'bc1qA', difficulty: 500 },
-        { address: 'bc1qB', difficulty: 300 },
-        { address: 'bc1qA', difficulty: 200 }, // A again
+        { address: 'bc1qa', difficulty: 500 },
+        { address: 'bc1qb', difficulty: 300 },
+        { address: 'bc1qa', difficulty: 200 }, // A again
       ]);
 
       const stats = await service.getWindowStats();
@@ -813,14 +833,14 @@ describe('PplnsService', () => {
     it('should return window share and pending balance', async () => {
       const { service, balanceService } = createService();
       service.setNetworkDifficulty(100000);
-      balanceService._set('bc1qA', 5000, 50000);
+      balanceService._set('bc1qa', 5000, 50000);
 
       await recordShares(service, [
-        { address: 'bc1qA', difficulty: 600 },
-        { address: 'bc1qB', difficulty: 400 },
+        { address: 'bc1qa', difficulty: 600 },
+        { address: 'bc1qb', difficulty: 400 },
       ]);
 
-      const status = await service.getAddressStatus('bc1qA');
+      const status = await service.getAddressStatus('bc1qa');
       expect(status.balanceSats).toBe(5000);
       expect(status.totalPaidSats).toBe(50000);
       expect(status.currentWindowDifficulty).toBe(600);
@@ -831,7 +851,7 @@ describe('PplnsService', () => {
       const { service } = createService();
       service.setNetworkDifficulty(100000);
 
-      const status = await service.getAddressStatus('bc1qUnknown');
+      const status = await service.getAddressStatus('bc1qunknown');
       expect(status.balanceSats).toBe(0);
       expect(status.totalPaidSats).toBe(0);
       expect(status.currentWindowDifficulty).toBe(0);
@@ -847,18 +867,18 @@ describe('PplnsService', () => {
       service.setNetworkDifficulty(100000);
 
       await recordShares(service, [
-        { address: 'bc1qA', difficulty: 100 },
-        { address: 'bc1qB', difficulty: 300 },
-        { address: 'bc1qC', difficulty: 600 },
+        { address: 'bc1qa', difficulty: 100 },
+        { address: 'bc1qb', difficulty: 300 },
+        { address: 'bc1qc', difficulty: 600 },
       ]);
 
       const dist = await service.getCurrentDistribution();
       expect(dist).toHaveLength(3);
       // Sorted by percent descending
-      expect(dist[0].address).toBe('bc1qC');
+      expect(dist[0].address).toBe('bc1qc');
       expect(dist[0].percent).toBeCloseTo(60, 0);
-      expect(dist[1].address).toBe('bc1qB');
-      expect(dist[2].address).toBe('bc1qA');
+      expect(dist[1].address).toBe('bc1qb');
+      expect(dist[2].address).toBe('bc1qa');
     });
   });
 
@@ -869,7 +889,7 @@ describe('PplnsService', () => {
       const { service, redis } = createService({ port: '' });
       (service as any).enabled = false;
 
-      await service.recordShare('bc1qA', 500);
+      await service.recordShare('bc1qa', 500);
       expect(redis.zAdd).not.toHaveBeenCalled();
     });
 

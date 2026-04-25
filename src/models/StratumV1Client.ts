@@ -9,6 +9,7 @@ import { firstValueFrom, Subscription } from 'rxjs';
 import { clearInterval } from 'timers';
 
 import { recordConnectionFailure } from '../services/protocol-detector.service';
+import { normalizeBtcAddress } from '../utils/btc-address.utils';
 import { AddressSettingsService } from '../ORM/address-settings/address-settings.service';
 import { BlocksService } from '../ORM/blocks/blocks.service';
 import { ClientStatisticsService } from '../ORM/client-statistics/client-statistics.service';
@@ -451,8 +452,11 @@ export class StratumV1Client {
                     parsedMessage,
                 );
 
-                // Trim whitespace from address (common copy-paste error)
-                authorizationMessage.address = authorizationMessage.address?.trim();
+                // Trim + normalise bech32 (lowercase) before accepting. Without
+                // this, every downstream lookup (PPLNS window aggregate, group
+                // routing cache, ledger balance) keys on the user's raw form
+                // and fragments work across case variants. See btc-address.utils.
+                authorizationMessage.address = normalizeBtcAddress(authorizationMessage.address);
 
                 // Validate Bitcoin address before accepting authorization
                 try {
