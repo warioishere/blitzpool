@@ -223,6 +223,24 @@ export interface CoinbaseDistributionInput {
      * are economically unspendable at realistic network fee rates.
      */
     minPayoutSats?: number;
+    /**
+     * Group-Solo finder-bonus: absolute sats paid to the block-finder
+     * as a separate coinbase output, on top of their normal proportional
+     * share. The remaining miner-cut (after fee + bonus) is split
+     * proportionally as usual, so the finder gets bonus + their share.
+     *
+     * Capped at 95 % of the miner-cut at runtime — protects the rest
+     * of the group from being starved if the configured bonus is too
+     * large for the post-halving block subsidy. If the resulting
+     * bonus is below `minPayoutSats` it is suppressed entirely and
+     * the original miner-cut is restored (caller should validate at
+     * configure-time, this is defensive).
+     *
+     * Both `finderBonusSats` and `finderAddress` must be set together;
+     * either being unset/0 disables the feature.
+     */
+    finderBonusSats?: number;
+    finderAddress?: string;
 }
 
 export interface CoinbaseDistributionEntry {
@@ -295,6 +313,8 @@ export function buildCoinbaseDistribution(
         logLabel,
         suppressMatchingDebits,
         minPayoutSats,
+        finderBonusSats: configuredBonusSats,
+        finderAddress,
     } = input;
 
     const label = logLabel ?? '[CoinbaseDist]';
@@ -336,7 +356,20 @@ export function buildCoinbaseDistribution(
     const wantFeeSats = Math.floor((feePercent / 100) * blockRewardSats);
     const feeEmitted = !!feeAddress && wantFeeSats >= minPayout;
     const feeSats = feeEmitted ? wantFeeSats : 0;
-    const rewardForMiners = blockRewardSats - feeSats;
+    let rewardForMiners = blockRewardSats - feeSats;
+
+    // Group-Solo finder bonus: subtracted from rewardForMiners BEFORE
+    // the proportional split, emitted as its own coinbase output. Cap
+    // at 95 % of rewardForMiners so the rest of the group can't be
+    // starved on small post-halving rewards. Only emit if the resulting
+    // amount clears minPayout — otherwise restore rewardForMiners and
+    // skip the bonus output entirely.
+    const wantBonusSats = (configuredBonusSats && finderAddress) ? configuredBonusSats : 0;
+    const bonusCapSats = Math.floor(rewardForMiners * 0.95);
+    const cappedBonusSats = Math.min(wantBonusSats, bonusCapSats);
+    const bonusEmitted = cappedBonusSats >= minPayout;
+    const bonusSats = bonusEmitted ? cappedBonusSats : 0;
+    rewardForMiners -= bonusSats;
 
     // ── Phase 1 + 2: compute rawFair + target per miner ────────────
     const computations = new Map<string, MinerComputation>();
@@ -380,11 +413,13 @@ export function buildCoinbaseDistribution(
     // so that miner reward and the fee-output gate stay consistent —
     // i.e. the fee is either subtracted AND emitted, or neither.
     const feeOutputCount = feeEmitted ? 1 : 0;
+    const bonusOutputCount = bonusEmitted ? 1 : 0;
     const maxMinerOutputs = Math.floor(
         (budget
             - COINBASE_BASE_WEIGHT
             - COINBASE_WITNESS_COMMITMENT_WEIGHT
-            - feeOutputCount * COINBASE_OUTPUT_WEIGHT)
+            - feeOutputCount * COINBASE_OUTPUT_WEIGHT
+            - bonusOutputCount * COINBASE_OUTPUT_WEIGHT)
         / COINBASE_OUTPUT_WEIGHT,
     );
 
@@ -639,6 +674,19 @@ export function buildCoinbaseDistribution(
             address: feeAddress,
             percent: (totalFeeSats / blockRewardSats) * 100,
             sats: totalFeeSats,
+        });
+    }
+
+    // Group-Solo finder bonus output. Emitted as its own dedicated output
+    // even when the finder is also in `addressShares` — keeps the bonus
+    // visible/auditable on-chain (block-explorer reviewers can see the
+    // pool config in action) and the math simple. The 1-output-weight
+    // overhead vs. merging into the proportional output is negligible.
+    if (bonusEmitted) {
+        payouts.push({
+            address: finderAddress!,
+            percent: (bonusSats / blockRewardSats) * 100,
+            sats: bonusSats,
         });
     }
 

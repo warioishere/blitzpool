@@ -1126,4 +1126,170 @@ describe('buildCoinbaseDistribution — credit/debit ledger model', () => {
             }
         }
     });
+
+    // ── Group-Solo finder bonus ────────────────────────────────────
+
+    describe('finder bonus (Group-Solo)', () => {
+
+        it('emits a separate bonus output to the finder, on top of their proportional share', () => {
+            const reward = 5_000_000_000;
+            const bonus = 50_000_000;  // 0.5 BTC bonus
+            const r = buildCoinbaseDistribution({
+                addressShares: shares({ [ALICE]: 100, [BOB]: 100 }),
+                balances: new Map(),
+                blockRewardSats: reward,
+                feePercent: 2,
+                feeAddress: FEE_ADDR,
+                coinbaseWeightBudget: DEFAULT_COINBASE_WEIGHT_BUDGET,
+                finderBonusSats: bonus,
+                finderAddress: ALICE,
+            });
+            // Three outputs: fee + bonus + 2 miners
+            // (or fee + bonus + Alice + Bob, with Alice's main output being half of (reward - fee - bonus))
+            expect(r.payouts.length).toBe(4);
+            const fee = r.payouts.find(p => p.address === FEE_ADDR)!;
+            const bonusOut = r.payouts.filter(p => p.address === ALICE).find(p => p.sats === bonus);
+            const aliceProp = r.payouts.filter(p => p.address === ALICE).find(p => p.sats !== bonus);
+            const bobOut = r.payouts.find(p => p.address === BOB)!;
+
+            expect(fee.sats).toBe(Math.floor(reward * 0.02));
+            expect(bonusOut).toBeDefined();
+            expect(bonusOut!.sats).toBe(bonus);
+            // Alice's proportional share = (reward - fee - bonus) / 2 (equal shares)
+            const minerCutAfterBonus = reward - fee.sats - bonus;
+            expect(aliceProp!.sats).toBeCloseTo(minerCutAfterBonus / 2, -2);
+            expect(bobOut.sats).toBeCloseTo(minerCutAfterBonus / 2, -2);
+
+            // Total on-chain = block reward (no leak)
+            expect(sumOnChainSats(r.payouts)).toBe(reward);
+        });
+
+        it('bonus capped at 95 % of miner-cut when configured value would exceed', () => {
+            const reward = 100_000_000;        // 1 BTC
+            const fee = Math.floor(reward * 0.02);  // 2 % = 2_000_000
+            const minerCut = reward - fee;           // 98_000_000
+            const cap = Math.floor(minerCut * 0.95); // 93_100_000
+            const bigBonus = minerCut;                // configured = full miner-cut → must be capped
+            const r = buildCoinbaseDistribution({
+                addressShares: shares({ [ALICE]: 100, [BOB]: 100 }),
+                balances: new Map(),
+                blockRewardSats: reward,
+                feePercent: 2,
+                feeAddress: FEE_ADDR,
+                coinbaseWeightBudget: DEFAULT_COINBASE_WEIGHT_BUDGET,
+                finderBonusSats: bigBonus,
+                finderAddress: ALICE,
+            });
+            const bonusOut = r.payouts.filter(p => p.address === ALICE).find(p => p.sats === cap);
+            expect(bonusOut).toBeDefined();
+            expect(bonusOut!.sats).toBe(cap);
+            expect(sumOnChainSats(r.payouts)).toBe(reward);
+        });
+
+        it('bonus suppressed when the resulting amount would be below minPayout (sub-dust gate)', () => {
+            // Tiny configured bonus relative to a tiny block reward —
+            // bonus output would be sub-dust, so the feature is silently
+            // skipped and the full miner-cut goes to the proportional split.
+            const reward = 100_000;
+            const r = buildCoinbaseDistribution({
+                addressShares: shares({ [ALICE]: 100, [BOB]: 100 }),
+                balances: new Map(),
+                blockRewardSats: reward,
+                feePercent: 0,
+                feeAddress: '',
+                coinbaseWeightBudget: DEFAULT_COINBASE_WEIGHT_BUDGET,
+                finderBonusSats: 100,           // way below dust
+                finderAddress: ALICE,
+                minPayoutSats: 5000,
+            });
+            // Only 2 miner outputs — no bonus output emitted
+            expect(r.payouts).toHaveLength(2);
+            expect(sumOnChainSats(r.payouts)).toBe(reward);
+        });
+
+        it('no bonus when finderBonusSats is 0 / undefined / negative', () => {
+            const reward = 5_000_000_000;
+            for (const v of [undefined, 0, -1]) {
+                const r = buildCoinbaseDistribution({
+                    addressShares: shares({ [ALICE]: 100, [BOB]: 100 }),
+                    balances: new Map(),
+                    blockRewardSats: reward,
+                    feePercent: 2,
+                    feeAddress: FEE_ADDR,
+                    coinbaseWeightBudget: DEFAULT_COINBASE_WEIGHT_BUDGET,
+                    finderBonusSats: v as any,
+                    finderAddress: ALICE,
+                });
+                // No second Alice output
+                expect(r.payouts.filter(p => p.address === ALICE)).toHaveLength(1);
+                expect(sumOnChainSats(r.payouts)).toBe(reward);
+            }
+        });
+
+        it('no bonus when finderAddress is unset, even if finderBonusSats > 0', () => {
+            const reward = 5_000_000_000;
+            const r = buildCoinbaseDistribution({
+                addressShares: shares({ [ALICE]: 100, [BOB]: 100 }),
+                balances: new Map(),
+                blockRewardSats: reward,
+                feePercent: 2,
+                feeAddress: FEE_ADDR,
+                coinbaseWeightBudget: DEFAULT_COINBASE_WEIGHT_BUDGET,
+                finderBonusSats: 50_000_000,
+                finderAddress: undefined,
+            });
+            // Standard 3-output coinbase: fee + 2 miners
+            expect(r.payouts).toHaveLength(3);
+            expect(sumOnChainSats(r.payouts)).toBe(reward);
+        });
+
+        it('finder is the only miner — bonus + 100 % of remaining miner-cut go to them', () => {
+            const reward = 5_000_000_000;
+            const bonus = 100_000_000;
+            const r = buildCoinbaseDistribution({
+                addressShares: shares({ [ALICE]: 100 }),
+                balances: new Map(),
+                blockRewardSats: reward,
+                feePercent: 2,
+                feeAddress: FEE_ADDR,
+                coinbaseWeightBudget: DEFAULT_COINBASE_WEIGHT_BUDGET,
+                finderBonusSats: bonus,
+                finderAddress: ALICE,
+            });
+            // Fee + bonus + 1 miner output = 3 outputs (Alice has 2: bonus + main)
+            expect(r.payouts).toHaveLength(3);
+            const aliceTotal = r.payouts
+                .filter(p => p.address === ALICE)
+                .reduce((s, p) => s + p.sats, 0);
+            const expectedFee = Math.floor(reward * 0.02);
+            expect(aliceTotal).toBe(reward - expectedFee);
+            expect(sumOnChainSats(r.payouts)).toBe(reward);
+        });
+
+        it('weight-budget reservation: bonus output counts towards the trim ceiling', () => {
+            // Tight budget: enough for fee + bonus + 1 miner output. With
+            // 3 miners, 2 must trim. Without bonus accounting, we'd
+            // wrongly fit 2 miners and overshoot the budget.
+            const reward = 5_000_000_000;
+            const bonus = 50_000_000;
+            // Budget = base (328) + witness (188) + 3 outputs (3 × 172 = 516) = 1032
+            // → fits fee, bonus, and 1 miner output. With 3 miners → trim 2.
+            const tightBudget = 1032;
+            const r = buildCoinbaseDistribution({
+                addressShares: shares({ [ALICE]: 100, [BOB]: 80, [CHARLIE]: 60 }),
+                balances: new Map(),
+                blockRewardSats: reward,
+                feePercent: 2,
+                feeAddress: FEE_ADDR,
+                coinbaseWeightBudget: tightBudget,
+                finderBonusSats: bonus,
+                finderAddress: ALICE,
+            });
+            // Alice's bonus + Alice's prop output (kept) + fee = 3 outputs
+            expect(r.payouts).toHaveLength(3);
+            // Bob and Charlie were trimmed → carried as pending balance
+            expect(r.balanceAfter.has(BOB)).toBe(true);
+            expect(r.balanceAfter.has(CHARLIE)).toBe(true);
+        });
+    });
 });
