@@ -1,6 +1,6 @@
-import { Body, Controller, Delete, Get, Headers, HttpException, HttpStatus, Param, Post, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Headers, HttpException, HttpStatus, Param, Patch, Post, Query } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
-import { GroupService, GroupServiceError } from '../../services/group.service';
+import { GroupService, GroupServiceError, GroupRoundResetSettings } from '../../services/group.service';
 import { normalizeBtcAddress } from '../../utils/btc-address.utils';
 import { GroupSoloService } from '../../services/group-solo.service';
 import { InvitationServiceError, PplnsGroupInvitationService } from '../../services/pplns-group-invitation.service';
@@ -457,6 +457,41 @@ export class PplnsGroupController {
         }
     }
 
+    /**
+     * PATCH /pplns/groups/:id/settings
+     * Admin-only update of the round-reset config — interval, fire-hour,
+     * timezone, finder bonus. PATCH semantics:
+     *   - omit a field   → leave column untouched
+     *   - field = null   → clear the column (interval=null disables the
+     *                      schedule; finderBonusSats=null becomes 0)
+     *   - field = value  → set the column
+     *
+     * After persistence, the per-group cron job is re-armed (or unscheduled
+     * if interval was cleared) via GroupRoundResetService.applyConfig.
+     */
+    @Patch(':id/settings')
+    async updateSettings(
+        @Param('id') id: string,
+        @Body() body: GroupRoundResetSettings,
+        @Headers('x-admin-token') token?: string,
+    ) {
+        try {
+            const updated = await this.groupService.updateRoundResetConfig(id, body ?? {}, token);
+            // Round-trip the settings the admin should see — bigint-safe via
+            // .toString() so JSON serialisation doesn't choke.
+            return {
+                id: updated.id,
+                roundResetIntervalDays: updated.roundResetIntervalDays,
+                roundResetHourLocal: updated.roundResetHourLocal,
+                roundResetTimezone: updated.roundResetTimezone,
+                finderBonusSats: updated.finderBonusSats ?? 0,
+                lastRoundResetAt: updated.lastRoundResetAt,
+            };
+        } catch (e) {
+            throw this.toHttpError(e);
+        }
+    }
+
     @Post(':id/transfer')
     async transfer(
         @Param('id') id: string,
@@ -505,6 +540,11 @@ export class PplnsGroupController {
                 'not-member': HttpStatus.NOT_FOUND,
                 'invalid-name': HttpStatus.BAD_REQUEST,
                 'invalid-address': HttpStatus.BAD_REQUEST,
+                'invalid-interval': HttpStatus.BAD_REQUEST,
+                'invalid-hour': HttpStatus.BAD_REQUEST,
+                'invalid-timezone': HttpStatus.BAD_REQUEST,
+                'invalid-bonus': HttpStatus.BAD_REQUEST,
+                'incomplete-schedule': HttpStatus.BAD_REQUEST,
                 'name-taken': HttpStatus.CONFLICT,
                 'address-in-group': HttpStatus.CONFLICT,
                 'already-member': HttpStatus.CONFLICT,

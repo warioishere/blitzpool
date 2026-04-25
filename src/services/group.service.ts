@@ -6,6 +6,7 @@ import * as crypto from 'crypto';
 import { PplnsGroupEntity } from '../ORM/pplns-group/pplns-group.entity';
 import { PplnsGroupMemberEntity } from '../ORM/pplns-group/pplns-group-member.entity';
 import { GroupSoloService } from './group-solo.service';
+import { GroupRoundResetService } from './group-round-reset.service';
 import { normalizeBtcAddress } from '../utils/btc-address.utils';
 
 /**
@@ -19,6 +20,20 @@ import { normalizeBtcAddress } from '../utils/btc-address.utils';
 const MIN_MEMBERS_ACTIVE = 2;
 const DEFAULT_KICK_INACTIVITY_DAYS = 14;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
+const MAX_RESET_INTERVAL_DAYS = 365;
+// Hard cap for finder bonus — guards against finger-fat configs that would
+// strand more sats than a normal block reward (~3.125 BTC at current era).
+// 1 BTC is already absurd for a per-block bonus on top of proportional split.
+const MAX_FINDER_BONUS_SATS = 100_000_000;
+
+function isValidTimezone(tz: string): boolean {
+    try {
+        new Intl.DateTimeFormat('en-US', { timeZone: tz });
+        return true;
+    } catch {
+        return false;
+    }
+}
 
 export class GroupServiceError extends Error {
     constructor(public readonly code: string, message: string) {
@@ -37,6 +52,25 @@ export interface GroupCacheEntry {
     active: boolean;
 }
 
+/**
+ * Partial-update DTO for the round-reset configuration.
+ *
+ * Semantics — distinguishing "absent", "null", and "value":
+ *   - field undefined  → don't touch this column
+ *   - field null       → clear the column (interval=null disables the schedule;
+ *                        finderBonusSats=null is treated as 0)
+ *   - field value      → set the column
+ *
+ * `finderBonusSats` accepts a JSON-friendly type (string|number|bigint) since
+ * raw JSON has no bigint literal.
+ */
+export interface GroupRoundResetSettings {
+    intervalDays?: number | null;
+    hourLocal?: number;
+    timezone?: string;
+    finderBonusSats?: string | number | null;
+}
+
 @Injectable()
 export class GroupService implements OnModuleInit {
 
@@ -52,6 +86,8 @@ export class GroupService implements OnModuleInit {
         private readonly configService: ConfigService,
         @Inject(forwardRef(() => GroupSoloService))
         private readonly groupSoloService: GroupSoloService,
+        @Inject(forwardRef(() => GroupRoundResetService))
+        private readonly roundResetService: GroupRoundResetService,
     ) {
         const raw = this.configService.get<string>('GROUP_INACTIVITY_KICK_DAYS');
         const parsed = raw ? parseInt(raw, 10) : NaN;
@@ -348,12 +384,135 @@ export class GroupService implements OnModuleInit {
         return { group: saved, adminToken: newToken };
     }
 
+    /**
+     * Admin-only PATCH-style update for the round-reset configuration
+     * (interval, fire-hour, timezone, finder-bonus). Each field is optional;
+     * undefined leaves the column untouched, null clears it.
+     *
+     * After persistence, re-arms (or unschedules, if interval was cleared)
+     * the per-group cron job by calling `roundResetService.applyConfig`.
+     * That call is idempotent — safe to invoke even when the config is
+     * unchanged from what was already scheduled.
+     */
+    async updateRoundResetConfig(
+        groupId: string,
+        settings: GroupRoundResetSettings,
+        token: string | undefined,
+    ): Promise<PplnsGroupEntity> {
+        const group = await this.requireAdminToken(groupId, token);
+
+        // intervalDays — accept null (clear) or integer in [1, 365]
+        if (settings.intervalDays !== undefined) {
+            if (settings.intervalDays === null) {
+                group.roundResetIntervalDays = null;
+            } else {
+                const v = settings.intervalDays;
+                if (!Number.isInteger(v) || v < 1 || v > MAX_RESET_INTERVAL_DAYS) {
+                    throw new GroupServiceError(
+                        'invalid-interval',
+                        `roundResetIntervalDays must be an integer in [1, ${MAX_RESET_INTERVAL_DAYS}] or null`,
+                    );
+                }
+                group.roundResetIntervalDays = v;
+            }
+        }
+
+        // hourLocal — integer in [0, 23]
+        if (settings.hourLocal !== undefined) {
+            const v = settings.hourLocal;
+            if (!Number.isInteger(v) || v < 0 || v > 23) {
+                throw new GroupServiceError(
+                    'invalid-hour',
+                    'roundResetHourLocal must be an integer in [0, 23]',
+                );
+            }
+            group.roundResetHourLocal = v;
+        }
+
+        // timezone — must be a valid IANA zone
+        if (settings.timezone !== undefined) {
+            const v = settings.timezone;
+            if (typeof v !== 'string' || v.length === 0 || !isValidTimezone(v)) {
+                throw new GroupServiceError(
+                    'invalid-timezone',
+                    `roundResetTimezone must be a valid IANA timezone (got: ${JSON.stringify(v)})`,
+                );
+            }
+            group.roundResetTimezone = v;
+        }
+
+        // finderBonusSats — non-negative integer (sats). Accept string|number|null.
+        // Stored as `number` on the entity (sats are well within Number.MAX_SAFE_INTEGER
+        // for the configured cap), matches `coinbase-distribution.ts` which expects
+        // number-typed sat amounts.
+        if (settings.finderBonusSats !== undefined) {
+            if (settings.finderBonusSats === null) {
+                group.finderBonusSats = 0;
+            } else {
+                const raw = settings.finderBonusSats;
+                let parsed: number;
+                if (typeof raw === 'number') {
+                    parsed = raw;
+                } else if (typeof raw === 'string' && /^[+-]?\d+$/.test(raw.trim())) {
+                    parsed = Number(raw.trim());
+                } else {
+                    throw new GroupServiceError(
+                        'invalid-bonus',
+                        'finderBonusSats must be a non-negative integer (sats)',
+                    );
+                }
+                if (!Number.isFinite(parsed) || !Number.isInteger(parsed)
+                    || parsed < 0 || parsed > MAX_FINDER_BONUS_SATS) {
+                    throw new GroupServiceError(
+                        'invalid-bonus',
+                        `finderBonusSats must be in [0, ${MAX_FINDER_BONUS_SATS}] sats`,
+                    );
+                }
+                group.finderBonusSats = parsed;
+            }
+        }
+
+        // If the interval is set we need a usable hour + tz on the entity —
+        // either coming in with this PATCH or already persisted. Catch the
+        // partial-config case here rather than letting GroupRoundResetService
+        // silently skip scheduling.
+        if (group.roundResetIntervalDays != null) {
+            if (!Number.isInteger(group.roundResetHourLocal)
+                || group.roundResetHourLocal! < 0
+                || group.roundResetHourLocal! > 23) {
+                throw new GroupServiceError(
+                    'incomplete-schedule',
+                    'roundResetHourLocal must be set when roundResetIntervalDays is set',
+                );
+            }
+            if (!group.roundResetTimezone || !isValidTimezone(group.roundResetTimezone)) {
+                throw new GroupServiceError(
+                    'incomplete-schedule',
+                    'roundResetTimezone must be set when roundResetIntervalDays is set',
+                );
+            }
+        }
+
+        const saved = await this.groupRepo.save(group);
+
+        // (Re-)apply the cron schedule. Idempotent: tears down the existing
+        // job and arms a fresh one, OR unschedules entirely when interval
+        // was just cleared.
+        this.roundResetService.applyConfig(saved);
+
+        return saved;
+    }
+
     async dissolveGroup(groupId: string, token: string | undefined): Promise<void> {
         await this.requireAdminToken(groupId, token);
         await this.dissolveInternal(groupId);
     }
 
     private async dissolveInternal(groupId: string): Promise<void> {
+        // Tear down any scheduled-reset cron job before wiping the group —
+        // the firing callback would otherwise self-cleanup on the next tick,
+        // but that's up to 24 h of pointless wakeups in the meantime.
+        this.roundResetService.unschedule(groupId);
         // Clear all group-solo round state (Redis shares, rejected hash,
         // last-seen hash, pending balance rows) before dropping the members.
         // Without this the keys live forever in Valkey since they carry no

@@ -101,12 +101,14 @@ describe('GroupService', () => {
     let groupRepo: ReturnType<typeof createMockRepo>;
     let memberRepo: ReturnType<typeof createMockRepo>;
     let groupSolo: ReturnType<typeof createMockGroupSolo>;
+    let roundReset: { applyConfig: jest.Mock; unschedule: jest.Mock };
     let service: GroupService;
 
     beforeEach(async () => {
         groupRepo = createMockRepo('group');
         memberRepo = createMockRepo('member');
         groupSolo = createMockGroupSolo();
+        roundReset = { applyConfig: jest.fn(), unschedule: jest.fn() };
 
         // Simulated EntityManager: every getRepository(target) hands back
         // the SAME mock instance keyed by `target`, so writes inside the
@@ -132,6 +134,7 @@ describe('GroupService', () => {
             memberRepo as any,
             config as any,
             groupSolo as any,
+            roundReset as any,
         );
         await service.onModuleInit();
     });
@@ -282,6 +285,132 @@ describe('GroupService', () => {
             .rejects.toMatchObject({ code: 'invalid-address' });
         await expect(service.transferCreator(group.id, '   ', oldToken))
             .rejects.toMatchObject({ code: 'invalid-address' });
+    });
+
+    // ── updateRoundResetConfig ──────────────────────────────────
+
+    /** Convenience: create a fresh group, return ids/token for the tests below. */
+    async function freshGroup() {
+        const r = await service.createGroup('cfg-group', 'bc1qalice');
+        return { id: r.group.id, token: r.adminToken };
+    }
+
+    it('updateRoundResetConfig: requires admin token', async () => {
+        const { id } = await freshGroup();
+        await expect(service.updateRoundResetConfig(id, { intervalDays: 7 }, undefined))
+            .rejects.toMatchObject({ code: 'missing-token' });
+        await expect(service.updateRoundResetConfig(id, { intervalDays: 7 }, 'wrong'))
+            .rejects.toMatchObject({ code: 'invalid-token' });
+    });
+
+    it('updateRoundResetConfig: full valid config persists + arms cron', async () => {
+        const { id, token } = await freshGroup();
+        const updated = await service.updateRoundResetConfig(id, {
+            intervalDays: 7,
+            hourLocal: 3,
+            timezone: 'Europe/Berlin',
+            finderBonusSats: '50000',
+        }, token);
+        expect(updated.roundResetIntervalDays).toBe(7);
+        expect(updated.roundResetHourLocal).toBe(3);
+        expect(updated.roundResetTimezone).toBe('Europe/Berlin');
+        expect(updated.finderBonusSats).toBe(50000);
+        expect(roundReset.applyConfig).toHaveBeenCalledWith(updated);
+    });
+
+    it('updateRoundResetConfig: clearing interval (=null) unschedules via applyConfig', async () => {
+        const { id, token } = await freshGroup();
+        await service.updateRoundResetConfig(id, {
+            intervalDays: 7, hourLocal: 3, timezone: 'Europe/Berlin',
+        }, token);
+        roundReset.applyConfig.mockClear();
+        const updated = await service.updateRoundResetConfig(id, { intervalDays: null }, token);
+        expect(updated.roundResetIntervalDays).toBeNull();
+        // applyConfig is the unschedule path too — it sees a null interval and tears down.
+        expect(roundReset.applyConfig).toHaveBeenCalledTimes(1);
+    });
+
+    it('updateRoundResetConfig: validation — invalid interval', async () => {
+        const { id, token } = await freshGroup();
+        for (const v of [0, -1, 1.5, 366, 99999]) {
+            await expect(service.updateRoundResetConfig(id, { intervalDays: v as any }, token))
+                .rejects.toMatchObject({ code: 'invalid-interval' });
+        }
+    });
+
+    it('updateRoundResetConfig: validation — invalid hour', async () => {
+        const { id, token } = await freshGroup();
+        for (const v of [-1, 24, 3.5, 99]) {
+            await expect(service.updateRoundResetConfig(id, { hourLocal: v as any }, token))
+                .rejects.toMatchObject({ code: 'invalid-hour' });
+        }
+    });
+
+    it('updateRoundResetConfig: validation — invalid timezone', async () => {
+        const { id, token } = await freshGroup();
+        for (const v of ['', 'NOT_A_REAL_TZ', 'Mars/Olympus', null as any, 42 as any]) {
+            await expect(service.updateRoundResetConfig(id, { timezone: v }, token))
+                .rejects.toMatchObject({ code: 'invalid-timezone' });
+        }
+    });
+
+    it('updateRoundResetConfig: validation — invalid bonus', async () => {
+        const { id, token } = await freshGroup();
+        // negative
+        await expect(service.updateRoundResetConfig(id, { finderBonusSats: -1 }, token))
+            .rejects.toMatchObject({ code: 'invalid-bonus' });
+        // over the cap (1 BTC = 100M sats; we set 200M to exceed)
+        await expect(service.updateRoundResetConfig(id, { finderBonusSats: '200000000' }, token))
+            .rejects.toMatchObject({ code: 'invalid-bonus' });
+        // garbage string
+        await expect(service.updateRoundResetConfig(id, { finderBonusSats: 'not-a-number' }, token))
+            .rejects.toMatchObject({ code: 'invalid-bonus' });
+    });
+
+    it('updateRoundResetConfig: incomplete-schedule when interval set but hour/tz missing', async () => {
+        const { id, token } = await freshGroup();
+        // Group starts with no hour/tz. Setting only interval should fail.
+        await expect(service.updateRoundResetConfig(id, { intervalDays: 7 }, token))
+            .rejects.toMatchObject({ code: 'incomplete-schedule' });
+    });
+
+    it('updateRoundResetConfig: PATCH semantics — undefined leaves columns alone', async () => {
+        const { id, token } = await freshGroup();
+        await service.updateRoundResetConfig(id, {
+            intervalDays: 7, hourLocal: 3, timezone: 'Europe/Berlin', finderBonusSats: 100000,
+        }, token);
+        // Only update bonus; interval/hour/tz must stay.
+        const updated = await service.updateRoundResetConfig(id, { finderBonusSats: 200000 }, token);
+        expect(updated.roundResetIntervalDays).toBe(7);
+        expect(updated.roundResetHourLocal).toBe(3);
+        expect(updated.roundResetTimezone).toBe('Europe/Berlin');
+        expect(updated.finderBonusSats).toBe(200000);
+    });
+
+    it('updateRoundResetConfig: bonus null clears to 0', async () => {
+        const { id, token } = await freshGroup();
+        await service.updateRoundResetConfig(id, {
+            intervalDays: 7, hourLocal: 3, timezone: 'Europe/Berlin', finderBonusSats: 100000,
+        }, token);
+        const cleared = await service.updateRoundResetConfig(id, { finderBonusSats: null }, token);
+        expect(cleared.finderBonusSats).toBe(0);
+    });
+
+    it('updateRoundResetConfig: bonus accepts string|number', async () => {
+        const { id, token } = await freshGroup();
+        const a = await service.updateRoundResetConfig(id, { finderBonusSats: '12345' }, token);
+        expect(a.finderBonusSats).toBe(12345);
+        const b = await service.updateRoundResetConfig(id, { finderBonusSats: 67890 }, token);
+        expect(b.finderBonusSats).toBe(67890);
+    });
+
+    it('dissolveGroup: also unschedules the per-group cron', async () => {
+        const { id, token } = await freshGroup();
+        // Need ≥ 2 members so the group is "active" — not strictly required
+        // for dissolveGroup but realistic.
+        await service.addMember(id, 'bc1qbob', token);
+        await service.dissolveGroup(id, token);
+        expect(roundReset.unschedule).toHaveBeenCalledWith(id);
     });
 
 });
