@@ -204,6 +204,15 @@ export function cronExprForPreset(preset: 'daily' | 'weekly' | 'monthly' | 'cust
         case 'weekly':  return '0 0 0 * * 1';   // every Monday at 00:00 (= end of Sunday)
         case 'monthly': return '0 0 0 1 * *';   // 1st of every month at 00:00 (= end of month)
         case 'custom':  return '0 0 0 * * *';   // daily fire, gated by fireIfDue elapsed-check
+        // Defence-in-depth: the union above is exhaustive for typed
+        // callers, but a DB row whose `roundResetPreset` drifted out of
+        // range (manual SQL, future enum addition without code update)
+        // would otherwise silently return `undefined` and crash the
+        // CronJob constructor with a confusing message. Fail loudly here.
+        default: {
+            const exhaustiveCheck: never = preset;
+            throw new Error(`cronExprForPreset: unknown preset '${exhaustiveCheck}'`);
+        }
     }
 }
 

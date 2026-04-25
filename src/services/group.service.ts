@@ -415,6 +415,23 @@ export class GroupService implements OnModuleInit {
     ): Promise<PplnsGroupEntity> {
         const group = await this.requireAdminToken(groupId, token);
 
+        // Cross-field consistency: `intervalDays` is only meaningful when
+        // preset === 'custom'. A PATCH that sends both a non-custom preset
+        // and a positive intervalDays would otherwise persist the dead
+        // intervalDays value (cron ignores it for daily/weekly/monthly,
+        // but the row pollutes downstream debugging + would re-surface
+        // if the preset is later switched back to 'custom').
+        if (settings.preset !== undefined
+            && settings.preset !== null
+            && settings.preset !== 'custom'
+            && settings.intervalDays !== undefined
+            && settings.intervalDays !== null) {
+            throw new GroupServiceError(
+                'invalid-interval',
+                `intervalDays may only be set when preset === 'custom' (got preset='${settings.preset}', intervalDays=${settings.intervalDays})`,
+            );
+        }
+
         // preset — switches calendar cadence (daily/weekly/monthly) vs
         // interval-driven (custom) vs disabled (null). For calendar
         // presets the system aligns to actual calendar boundaries
@@ -501,6 +518,19 @@ export class GroupService implements OnModuleInit {
                     throw new GroupServiceError(
                         'invalid-bonus',
                         `finderBonusSats must be in [0, ${MAX_FINDER_BONUS_SATS}] sats`,
+                    );
+                }
+                // Reject sub-minPayout positive bonuses. Without this, the
+                // coinbase-distribution math would silently clear the bonus
+                // at runtime (`bonusEmitted = cappedBonusSats >= minPayout`)
+                // and emit no on-chain output — admin sees the configured
+                // value in the UI but no block ever pays it. Better to fail
+                // the PATCH so the admin knows their value is too low.
+                const minPayoutSats = this.groupSoloService.getMinPayoutSats();
+                if (parsed > 0 && parsed < minPayoutSats) {
+                    throw new GroupServiceError(
+                        'invalid-bonus',
+                        `finderBonusSats must be either 0 (disabled) or at least the pool's minimum payout of ${minPayoutSats} sats`,
                     );
                 }
                 group.finderBonusSats = parsed;

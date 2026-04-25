@@ -162,6 +162,18 @@ export class GroupSoloService implements OnModuleInit {
         return this.enabled && !!this.redis;
     }
 
+    /**
+     * Effective minimum-payout floor for any on-chain output the engine
+     * emits (after the DUST_LIMIT_SATS clamp). GroupService reads this
+     * to validate `finderBonusSats` at PATCH time — a bonus below this
+     * threshold would silently be dropped by the coinbase-distribution
+     * math (`bonusEmitted = cappedBonusSats >= minPayout`), so the API
+     * rejects it instead of letting the admin configure a no-op.
+     */
+    getMinPayoutSats(): number {
+        return this.minPayoutSats;
+    }
+
     /** Delegate to GroupService — allows stratum layer to query address membership via one service. */
     getGroupForAddress(address: string) {
         return this.groupService.getGroupForAddress(address);
@@ -576,11 +588,17 @@ export class GroupSoloService implements OnModuleInit {
                 throw e;
             }
 
-            // Snapshot(s) + round cleared only after the TX committed. With
-            // per-finder snapshots, every other miner's snapshot is now
-            // stale (round just reset) so we wipe the whole prefix.
-            await this.deleteAllSnapshots(groupId);
+            // Snapshot(s) + round cleared only after the TX committed. Order
+            // matters: clear the share window FIRST, snapshots SECOND. If a
+            // concurrent stratum session calls getPayoutDistribution between
+            // the two Redis ops, an empty share window triggers the early-
+            // exit fallback path (line ~244) which does NOT write a
+            // snapshot — so no stale snapshot can survive into the next
+            // round. The reverse order had a small race window where a new
+            // snapshot built from soon-to-be-cleared shares could outlive
+            // resetRound and trip the next block's mismatch guard.
             await this.resetRound(groupId);
+            await this.deleteAllSnapshots(groupId);
         } finally {
             this.blockFoundLocks.delete(groupId);
         }
@@ -791,6 +809,13 @@ export class GroupSoloService implements OnModuleInit {
             }
             await this.redis.hDel(keys.rejectedShares, address);
             await this.redis.hDel(keys.lastShareAt, address);
+            // Drop the kicked member's per-finder snapshot. It would
+            // otherwise live until 1h TTL or the next block-found wipe.
+            // Inert (the member's stratum sessions can no longer route
+            // to group-solo because the address-cache no longer marks
+            // them as in an active group), but leaving it behind is just
+            // dead state in Valkey.
+            await this.redis.del(snapshotKeyFor(groupId, address));
         }
 
         await this.balanceRepo.delete({ address, groupId });
@@ -843,20 +868,30 @@ export class GroupSoloService implements OnModuleInit {
      *     not round state)
      *   - `pplns_group` row + member roster
      *
-     * Idempotency:
-     *   - Skipped if a block-found wipe ran in the last 60 s (the
-     *     block path is the more authoritative trigger; we don't want
-     *     to double-wipe and we don't want to race against an
-     *     in-flight onBlockFound transaction)
+     * Idempotency / race protection:
+     *   - `blockFoundLocks` (in-process Set) makes scheduled-vs-onBlockFound
+     *     mutually exclusive within this process. Single-instance pool, so
+     *     this is sufficient — no clustered-deployment failure mode to
+     *     worry about. Whichever ran first finishes; the other is skipped.
+     *   - `lastRoundResetAt` 60 s guard below additionally prevents a
+     *     scheduled-vs-scheduled re-fire (only `scheduledRoundReset`
+     *     itself updates `lastRoundResetAt` — see line 895). It does NOT
+     *     gate against `onBlockFound` (which doesn't write that column);
+     *     a block-found wipe at 23:59:55 followed by a calendar fire at
+     *     00:00:00 will run the calendar wipe — which is correct under
+     *     Variant B semantics ("everything earned in the past period gets
+     *     wiped at the boundary"), the round is just empty so the wipe
+     *     is a near-no-op.
      *
      * Block-found behaviour is unchanged — only timed resets wipe
      * the pending balances. See `onBlockFound` for the per-block
      * settlement flow.
      */
     async scheduledRoundReset(groupId: string): Promise<void> {
-        // Skip if a block-found is in flight. Block-found is the more
-        // authoritative trigger and already wipes the round; racing
-        // with it would corrupt the snapshot/history transaction.
+        // Skip if a block-found is in flight (the in-process lock both
+        // pathways check). Block-found is the more authoritative trigger
+        // and already wipes the round; racing with it would let two
+        // pending-balance writes interleave.
         if (this.blockFoundLocks.has(groupId)) {
             console.log(`[GroupSolo] Skipping scheduled reset for ${groupId} — block-found in progress`);
             return;
@@ -868,12 +903,15 @@ export class GroupSoloService implements OnModuleInit {
             return;
         }
 
-        // Anti-double-fire: if a recent reset (block-found OR scheduled)
-        // ran less than ~60 s ago, the round is essentially empty —
-        // resetting again would just be noise.
+        // Anti-double-fire (scheduled-vs-scheduled only): skip if the
+        // previous scheduled reset ran < 60 s ago. `lastRoundResetAt` is
+        // written exclusively by this method; onBlockFound does not touch
+        // it (see docstring above for why that's intentional under
+        // Variant B). The blockFoundLocks check above is the actual
+        // serialization with the block-found path.
         const lastResetAt = group.lastRoundResetAt?.getTime() ?? 0;
         if (Date.now() - lastResetAt < 60_000) {
-            console.log(`[GroupSolo] Skipping scheduled reset for ${groupId} — last reset ${Date.now() - lastResetAt}ms ago`);
+            console.log(`[GroupSolo] Skipping scheduled reset for ${groupId} — last scheduled reset ${Date.now() - lastResetAt}ms ago`);
             return;
         }
 
@@ -891,7 +929,9 @@ export class GroupSoloService implements OnModuleInit {
         // at the per-group level (the pool's books absorb the net).
         await this.balanceRepo.delete({ groupId });
 
-        // Mark the reset for the anti-double-fire guard above.
+        // Mark the reset for the scheduled-vs-scheduled guard above and
+        // for `computeNextResetAt` / the custom-preset elapsed-check in
+        // GroupRoundResetService (both anchor on this column).
         await this.groupRepo.update({ id: groupId }, { lastRoundResetAt: new Date() });
     }
 

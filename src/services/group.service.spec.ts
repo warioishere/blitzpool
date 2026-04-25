@@ -88,6 +88,10 @@ function createMockGroupSolo() {
         getMemberLastActive: jest.fn(async () => null),
         removeMemberState: jest.fn(async () => undefined),
         removeGroupState: jest.fn(async () => undefined),
+        // Min-payout floor for finderBonusSats validation. Default 5000 sats
+        // (matches DEFAULT_MIN_PAYOUT_SATS); individual tests can spy/override
+        // when they need a different value.
+        getMinPayoutSats: jest.fn(() => 5000),
     };
 }
 
@@ -433,6 +437,42 @@ describe('GroupService', () => {
         expect(a.finderBonusSats).toBe(12345);
         const b = await service.updateRoundResetConfig(id, { finderBonusSats: 67890 }, token);
         expect(b.finderBonusSats).toBe(67890);
+    });
+
+    it('updateRoundResetConfig: bonus below pool minPayout is rejected (would be silently dropped at runtime)', async () => {
+        const { id, token } = await freshGroup();
+        // Default mock returns minPayoutSats=5000. A bonus of 4000 would be
+        // accepted by the bounds check (≥0, ≤MAX) but the coinbase-distribution
+        // math would clear it via `bonusEmitted = cappedBonusSats >= minPayout`.
+        // Validation should reject so the admin doesn't see "configured" without
+        // any block ever paying it.
+        await expect(service.updateRoundResetConfig(id, { finderBonusSats: 4000 }, token))
+            .rejects.toMatchObject({ code: 'invalid-bonus' });
+        // Boundary: exactly minPayout passes.
+        const ok = await service.updateRoundResetConfig(id, { finderBonusSats: 5000 }, token);
+        expect(ok.finderBonusSats).toBe(5000);
+        // 0 stays the "disabled" sentinel — must NOT be rejected even though
+        // 0 < minPayout (the rule is "either off or above the floor").
+        const off = await service.updateRoundResetConfig(id, { finderBonusSats: 0 }, token);
+        expect(off.finderBonusSats).toBe(0);
+    });
+
+    it('updateRoundResetConfig: rejects intervalDays when preset is non-custom', async () => {
+        const { id, token } = await freshGroup();
+        // Non-custom preset + positive intervalDays would persist as dead
+        // state in DB (cron ignores intervalDays for daily/weekly/monthly).
+        await expect(service.updateRoundResetConfig(id, {
+            preset: 'daily', timezone: 'Europe/Berlin', intervalDays: 25,
+        }, token)).rejects.toMatchObject({ code: 'invalid-interval' });
+        await expect(service.updateRoundResetConfig(id, {
+            preset: 'weekly', timezone: 'Europe/Berlin', intervalDays: 7,
+        }, token)).rejects.toMatchObject({ code: 'invalid-interval' });
+        // intervalDays:null is fine even with a non-custom preset (clears).
+        const ok = await service.updateRoundResetConfig(id, {
+            preset: 'monthly', timezone: 'Europe/Berlin', intervalDays: null,
+        }, token);
+        expect(ok.roundResetPreset).toBe('monthly');
+        expect(ok.roundResetIntervalDays).toBeNull();
     });
 
     it('dissolveGroup: also unschedules the per-group cron', async () => {
