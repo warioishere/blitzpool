@@ -1,4 +1,4 @@
-import { GroupRoundResetService } from './group-round-reset.service';
+import { GroupRoundResetService, cronExprForPreset, computeNextResetAt } from './group-round-reset.service';
 import { PplnsGroupEntity } from '../ORM/pplns-group/pplns-group.entity';
 
 /**
@@ -23,8 +23,9 @@ function makeGroup(overrides: Partial<PplnsGroupEntity> = {}): PplnsGroupEntity 
         adminTokenHash: 'hash',
         createdAt: new Date('2026-01-01T00:00:00Z'),
         dissolvedAt: null,
+        roundResetPreset: 'custom',
         roundResetIntervalDays: 7,
-        roundResetHourLocal: 3,
+        roundResetHourLocal: 0,
         roundResetTimezone: 'Europe/Berlin',
         finderBonusSats: 0,
         lastRoundResetAt: null,
@@ -91,19 +92,17 @@ describe('GroupRoundResetService', () => {
         expect(schedulerRegistry.addCronJob).not.toHaveBeenCalled();
     });
 
-    it('skips scheduling when interval is null/0/negative', () => {
+    it('skips scheduling when preset is null', () => {
         const { service, schedulerRegistry } = makeService();
-        service.applyConfig(makeGroup({ roundResetIntervalDays: null as any }));
-        service.applyConfig(makeGroup({ roundResetIntervalDays: 0 }));
-        service.applyConfig(makeGroup({ roundResetIntervalDays: -3 }));
+        service.applyConfig(makeGroup({ roundResetPreset: null as any }));
         expect(schedulerRegistry.addCronJob).not.toHaveBeenCalled();
     });
 
-    it('skips scheduling when hour is out of [0,23]', () => {
+    it('skips scheduling when preset=custom but interval is invalid', () => {
         const { service, schedulerRegistry } = makeService();
-        service.applyConfig(makeGroup({ roundResetHourLocal: -1 }));
-        service.applyConfig(makeGroup({ roundResetHourLocal: 24 }));
-        service.applyConfig(makeGroup({ roundResetHourLocal: 3.5 }));
+        service.applyConfig(makeGroup({ roundResetPreset: 'custom', roundResetIntervalDays: null as any }));
+        service.applyConfig(makeGroup({ roundResetPreset: 'custom', roundResetIntervalDays: 0 }));
+        service.applyConfig(makeGroup({ roundResetPreset: 'custom', roundResetIntervalDays: -3 }));
         expect(schedulerRegistry.addCronJob).not.toHaveBeenCalled();
     });
 
@@ -111,6 +110,15 @@ describe('GroupRoundResetService', () => {
         const { service, schedulerRegistry } = makeService();
         service.applyConfig(makeGroup({ roundResetTimezone: null as any }));
         expect(schedulerRegistry.addCronJob).not.toHaveBeenCalled();
+    });
+
+    it('schedules calendar presets without an interval', () => {
+        const { service, schedulerRegistry, jobs } = makeService();
+        service.applyConfig(makeGroup({ roundResetPreset: 'daily', roundResetIntervalDays: null as any }));
+        service.applyConfig(makeGroup({ id: 'grp-2', roundResetPreset: 'weekly', roundResetIntervalDays: null as any }));
+        service.applyConfig(makeGroup({ id: 'grp-3', roundResetPreset: 'monthly', roundResetIntervalDays: null as any }));
+        expect(schedulerRegistry.addCronJob).toHaveBeenCalledTimes(3);
+        expect(jobs.size).toBe(3);
     });
 
     it('schedules once when config is valid', () => {
@@ -123,7 +131,7 @@ describe('GroupRoundResetService', () => {
     it('idempotent: applying twice replaces the previous job (no duplicate)', () => {
         const { service, schedulerRegistry, jobs } = makeService();
         service.applyConfig(makeGroup());
-        service.applyConfig(makeGroup({ roundResetHourLocal: 5 }));
+        service.applyConfig(makeGroup({ roundResetPreset: 'weekly', roundResetIntervalDays: null as any }));
         // Each apply: deleteCronJob (no-op on first, real on second), then add.
         expect(schedulerRegistry.addCronJob).toHaveBeenCalledTimes(2);
         expect(jobs.size).toBe(1);
@@ -238,11 +246,11 @@ describe('GroupRoundResetService', () => {
         expect(schedulerRegistry.deleteCronJob).toHaveBeenCalledWith('group-reset-grp-1');
     });
 
-    it('fireIfDue: cleared interval → unschedules itself', async () => {
+    it('fireIfDue: cleared preset → unschedules itself', async () => {
         const { service, groupRepo, groupSoloService, schedulerRegistry, jobs } = makeService();
         service.applyConfig(makeGroup());
-        // Admin cleared the interval between firings.
-        groupRepo.findOneBy.mockResolvedValue(makeGroup({ roundResetIntervalDays: null as any }));
+        // Admin cleared the preset between firings.
+        groupRepo.findOneBy.mockResolvedValue(makeGroup({ roundResetPreset: null as any }));
 
         const tick = takeCronCallback(jobs, 'grp-1');
         tick();
@@ -251,14 +259,35 @@ describe('GroupRoundResetService', () => {
         expect(schedulerRegistry.deleteCronJob).toHaveBeenCalledWith('group-reset-grp-1');
     });
 
+    it('fireIfDue: calendar preset fires unconditionally on every tick', async () => {
+        const { service, groupRepo, groupSoloService, jobs } = makeService();
+        // Daily preset, no elapsed-check applies. Even if last reset was
+        // 1 minute ago, the cron firing IS the calendar boundary reset.
+        const group = makeGroup({
+            roundResetPreset: 'daily',
+            roundResetIntervalDays: null as any,
+            lastRoundResetAt: new Date(Date.now() - 60 * 1000), // 1 min ago
+        });
+        groupRepo.findOneBy.mockResolvedValue(group);
+        service.applyConfig(group);
+
+        const tick = takeCronCallback(jobs, 'grp-1');
+        tick();
+        await new Promise(setImmediate);
+        expect(groupSoloService.scheduledRoundReset).toHaveBeenCalledWith('grp-1');
+        // Note: the 60-s anti-double-fire guard is in scheduledRoundReset
+        // itself (GroupSoloService), not here. fireIfDue's job is to fire
+        // calendar resets without elapsed math.
+    });
+
     // ── Bootstrap ─────────────────────────────────────────────────────
 
     it('onApplicationBootstrap loads all configured groups and schedules them', async () => {
         const { service, schedulerRegistry, groupRepo } = makeService();
         groupRepo.find.mockResolvedValue([
             makeGroup({ id: 'grp-1' }),
-            makeGroup({ id: 'grp-2', roundResetHourLocal: 5 }),
-            makeGroup({ id: 'grp-3', roundResetTimezone: 'America/New_York' }),
+            makeGroup({ id: 'grp-2', roundResetPreset: 'daily', roundResetIntervalDays: null as any }),
+            makeGroup({ id: 'grp-3', roundResetPreset: 'weekly', roundResetIntervalDays: null as any, roundResetTimezone: 'America/New_York' }),
         ]);
         await service.onApplicationBootstrap();
         expect(schedulerRegistry.addCronJob).toHaveBeenCalledTimes(3);
@@ -280,5 +309,141 @@ describe('GroupRoundResetService', () => {
         const names = schedulerRegistry.addCronJob.mock.calls.map((c: any[]) => c[0]);
         expect(names).toContain('group-reset-grp-1');
         expect(names).toContain('group-reset-grp-3');
+    });
+
+    // ── cronExprForPreset ─────────────────────────────────────────────
+
+    describe('cronExprForPreset', () => {
+        it('daily → fires every day at 00:00', () => {
+            expect(cronExprForPreset('daily')).toBe('0 0 0 * * *');
+        });
+        it('weekly → fires on Monday at 00:00 (= end of Sunday)', () => {
+            expect(cronExprForPreset('weekly')).toBe('0 0 0 * * 1');
+        });
+        it('monthly → fires on day 1 at 00:00 (= end of previous month)', () => {
+            expect(cronExprForPreset('monthly')).toBe('0 0 0 1 * *');
+        });
+        it('custom → fires daily, fireIfDue gates with elapsed-check', () => {
+            expect(cronExprForPreset('custom')).toBe('0 0 0 * * *');
+        });
+    });
+
+    // ── computeNextResetAt ────────────────────────────────────────────
+    //
+    // The exact timestamp depends on "now" in real time, so the assertions
+    // here check structural properties: timestamp is in the future, lands
+    // on the right calendar boundary in the configured TZ, and respects
+    // the elapsed gate for custom presets.
+
+    describe('computeNextResetAt', () => {
+        const TZ = 'Europe/Berlin';
+
+        const partsInTz = (d: Date) => {
+            const fmt = new Intl.DateTimeFormat('en-CA', {
+                timeZone: TZ,
+                year: 'numeric', month: '2-digit', day: '2-digit',
+                hour: '2-digit', minute: '2-digit', second: '2-digit',
+                weekday: 'short', hour12: false,
+            }).formatToParts(d);
+            const get = (n: string) => fmt.find(p => p.type === n)!.value;
+            return {
+                hour: parseInt(get('hour'), 10),
+                minute: parseInt(get('minute'), 10),
+                second: parseInt(get('second'), 10),
+                day: parseInt(get('day'), 10),
+                weekday: get('weekday'),
+            };
+        };
+
+        it('returns null when preset is not set', () => {
+            expect(computeNextResetAt(makeGroup({ roundResetPreset: null as any }))).toBeNull();
+        });
+
+        it('returns null when group is dissolved', () => {
+            expect(computeNextResetAt(makeGroup({ dissolvedAt: new Date() }))).toBeNull();
+        });
+
+        it('returns null when timezone is missing', () => {
+            expect(computeNextResetAt(makeGroup({
+                roundResetPreset: 'daily', roundResetTimezone: null as any,
+            }))).toBeNull();
+        });
+
+        it('daily: next 00:00 in TZ', () => {
+            const next = computeNextResetAt(makeGroup({
+                roundResetPreset: 'daily',
+                roundResetIntervalDays: null as any,
+                roundResetTimezone: TZ,
+            }));
+            expect(next).not.toBeNull();
+            expect(next!.getTime()).toBeGreaterThan(Date.now());
+            const p = partsInTz(next!);
+            expect(p.hour).toBe(0);
+            expect(p.minute).toBe(0);
+            expect(p.second).toBe(0);
+        });
+
+        it('weekly: next Monday 00:00 in TZ', () => {
+            const next = computeNextResetAt(makeGroup({
+                roundResetPreset: 'weekly',
+                roundResetIntervalDays: null as any,
+                roundResetTimezone: TZ,
+            }));
+            expect(next).not.toBeNull();
+            const p = partsInTz(next!);
+            expect(p.hour).toBe(0);
+            expect(p.weekday).toBe('Mon');
+        });
+
+        it('monthly: next 1st of month 00:00 in TZ', () => {
+            const next = computeNextResetAt(makeGroup({
+                roundResetPreset: 'monthly',
+                roundResetIntervalDays: null as any,
+                roundResetTimezone: TZ,
+            }));
+            expect(next).not.toBeNull();
+            const p = partsInTz(next!);
+            expect(p.hour).toBe(0);
+            expect(p.day).toBe(1);
+        });
+
+        it('custom: never-reset → next 00:00 in TZ (immediate)', () => {
+            const next = computeNextResetAt(makeGroup({
+                roundResetPreset: 'custom',
+                roundResetIntervalDays: 7,
+                roundResetTimezone: TZ,
+                lastRoundResetAt: null,
+            }));
+            expect(next).not.toBeNull();
+            const p = partsInTz(next!);
+            expect(p.hour).toBe(0);
+            // First daily fire from now → ≤ 24h away
+            expect(next!.getTime() - Date.now()).toBeLessThan(25 * 60 * 60 * 1000);
+        });
+
+        it('custom: lastResetAt 3d ago + 7d interval → next reset >= ~4d from now', () => {
+            const last = new Date(Date.now() - 3 * DAY_MS);
+            const next = computeNextResetAt(makeGroup({
+                roundResetPreset: 'custom',
+                roundResetIntervalDays: 7,
+                roundResetTimezone: TZ,
+                lastRoundResetAt: last,
+            }));
+            expect(next).not.toBeNull();
+            // Threshold = lastResetAt + 7d - 12h tolerance.
+            // last = now - 3d. So earliest = now + 3.5d.
+            // Next reset must be at the next 00:00 TZ AT OR AFTER that, ≤ 4.5d from now.
+            const delta = next!.getTime() - Date.now();
+            expect(delta).toBeGreaterThanOrEqual(3.5 * DAY_MS - 25 * HOUR_MS); // -25h covers TZ skew
+            expect(delta).toBeLessThanOrEqual(5 * DAY_MS);
+        });
+
+        it('custom invalid interval → null', () => {
+            expect(computeNextResetAt(makeGroup({
+                roundResetPreset: 'custom',
+                roundResetIntervalDays: null as any,
+                roundResetTimezone: TZ,
+            }))).toBeNull();
+        });
     });
 });

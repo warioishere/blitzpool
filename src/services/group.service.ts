@@ -65,11 +65,25 @@ export interface GroupCacheEntry {
  * raw JSON has no bigint literal.
  */
 export interface GroupRoundResetSettings {
+    /**
+     * Reset cadence preset. Set to a string to enable the schedule;
+     * pass `null` to disable scheduled resets entirely.
+     *
+     *   'daily'   → every day at 00:00 in admin's TZ
+     *   'weekly'  → every Monday at 00:00 in admin's TZ
+     *   'monthly' → 1st of every month at 00:00 in admin's TZ
+     *   'custom'  → requires `intervalDays`; fires every N days at 00:00 in TZ
+     *   null      → schedule off
+     */
+    preset?: 'daily' | 'weekly' | 'monthly' | 'custom' | null;
+    /** Only authoritative when preset === 'custom'. Integer 1..365. */
     intervalDays?: number | null;
-    hourLocal?: number;
+    /** Admin's IANA timezone (browser-supplied). Required for any preset. */
     timezone?: string;
     finderBonusSats?: string | number | null;
 }
+
+export type RoundResetPreset = 'daily' | 'weekly' | 'monthly' | 'custom';
 
 @Injectable()
 export class GroupService implements OnModuleInit {
@@ -401,7 +415,34 @@ export class GroupService implements OnModuleInit {
     ): Promise<PplnsGroupEntity> {
         const group = await this.requireAdminToken(groupId, token);
 
-        // intervalDays — accept null (clear) or integer in [1, 365]
+        // preset — switches calendar cadence (daily/weekly/monthly) vs
+        // interval-driven (custom) vs disabled (null). For calendar
+        // presets the system aligns to actual calendar boundaries
+        // (end-of-day / Monday-start / 1st-of-month) in the admin's TZ,
+        // not "every N days from last reset".
+        if (settings.preset !== undefined) {
+            const v = settings.preset;
+            if (v === null) {
+                group.roundResetPreset = null;
+                group.roundResetIntervalDays = null;
+            } else if (v === 'daily' || v === 'weekly' || v === 'monthly' || v === 'custom') {
+                group.roundResetPreset = v;
+                if (v !== 'custom') {
+                    // Calendar presets ignore intervalDays — clear any stale value
+                    // so the schedule is unambiguous.
+                    group.roundResetIntervalDays = null;
+                }
+            } else {
+                throw new GroupServiceError(
+                    'invalid-preset',
+                    `roundResetPreset must be one of 'daily','weekly','monthly','custom' or null`,
+                );
+            }
+        }
+
+        // intervalDays — only meaningful when preset='custom'. Validate
+        // shape regardless so a bad value is rejected even if the caller
+        // hasn't (re-)sent the preset in the same PATCH.
         if (settings.intervalDays !== undefined) {
             if (settings.intervalDays === null) {
                 group.roundResetIntervalDays = null;
@@ -417,19 +458,8 @@ export class GroupService implements OnModuleInit {
             }
         }
 
-        // hourLocal — integer in [0, 23]
-        if (settings.hourLocal !== undefined) {
-            const v = settings.hourLocal;
-            if (!Number.isInteger(v) || v < 0 || v > 23) {
-                throw new GroupServiceError(
-                    'invalid-hour',
-                    'roundResetHourLocal must be an integer in [0, 23]',
-                );
-            }
-            group.roundResetHourLocal = v;
-        }
-
-        // timezone — must be a valid IANA zone
+        // timezone — must be a valid IANA zone. Cron uses this to fire
+        // calendar resets at midnight in the admin's wall-clock.
         if (settings.timezone !== undefined) {
             const v = settings.timezone;
             if (typeof v !== 'string' || v.length === 0 || !isValidTimezone(v)) {
@@ -440,6 +470,11 @@ export class GroupService implements OnModuleInit {
             }
             group.roundResetTimezone = v;
         }
+        // hourLocal is no longer admin-configurable — always 00:00 local
+        // (= end of previous calendar day/week/month). Defensive: lock
+        // any existing entity value to 0 so cron expressions stay
+        // consistent with the new semantics.
+        group.roundResetHourLocal = 0;
 
         // finderBonusSats — non-negative integer (sats). Accept string|number|null.
         // Stored as `number` on the entity (sats are well within Number.MAX_SAFE_INTEGER
@@ -472,24 +507,28 @@ export class GroupService implements OnModuleInit {
             }
         }
 
-        // If the interval is set we need a usable hour + tz on the entity —
-        // either coming in with this PATCH or already persisted. Catch the
-        // partial-config case here rather than letting GroupRoundResetService
-        // silently skip scheduling.
-        if (group.roundResetIntervalDays != null) {
-            if (!Number.isInteger(group.roundResetHourLocal)
-                || group.roundResetHourLocal! < 0
-                || group.roundResetHourLocal! > 23) {
-                throw new GroupServiceError(
-                    'incomplete-schedule',
-                    'roundResetHourLocal must be set when roundResetIntervalDays is set',
-                );
-            }
+        // If a preset is configured we need a TZ on the entity — either
+        // coming in with this PATCH or already persisted. The TZ is
+        // mandatory for both calendar and custom presets because cron
+        // needs it to align to the admin's wall-clock. For 'custom' we
+        // additionally require an integer interval.
+        if (group.roundResetPreset != null) {
             if (!group.roundResetTimezone || !isValidTimezone(group.roundResetTimezone)) {
                 throw new GroupServiceError(
                     'incomplete-schedule',
-                    'roundResetTimezone must be set when roundResetIntervalDays is set',
+                    'roundResetTimezone must be set when roundResetPreset is set',
                 );
+            }
+            if (group.roundResetPreset === 'custom') {
+                if (!group.roundResetIntervalDays
+                    || !Number.isInteger(group.roundResetIntervalDays)
+                    || group.roundResetIntervalDays < 1
+                    || group.roundResetIntervalDays > MAX_RESET_INTERVAL_DAYS) {
+                    throw new GroupServiceError(
+                        'incomplete-schedule',
+                        `roundResetIntervalDays must be set in [1, ${MAX_RESET_INTERVAL_DAYS}] when preset='custom'`,
+                    );
+                }
             }
         }
 

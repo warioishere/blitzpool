@@ -9,35 +9,36 @@ import { GroupSoloService } from './group-solo.service';
 /**
  * Drives the per-group scheduled round-reset cron jobs.
  *
- * Each group with non-NULL `roundResetIntervalDays` gets its own
- * cron job, registered with `SchedulerRegistry`, that fires daily
- * at the group's configured `roundResetHourLocal` in the group's
- * `roundResetTimezone`. The job's callback checks whether enough
- * time has elapsed since `lastRoundResetAt` (with a DST tolerance)
- * and, if yes, calls `GroupSoloService.scheduledRoundReset(groupId)`
- * which performs the Variant-B "wipe everything" sequence.
+ * Each group with a non-NULL `roundResetPreset` gets its own
+ * cron job, registered with `SchedulerRegistry`, that fires at
+ * calendar boundaries in the group's `roundResetTimezone`:
  *
- * Why daily-fire + elapsed-check instead of "every N days" cron:
- *   cron natively supports "every Sunday" (interval=7) and "1st of
- *   the month" (interval≈30) but not arbitrary "every N days from
- *   creation". Firing daily and checking the elapsed time is the
- *   simplest way to support any integer interval uniformly.
+ *   - 'daily'   → 00:00 every day            (cron `0 0 0 * * *`)
+ *   - 'weekly'  → 00:00 on Monday            (cron `0 0 0 * * 1`)
+ *   - 'monthly' → 00:00 on day 1 of month    (cron `0 0 0 1 * *`)
+ *   - 'custom'  → 00:00 every day, gated by elapsed-check on
+ *                 `roundResetIntervalDays`   (cron `0 0 0 * * *`)
+ *
+ * Calendar presets fire exactly at the wall-clock boundary in
+ * the admin's TZ — daily resets at end-of-day, weekly at end-of-
+ * Sunday, monthly at end-of-month including the 28/29/30/31-day
+ * variation. No "every N days from creation" approximation.
  *
  * Lifecycle (called from GroupService / settings controller):
  *   - applyConfig(group)   — after group create / settings update
  *   - unschedule(groupId)  — after group dissolve
  *
- * Tolerance: a 12 h skew off the configured interval is allowed
- * before firing — covers DST transitions where the daily fire-time
- * lands 23 h or 25 h after the previous one.
+ * For 'custom', a 12 h DST tolerance absorbs the skew where the
+ * daily fire lands 23 h or 25 h after the previous one. Calendar
+ * presets are tolerance-free because cron itself is calendar-aware.
  */
+/** Tolerance against the configured interval (ms), absorbs DST skew. */
+const DST_TOLERANCE_MS = 12 * 60 * 60 * 1000;
+
 @Injectable()
 export class GroupRoundResetService implements OnApplicationBootstrap {
 
     private readonly logger = new Logger(GroupRoundResetService.name);
-
-    /** Tolerance against the configured interval (ms), absorbs DST skew. */
-    private static readonly DST_TOLERANCE_MS = 12 * 60 * 60 * 1000;
 
     constructor(
         @InjectRepository(PplnsGroupEntity)
@@ -48,12 +49,12 @@ export class GroupRoundResetService implements OnApplicationBootstrap {
     ) {}
 
     async onApplicationBootstrap(): Promise<void> {
-        // Load every active group with a configured reset interval and
-        // arm its cron job. Groups without configuration stay silent.
+        // Load every active group with a configured preset and arm its
+        // cron job. Groups without a preset stay silent.
         const groups = await this.groupRepo.find({
             where: {
                 dissolvedAt: IsNull(),
-                roundResetIntervalDays: Not(IsNull()),
+                roundResetPreset: Not(IsNull()),
             },
         });
         let scheduled = 0;
@@ -73,21 +74,23 @@ export class GroupRoundResetService implements OnApplicationBootstrap {
     /**
      * (Re-)schedule a group's reset job from its current entity state.
      * Idempotent: silently replaces an existing job for the same group.
-     * Removes the job entirely when the group has no interval configured
+     * Removes the job entirely when the group has no preset configured
      * (admin cleared the setting).
      */
     applyConfig(group: PplnsGroupEntity): void {
-        // Always start clean — handles "interval changed" / "TZ changed"
+        // Always start clean — handles "preset changed" / "TZ changed"
         // by tearing down the old job before deciding whether to arm a
         // new one.
         this.unschedule(group.id);
 
         if (group.dissolvedAt) return;
-        if (!group.roundResetIntervalDays || group.roundResetIntervalDays < 1) return;
-        if (!Number.isInteger(group.roundResetHourLocal)
-            || group.roundResetHourLocal! < 0
-            || group.roundResetHourLocal! > 23) return;
+        if (!group.roundResetPreset) return;
         if (!group.roundResetTimezone) return;
+        if (group.roundResetPreset === 'custom') {
+            // Custom requires an interval; without it the cron has no
+            // meaning. Stay silent rather than fire daily forever.
+            if (!group.roundResetIntervalDays || group.roundResetIntervalDays < 1) return;
+        }
 
         this.scheduleForGroup(group);
     }
@@ -109,19 +112,15 @@ export class GroupRoundResetService implements OnApplicationBootstrap {
 
     /** Build the cron job and register it. Caller must ensure config is valid. */
     private scheduleForGroup(group: PplnsGroupEntity): void {
-        const hour = group.roundResetHourLocal!;
         const tz = group.roundResetTimezone!;
         const groupId = group.id;
-        // Fire daily at the configured local hour. The elapsed-since-last
-        // check inside the callback gates which firings actually run a
-        // reset (every N-th, where N = interval).
-        const cronExpr = `0 0 ${hour} * * *`;
+        const cronExpr = cronExprForPreset(group.roundResetPreset!);
 
         const job = new CronJob(
             cronExpr,
             () => {
-                // Run the elapsed-check + reset out-of-band so the cron
-                // tick isn't blocked on DB / Redis I/O.
+                // Run the reset out-of-band so the cron tick isn't
+                // blocked on DB / Redis I/O.
                 this.fireIfDue(groupId).catch(err => this.logger.error(
                     `reset firing failed for ${groupId}: ${(err as Error).message}`,
                 ));
@@ -132,17 +131,23 @@ export class GroupRoundResetService implements OnApplicationBootstrap {
         );
 
         this.schedulerRegistry.addCronJob(this.cronJobName(groupId), job);
+        const intervalSuffix = group.roundResetPreset === 'custom'
+            ? `, interval=${group.roundResetIntervalDays}d`
+            : '';
         this.logger.log(
-            `scheduled group ${groupId}: '${cronExpr}' in ${tz}, ` +
-            `interval=${group.roundResetIntervalDays}d`,
+            `scheduled group ${groupId}: preset=${group.roundResetPreset} '${cronExpr}' in ${tz}${intervalSuffix}`,
         );
     }
 
     /**
      * Cron-callback body: load the fresh group state and decide whether
-     * to fire the reset based on `lastRoundResetAt`. Loading fresh on
-     * every fire (rather than capturing the entity in a closure) means
-     * settings changes pick up on the next firing without re-arming.
+     * to fire the reset. Loading fresh on every fire (rather than
+     * capturing the entity in a closure) means settings changes pick
+     * up on the next firing without re-arming.
+     *
+     * For calendar presets every firing IS the reset (cron is already
+     * calendar-aligned). For 'custom' the elapsed-check decides whether
+     * the configured interval has been reached.
      */
     private async fireIfDue(groupId: string): Promise<void> {
         const group = await this.groupRepo.findOneBy({ id: groupId });
@@ -152,23 +157,32 @@ export class GroupRoundResetService implements OnApplicationBootstrap {
             this.unschedule(groupId);
             return;
         }
-        if (!group.roundResetIntervalDays || group.roundResetIntervalDays < 1) {
+        if (!group.roundResetPreset) {
             // Admin cleared the setting between firings.
             this.unschedule(groupId);
             return;
         }
 
-        const intervalMs = group.roundResetIntervalDays * 24 * 60 * 60 * 1000;
-        const elapsedMs = group.lastRoundResetAt
-            ? Date.now() - group.lastRoundResetAt.getTime()
-            : Number.POSITIVE_INFINITY;  // never reset → fire immediately
-        const dueThreshold = intervalMs - GroupRoundResetService.DST_TOLERANCE_MS;
+        if (group.roundResetPreset === 'custom') {
+            const intervalDays = group.roundResetIntervalDays ?? 0;
+            if (intervalDays < 1) {
+                this.unschedule(groupId);
+                return;
+            }
+            const intervalMs = intervalDays * 24 * 60 * 60 * 1000;
+            const elapsedMs = group.lastRoundResetAt
+                ? Date.now() - group.lastRoundResetAt.getTime()
+                : Number.POSITIVE_INFINITY;  // never reset → fire immediately
+            const dueThreshold = intervalMs - DST_TOLERANCE_MS;
 
-        if (elapsedMs < dueThreshold) {
-            // Too early — daily-fire ticked but the configured interval
-            // hasn't elapsed yet. Wait for a future firing.
-            return;
+            if (elapsedMs < dueThreshold) {
+                // Too early — daily-fire ticked but the configured interval
+                // hasn't elapsed yet. Wait for a future firing.
+                return;
+            }
         }
+        // Calendar presets fall through unconditionally — the cron only
+        // fires at the configured calendar boundary.
 
         await this.groupSoloService.scheduledRoundReset(groupId);
     }
@@ -176,4 +190,65 @@ export class GroupRoundResetService implements OnApplicationBootstrap {
     private cronJobName(groupId: string): string {
         return `group-reset-${groupId}`;
     }
+}
+
+/**
+ * Cron expressions for each preset. All fire at 00:00 in the
+ * group's TZ — calendar presets pick the calendar-aligned day,
+ * custom fires every day and lets `fireIfDue` gate on elapsed
+ * time.
+ */
+export function cronExprForPreset(preset: 'daily' | 'weekly' | 'monthly' | 'custom'): string {
+    switch (preset) {
+        case 'daily':   return '0 0 0 * * *';   // every day at 00:00
+        case 'weekly':  return '0 0 0 * * 1';   // every Monday at 00:00 (= end of Sunday)
+        case 'monthly': return '0 0 0 1 * *';   // 1st of every month at 00:00 (= end of month)
+        case 'custom':  return '0 0 0 * * *';   // daily fire, gated by fireIfDue elapsed-check
+    }
+}
+
+/**
+ * Compute the wall-clock timestamp of the next scheduled reset
+ * for a group, or null if the schedule is disabled. Used by the
+ * public group-view endpoint so the UI can show an exact countdown
+ * to the next reset (no client-side TZ math required).
+ *
+ * For calendar presets the next reset is exactly the next cron
+ * fire (00:00 in the group's TZ on the appropriate calendar
+ * boundary). For 'custom' it's the first daily cron fire at or
+ * after `lastRoundResetAt + intervalDays - DST tolerance`; this
+ * matches the gate inside `fireIfDue` so the displayed time and
+ * the actual fire time agree.
+ */
+export function computeNextResetAt(group: PplnsGroupEntity): Date | null {
+    if (!group.roundResetPreset) return null;
+    if (!group.roundResetTimezone) return null;
+    if (group.dissolvedAt) return null;
+    if (group.roundResetPreset === 'custom') {
+        if (!group.roundResetIntervalDays || group.roundResetIntervalDays < 1) return null;
+    }
+
+    const cronExpr = cronExprForPreset(group.roundResetPreset);
+    // start=false → just used as a calculator, never actually fires.
+    const tempJob = new CronJob(cronExpr, () => {}, null, false, group.roundResetTimezone);
+
+    if (group.roundResetPreset !== 'custom') {
+        return tempJob.nextDate().toJSDate();
+    }
+
+    // Custom: walk forward through daily fires; pick the first one
+    // at or after the elapsed-due threshold.
+    const intervalMs = group.roundResetIntervalDays! * 24 * 60 * 60 * 1000;
+    const earliestMs = group.lastRoundResetAt
+        ? group.lastRoundResetAt.getTime() + intervalMs - DST_TOLERANCE_MS
+        : Date.now();
+    const lookaheadDays = group.roundResetIntervalDays! + 2; // +2 covers DST + boundary
+    const upcoming = tempJob.nextDates(lookaheadDays);
+    for (const d of upcoming) {
+        const ms = d.toJSDate().getTime();
+        if (ms >= earliestMs) return d.toJSDate();
+    }
+    return upcoming.length > 0
+        ? upcoming[upcoming.length - 1].toJSDate()
+        : null;
 }

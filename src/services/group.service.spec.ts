@@ -297,52 +297,65 @@ describe('GroupService', () => {
 
     it('updateRoundResetConfig: requires admin token', async () => {
         const { id } = await freshGroup();
-        await expect(service.updateRoundResetConfig(id, { intervalDays: 7 }, undefined))
+        await expect(service.updateRoundResetConfig(id, { preset: 'weekly', timezone: 'Europe/Berlin' }, undefined))
             .rejects.toMatchObject({ code: 'missing-token' });
-        await expect(service.updateRoundResetConfig(id, { intervalDays: 7 }, 'wrong'))
+        await expect(service.updateRoundResetConfig(id, { preset: 'weekly', timezone: 'Europe/Berlin' }, 'wrong'))
             .rejects.toMatchObject({ code: 'invalid-token' });
     });
 
-    it('updateRoundResetConfig: full valid config persists + arms cron', async () => {
+    it('updateRoundResetConfig: calendar preset (weekly) persists + arms cron', async () => {
         const { id, token } = await freshGroup();
         const updated = await service.updateRoundResetConfig(id, {
-            intervalDays: 7,
-            hourLocal: 3,
+            preset: 'weekly',
             timezone: 'Europe/Berlin',
             finderBonusSats: '50000',
         }, token);
-        expect(updated.roundResetIntervalDays).toBe(7);
-        expect(updated.roundResetHourLocal).toBe(3);
+        expect(updated.roundResetPreset).toBe('weekly');
+        expect(updated.roundResetIntervalDays).toBeNull(); // calendar presets clear intervalDays
         expect(updated.roundResetTimezone).toBe('Europe/Berlin');
         expect(updated.finderBonusSats).toBe(50000);
         expect(roundReset.applyConfig).toHaveBeenCalledWith(updated);
     });
 
-    it('updateRoundResetConfig: clearing interval (=null) unschedules via applyConfig', async () => {
+    it('updateRoundResetConfig: custom preset persists + arms cron', async () => {
+        const { id, token } = await freshGroup();
+        const updated = await service.updateRoundResetConfig(id, {
+            preset: 'custom',
+            intervalDays: 25,
+            timezone: 'Europe/Berlin',
+        }, token);
+        expect(updated.roundResetPreset).toBe('custom');
+        expect(updated.roundResetIntervalDays).toBe(25);
+        expect(updated.roundResetTimezone).toBe('Europe/Berlin');
+    });
+
+    it('updateRoundResetConfig: clearing preset (=null) unschedules via applyConfig', async () => {
         const { id, token } = await freshGroup();
         await service.updateRoundResetConfig(id, {
-            intervalDays: 7, hourLocal: 3, timezone: 'Europe/Berlin',
+            preset: 'custom', intervalDays: 7, timezone: 'Europe/Berlin',
         }, token);
         roundReset.applyConfig.mockClear();
-        const updated = await service.updateRoundResetConfig(id, { intervalDays: null }, token);
+        const updated = await service.updateRoundResetConfig(id, { preset: null }, token);
+        expect(updated.roundResetPreset).toBeNull();
         expect(updated.roundResetIntervalDays).toBeNull();
-        // applyConfig is the unschedule path too — it sees a null interval and tears down.
+        // applyConfig is the unschedule path too — it sees null preset and tears down.
         expect(roundReset.applyConfig).toHaveBeenCalledTimes(1);
     });
 
-    it('updateRoundResetConfig: validation — invalid interval', async () => {
+    it('updateRoundResetConfig: validation — invalid preset', async () => {
         const { id, token } = await freshGroup();
-        for (const v of [0, -1, 1.5, 366, 99999]) {
-            await expect(service.updateRoundResetConfig(id, { intervalDays: v as any }, token))
-                .rejects.toMatchObject({ code: 'invalid-interval' });
+        for (const v of ['', 'never', 'WEEKLY', 'every-2-weeks', 0, true]) {
+            await expect(service.updateRoundResetConfig(id, { preset: v as any }, token))
+                .rejects.toMatchObject({ code: 'invalid-preset' });
         }
     });
 
-    it('updateRoundResetConfig: validation — invalid hour', async () => {
+    it('updateRoundResetConfig: validation — invalid interval (when preset=custom)', async () => {
         const { id, token } = await freshGroup();
-        for (const v of [-1, 24, 3.5, 99]) {
-            await expect(service.updateRoundResetConfig(id, { hourLocal: v as any }, token))
-                .rejects.toMatchObject({ code: 'invalid-hour' });
+        for (const v of [0, -1, 1.5, 366, 99999]) {
+            await expect(service.updateRoundResetConfig(id, {
+                preset: 'custom', intervalDays: v as any, timezone: 'Europe/Berlin',
+            }, token)).rejects.toMatchObject({ code: 'invalid-interval' });
         }
     });
 
@@ -367,30 +380,48 @@ describe('GroupService', () => {
             .rejects.toMatchObject({ code: 'invalid-bonus' });
     });
 
-    it('updateRoundResetConfig: incomplete-schedule when interval set but hour/tz missing', async () => {
+    it('updateRoundResetConfig: incomplete-schedule when preset set but tz missing', async () => {
         const { id, token } = await freshGroup();
-        // Group starts with no hour/tz. Setting only interval should fail.
-        await expect(service.updateRoundResetConfig(id, { intervalDays: 7 }, token))
+        // Group starts with no tz. Setting only preset should fail.
+        await expect(service.updateRoundResetConfig(id, { preset: 'daily' }, token))
             .rejects.toMatchObject({ code: 'incomplete-schedule' });
+    });
+
+    it('updateRoundResetConfig: incomplete-schedule when preset=custom but interval missing', async () => {
+        const { id, token } = await freshGroup();
+        await expect(service.updateRoundResetConfig(id, {
+            preset: 'custom', timezone: 'Europe/Berlin',
+        }, token)).rejects.toMatchObject({ code: 'incomplete-schedule' });
     });
 
     it('updateRoundResetConfig: PATCH semantics — undefined leaves columns alone', async () => {
         const { id, token } = await freshGroup();
         await service.updateRoundResetConfig(id, {
-            intervalDays: 7, hourLocal: 3, timezone: 'Europe/Berlin', finderBonusSats: 100000,
+            preset: 'custom', intervalDays: 7, timezone: 'Europe/Berlin', finderBonusSats: 100000,
         }, token);
-        // Only update bonus; interval/hour/tz must stay.
+        // Only update bonus; preset/interval/tz must stay.
         const updated = await service.updateRoundResetConfig(id, { finderBonusSats: 200000 }, token);
+        expect(updated.roundResetPreset).toBe('custom');
         expect(updated.roundResetIntervalDays).toBe(7);
-        expect(updated.roundResetHourLocal).toBe(3);
         expect(updated.roundResetTimezone).toBe('Europe/Berlin');
         expect(updated.finderBonusSats).toBe(200000);
+    });
+
+    it('updateRoundResetConfig: switching from custom to weekly clears intervalDays', async () => {
+        const { id, token } = await freshGroup();
+        await service.updateRoundResetConfig(id, {
+            preset: 'custom', intervalDays: 25, timezone: 'Europe/Berlin',
+        }, token);
+        const updated = await service.updateRoundResetConfig(id, { preset: 'weekly' }, token);
+        expect(updated.roundResetPreset).toBe('weekly');
+        // Calendar presets are cadence-driven by cron, intervalDays is meaningless.
+        expect(updated.roundResetIntervalDays).toBeNull();
     });
 
     it('updateRoundResetConfig: bonus null clears to 0', async () => {
         const { id, token } = await freshGroup();
         await service.updateRoundResetConfig(id, {
-            intervalDays: 7, hourLocal: 3, timezone: 'Europe/Berlin', finderBonusSats: 100000,
+            preset: 'custom', intervalDays: 7, timezone: 'Europe/Berlin', finderBonusSats: 100000,
         }, token);
         const cleared = await service.updateRoundResetConfig(id, { finderBonusSats: null }, token);
         expect(cleared.finderBonusSats).toBe(0);
