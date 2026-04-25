@@ -546,9 +546,17 @@ export function buildCoinbaseDistribution(
 
     const overshoot = preliminaryOnChain - rewardForMiners;
     if (overshoot > 0) {
+        // Sort ASCENDING by balanceOld so the LARGEST credit-claimer absorbs
+        // the floor-rounding residual at the end of the loop. The smallest
+        // claimer's balanceOld can be < the residual when many small credits
+        // share an overshoot — descending sort would push the residual onto
+        // them and produce a NEGATIVE onChain, which Phase 6's emission
+        // filter then drops, leaving total emitted = rewardForMiners + 1
+        // sat. Bitcoin Core rejects with bad-cb-amount. Ascending sort
+        // gives the residual to whoever has the most headroom for it.
         const creditClaimers = kept
             .filter(c => c.balanceOld > 0)
-            .sort((a, b) => b.balanceOld - a.balanceOld);
+            .sort((a, b) => a.balanceOld - b.balanceOld);
 
         let totalCredit = 0;
         for (const c of creditClaimers) totalCredit += c.balanceOld;
@@ -557,9 +565,16 @@ export function buildCoinbaseDistribution(
             let applied = 0;
             for (let i = 0; i < creditClaimers.length; i++) {
                 const c = creditClaimers[i];
-                const cut = (i === creditClaimers.length - 1)
+                let cut = (i === creditClaimers.length - 1)
                     ? overshoot - applied            // last one soaks up floor-rounding
                     : Math.floor(overshoot * c.balanceOld / totalCredit);
+                // Defence-in-depth clamp: a cut must NEVER exceed the
+                // claimer's available credit, otherwise c.onChain goes
+                // negative and emission overshoots (see ascending-sort
+                // rationale above for why this is unreachable in normal
+                // configurations, but the clamp closes the door for any
+                // pathological input).
+                if (cut > c.balanceOld) cut = c.balanceOld;
                 c.onChain -= cut;
                 c.balanceNew += cut;                 // unpaid portion stays in ledger
                 applied += cut;
@@ -567,6 +582,26 @@ export function buildCoinbaseDistribution(
                     `${label} solvency cap: ${c.address} credit cut ${cut} sats `
                     + `(${c.onChain} on-chain, ${c.balanceNew} carry-forward — abandoned-debtor imbalance)`,
                 );
+            }
+            // If the clamp swallowed some sats (`applied < overshoot`),
+            // the cap couldn't close the gap and emission would still
+            // overshoot. Fall back to fee-100 % rather than build an
+            // invalid block. This branch is unreachable when totalCredit
+            // >= overshoot AND ascending sort is used — kept as belt-and-
+            // suspenders against future refactors.
+            if (applied < overshoot) {
+                console.error(
+                    `${label} CRITICAL: solvency cap clamp residual ${overshoot - applied} sats `
+                    + `(applied=${applied}, overshoot=${overshoot}, claimers=${creditClaimers.length}). `
+                    + `Emitting fee-100 % fallback to avoid bad-cb-amount.`,
+                );
+                return {
+                    payouts: feeAddress
+                        ? [{ address: feeAddress, percent: 100, sats: blockRewardSats }]
+                        : [],
+                    consideredAddresses,
+                    balanceAfter: new Map(),
+                };
             }
         } else {
             // Mathematically impossible: overshoot > 0 ⇒ sum(kept.balance_old) > 0

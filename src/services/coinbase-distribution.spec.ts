@@ -3,6 +3,9 @@ import {
     CoinbaseDistributionEntry,
     DUST_LIMIT_SATS,
     DEFAULT_COINBASE_WEIGHT_BUDGET,
+    COINBASE_BASE_WEIGHT,
+    COINBASE_OUTPUT_WEIGHT,
+    COINBASE_WITNESS_COMMITMENT_WEIGHT,
 } from './coinbase-distribution';
 
 const FEE_ADDR = 'bc1qfee';
@@ -1290,6 +1293,170 @@ describe('buildCoinbaseDistribution — credit/debit ledger model', () => {
             // Bob and Charlie were trimmed → carried as pending balance
             expect(r.balanceAfter.has(BOB)).toBe(true);
             expect(r.balanceAfter.has(CHARLIE)).toBe(true);
+        });
+    });
+
+    /**
+     * Consensus-validity invariant — the only things that matter for
+     * Bitcoin Core to accept the block we build:
+     *
+     *   1. sum(coinbase output sats) ≤ blockReward    (bad-cb-amount)
+     *   2. coinbase weight ≤ configured budget         (oversized coinbase
+     *                                                   pushes the block past
+     *                                                   weight limits)
+     *
+     * Existing tests assert specific math (alice gets X, bob gets Y).
+     * This block fuzzes the entire input space the engine actually
+     * sees in production — every payout mode flag, every reward level
+     * across halvings, group sizes from 1 to 30, with/without bonus,
+     * with/without fee — and asserts only the two invariants. Catches
+     * the case the test author didn't think to test for. If a future
+     * refactor introduces a path where Core would reject our block,
+     * this fuzzer will catch it before regtest does.
+     *
+     * 500 trials × every code path = ~5k branch executions per run.
+     * Pure-function, ~50 ms total.
+     */
+    describe('consensus-validity invariants (fuzz)', () => {
+        const REWARDS = [
+            5_000_000_000,        // pre-2024 subsidy
+            3_125_000_000,        // post-2024 subsidy
+            1_562_500_000,        // post-2028 subsidy
+            390_625_000,          // post-2036 subsidy
+            48_828_125,           // late-era subsidy + small fees
+            1_000_000_000,        // round number, lots of fees
+        ];
+
+        function rand<T>(arr: T[]): T {
+            return arr[Math.floor(Math.random() * arr.length)];
+        }
+
+        function maxOutputsForBudget(budget: number, hasFee: boolean, hasBonus: boolean): number {
+            const fixed = COINBASE_BASE_WEIGHT + COINBASE_WITNESS_COMMITMENT_WEIGHT;
+            const overheadOutputs = (hasFee ? 1 : 0) + (hasBonus ? 1 : 0);
+            const remaining = budget - fixed - overheadOutputs * COINBASE_OUTPUT_WEIGHT;
+            return Math.max(0, Math.floor(remaining / COINBASE_OUTPUT_WEIGHT));
+        }
+
+        it('500 random configurations — sum(payouts.sats) ≤ blockReward AND weight ≤ budget', () => {
+            const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+            const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+            try {
+                for (let trial = 0; trial < 500; trial++) {
+                    // Randomize the entire input surface.
+                    const reward = rand(REWARDS);
+                    const feePercent = rand([0, 0.5, 1, 2, 2.5, 5]);
+                    const feeAddress = Math.random() < 0.85 ? FEE_ADDR : '';
+                    const suppressMatchingDebits = Math.random() < 0.5;
+                    const minPayoutSats = rand([DUST_LIMIT_SATS, 1000, 5000, 10000]);
+                    const budget = rand([
+                        DEFAULT_COINBASE_WEIGHT_BUDGET,
+                        20_000,    // tight — forces trim
+                        5_000,     // very tight — forces aggressive trim
+                        100_000,   // generous
+                    ]);
+
+                    const n = 1 + Math.floor(Math.random() * 30);
+                    const sharesIn: Record<string, number> = {};
+                    const balancesIn = new Map<string, number>();
+                    for (let i = 0; i < n; i++) {
+                        const addr = `bc1qaddr${i}`;
+                        if (Math.random() < 0.85) {
+                            sharesIn[addr] = Math.floor(Math.random() * 10000) + 1;
+                        }
+                        if (Math.random() < 0.5) {
+                            // Balanced mix of credits and debits, ledger-style.
+                            const sign = Math.random() < 0.5 ? 1 : -1;
+                            const mag = Math.floor(Math.random() * 20000);
+                            balancesIn.set(addr, sign * mag);
+                        }
+                    }
+
+                    // Optionally enable finder bonus on a random member.
+                    const wantBonus = Math.random() < 0.4;
+                    let finderBonusSats: number | undefined;
+                    let finderAddress: string | undefined;
+                    if (wantBonus) {
+                        const candidates = Object.keys(sharesIn);
+                        if (candidates.length > 0) {
+                            finderAddress = rand(candidates);
+                            // Mix of well-above-min, just-above-min, and
+                            // unrealistically-large bonuses (test the 95 % cap).
+                            finderBonusSats = rand([
+                                10_000, 100_000, 1_000_000,
+                                Math.floor(reward * 0.5),
+                                Math.floor(reward * 2),     // exceeds reward → cap kicks in
+                            ]);
+                        }
+                    }
+
+                    const r = buildCoinbaseDistribution({
+                        addressShares: shares(sharesIn),
+                        balances: balancesIn,
+                        blockRewardSats: reward,
+                        feePercent,
+                        feeAddress,
+                        coinbaseWeightBudget: budget,
+                        suppressMatchingDebits,
+                        minPayoutSats,
+                        finderBonusSats,
+                        finderAddress,
+                    });
+
+                    // Invariant 1: bad-cb-amount safety.
+                    // Sum of every coinbase output must not exceed the block reward.
+                    // Core enforces this at consensus level — exceeding rejects
+                    // the block. Equal is fine; under is fine (sats burn).
+                    const totalEmitted = sumOnChainSats(r.payouts);
+                    if (totalEmitted > reward) {
+                        throw new Error(
+                            `INVARIANT BROKEN (bad-cb-amount): trial=${trial} totalEmitted=${totalEmitted} > reward=${reward}\n`
+                            + `  config: feePct=${feePercent} feeAddr='${feeAddress}' suppressDebits=${suppressMatchingDebits} `
+                            + `minPayout=${minPayoutSats} budget=${budget} bonus=${finderBonusSats} bonusAddr=${finderAddress}\n`
+                            + `  shares: ${JSON.stringify(sharesIn)}\n`
+                            + `  balances: ${JSON.stringify(Object.fromEntries(balancesIn))}\n`
+                            + `  payouts: ${JSON.stringify(r.payouts)}`,
+                        );
+                    }
+
+                    // Invariant 2: weight-budget safety.
+                    // Coinbase output count, when serialized, must not push
+                    // the coinbase past the configured weight budget. The
+                    // engine's trim phase enforces this; this asserts the
+                    // enforcement actually held.
+                    const hasFeeOut = r.payouts.some(p => p.address === feeAddress) && !!feeAddress;
+                    const hasBonusOut = !!finderAddress
+                        && r.payouts.some(p => p.address === finderAddress && p.sats === Math.min(
+                            finderBonusSats ?? 0,
+                            Math.floor((reward - Math.floor(reward * feePercent / 100)) * 0.95),
+                        ));
+                    const actualWeight = COINBASE_BASE_WEIGHT
+                        + COINBASE_WITNESS_COMMITMENT_WEIGHT
+                        + r.payouts.length * COINBASE_OUTPUT_WEIGHT;
+                    if (actualWeight > budget && r.payouts.length > 0) {
+                        throw new Error(
+                            `INVARIANT BROKEN (weight overrun): trial=${trial} weight=${actualWeight} > budget=${budget} `
+                            + `(${r.payouts.length} outputs, hasFee=${hasFeeOut}, hasBonus=${hasBonusOut})\n`
+                            + `  shares: ${JSON.stringify(sharesIn)}`,
+                        );
+                    }
+
+                    // Invariant 3: every emitted output is positive sats.
+                    // Zero-sats outputs would still validate at the script
+                    // level but are pointless and suggest a math bug. Pool
+                    // engine should never emit them.
+                    for (const p of r.payouts) {
+                        if (p.sats <= 0) {
+                            throw new Error(
+                                `INVARIANT BROKEN (non-positive payout): trial=${trial} ${p.address} sats=${p.sats}`,
+                            );
+                        }
+                    }
+                }
+            } finally {
+                warnSpy.mockRestore();
+                errorSpy.mockRestore();
+            }
         });
     });
 });
