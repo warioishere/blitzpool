@@ -120,7 +120,16 @@ function createMockRedis() {
         },
         get: async (key: string) => store.get(key) ?? null,
         set: async (key: string, value: string, _opts?: any) => { store.set(key, value); },
-        del: async (key: string) => { store.delete(key); zsets.delete(key); hashes.delete(key); },
+        del: async (keyOrKeys: string | string[]) => {
+            const ks = Array.isArray(keyOrKeys) ? keyOrKeys : [keyOrKeys];
+            for (const k of ks) { store.delete(k); zsets.delete(k); hashes.delete(k); }
+        },
+        scan: async (_cursor: number, opts: { MATCH: string; COUNT?: number }) => {
+            const pattern = opts.MATCH;
+            const regex = new RegExp('^' + pattern.split('*').map(p => p.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$');
+            const allKeys = [...store.keys(), ...zsets.keys(), ...hashes.keys()];
+            return { cursor: 0, keys: Array.from(new Set(allKeys.filter(k => regex.test(k)))) };
+        },
         expire: async () => 1,
         incrByFloat: async (key: string, amount: number) => {
             const v = parseFloat(store.get(key) ?? '0') + amount;

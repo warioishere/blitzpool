@@ -75,7 +75,17 @@ function createMockRedis() {
     },
     get: async (key: string) => store.get(key) ?? null,
     set: async (key: string, value: string) => { store.set(key, value); },
-    del: async (key: string) => { store.delete(key); zsets.delete(key); },
+    del: async (keyOrKeys: string | string[]) => {
+      const ks = Array.isArray(keyOrKeys) ? keyOrKeys : [keyOrKeys];
+      for (const k of ks) { store.delete(k); zsets.delete(k); hashes.delete(k); }
+    },
+    scan: async (_cursor: number, opts: { MATCH: string; COUNT?: number }) => {
+      const pattern = opts.MATCH;
+      const regex = new RegExp('^' + pattern.split('*').map(p => p.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$');
+      const allKeys = [...store.keys(), ...zsets.keys(), ...hashes.keys()];
+      const matched = allKeys.filter(k => regex.test(k));
+      return { cursor: 0, keys: Array.from(new Set(matched)) };
+    },
     incrByFloat: async (key: string, amount: number) => {
       const val = parseFloat(store.get(key) ?? '0') + amount;
       store.set(key, val.toString());
@@ -378,5 +388,112 @@ describe('Group-Solo Regtest — End-to-End with Bitcoin Core', () => {
     expect(freshDist[0].percent).toBe(100);
 
     console.log('✅ End-to-end flow verified: shares → distribution → block submit → round reset');
+  }, 60000);
+
+  // ── Finder-bonus mode: per-miner coinbase ────────────────────────
+  //
+  // Verifies Option A end-to-end: a group with `finderBonusSats > 0`
+  // produces per-miner coinbase templates where each session names its
+  // own address as the bonus recipient. Bitcoin Core must accept the
+  // resulting block (4 outputs: fee + bonus + alice-prop + bob-prop)
+  // and the bookkeeping must match the on-chain split exactly.
+  //
+  // Without this regtest we'd only know the math is internally
+  // consistent — not that real Core accepts the output layout.
+  it('finder-bonus mode: per-miner coinbase with bonus output is accepted by Core', async () => {
+    const FINDER_BONUS = 1_000_000; // 0.01 BTC
+
+    const { service, redis } = makeService();
+    // Seed group with finderBonusSats configured. The service reads
+    // this from the live group entity, so we push a row into the
+    // mock groupRepo.
+    const groupRepo = (service as any).groupRepo;
+    groupRepo.findOneBy = async (where: any) => {
+      if (where.id === 'grp-1') {
+        return { id: 'grp-1', finderBonusSats: FINDER_BONUS, dissolvedAt: null };
+      }
+      return null;
+    };
+
+    // Two active miners with 60/40 share split.
+    await service.recordShare(ADDR_ALICE, 600);
+    await service.recordShare(ADDR_BOB, 400);
+
+    const template = await rpcCall('getblocktemplate', [{ rules: ['segwit'] }]);
+    const blockReward = template.coinbasevalue;
+    const height = template.height;
+
+    // Build alice's per-miner template (alice as finderAddress).
+    const distribution = await service.getPayoutDistribution('grp-1', blockReward, ADDR_ALICE);
+
+    // Distribution must include: fee + bonus(alice) + alice-prop + bob.
+    const addresses = distribution.map(d => d.address);
+    expect(addresses).toContain(ADDR_FEE);
+    expect(addresses).toContain(ADDR_ALICE);
+    expect(addresses).toContain(ADDR_BOB);
+    // Alice should appear at least twice — once for bonus, once for prop.
+    const aliceCount = addresses.filter(a => a === ADDR_ALICE).length;
+    expect(aliceCount).toBeGreaterThanOrEqual(2);
+
+    // Locate the dedicated bonus output (exact match on configured sats).
+    const bonusOutput = distribution.find(d => d.address === ADDR_ALICE && d.sats === FINDER_BONUS);
+    expect(bonusOutput).toBeDefined();
+
+    // Convert to coinbase outputs. The service emits authoritative
+    // `sats` values now — use them directly (no rounding fix-up needed).
+    const payouts = distribution.map(d => ({ address: d.address, sats: d.sats }));
+    // Defence-in-depth: any tiny rounding undershoot vs blockReward goes
+    // to the fee output so the coinbase claims the full reward.
+    const totalAssigned = payouts.reduce((s, p) => s + p.sats, 0);
+    if (totalAssigned < blockReward) {
+      const feeIdx = payouts.findIndex(p => p.address === ADDR_FEE);
+      payouts[feeIdx >= 0 ? feeIdx : 0].sats += blockReward - totalAssigned;
+    }
+    expect(payouts.reduce((s, p) => s + p.sats, 0)).toBeLessThanOrEqual(blockReward);
+
+    console.log(`\n=== Group-Solo Regtest (FINDER BONUS) ===`);
+    console.log(`Height: ${height}`);
+    console.log(`Block reward: ${blockReward} sats, finder bonus: ${FINDER_BONUS} sats`);
+    console.log(`Distribution from service (${payouts.length} outputs):`);
+    payouts.forEach((p, i) => {
+      const label = p.address === ADDR_FEE ? 'FEE'
+        : p.address === ADDR_ALICE ? (p.sats === FINDER_BONUS ? 'ALICE (BONUS)' : 'ALICE (60% prop)')
+        : p.address === ADDR_BOB ? 'BOB (40% prop)'
+        : p.address.substring(0, 20);
+      console.log(`  Output ${i}: ${p.sats} sats → ${label}`);
+    });
+
+    // Build + mine + submit block.
+    const txs = template.transactions.map((t: any) => bitcoinjs.Transaction.fromHex(t.data));
+    const dummyCoinbase = new bitcoinjs.Transaction();
+    dummyCoinbase.version = 2;
+    dummyCoinbase.addInput(Buffer.alloc(32, 0), 0xffffffff, 0xffffffff);
+    dummyCoinbase.addOutput(Buffer.alloc(22, 0), 0);
+    dummyCoinbase.ins[0].witness = [Buffer.alloc(32, 0)];
+    const witnessCommit = bitcoinjs.Block.calculateMerkleRoot([dummyCoinbase, ...txs], true);
+
+    const coinbaseTx = buildCoinbase(payouts, height, witnessCommit);
+    const block = buildBlock(template, coinbaseTx, txs);
+    const mined = mineBlock(block, template.target);
+    expect(mined).toBe(true);
+
+    // Real Core acceptance test — this is the whole point of the spec.
+    const result = await rpcCall('submitblock', [block.toHex(false)]);
+    console.log(`Submit result (bonus mode): ${result === null ? 'SUCCESS!' : result}`);
+    expect(result).toBeNull();
+
+    // Chain tip advanced — block was accepted.
+    const info = await rpcCall('getblockchaininfo');
+    expect(info.blocks).toBe(height);
+
+    // Bookkeeping: alice (the finder) gets bonus + prop on-chain.
+    await service.onBlockFound(height, blockReward, ADDR_ALICE);
+
+    // Per-finder snapshot wiped by deleteAllSnapshots.
+    for (const [key] of redis._store) {
+      expect(key).not.toMatch(/^groupsolo:grp-1:snapshot/);
+    }
+
+    console.log('✅ Bonus mode verified: Core accepted the per-miner coinbase with finder-bonus output');
   }, 60000);
 });

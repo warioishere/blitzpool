@@ -3,6 +3,8 @@ import { Throttle } from '@nestjs/throttler';
 import { GroupService, GroupServiceError, GroupRoundResetSettings } from '../../services/group.service';
 import { normalizeBtcAddress } from '../../utils/btc-address.utils';
 import { GroupSoloService } from '../../services/group-solo.service';
+import { computeNextResetAt } from '../../services/group-round-reset.service';
+import { PplnsGroupEntity } from '../../ORM/pplns-group/pplns-group.entity';
 import { InvitationServiceError, PplnsGroupInvitationService } from '../../services/pplns-group-invitation.service';
 import { AddressEmailService } from '../../services/address-email.service';
 import { ClientService } from '../../ORM/client/client.service';
@@ -481,11 +483,12 @@ export class PplnsGroupController {
             // .toString() so JSON serialisation doesn't choke.
             return {
                 id: updated.id,
+                roundResetPreset: updated.roundResetPreset ?? null,
                 roundResetIntervalDays: updated.roundResetIntervalDays,
-                roundResetHourLocal: updated.roundResetHourLocal,
                 roundResetTimezone: updated.roundResetTimezone,
                 finderBonusSats: updated.finderBonusSats ?? 0,
                 lastRoundResetAt: updated.lastRoundResetAt,
+                nextResetAt: computeNextResetAt(updated as PplnsGroupEntity),
             };
         } catch (e) {
             throw this.toHttpError(e);
@@ -523,26 +526,31 @@ export class PplnsGroupController {
 
     private publicGroupView(group: {
         id: string; name: string; creatorAddress: string; active: boolean; createdAt: Date;
+        roundResetPreset?: 'daily' | 'weekly' | 'monthly' | 'custom' | null;
         roundResetIntervalDays?: number | null;
         roundResetHourLocal?: number | null;
         roundResetTimezone?: string | null;
         finderBonusSats?: number | null;
         lastRoundResetAt?: Date | null;
+        dissolvedAt?: Date | null;
     }) {
         // Round-reset config + finder bonus are intentionally exposed on the
         // public view — every member needs them to render the "next reset in
         // Xd Yh Zm" countdown and finder-bonus badge in their dashboard.
+        // `nextResetAt` is computed server-side so the UI doesn't have to do
+        // calendar / timezone math; it just shows a live countdown.
         return {
             id: group.id,
             name: group.name,
             creatorAddress: group.creatorAddress,
             active: group.active,
             createdAt: group.createdAt,
+            roundResetPreset: group.roundResetPreset ?? null,
             roundResetIntervalDays: group.roundResetIntervalDays ?? null,
-            roundResetHourLocal: group.roundResetHourLocal ?? null,
             roundResetTimezone: group.roundResetTimezone ?? null,
             finderBonusSats: group.finderBonusSats ?? 0,
             lastRoundResetAt: group.lastRoundResetAt ?? null,
+            nextResetAt: computeNextResetAt(group as PplnsGroupEntity),
         };
     }
 

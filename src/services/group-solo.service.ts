@@ -49,8 +49,17 @@ function redisKeys(groupId: string) {
         // getPayoutDistribution, consumed by onBlockFound. Persists across
         // pool restart (AOF) so a crash between job-send and block-found
         // doesn't cause payouts to drift from the on-chain coinbase.
-        snapshot: `groupsolo:${groupId}:snapshot`,
+        //
+        // With finder-bonus, every miner gets their own coinbase template
+        // (their address as bonus recipient), so snapshots are keyed by
+        // `${snapshotPrefix}:${finderAddress}`. snapshotPrefix is also used
+        // as the SCAN match base for cleanup (resetRound, removeGroupState).
+        snapshotPrefix: `groupsolo:${groupId}:snapshot`,
     };
+}
+
+function snapshotKeyFor(groupId: string, finderAddress: string | null | undefined): string {
+    return `groupsolo:${groupId}:snapshot:${finderAddress ?? '__none__'}`;
 }
 
 const SNAPSHOT_TTL_SECONDS = 60 * 60; // 1h — covers worst-case block+restart delay.
@@ -207,9 +216,27 @@ export class GroupSoloService implements OnModuleInit {
 
     /**
      * Build the current round's payout distribution for the given group.
-     * Stores a snapshot so onBlockFound can use the exact same split.
+     *
+     * Per-miner coinbase: when `finderAddress` is provided AND the group's
+     * `finderBonusSats > 0`, the resulting distribution emits a dedicated
+     * bonus output to `finderAddress`, financed proportionally by reducing
+     * every active miner's share (including the finder's own). The finder
+     * gets `bonus + their_proportional_share_of_(reward - bonus)`.
+     *
+     * Each miner's stratum session calls this with their own address, so
+     * each miner's coinbase template names them as the finder. The snapshot
+     * is keyed per-finderAddress so onBlockFound can reconstruct the exact
+     * on-chain split for whichever miner actually finds the block.
+     *
+     * `finderAddress` may be omitted (e.g. unauthorized session, JDP path
+     * which is excluded for Group-Solo). In that case no bonus output is
+     * emitted and the snapshot is stored under the legacy "__none__" key.
      */
-    async getPayoutDistribution(groupId: string, blockRewardSats: number): Promise<GroupSoloPayoutEntry[]> {
+    async getPayoutDistribution(
+        groupId: string,
+        blockRewardSats: number,
+        finderAddress?: string,
+    ): Promise<GroupSoloPayoutEntry[]> {
         if (!this.isEnabled()) return this.fallback();
 
         const keys = redisKeys(groupId);
@@ -228,6 +255,14 @@ export class GroupSoloService implements OnModuleInit {
         const balanceEntities = await this.balanceRepo.find({ where: { groupId } });
         const balances = new Map<string, number>();
         for (const p of balanceEntities) balances.set(p.address, p.pendingSats);
+
+        // Read finder-bonus from the live group config. Null/0 disables the
+        // bonus path entirely; a positive value combined with `finderAddress`
+        // activates the per-miner bonus output.
+        const group = await this.groupRepo.findOneBy({ id: groupId });
+        const finderBonusSats = (group?.finderBonusSats ?? 0) > 0
+            ? group!.finderBonusSats!
+            : 0;
 
         const result = buildCoinbaseDistribution({
             addressShares,
@@ -248,13 +283,15 @@ export class GroupSoloService implements OnModuleInit {
             // sane, and there's no second signed-ledger maintenance machinery
             // to build just for group-solo.
             suppressMatchingDebits: true,
+            finderBonusSats,
+            finderAddress,
         });
 
         const payouts: GroupSoloPayoutEntry[] = result.payouts.length > 0
             ? result.payouts.map(p => ({ address: p.address, percent: p.percent, sats: p.sats }))
             : this.fallback(blockRewardSats);
 
-        await this.writeSnapshot(groupId, {
+        await this.writeSnapshot(groupId, finderAddress, {
             distribution: payouts,
             blockRewardSats,
             consideredAddresses: Array.from(result.consideredAddresses),
@@ -263,28 +300,35 @@ export class GroupSoloService implements OnModuleInit {
         return payouts;
     }
 
-    private async writeSnapshot(groupId: string, snapshot: StoredSnapshot): Promise<void> {
-        const keys = redisKeys(groupId);
+    private async writeSnapshot(
+        groupId: string,
+        finderAddress: string | undefined,
+        snapshot: StoredSnapshot,
+    ): Promise<void> {
+        const key = snapshotKeyFor(groupId, finderAddress);
         try {
-            await this.redis.set(keys.snapshot, JSON.stringify(snapshot), { EX: SNAPSHOT_TTL_SECONDS });
+            await this.redis.set(key, JSON.stringify(snapshot), { EX: SNAPSHOT_TTL_SECONDS });
         } catch {
             // Some ioredis / node-redis variants don't accept the options
             // object — fall back to set + expire.
-            await this.redis.set(keys.snapshot, JSON.stringify(snapshot));
+            await this.redis.set(key, JSON.stringify(snapshot));
             if (typeof this.redis.expire === 'function') {
-                await this.redis.expire(keys.snapshot, SNAPSHOT_TTL_SECONDS);
+                await this.redis.expire(key, SNAPSHOT_TTL_SECONDS);
             }
         }
     }
 
-    private async readSnapshot(groupId: string): Promise<{
+    private async readSnapshot(
+        groupId: string,
+        finderAddress: string | undefined,
+    ): Promise<{
         distribution: GroupSoloPayoutEntry[];
         blockRewardSats: number;
         consideredAddresses: Set<string>;
         balanceAfter: Map<string, number>;
     } | null> {
-        const keys = redisKeys(groupId);
-        const raw = await this.redis.get(keys.snapshot);
+        const key = snapshotKeyFor(groupId, finderAddress);
+        const raw = await this.redis.get(key);
         if (!raw) return null;
         try {
             const parsed: StoredSnapshot = JSON.parse(raw);
@@ -303,9 +347,31 @@ export class GroupSoloService implements OnModuleInit {
         }
     }
 
-    private async deleteSnapshot(groupId: string): Promise<void> {
+    /**
+     * Delete every per-finder snapshot for a group. Called by
+     * onBlockFound after a block is processed (round reset → all
+     * other miners' snapshots are stale) and by removeGroupState
+     * during dissolve. Uses SCAN to avoid unbounded KEYS lookups.
+     */
+    private async deleteAllSnapshots(groupId: string): Promise<void> {
         const keys = redisKeys(groupId);
-        await this.redis.del(keys.snapshot);
+        const pattern = `${keys.snapshotPrefix}:*`;
+        try {
+            let cursor = 0;
+            do {
+                const result = await this.redis.scan(cursor, { MATCH: pattern, COUNT: 100 });
+                cursor = result.cursor;
+                if (result.keys && result.keys.length > 0) {
+                    await this.redis.del(result.keys);
+                }
+            } while (cursor !== 0);
+        } catch (err) {
+            console.warn(`[GroupSolo] deleteAllSnapshots(${groupId}) failed:`, (err as Error).message);
+        }
+        // Also clear the legacy "single snapshot per group" key so
+        // pools upgrading from the pre-finder-bonus codebase don't
+        // leave dead state behind. No-op if the key doesn't exist.
+        await this.redis.del(keys.snapshotPrefix);
     }
 
     private fallback(blockRewardSats?: number): GroupSoloPayoutEntry[] {
@@ -355,9 +421,18 @@ export class GroupSoloService implements OnModuleInit {
 
             console.log(`[GroupSolo] Block ${blockHeight} found by group ${groupId} (finder=${finderAddress})`);
 
-            const snapshot = await this.readSnapshot(groupId);
+            // Read the snapshot built for THIS specific finder. With per-miner
+            // coinbases (finder-bonus feature), every miner has their own
+            // snapshot keyed by finderAddress; only the finder's snapshot
+            // matches the on-chain coinbase, so that's the one we use for
+            // accounting. Falls back to the legacy "no finder" key if
+            // present (graceful upgrade from pre-finder-bonus snapshots).
+            let snapshot = await this.readSnapshot(groupId, finderAddress);
             if (!snapshot || snapshot.distribution.length === 0) {
-                console.warn(`[GroupSolo] No snapshot for group ${groupId} — using window recalculation fallback`);
+                snapshot = await this.readSnapshot(groupId, undefined);
+            }
+            if (!snapshot || snapshot.distribution.length === 0) {
+                console.warn(`[GroupSolo] No snapshot for group ${groupId} (finder=${finderAddress}) — using window recalculation fallback`);
                 await this.onBlockFoundFromWindow(groupId, blockHeight, blockRewardSats);
                 return;
             }
@@ -373,7 +448,7 @@ export class GroupSoloService implements OnModuleInit {
                     `[GroupSolo] Snapshot blockReward ${snapshot.blockRewardSats} != block's `
                     + `${blockRewardSats} for group ${groupId} — falling back to window recalc`,
                 );
-                await this.deleteSnapshot(groupId);
+                await this.deleteAllSnapshots(groupId);
                 await this.onBlockFoundFromWindow(groupId, blockHeight, blockRewardSats);
                 return;
             }
@@ -501,8 +576,10 @@ export class GroupSoloService implements OnModuleInit {
                 throw e;
             }
 
-            // Snapshot + round cleared only after the TX committed.
-            await this.deleteSnapshot(groupId);
+            // Snapshot(s) + round cleared only after the TX committed. With
+            // per-finder snapshots, every other miner's snapshot is now
+            // stale (round just reset) so we wipe the whole prefix.
+            await this.deleteAllSnapshots(groupId);
             await this.resetRound(groupId);
         } finally {
             this.blockFoundLocks.delete(groupId);
@@ -739,7 +816,7 @@ export class GroupSoloService implements OnModuleInit {
             await this.resetRound(groupId);
             const keys = redisKeys(groupId);
             await this.redis.del(keys.lastShareAt);
-            await this.redis.del(keys.snapshot);
+            await this.deleteAllSnapshots(groupId);
         }
         await this.balanceRepo.delete({ groupId });
         await this.historyRepo.delete({ groupId });
@@ -806,7 +883,7 @@ export class GroupSoloService implements OnModuleInit {
             await this.resetRound(groupId);
             const keys = redisKeys(groupId);
             await this.redis.del(keys.lastShareAt);
-            await this.redis.del(keys.snapshot);
+            await this.deleteAllSnapshots(groupId);
         }
 
         // Variant B: wipe ALL pending balances. Positive balances are

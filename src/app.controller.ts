@@ -160,9 +160,13 @@ export class AppController {
     let mode: 'solo' | 'pplns' | 'group-solo' = modeResult.mode;
 
     if (modeResult.mode === 'group-solo' && modeResult.groupId && this.groupSoloService.isEnabled()) {
+      // Pass the requesting address as finderAddress so the UI's block-template
+      // preview shows THIS miner's coinbase (with their bonus output), matching
+      // the per-miner template the stratum layer would actually send them.
       const distribution = await this.groupSoloService.getPayoutDistribution(
         modeResult.groupId,
         tpl.blockData.coinbasevalue,
+        address,
       );
       if (distribution && distribution.length > 0) {
         payoutInformation = distribution;

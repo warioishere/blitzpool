@@ -824,10 +824,16 @@ export class StratumV1Client {
                 return;
             }
         } else if (jobGroupId) {
-            // Group-solo on non-PPLNS port: per-group shared coinbase, PROP-style
+            // Group-solo on non-PPLNS port: per-miner coinbase, PROP-style
+            // split + finder-bonus output to THIS connection's address.
+            // Each session's template names them as the bonus recipient,
+            // so whoever finds the block has the bonus already in the
+            // coinbase. Snapshots are keyed per finderAddress so
+            // onBlockFound can match the on-chain split exactly.
             payoutInformation = await this.groupSoloService!.getPayoutDistribution(
                 jobGroupId,
                 jobTemplate.blockData.coinbasevalue,
+                this.clientAuthorization?.address,
             );
             this.noFee = false;
             if (!payoutInformation || payoutInformation.length === 0) return;

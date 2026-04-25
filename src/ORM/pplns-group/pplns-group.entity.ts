@@ -35,8 +35,25 @@ export class PplnsGroupEntity {
     // and/or a finder bonus on top of the proportional split.
 
     /**
-     * Days between scheduled timer-resets. NULL = no timer (only
-     * block-found triggers a reset, original behaviour).
+     * Reset cadence preset:
+     *   - 'daily'   → every day at 00:00 in admin's TZ (= end of previous day)
+     *   - 'weekly'  → every Monday at 00:00 in admin's TZ (= end of Sunday)
+     *   - 'monthly' → 1st of every month at 00:00 in admin's TZ (= end of month)
+     *   - 'custom'  → every `roundResetIntervalDays` calendar days at 00:00 in TZ
+     *   - null      → no scheduled reset (only block-found triggers a wipe)
+     *
+     * Stored as the authoritative source-of-truth for cadence; the older
+     * `roundResetIntervalDays` is now only meaningful when preset='custom'.
+     * Existing groups that pre-date this column have NULL preset and are
+     * treated as 'custom' if `roundResetIntervalDays` is set.
+     */
+    @Column({ type: 'varchar', length: 16, nullable: true })
+    roundResetPreset: 'daily' | 'weekly' | 'monthly' | 'custom' | null;
+
+    /**
+     * Days between scheduled timer-resets. Only authoritative when
+     * `roundResetPreset='custom'`. NULL = no timer (only block-found
+     * triggers a reset, original behaviour).
      */
     @Column({ type: 'int', nullable: true })
     roundResetIntervalDays: number | null;

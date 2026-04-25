@@ -1878,7 +1878,16 @@ export class StratumV2Client {
     }
     const asyncGroupId = this.activeGroupId();
     if (asyncGroupId) {
-      const distribution = await this.groupSoloService!.getPayoutDistribution(asyncGroupId, blockRewardSats);
+      // Per-miner coinbase: pass this session's address as finderAddress
+      // so the group's finder-bonus (if any) lands as a dedicated coinbase
+      // output to whoever this template is being mined by. Same flow for
+      // standard and extended channels — both reach this path via
+      // buildPayoutInformationAsync.
+      const distribution = await this.groupSoloService!.getPayoutDistribution(
+        asyncGroupId,
+        blockRewardSats,
+        this.address,
+      );
       if (distribution && distribution.length > 0) {
         this.noFee = false;
         return distribution;

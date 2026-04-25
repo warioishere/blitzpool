@@ -29,7 +29,10 @@ function createMockRedis() {
         get: jest.fn(async (key: string) => store.get(key) ?? null),
         set: jest.fn(async (key: string, value: string, _opts?: any) => { store.set(key, value); }),
         expire: jest.fn(async (_key: string, _seconds: number) => 1),
-        del: jest.fn(async (key: string) => { store.delete(key); zsets.delete(key); hashes.delete(key); }),
+        del: jest.fn(async (keyOrKeys: string | string[]) => {
+            const ks = Array.isArray(keyOrKeys) ? keyOrKeys : [keyOrKeys];
+            for (const k of ks) { store.delete(k); zsets.delete(k); hashes.delete(k); }
+        }),
         incrByFloat: jest.fn(async (key: string, amount: number) => {
             const val = parseFloat(store.get(key) ?? '0') + amount;
             store.set(key, val.toString());
@@ -77,6 +80,24 @@ function createMockRedis() {
             const z = getZ(key);
             const idx = z.findIndex(e => e.value === value);
             if (idx >= 0) z.splice(idx, 1);
+        }),
+        // node-redis v4 cursor-based SCAN. The mock returns ALL matching
+        // keys in a single page since the in-memory store is small;
+        // production code must still use a do/while loop because it
+        // can't assume that.
+        scan: jest.fn(async (_cursor: number, opts: { MATCH: string; COUNT?: number }) => {
+            // Translate Redis-glob (`*`) into a regex anchor. We only
+            // need the `*` wildcard for snapshot prefix scans — full
+            // glob support isn't required for tests.
+            const pattern = opts.MATCH;
+            const regex = new RegExp('^' + pattern.split('*').map(p => p.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$');
+            const allKeys = [
+                ...store.keys(),
+                ...zsets.keys(),
+                ...hashes.keys(),
+            ];
+            const matched = allKeys.filter(k => regex.test(k));
+            return { cursor: 0, keys: Array.from(new Set(matched)) };
         }),
         _store: store,
         _zsets: zsets,
@@ -610,7 +631,11 @@ describe('GroupSoloService', () => {
             expect(redis._store.has('groupsolo:g1:counter')).toBe(false);
             expect(redis._store.has('groupsolo:g1:rejected-shares')).toBe(false);
             expect(redis._store.has('groupsolo:g1:last-share-at')).toBe(false);
-            expect(redis._store.has('groupsolo:g1:snapshot')).toBe(false);
+            // Snapshots are now keyed per finderAddress (groupsolo:g1:snapshot:<addr>);
+            // assert that no snapshot key for this group survives the wipe.
+            for (const k of redis._store.keys()) {
+                expect(k).not.toMatch(/^groupsolo:g1:snapshot/);
+            }
 
             // ALL pending balances gone (positive forfeit + symmetric)
             expect((balanceRepo._rows as any[]).length).toBe(0);
@@ -707,5 +732,253 @@ describe('GroupSoloService', () => {
         const charlieRow = (balanceRepo._rows as any[]).find(r => r.address === 'bc1qcharlie');
         expect(aliceRow?.pendingSats).toBe(450);
         expect(charlieRow?.pendingSats).toBe(450);
+    });
+
+    // ── Finder-bonus per-miner coinbase ────────────────────────────
+    //
+    // The bonus output is built into each miner's own coinbase template
+    // (their address as recipient). The proportional split is computed
+    // on the post-bonus miner cut, so the finder's total is
+    //     bonus + their_proportional_share_of_(reward - bonus).
+    // Other members' shares shrink proportionally — they "pay" for the
+    // bonus in the sense that their slice of the pie is smaller than
+    // it would be without the bonus. Each miner's snapshot is keyed by
+    // their finderAddress so onBlockFound matches the on-chain coinbase
+    // exactly.
+    describe('finder bonus (per-miner coinbase)', () => {
+        const FINDER_BONUS = 1_000_000; // 0.01 BTC
+
+        const seedGroup = (
+            service: any,
+            groupRepo: any,
+            groupId: string,
+            finderBonusSats: number | null,
+        ) => {
+            (groupRepo._rows as any[]).push({
+                id: groupId,
+                name: groupId,
+                creatorAddress: 'bc1qalice',
+                adminTokenHash: 'x',
+                rules: '',
+                forbidBuyHashrate: false,
+                roundResetIntervalDays: null,
+                roundResetHourLocal: null,
+                roundResetTimezone: null,
+                lastRoundResetAt: null,
+                finderBonusSats,
+                dissolvedAt: null,
+                createdAt: new Date(),
+            });
+        };
+
+        it('emits a dedicated bonus output to finderAddress when configured', async () => {
+            const { service, groupService } = makeService();
+            const groupRepo = (service as any).groupRepo;
+            seedGroup(service, groupRepo, 'g1', FINDER_BONUS);
+            groupService._setMembership('bc1qalice', 'g1', true);
+            groupService._setMembership('bc1qbob', 'g1', true);
+
+            await service.recordShare('bc1qalice', 500);
+            await service.recordShare('bc1qbob', 500);
+
+            // Build alice's per-miner coinbase template.
+            const dist = await service.getPayoutDistribution('g1', 100_000_000, 'bc1qalice');
+
+            // Alice should appear at least once: once for her bonus output
+            // (FINDER_BONUS sats) and once (or merged) for her proportional
+            // share. The current impl emits them as separate outputs — find
+            // the dedicated bonus entry by exact-match on the configured sats.
+            const aliceOutputs = dist.filter(d => d.address === 'bc1qalice');
+            const bonusOutput = aliceOutputs.find(d => d.sats === FINDER_BONUS);
+            expect(bonusOutput).toBeDefined();
+
+            // Total miner-portion (non-fee) should not exceed
+            //   floor((100 - feePercent)/100 * blockReward) = 98_000_000.
+            const minerCut = dist
+                .filter(d => d.address !== 'bc1qfee')
+                .reduce((s, d) => s + d.sats, 0);
+            expect(minerCut).toBeLessThanOrEqual(98_000_000);
+
+            // Alice's effective total = bonus + her proportional share of
+            // (rewardForMiners - bonus). With 50/50 shares, she should get
+            // bonus + ~half of (98M - bonus) = 1M + 48.5M ≈ 49.5M sats.
+            const aliceTotal = aliceOutputs.reduce((s, d) => s + d.sats, 0);
+            expect(aliceTotal).toBeGreaterThan(FINDER_BONUS);
+            expect(aliceTotal).toBeLessThan(98_000_000);
+            // Bob keeps roughly half the post-bonus miner cut.
+            const bobTotal = dist
+                .filter(d => d.address === 'bc1qbob')
+                .reduce((s, d) => s + d.sats, 0);
+            expect(bobTotal).toBeGreaterThan(0);
+            expect(bobTotal).toBeLessThan(aliceTotal); // alice has the bonus on top
+        });
+
+        it('per-miner snapshots: each miner gets their own coinbase keyed by their address', async () => {
+            const { service, redis, groupService } = makeService();
+            const groupRepo = (service as any).groupRepo;
+            seedGroup(service, groupRepo, 'g1', FINDER_BONUS);
+            groupService._setMembership('bc1qalice', 'g1', true);
+            groupService._setMembership('bc1qbob', 'g1', true);
+
+            await service.recordShare('bc1qalice', 500);
+            await service.recordShare('bc1qbob', 500);
+
+            // Build per-miner templates for alice and bob — each writes
+            // a snapshot keyed by their own address.
+            const distAlice = await service.getPayoutDistribution('g1', 100_000_000, 'bc1qalice');
+            const distBob   = await service.getPayoutDistribution('g1', 100_000_000, 'bc1qbob');
+
+            // Two distinct snapshots persisted in Redis, each with the
+            // bonus output to its respective finder.
+            expect(redis._store.has('groupsolo:g1:snapshot:bc1qalice')).toBe(true);
+            expect(redis._store.has('groupsolo:g1:snapshot:bc1qbob')).toBe(true);
+
+            const aliceSnap = JSON.parse(redis._store.get('groupsolo:g1:snapshot:bc1qalice')!);
+            const bobSnap = JSON.parse(redis._store.get('groupsolo:g1:snapshot:bc1qbob')!);
+
+            const aliceBonus = (aliceSnap.distribution as any[]).find(d => d.address === 'bc1qalice' && d.sats === FINDER_BONUS);
+            const bobBonus   = (bobSnap.distribution as any[]).find(d => d.address === 'bc1qbob'   && d.sats === FINDER_BONUS);
+            expect(aliceBonus).toBeDefined();
+            expect(bobBonus).toBeDefined();
+        });
+
+        it('onBlockFound reads the snapshot for the actual finder', async () => {
+            const { service, redis, historyRepo, groupService } = makeService();
+            const groupRepo = (service as any).groupRepo;
+            seedGroup(service, groupRepo, 'g1', FINDER_BONUS);
+            groupService._setMembership('bc1qalice', 'g1', true);
+            groupService._setMembership('bc1qbob', 'g1', true);
+
+            await service.recordShare('bc1qalice', 500);
+            await service.recordShare('bc1qbob', 500);
+
+            // Both miners build their own templates first.
+            await service.getPayoutDistribution('g1', 100_000_000, 'bc1qalice');
+            await service.getPayoutDistribution('g1', 100_000_000, 'bc1qbob');
+
+            // Bob finds the block. Accounting must use bob's snapshot, not alice's.
+            await service.onBlockFound(900_000, 100_000_000, 'bc1qbob');
+
+            // Bob should have a coinbase row with at least the bonus amount.
+            const bobCoinbaseRows = (historyRepo._rows as any[])
+                .filter(r => r.address === 'bc1qbob' && r.inCoinbase === true);
+            expect(bobCoinbaseRows.length).toBeGreaterThan(0);
+            const bobTotalPaid = bobCoinbaseRows.reduce((s, r) => s + r.paidSats, 0);
+            expect(bobTotalPaid).toBeGreaterThanOrEqual(FINDER_BONUS);
+
+            // Alice should NOT have a bonus output in this block — only
+            // her proportional share. Her on-chain payout must be smaller
+            // than bob's because bob has the bonus on top.
+            const aliceCoinbaseRows = (historyRepo._rows as any[])
+                .filter(r => r.address === 'bc1qalice' && r.inCoinbase === true);
+            const aliceTotalPaid = aliceCoinbaseRows.reduce((s, r) => s + r.paidSats, 0);
+            expect(aliceTotalPaid).toBeLessThan(bobTotalPaid);
+
+            // Round resets — all per-finder snapshots cleared.
+            for (const k of redis._store.keys()) {
+                expect(k).not.toMatch(/^groupsolo:g1:snapshot/);
+            }
+        });
+
+        it('no bonus output when finderBonusSats=0 — old path preserved', async () => {
+            const { service, groupService } = makeService();
+            const groupRepo = (service as any).groupRepo;
+            seedGroup(service, groupRepo, 'g1', 0);
+            groupService._setMembership('bc1qalice', 'g1', true);
+
+            await service.recordShare('bc1qalice', 1000);
+
+            const dist = await service.getPayoutDistribution('g1', 100_000_000, 'bc1qalice');
+
+            // Just fee + alice's proportional share; no extra bonus output.
+            // With single miner the proportional share already concentrates
+            // the whole miner cut to her, so the dist length stays the same
+            // as the old code path: 2 outputs (fee + alice).
+            expect(dist).toHaveLength(2);
+            expect(dist.find(d => d.address === 'bc1qfee')).toBeDefined();
+            const alice = dist.find(d => d.address === 'bc1qalice')!;
+            // Alice gets ~98% (full miner cut), no separate bonus output.
+            expect(alice.percent).toBeCloseTo(98, 1);
+        });
+
+        it('no bonus output when finderAddress is undefined — graceful fallback', async () => {
+            const { service, redis, groupService } = makeService();
+            const groupRepo = (service as any).groupRepo;
+            seedGroup(service, groupRepo, 'g1', FINDER_BONUS);
+            groupService._setMembership('bc1qalice', 'g1', true);
+
+            await service.recordShare('bc1qalice', 1000);
+
+            // No finderAddress provided (e.g. unauthenticated stratum session)
+            const dist = await service.getPayoutDistribution('g1', 100_000_000);
+
+            // No dedicated bonus output emitted; falls back to fee + prop split.
+            // Snapshot is stored under the legacy "__none__" suffix so a
+            // legacy onBlockFound caller (or graceful upgrade) can find it.
+            expect(redis._store.has('groupsolo:g1:snapshot:__none__')).toBe(true);
+            const alice = dist.find(d => d.address === 'bc1qalice')!;
+            // Same shape as the no-bonus case above — full miner cut to alice.
+            expect(alice.percent).toBeCloseTo(98, 1);
+            // Alice's output shouldn't equal FINDER_BONUS exactly (would
+            // indicate the bonus was emitted despite missing finderAddress).
+            expect(alice.sats).not.toBe(FINDER_BONUS);
+        });
+
+        it('bonus capped at 95% of miner cut — small post-halving block stays solvable', async () => {
+            const { service, groupService } = makeService();
+            const groupRepo = (service as any).groupRepo;
+            // Configure a giant bonus (1 BTC) on a small block reward — the
+            // 95 % cap must kick in so the rest of the group isn't starved
+            // and the math doesn't blow past the miner cut.
+            seedGroup(service, groupRepo, 'g1', 100_000_000); // 1 BTC bonus
+            groupService._setMembership('bc1qalice', 'g1', true);
+            groupService._setMembership('bc1qbob', 'g1', true);
+
+            await service.recordShare('bc1qalice', 500);
+            await service.recordShare('bc1qbob', 500);
+
+            const SMALL_REWARD = 50_000_000; // 0.5 BTC — bonus larger than the block reward
+            const dist = await service.getPayoutDistribution('g1', SMALL_REWARD, 'bc1qalice');
+
+            // Total emitted (incl. fee) must not exceed the block reward —
+            // otherwise Bitcoin Core rejects with bad-cb-amount.
+            const totalEmitted = dist.reduce((s, d) => s + d.sats, 0);
+            expect(totalEmitted).toBeLessThanOrEqual(SMALL_REWARD);
+
+            // 95 % cap of miner cut (~49M sats) — alice's bonus output
+            // shouldn't exceed that.
+            const minerCut = SMALL_REWARD - Math.floor(0.02 * SMALL_REWARD); // 49M
+            const cap = Math.floor(minerCut * 0.95);
+            const aliceBonus = dist.find(d => d.address === 'bc1qalice' && d.sats <= cap);
+            expect(aliceBonus).toBeDefined();
+        });
+
+        it('per-miner snapshots all wiped after onBlockFound — no stale state for next round', async () => {
+            const { service, redis, groupService } = makeService();
+            const groupRepo = (service as any).groupRepo;
+            seedGroup(service, groupRepo, 'g1', FINDER_BONUS);
+            groupService._setMembership('bc1qalice', 'g1', true);
+            groupService._setMembership('bc1qbob', 'g1', true);
+            groupService._setMembership('bc1qcharlie', 'g1', true);
+
+            await service.recordShare('bc1qalice', 100);
+            await service.recordShare('bc1qbob', 100);
+            await service.recordShare('bc1qcharlie', 100);
+
+            // 3 per-miner templates → 3 snapshots in Redis.
+            await service.getPayoutDistribution('g1', 100_000_000, 'bc1qalice');
+            await service.getPayoutDistribution('g1', 100_000_000, 'bc1qbob');
+            await service.getPayoutDistribution('g1', 100_000_000, 'bc1qcharlie');
+
+            const snapshotKeysBefore = Array.from(redis._store.keys()).filter(k => k.startsWith('groupsolo:g1:snapshot'));
+            expect(snapshotKeysBefore.length).toBe(3);
+
+            // Charlie finds the block.
+            await service.onBlockFound(900_000, 100_000_000, 'bc1qcharlie');
+
+            // All 3 snapshots are now stale (round reset) → wiped.
+            const snapshotKeysAfter = Array.from(redis._store.keys()).filter(k => k.startsWith('groupsolo:g1:snapshot'));
+            expect(snapshotKeysAfter.length).toBe(0);
+        });
     });
 });
