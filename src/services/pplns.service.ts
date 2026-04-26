@@ -19,6 +19,11 @@ import {
     COINBASE_OUTPUT_WEIGHT,
     COINBASE_WITNESS_COMMITMENT_WEIGHT,
 } from './coinbase-distribution';
+import {
+    ParsedCoinbaseSnapshot,
+    readStoredSnapshot,
+    writeStoredSnapshot,
+} from './coinbase-snapshot';
 
 /**
  * PPLNS (Pay Per Last N Shares) engine.
@@ -64,13 +69,6 @@ const REDIS_KEY_WINDOW_BY_ADDRESS = 'pplns:window:by-address';
 //                            as absolute writes in the block-found TX.
 const REDIS_KEY_SNAPSHOT = 'pplns:snapshot';
 const SNAPSHOT_TTL_SECONDS = 60 * 60; // 1h — covers worst-case block-find + restart window.
-
-interface StoredPplnsSnapshot {
-    distribution: PplnsPayoutEntry[];
-    blockRewardSats: number;
-    consideredAddresses: string[];
-    balanceAfter: Array<[string, number]>;   // signed; empty list = no ledger changes
-}
 
 // DUST_LIMIT_SATS + coinbase weight constants live in
 // ./coinbase-distribution.ts — single source of truth.
@@ -412,42 +410,17 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         return payouts;
     }
 
-    private async writeSnapshot(snapshot: StoredPplnsSnapshot): Promise<void> {
-        try {
-            await this.redis.set(REDIS_KEY_SNAPSHOT, JSON.stringify(snapshot), { EX: SNAPSHOT_TTL_SECONDS });
-        } catch {
-            await this.redis.set(REDIS_KEY_SNAPSHOT, JSON.stringify(snapshot));
-            if (typeof this.redis.expire === 'function') {
-                await this.redis.expire(REDIS_KEY_SNAPSHOT, SNAPSHOT_TTL_SECONDS);
-            }
-        }
-    }
-
-    private async readSnapshot(): Promise<{
+    private writeSnapshot(snapshot: {
         distribution: PplnsPayoutEntry[];
         blockRewardSats: number;
-        consideredAddresses: Set<string>;
-        balanceAfter: Map<string, number>;
-    } | null> {
-        const raw = await this.redis.get(REDIS_KEY_SNAPSHOT);
-        if (!raw) return null;
-        try {
-            const parsed: StoredPplnsSnapshot = JSON.parse(raw);
-            return {
-                distribution: parsed.distribution.map(d => ({
-                    address: d.address,
-                    percent: d.percent,
-                    // Legacy snapshots pre-signed-ledger don't carry sats;
-                    // derive it from percent to stay compatible during rollout.
-                    sats: d.sats ?? Math.floor((d.percent / 100) * parsed.blockRewardSats),
-                })),
-                blockRewardSats: parsed.blockRewardSats,
-                consideredAddresses: new Set(parsed.consideredAddresses ?? []),
-                balanceAfter: new Map(parsed.balanceAfter ?? []),
-            };
-        } catch {
-            return null;
-        }
+        consideredAddresses: string[];
+        balanceAfter: Array<[string, number]>;
+    }): Promise<void> {
+        return writeStoredSnapshot(this.redis, REDIS_KEY_SNAPSHOT, snapshot, SNAPSHOT_TTL_SECONDS);
+    }
+
+    private readSnapshot(): Promise<ParsedCoinbaseSnapshot | null> {
+        return readStoredSnapshot(this.redis, REDIS_KEY_SNAPSHOT);
     }
 
     private async deleteSnapshot(): Promise<void> {

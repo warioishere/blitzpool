@@ -14,6 +14,11 @@ import {
     DEFAULT_COINBASE_WEIGHT_BUDGET,
     resolveMinPayoutSats,
 } from './coinbase-distribution';
+import {
+    ParsedCoinbaseSnapshot,
+    readStoredSnapshot,
+    writeStoredSnapshot,
+} from './coinbase-snapshot';
 
 /**
  * Group-solo PROP-style payout engine.
@@ -63,13 +68,6 @@ function snapshotKeyFor(groupId: string, finderAddress: string | null | undefine
 }
 
 const SNAPSHOT_TTL_SECONDS = 60 * 60; // 1h — covers worst-case block+restart delay.
-
-interface StoredSnapshot {
-    distribution: GroupSoloPayoutEntry[];
-    blockRewardSats: number;
-    consideredAddresses: string[];
-    balanceAfter: Array<[string, number]>;
-}
 
 /**
  * Group-solo view of a coinbase output. Structurally identical to
@@ -305,51 +303,29 @@ export class GroupSoloService implements OnModuleInit {
         return payouts;
     }
 
-    private async writeSnapshot(
+    private writeSnapshot(
         groupId: string,
         finderAddress: string | undefined,
-        snapshot: StoredSnapshot,
+        snapshot: {
+            distribution: GroupSoloPayoutEntry[];
+            blockRewardSats: number;
+            consideredAddresses: string[];
+            balanceAfter: Array<[string, number]>;
+        },
     ): Promise<void> {
-        const key = snapshotKeyFor(groupId, finderAddress);
-        try {
-            await this.redis.set(key, JSON.stringify(snapshot), { EX: SNAPSHOT_TTL_SECONDS });
-        } catch {
-            // Some ioredis / node-redis variants don't accept the options
-            // object — fall back to set + expire.
-            await this.redis.set(key, JSON.stringify(snapshot));
-            if (typeof this.redis.expire === 'function') {
-                await this.redis.expire(key, SNAPSHOT_TTL_SECONDS);
-            }
-        }
+        return writeStoredSnapshot(
+            this.redis,
+            snapshotKeyFor(groupId, finderAddress),
+            snapshot,
+            SNAPSHOT_TTL_SECONDS,
+        );
     }
 
-    private async readSnapshot(
+    private readSnapshot(
         groupId: string,
         finderAddress: string | undefined,
-    ): Promise<{
-        distribution: GroupSoloPayoutEntry[];
-        blockRewardSats: number;
-        consideredAddresses: Set<string>;
-        balanceAfter: Map<string, number>;
-    } | null> {
-        const key = snapshotKeyFor(groupId, finderAddress);
-        const raw = await this.redis.get(key);
-        if (!raw) return null;
-        try {
-            const parsed: StoredSnapshot = JSON.parse(raw);
-            return {
-                distribution: parsed.distribution.map(d => ({
-                    address: d.address,
-                    percent: d.percent,
-                    sats: d.sats ?? Math.floor((d.percent / 100) * parsed.blockRewardSats),
-                })),
-                blockRewardSats: parsed.blockRewardSats,
-                consideredAddresses: new Set(parsed.consideredAddresses ?? []),
-                balanceAfter: new Map(parsed.balanceAfter ?? []),
-            };
-        } catch {
-            return null;
-        }
+    ): Promise<ParsedCoinbaseSnapshot | null> {
+        return readStoredSnapshot(this.redis, snapshotKeyFor(groupId, finderAddress));
     }
 
     /**
