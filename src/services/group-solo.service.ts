@@ -721,7 +721,7 @@ export class GroupSoloService implements OnModuleInit {
                         paidSats: d.sats, percent: d.percent,
                         sharesInRound: Math.round(diffByAddr.get(d.address) ?? 0),
                         totalSharesInRound: Math.round(totalDiffRound),
-                        inCoinbase: true, rowType: 'coinbase',
+                        rowType: 'coinbase',
                     }));
                 }
 
@@ -739,7 +739,7 @@ export class GroupSoloService implements OnModuleInit {
                         paidSats: 0, percent: 0,
                         sharesInRound: Math.round(diffByAddr.get(addr) ?? 0),
                         totalSharesInRound: Math.round(totalDiffRound),
-                        inCoinbase: false, rowType: 'pending',
+                        rowType: 'pending',
                     }));
                     emittedThisBlock.add(addr);
                 }
@@ -755,7 +755,7 @@ export class GroupSoloService implements OnModuleInit {
                         paidSats: 0, percent: 0,
                         sharesInRound: Math.round(diffByAddr.get(addr) ?? 0),
                         totalSharesInRound: Math.round(totalDiffRound),
-                        inCoinbase: false, rowType: 'pending',
+                        rowType: 'pending',
                     }));
                     emittedThisBlock.add(addr);
                     console.log(`[GroupSolo]   ${addr}: ${(diffByAddr.get(addr) ?? 0).toFixed(2)} shares in round but not in coinbase distribution (late arrival, PROP rules)`);

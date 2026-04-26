@@ -172,8 +172,8 @@ describe('DustSweepService', () => {
             expect(pplnsHistory).toHaveLength(2);
             const creditAudit = pplnsHistory.find((r: any) => r.address === 'bc1qcred');
             const debitAudit = pplnsHistory.find((r: any) => r.address === 'bc1qdebt');
-            expect(creditAudit).toMatchObject({ paidSats: 500, rowType: 'dust-sweep', inCoinbase: false });
-            expect(debitAudit).toMatchObject({ paidSats: 500, rowType: 'dust-sweep', inCoinbase: false });
+            expect(creditAudit).toMatchObject({ paidSats: 500, rowType: 'dust-sweep' });
+            expect(debitAudit).toMatchObject({ paidSats: 500, rowType: 'dust-sweep' });
             // Same blockHeight marker so an operator can trace the pair.
             expect(creditAudit.blockHeight).toBe(debitAudit.blockHeight);
             expect(creditAudit.blockHeight).toBeLessThan(0);
@@ -409,7 +409,6 @@ describe('DustSweepService', () => {
                 address: 'bc1qa',
                 paidSats: 100,
                 rowType: 'dust-sweep',
-                inCoinbase: false,
             });
         });
 

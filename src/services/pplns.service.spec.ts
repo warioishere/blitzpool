@@ -701,7 +701,7 @@ describe('PplnsService', () => {
 
       const feeEntry = history.find((h: any) => h.address === 'bc1qfee');
       expect(feeEntry).toBeDefined();
-      expect(feeEntry.inCoinbase).toBe(true);
+      expect(feeEntry.rowType).toBe('coinbase');
       expect(feeEntry.blockHeight).toBe(800000);
     });
 
@@ -755,7 +755,7 @@ describe('PplnsService', () => {
       // rewardForMiners, not R1's. With one miner getting 100%, her
       // paidSats ≈ 0.98 * R2 = 117_600_000, not 0.98 * R1 = 98_000_000.
       const history = payoutHistoryRepo._getSaved() as any[];
-      const aliceRow = history.find(r => r.address === 'bc1qalice' && r.inCoinbase);
+      const aliceRow = history.find(r => r.address === 'bc1qalice' && r.rowType === 'coinbase');
       expect(aliceRow).toBeDefined();
       expect(aliceRow.paidSats).toBeGreaterThan(100_000_000);
     });
@@ -794,13 +794,13 @@ describe('PplnsService', () => {
       const bobRows = history.filter(r => r.address === 'bc1qbob');
       expect(bobRows).toHaveLength(1);
       expect(bobRows[0].paidSats).toBe(0);
-      expect(bobRows[0].inCoinbase).toBe(false);
+      expect(bobRows[0].rowType).toBe('pending');
       expect(bobRows[0].rowType).toBe('pending');
 
       // Miner-cut coinbase total (excluding fee) must not exceed rewardForMiners.
       const rewardForMiners = Math.floor(0.98 * BLOCK_REWARD);
       const minerCoinbasePaid = history
-        .filter(r => r.inCoinbase === true && r.address !== 'bc1qfee')
+        .filter(r => r.rowType === 'coinbase' && r.address !== 'bc1qfee')
         .reduce((sum, r) => sum + r.paidSats, 0);
       expect(minerCoinbasePaid).toBeLessThanOrEqual(rewardForMiners);
     });

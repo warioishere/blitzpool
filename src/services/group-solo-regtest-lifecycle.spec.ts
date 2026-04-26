@@ -497,7 +497,7 @@ describe('Group-Solo Regtest Lifecycle', () => {
         await svcB.onBlockFound(usedTemplate.height, usedTemplate.coinbasevalue, ADDR_ALICE);
 
         const historyForBlock = (historyRepo._rows as any[]).filter(
-            r => r.blockHeight === usedTemplate.height && r.inCoinbase === true,
+            r => r.blockHeight === usedTemplate.height && r.rowType === 'coinbase',
         );
         expect(historyForBlock.length).toBe(distributionA.length);
         expect(historyForBlock.map(r => r.address).sort())

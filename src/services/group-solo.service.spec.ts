@@ -314,14 +314,14 @@ describe('GroupSoloService', () => {
         await service.onBlockFound(900_000, 100_000_000, 'bc1qbig');
 
         // Tiny's small sat amount (< 546) should either not appear in coinbase
-        // or appear as inCoinbase=false (pending row).
+        // or appear as rowType='pending'.
         const tinyRows = (historyRepo._rows as any[]).filter(r => r.address === 'bc1qtiny');
         if (tinyRows.length > 0) {
-            expect(tinyRows[0].inCoinbase).toBe(false);
+            expect(tinyRows[0].rowType).toBe('pending');
         }
         // Big miner paid via coinbase
         const bigRows = (historyRepo._rows as any[]).filter(r => r.address === 'bc1qbig');
-        expect(bigRows.some(r => r.inCoinbase === true)).toBe(true);
+        expect(bigRows.some(r => r.rowType === 'coinbase')).toBe(true);
     });
 
     it('pending balances accumulate across rounds until they cross dust, then are paid in coinbase', async () => {
@@ -340,7 +340,7 @@ describe('GroupSoloService', () => {
         // Charlie's round-1 sats went to pending (sub-dust); Alice was paid via coinbase
         const round1Rows = historyRepo._rows as any[];
         const tinyRound1 = round1Rows.find(r => r.address === 'bc1qtiny' && r.blockHeight === 900_001);
-        expect(tinyRound1.inCoinbase).toBe(false);
+        expect(tinyRound1.rowType).toBe('pending');
         const tinyBalance1 = await balanceRepo.findOneBy({ address: 'bc1qtiny' });
         expect(tinyBalance1.pendingSats).toBeGreaterThan(0);
         const pendingAfterRound1: number = tinyBalance1.pendingSats;
@@ -356,7 +356,7 @@ describe('GroupSoloService', () => {
         const tinyRound2 = (historyRepo._rows as any[])
             .filter(r => r.address === 'bc1qtiny' && r.blockHeight === 900_002);
         expect(tinyRound2.length).toBeGreaterThan(0);
-        expect(tinyRound2.some(r => r.inCoinbase === true)).toBe(true);
+        expect(tinyRound2.some(r => r.rowType === 'coinbase')).toBe(true);
 
         const tinyBalance2 = await balanceRepo.findOneBy({ address: 'bc1qtiny' });
         // Most of Round-1's pending carry was paid on-chain in Round 2.
@@ -407,17 +407,17 @@ describe('GroupSoloService', () => {
         const bobRows = (historyRepo._rows as any[]).filter(r => r.address === 'bc1qbob');
         expect(bobRows).toHaveLength(1);
         expect(bobRows[0].paidSats).toBe(0);
-        expect(bobRows[0].inCoinbase).toBe(false);
+        expect(bobRows[0].rowType).toBe('pending');
         expect(bobRows[0].sharesInRound).toBe(2000);
 
         // Total paid via coinbase (fee + Alice) should not exceed BLOCK_REWARD
         const coinbasePaid = (historyRepo._rows as any[])
-            .filter(r => r.inCoinbase === true)
+            .filter(r => r.rowType === 'coinbase')
             .reduce((sum, r) => sum + r.paidSats, 0);
         expect(coinbasePaid).toBeLessThanOrEqual(BLOCK_REWARD);
         // And miner-cut portion (non-fee) should not exceed rewardForMiners
         const minerCoinbasePaid = (historyRepo._rows as any[])
-            .filter(r => r.inCoinbase === true && r.address !== 'bc1qfee')
+            .filter(r => r.rowType === 'coinbase' && r.address !== 'bc1qfee')
             .reduce((sum, r) => sum + r.paidSats, 0);
         const rewardForMiners = Math.floor(0.98 * BLOCK_REWARD);
         expect(minerCoinbasePaid).toBeLessThanOrEqual(rewardForMiners);
@@ -445,7 +445,7 @@ describe('GroupSoloService', () => {
 
         // Alice's history row must reflect R2 (fallback used), not R1.
         const aliceRow = (historyRepo._rows as any[])
-            .find(r => r.address === 'bc1qalice' && r.inCoinbase === true);
+            .find(r => r.address === 'bc1qalice' && r.rowType === 'coinbase');
         expect(aliceRow).toBeDefined();
         // Single miner with 100% of shares → paidSats ≈ 0.98 * R2 = 117_600_000
         expect(aliceRow.paidSats).toBeGreaterThan(100_000_000);
@@ -490,14 +490,14 @@ describe('GroupSoloService', () => {
         // current implementation emits two separate outputs, so we expect
         // at least one row that matches the bonus exactly.
         const aliceRows = (historyRepo._rows as any[])
-            .filter(r => r.address === 'bc1qalice' && r.inCoinbase === true);
+            .filter(r => r.address === 'bc1qalice' && r.rowType === 'coinbase');
         const bonusRow = aliceRows.find(r => r.paidSats === BONUS);
         expect(bonusRow).toBeDefined();
 
         // Bob (non-finder) gets only his proportional share — half of
         // (R2 - fee - bonus) = half of (120M - 2.4M - 50k) ≈ 58_775_000.
         const bobRow = (historyRepo._rows as any[])
-            .find(r => r.address === 'bc1qbob' && r.inCoinbase === true);
+            .find(r => r.address === 'bc1qbob' && r.rowType === 'coinbase');
         expect(bobRow).toBeDefined();
         expect(bobRow.paidSats).toBeGreaterThan(50_000_000);
         expect(bobRow.paidSats).toBeLessThan(60_000_000);
@@ -505,7 +505,7 @@ describe('GroupSoloService', () => {
         // Total on-chain miner cut (alice's two rows + bob) MUST equal
         // R2 - fee = 117_600_000 to the sat (no overshoot, no shortage).
         const minerCoinbasePaid = (historyRepo._rows as any[])
-            .filter(r => r.inCoinbase === true && r.address !== 'bc1qfee')
+            .filter(r => r.rowType === 'coinbase' && r.address !== 'bc1qfee')
             .reduce((sum, r) => sum + r.paidSats, 0);
         const rewardForMiners = Math.floor(0.98 * R2);
         expect(minerCoinbasePaid).toBe(rewardForMiners);
@@ -921,7 +921,7 @@ describe('GroupSoloService', () => {
 
             // Bob should have a coinbase row with at least the bonus amount.
             const bobCoinbaseRows = (historyRepo._rows as any[])
-                .filter(r => r.address === 'bc1qbob' && r.inCoinbase === true);
+                .filter(r => r.address === 'bc1qbob' && r.rowType === 'coinbase');
             expect(bobCoinbaseRows.length).toBeGreaterThan(0);
             const bobTotalPaid = bobCoinbaseRows.reduce((s, r) => s + r.paidSats, 0);
             expect(bobTotalPaid).toBeGreaterThanOrEqual(FINDER_BONUS);
@@ -930,7 +930,7 @@ describe('GroupSoloService', () => {
             // her proportional share. Her on-chain payout must be smaller
             // than bob's because bob has the bonus on top.
             const aliceCoinbaseRows = (historyRepo._rows as any[])
-                .filter(r => r.address === 'bc1qalice' && r.inCoinbase === true);
+                .filter(r => r.address === 'bc1qalice' && r.rowType === 'coinbase');
             const aliceTotalPaid = aliceCoinbaseRows.reduce((s, r) => s + r.paidSats, 0);
             expect(aliceTotalPaid).toBeLessThan(bobTotalPaid);
 

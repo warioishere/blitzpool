@@ -318,14 +318,14 @@ describe('PPLNS Integration', () => {
       const feeEntry = history.find((h: any) => h.address === ADDR_FEE);
       expect(feeEntry).toBeDefined();
       expect(feeEntry.paidSats).toBe(BLOCK_REWARD - Math.floor(0.98 * BLOCK_REWARD));
-      expect(feeEntry.inCoinbase).toBe(true);
+      expect(feeEntry.rowType).toBe('coinbase');
 
       // Miner entries
       const miner1Entry = history.find((h: any) => h.address === ADDR_MINER1);
       const miner2Entry = history.find((h: any) => h.address === ADDR_MINER2);
       expect(miner1Entry.paidSats).toBeGreaterThan(miner2Entry.paidSats); // 60% > 40%
-      expect(miner1Entry.inCoinbase).toBe(true);
-      expect(miner2Entry.inCoinbase).toBe(true);
+      expect(miner1Entry.rowType).toBe('coinbase');
+      expect(miner2Entry.rowType).toBe('coinbase');
 
       // Total paid should equal block reward
       const totalPaid = history.reduce((s: number, h: any) => s + h.paidSats, 0);
@@ -335,7 +335,7 @@ describe('PPLNS Integration', () => {
 
       console.log('\n=== Block Found Payout History ===');
       history.forEach((h: any) => {
-        console.log(`  ${h.address.substring(0, 20)}...: ${h.paidSats} sats (${h.percent.toFixed(2)}%) ${h.inCoinbase ? 'COINBASE' : 'PENDING'}`);
+        console.log(`  ${h.address.substring(0, 20)}...: ${h.paidSats} sats (${h.percent.toFixed(2)}%) ${(h.rowType ?? '').toUpperCase()}`);
       });
     });
 

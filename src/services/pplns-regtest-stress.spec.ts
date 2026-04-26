@@ -450,8 +450,8 @@ describe('PPLNS Regtest — 50-miner stress', () => {
         // ── onBlockFound: audit rows written ──
         await service.onBlockFound(template.height, blockReward);
 
-        const coinbaseRows = historyRepo._rows.filter((r: any) => r.blockHeight === template.height && r.inCoinbase);
-        const pendingRows  = historyRepo._rows.filter((r: any) => r.blockHeight === template.height && !r.inCoinbase);
+        const coinbaseRows = historyRepo._rows.filter((r: any) => r.blockHeight === template.height && r.rowType === 'coinbase');
+        const pendingRows  = historyRepo._rows.filter((r: any) => r.blockHeight === template.height && r.rowType !== 'coinbase');
 
         // Every address that ended up in the distribution (incl. fee) got
         // a coinbase history row.

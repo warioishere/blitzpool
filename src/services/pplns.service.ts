@@ -729,7 +729,6 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
                         address: entry.address,
                         paidSats: entry.sats,
                         percent: entry.percent,
-                        inCoinbase: true,
                         rowType: 'coinbase',
                     }));
 
@@ -758,7 +757,6 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
                         address: addr,
                         paidSats: 0,
                         percent: 0,
-                        inCoinbase: false,
                         rowType: 'pending',
                     }));
                     emittedThisBlock.add(addr);
@@ -777,7 +775,6 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
                         address: addr,
                         paidSats: 0,
                         percent: 0,
-                        inCoinbase: false,
                         rowType: 'pending',
                     }));
                     emittedThisBlock.add(addr);

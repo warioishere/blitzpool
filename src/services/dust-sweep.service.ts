@@ -289,7 +289,6 @@ export class DustSweepService implements OnModuleInit {
                             address: credit.address,
                             paidSats: amount,
                             percent: 0,
-                            inCoinbase: false,
                             rowType: 'dust-sweep',
                         }),
                         history.create({
@@ -297,7 +296,6 @@ export class DustSweepService implements OnModuleInit {
                             address: debit.address,
                             paidSats: amount,
                             percent: 0,
-                            inCoinbase: false,
                             rowType: 'dust-sweep',
                         }),
                     ]);
@@ -394,7 +392,6 @@ export class DustSweepService implements OnModuleInit {
                         percent: 0,
                         sharesInRound: 0,
                         totalSharesInRound: 0,
-                        inCoinbase: false,
                         rowType: 'dust-sweep',
                     }));
                     await balance.delete({ address: row.address, groupId: row.groupId });

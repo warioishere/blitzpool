@@ -23,9 +23,6 @@ export class PplnsPayoutHistoryEntity {
     @Column({ type: 'real', default: 0 })
     percent: number;
 
-    @Column({ type: 'boolean', default: true })
-    inCoinbase: boolean;
-
     /**
      * Discriminator for row semantics:
      *   - 'coinbase'    : paid on-chain via the block's coinbase tx
@@ -35,10 +32,9 @@ export class PplnsPayoutHistoryEntity {
      *                     pplns_balance.balanceSats)
      *   - 'dust-sweep'  : absorbed by the daily sweep cron after inactivity
      *
-     * Existing rows default to 'coinbase' via the migration backfill —
-     * inCoinbase=true mapped to 'coinbase', inCoinbase=false mapped to
-     * 'pending'. New code uses rowType; inCoinbase is kept for backward
-     * compatibility but should be derived from rowType in new UI.
+     * Replaced the legacy `inCoinbase: boolean` column (dropped in
+     * 1779000000000-DropInCoinbaseColumn). Single source of truth for
+     * row semantics — UI styles + filters by rowType only.
      */
     @Column({ type: 'varchar', length: 16, default: 'coinbase' })
     rowType: 'coinbase' | 'pending' | 'dust-sweep';
