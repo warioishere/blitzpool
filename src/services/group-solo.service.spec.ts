@@ -588,8 +588,9 @@ describe('GroupSoloService', () => {
 
         await service.onBlockFound(900_000, 100_000_000, 'bc1qalice');
 
-        // rejected-shares hash is cleared on round reset; lastShareAt is NOT
-        // (it survives across rounds, powering the admin kick inactivity gate).
+        // rejected-shares hash is cleared on round reset; lastAcceptedShareAt
+        // is NOT (it survives across rounds, powering the admin kick
+        // inactivity gate).
         expect(redis._hashes.get('groupsolo:g1:rejected-shares')?.size ?? 0).toBe(0);
         const stats = await service.getRoundStats('g1');
         expect(stats.totalRejected).toBe(0);
@@ -713,7 +714,7 @@ describe('GroupSoloService', () => {
             expect(redis._store.has('groupsolo:g1:total')).toBe(false);
             expect(redis._store.has('groupsolo:g1:counter')).toBe(false);
             expect(redis._store.has('groupsolo:g1:rejected-shares')).toBe(false);
-            expect(redis._store.has('groupsolo:g1:last-share-at')).toBe(false);
+            expect(redis._store.has('groupsolo:g1:last-accepted-share-at')).toBe(false);
             // Snapshots are now keyed per finderAddress (groupsolo:g1:snapshot:<addr>);
             // assert that no snapshot key for this group survives the wipe.
             for (const k of redis._store.keys()) {

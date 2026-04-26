@@ -77,12 +77,12 @@ export class PplnsGroupController {
     }
 
     /**
-     * Returns per-member rows including a `lastShareAt` (epoch-ms or null)
-     * and, for callers that supply a valid admin token, the member's
-     * verified email. The email is omitted entirely when no valid admin
-     * token is present — this endpoint doubles as the public group-page
-     * and the admin dashboard feed, and non-admins have no business seeing
-     * other members' emails.
+     * Returns per-member rows including a `lastAcceptedShareAt` (epoch-ms
+     * or null) and, for callers that supply a valid admin token, the
+     * member's verified email. The email is omitted entirely when no valid
+     * admin token is present — this endpoint doubles as the public
+     * group-page and the admin dashboard feed, and non-admins have no
+     * business seeing other members' emails.
      */
     private async detailsForGroupId(id: string, adminToken?: string) {
         const group = await this.groupService.getGroup(id);
@@ -103,13 +103,13 @@ export class PplnsGroupController {
         const members = await this.groupService.listMembers(id);
         const membersWithStatus = await Promise.all(members.map(async m => {
             const hashrate = await this.addressHashrate(m.address);
-            const lastShareAt = await this.groupSoloService.getMemberLastActive(id, m.address);
+            const lastAcceptedShareAt = await this.groupSoloService.getMemberLastActive(id, m.address);
             const row: any = {
                 address: m.address,
                 role: m.role,
                 joinedAt: m.joinedAt,
                 hashrate,
-                lastShareAt,
+                lastAcceptedShareAt,
             };
             if (isAdmin) {
                 const binding = await this.addressEmailService.getVerified(m.address);

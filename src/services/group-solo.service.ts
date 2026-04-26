@@ -48,8 +48,11 @@ function redisKeys(groupId: string) {
         rejectedShares: `groupsolo:${groupId}:rejected-shares`,
         // Per-address last-accepted-share epoch-ms. Persists across rounds
         // (NOT cleared on block-found) so the admin-kick inactivity gate
-        // can look back weeks.
-        lastShareAt: `groupsolo:${groupId}:last-share-at`,
+        // can look back weeks. Mirrors the persistent
+        // `pplns_group_balance.lastAcceptedShareAt` column — same name on
+        // purpose: hot-path Redis cache of what the DB column tracks
+        // authoritatively for the dust-sweep cron.
+        lastAcceptedShareAt: `groupsolo:${groupId}:last-accepted-share-at`,
         // Coinbase-time distribution snapshot, JSON-encoded. Created by
         // getPayoutDistribution, consumed by onBlockFound. Persists across
         // pool restart (AOF) so a crash between job-send and block-found
@@ -184,7 +187,7 @@ export class GroupSoloService implements OnModuleInit {
         const payload = `${address}:${difficulty}:${now}`;
         await this.redis.zAdd(keys.shares, { score: counter, value: payload });
         await this.redis.incrByFloat(keys.total, difficulty);
-        await this.redis.hSet(keys.lastShareAt, address, String(now));
+        await this.redis.hSet(keys.lastAcceptedShareAt, address, String(now));
 
         // Persist last-accepted-share timestamp on the balance row so the
         // dust-sweep cron can tell dormant dust from active dust. No-op
@@ -785,8 +788,8 @@ export class GroupSoloService implements OnModuleInit {
         await this.redis.del(keys.counter);
         await this.redis.del(keys.total);
         await this.redis.del(keys.rejectedShares);
-        // lastShareAt is intentionally NOT cleared on round reset — it
-        // survives across blocks so the inactivity gate measures actual
+        // lastAcceptedShareAt is intentionally NOT cleared on round reset —
+        // it survives across blocks so the inactivity gate measures actual
         // time since last work, not time since last round start.
     }
 
@@ -818,7 +821,7 @@ export class GroupSoloService implements OnModuleInit {
     ): Promise<void> {
         await this.resetRound(groupId);
         if (opts.includeLastShareAt) {
-            await this.redis.del(redisKeys(groupId).lastShareAt);
+            await this.redis.del(redisKeys(groupId).lastAcceptedShareAt);
         }
         if (opts.includeSnapshots) {
             await this.deleteAllSnapshots(groupId);
@@ -835,7 +838,7 @@ export class GroupSoloService implements OnModuleInit {
     async getMemberLastActive(groupId: string, address: string): Promise<number | null> {
         if (!this.isEnabled()) return null;
         const keys = redisKeys(groupId);
-        const raw = await this.redis.hGet(keys.lastShareAt, address);
+        const raw = await this.redis.hGet(keys.lastAcceptedShareAt, address);
         if (!raw) return null;
         const n = parseInt(raw, 10);
         return Number.isFinite(n) ? n : null;
@@ -883,7 +886,7 @@ export class GroupSoloService implements OnModuleInit {
                 await this.redis.incrByFloat(keys.total, -removedDiff);
             }
             await this.redis.hDel(keys.rejectedShares, address);
-            await this.redis.hDel(keys.lastShareAt, address);
+            await this.redis.hDel(keys.lastAcceptedShareAt, address);
             // Drop the kicked member's per-finder snapshot. It would
             // otherwise live until 1h TTL or the next block-found wipe.
             // Inert (the member's stratum sessions can no longer route
@@ -933,7 +936,7 @@ export class GroupSoloService implements OnModuleInit {
      *
      * What gets wiped:
      *   - Redis live shares, counter, total, rejectedShares
-     *   - Redis lastShareAt (members start "fresh" inactivity-wise)
+     *   - Redis lastAcceptedShareAt (members start "fresh" inactivity-wise)
      *   - Redis distribution snapshot
      *   - All `pplns_group_balance` rows for this group
      *
