@@ -12,174 +12,29 @@
  */
 
 import * as bitcoinjs from 'bitcoinjs-lib';
-import * as http from 'http';
 import { GroupSoloService } from './group-solo.service';
 import { PplnsGroupBlockHistoryEntity } from '../ORM/pplns-group/pplns-group-block-history.entity';
 import { PplnsGroupBalanceEntity } from '../ORM/pplns-group/pplns-group-balance.entity';
 import { attachMockTxManager } from './__test-helpers__/mock-tx-manager';
-
-const RPC_URL = 'http://127.0.0.1:18443';
-const RPC_USER = 'test';
-const RPC_PASS = 'test';
-const NETWORK = bitcoinjs.networks.regtest;
+import {
+    rpcCall,
+    buildCoinbase as buildCoinbaseHelper,
+    buildBlock,
+    mineBlock,
+    createMockRedis,
+    createMockRepo,
+} from './__test-helpers__/regtest-harness';
 
 const ADDR_FEE = 'bcrt1qqj0r5w2ua3pe0sh6gthvfeegvwsa3t4edumqzf';
 const ADDR_ALICE = 'bcrt1q2jf90sp25mt4pte5swkr4cujpj5d8zzwdt09fq';
 const ADDR_BOB = 'bcrt1qt2amqww2n3dcz3ckx6nlentvm9e6rpxqrfmvl7';
 const ADDR_CHARLIE = 'bcrt1qlppw7cnqspnky6qzv8p2n468lpvwuct7ehp7l2';
 
-// ── RPC Helper ──────────────────────────────────────────────────
-
-function rpcCall(method: string, params: any[] = []): Promise<any> {
-  return new Promise((resolve, reject) => {
-    const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method, params });
-    const auth = Buffer.from(`${RPC_USER}:${RPC_PASS}`).toString('base64');
-
-    const req = http.request(RPC_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Basic ${auth}` },
-    }, (res) => {
-      let data = '';
-      res.on('data', (chunk) => data += chunk);
-      res.on('end', () => {
-        try {
-          const parsed = JSON.parse(data);
-          if (parsed.error) reject(new Error(`RPC error: ${JSON.stringify(parsed.error)}`));
-          else resolve(parsed.result);
-        } catch (e) {
-          reject(new Error(`Invalid JSON: ${data}`));
-        }
-      });
-    });
-    req.on('error', reject);
-    req.write(body);
-    req.end();
-  });
-}
-
-// ── Mock stack for the service ──────────────────────────────────
-
-function createMockRedis() {
-  const store = new Map<string, string>();
-  const zsets = new Map<string, { score: number; value: string }[]>();
-  const hashes = new Map<string, Map<string, string>>();
-  const getZ = (key: string) => {
-    if (!zsets.has(key)) zsets.set(key, []);
-    return zsets.get(key)!;
-  };
-  return {
-    incr: async (key: string) => {
-      const val = parseInt(store.get(key) ?? '0', 10) + 1;
-      store.set(key, val.toString());
-      return val;
-    },
-    get: async (key: string) => store.get(key) ?? null,
-    set: async (key: string, value: string) => { store.set(key, value); },
-    del: async (keyOrKeys: string | string[]) => {
-      const ks = Array.isArray(keyOrKeys) ? keyOrKeys : [keyOrKeys];
-      for (const k of ks) { store.delete(k); zsets.delete(k); hashes.delete(k); }
-    },
-    scan: async (_cursor: number, opts: { MATCH: string; COUNT?: number }) => {
-      const pattern = opts.MATCH;
-      const regex = new RegExp('^' + pattern.split('*').map(p => p.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$');
-      const allKeys = [...store.keys(), ...zsets.keys(), ...hashes.keys()];
-      const matched = allKeys.filter(k => regex.test(k));
-      return { cursor: 0, keys: Array.from(new Set(matched)) };
-    },
-    incrByFloat: async (key: string, amount: number) => {
-      const val = parseFloat(store.get(key) ?? '0') + amount;
-      store.set(key, val.toString());
-      return val;
-    },
-    zAdd: async (key: string, entry: { score: number; value: string }) => {
-      const z = getZ(key);
-      z.push(entry);
-      z.sort((a, b) => a.score - b.score);
-    },
-    zRange: async (key: string, start: number, end: number) => {
-      const z = getZ(key);
-      const e = end === -1 ? z.length - 1 : end;
-      return z.slice(start, e + 1).map(x => x.value);
-    },
-    zCard: async (key: string) => getZ(key).length,
-    zRem: async (key: string, value: string) => {
-      const z = getZ(key);
-      const idx = z.findIndex(e => e.value === value);
-      if (idx >= 0) z.splice(idx, 1);
-    },
-    hSet: async (key: string, field: string, value: string) => {
-      if (!hashes.has(key)) hashes.set(key, new Map());
-      hashes.get(key)!.set(field, value);
-    },
-    hGet: async (key: string, field: string) => hashes.get(key)?.get(field) ?? null,
-    hDel: async (key: string, field: string) => { hashes.get(key)?.delete(field); },
-    hGetAll: async (key: string) => {
-      const h = hashes.get(key);
-      return h ? Object.fromEntries(h.entries()) : {};
-    },
-    hIncrByFloat: async (key: string, field: string, amount: number) => {
-      if (!hashes.has(key)) hashes.set(key, new Map());
-      const h = hashes.get(key)!;
-      const val = parseFloat(h.get(field) ?? '0') + amount;
-      h.set(field, val.toString());
-      return val;
-    },
-    expire: async (_key: string, _seconds: number) => 1,
-    _store: store,
-    _zsets: zsets,
-    _hashes: hashes,
-  };
-}
-
-function createMockRepo<T>() {
-  const rows: T[] = [];
-  const applySave = (row: T) => {
-    const r = row as any;
-    let existing: any = null;
-    if (r?.id !== undefined) {
-      existing = (rows as any[]).find(x => x.id === r.id);
-    } else if (r?.address !== undefined && r?.groupId !== undefined) {
-      existing = (rows as any[]).find(x => x.address === r.address && x.groupId === r.groupId);
-    } else if (r?.address !== undefined) {
-      existing = (rows as any[]).find(x => x.address === r.address);
-    }
-    if (existing) Object.assign(existing, row);
-    else rows.push(row);
-  };
-  return {
-    save: async (arg: T | T[]) => {
-      const batch = Array.isArray(arg) ? arg : [arg];
-      for (const row of batch) applySave(row);
-      return arg;
-    },
-    insert: async (arg: T | T[]) => {
-      const batch = Array.isArray(arg) ? arg : [arg];
-      for (const row of batch) rows.push(row);
-      return { identifiers: [] };
-    },
-    create: (partial: Partial<T>) => ({ ...partial }) as T,
-    find: async (q?: any) => {
-      if (!q?.where) return [...rows];
-      return (rows as any[]).filter(r =>
-        Object.entries(q.where).every(([k, v]) => {
-          if (v && typeof v === 'object' && Array.isArray((v as any)._value)) {
-            return new Set((v as any)._value).has(r[k]);
-          }
-          return r[k] === v;
-        }),
-      );
-    },
-    findOneBy: async (where: any) =>
-      (rows as any[]).find(r => Object.entries(where).every(([k, v]) => r[k] === v)) ?? null,
-    update: async (where: any, patch: any) => {
-      for (const row of rows as any[]) {
-        if (Object.entries(where).every(([k, v]) => row[k] === v)) Object.assign(row, patch);
-      }
-      return { affected: 0 } as any;
-    },
-    _rows: rows,
-  };
-}
+const buildCoinbase = (
+    payouts: { address: string; sats: number }[],
+    height: number,
+    witnessCommit: Buffer,
+) => buildCoinbaseHelper(payouts, height, witnessCommit, 'blitzpool-group-solo-test');
 
 function makeService() {
   const env: Record<string, string> = {
@@ -211,62 +66,6 @@ function makeService() {
   (service as any).redis = redis;
   (service as any).enabled = true;
   return { service, redis };
-}
-
-// ── Block Builder ───────────────────────────────────────────────
-
-function buildCoinbase(
-  payouts: { address: string; sats: number }[],
-  height: number,
-  witnessCommit: Buffer,
-): bitcoinjs.Transaction {
-  const tx = new bitcoinjs.Transaction();
-  tx.version = 2;
-  tx.addInput(Buffer.alloc(32, 0), 0xffffffff, 0xffffffff);
-  const heightEncoded = bitcoinjs.script.number.encode(height);
-  tx.ins[0].script = Buffer.concat([
-    Buffer.from([heightEncoded.length]),
-    heightEncoded,
-    Buffer.from('blitzpool-group-solo-test'),
-    Buffer.alloc(4, 0),
-  ]);
-  tx.ins[0].witness = [Buffer.alloc(32, 0)];
-
-  for (const payout of payouts) {
-    const script = bitcoinjs.address.toOutputScript(payout.address, NETWORK);
-    tx.addOutput(script, payout.sats);
-  }
-  const commitmentHeader = Buffer.from('aa21a9ed', 'hex');
-  tx.addOutput(
-    bitcoinjs.script.compile([
-      bitcoinjs.opcodes.OP_RETURN,
-      Buffer.concat([commitmentHeader, witnessCommit]),
-    ]),
-    0,
-  );
-  return tx;
-}
-
-function buildBlock(template: any, coinbaseTx: bitcoinjs.Transaction, transactions: bitcoinjs.Transaction[]): bitcoinjs.Block {
-  const block = new bitcoinjs.Block();
-  block.version = template.version;
-  block.prevHash = Buffer.from(template.previousblockhash, 'hex').reverse();
-  block.timestamp = template.curtime;
-  block.bits = parseInt(template.bits, 16);
-  block.nonce = 0;
-  block.transactions = [coinbaseTx, ...transactions];
-  block.merkleRoot = bitcoinjs.Block.calculateMerkleRoot(block.transactions, false);
-  return block;
-}
-
-function mineBlock(block: bitcoinjs.Block, targetHex: string): boolean {
-  const target = Buffer.from(targetHex.padStart(64, '0'), 'hex');
-  for (let nonce = 0; nonce < 0xffffffff; nonce++) {
-    block.nonce = nonce;
-    const hash = bitcoinjs.crypto.hash256(block.toBuffer(true));
-    if (Buffer.from(hash).reverse().compare(target) <= 0) return true;
-  }
-  return false;
 }
 
 // ═══════════════════════════════════════════════════════════════
