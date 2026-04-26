@@ -249,12 +249,12 @@ export class GroupSoloService implements OnModuleInit {
         blockRewardSats: number,
         finderAddress?: string,
     ): Promise<GroupSoloPayoutEntry[]> {
-        if (!this.isEnabled()) return this.fallback();
+        if (!this.isEnabled()) return this.fallback(blockRewardSats);
 
         const keys = redisKeys(groupId);
         const entries = await this.redis.zRange(keys.shares, 0, -1);
         if (!entries || entries.length === 0) {
-            return this.fallback();
+            return this.fallback(blockRewardSats);
         }
 
         const addressShares = new Map<string, number>();
@@ -386,12 +386,21 @@ export class GroupSoloService implements OnModuleInit {
         await this.redis.del(keys.snapshotPrefix);
     }
 
-    private fallback(blockRewardSats?: number): GroupSoloPayoutEntry[] {
+    /**
+     * "No miners in window / service disabled" fallback shape — emits the
+     * fee address as a single 100 % output, or an empty array if no fee
+     * address is configured. Mirrors PplnsService.fallbackDistribution; the
+     * required `blockRewardSats` parameter prevents the silent-zero-sats
+     * footgun the prior optional signature had (a callsite that forgot to
+     * pass the reward would emit a 0-sat coinbase output that callers'
+     * `length > 0` checks happily accepted).
+     */
+    private fallback(blockRewardSats: number): GroupSoloPayoutEntry[] {
         if (this.feeAddress) {
             return [{
                 address: this.feeAddress,
                 percent: 100,
-                sats: blockRewardSats ?? 0,
+                sats: blockRewardSats,
             }];
         }
         return [];

@@ -280,6 +280,29 @@ describe('GroupSoloService', () => {
         expect(total).toBeCloseTo(100, 5);
     });
 
+    it('empty-window fallback emits a fee output with the actual block reward (regression: not 0 sats)', async () => {
+        // Pre-fix bug: getPayoutDistribution called this.fallback() (no
+        // arg) on the !isEnabled / empty-window paths, returning
+        // [{ feeAddress, percent: 100, sats: 0 }]. Callers checked only
+        // `length > 0`, so a 0-sat fee output would silently pass through
+        // into the coinbase. Now: fallback requires blockRewardSats and
+        // emits the real value.
+        const REWARD = 100_000_000;
+        const { service, groupService } = makeService();
+        groupService._setMembership('bc1qalice', 'g1', true);
+        // Explicitly do NOT record any shares — exercises the empty-zRange
+        // early-exit path inside getPayoutDistribution.
+
+        const dist = await service.getPayoutDistribution('g1', REWARD);
+
+        expect(dist).toHaveLength(1);
+        expect(dist[0]).toEqual({
+            address: 'bc1qfee',
+            percent: 100,
+            sats: REWARD,
+        });
+    });
+
     it('onBlockFound writes history rows and resets the round', async () => {
         const { service, redis, historyRepo, groupService } = makeService();
         groupService._setMembership('bc1qalice', 'g1', true);
