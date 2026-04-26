@@ -758,17 +758,15 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
     // ── Stats ────────────────────────────────────────────────────
 
     async getWindowStats(): Promise<{
-        totalDifficulty: number;
+        totalShares: number;
         windowSize: number;
-        shareCount: number;
         minerCount: number;
     }> {
         if (!this.redis) {
-            return { totalDifficulty: 0, windowSize: 0, shareCount: 0, minerCount: 0 };
+            return { totalShares: 0, windowSize: 0, minerCount: 0 };
         }
 
         const totalStr = await this.redis.get(REDIS_KEY_WINDOW_TOTAL);
-        const shareCount = await this.redis.zCard(REDIS_KEY_SHARES);
         const entries = await this.redis.zRange(REDIS_KEY_SHARES, 0, -1);
         const miners = new Set<string>();
         for (const entry of (entries ?? [])) {
@@ -776,9 +774,8 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         }
 
         return {
-            totalDifficulty: parseFloat(totalStr) || 0,
+            totalShares: parseFloat(totalStr) || 0,
             windowSize: this.getWindowSize(),
-            shareCount: shareCount ?? 0,
             minerCount: miners.size,
         };
     }
@@ -794,36 +791,36 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
     async getAddressStatus(address: string): Promise<{
         balanceSats: number;
         totalPaidSats: number;
-        currentWindowDifficulty: number;
+        currentWindowShares: number;
         currentWindowPercent: number;
     }> {
         const balance = await this.balanceService.getBalance(address);
 
-        let currentWindowDifficulty = 0;
+        let currentWindowShares = 0;
         let currentWindowPercent = 0;
 
         if (this.redis) {
             const entries = await this.redis.zRange(REDIS_KEY_SHARES, 0, -1);
-            let totalDiff = 0;
-            let addressDiff = 0;
+            let totalShares = 0;
+            let addressShares = 0;
             for (const entry of (entries ?? [])) {
                 const parts = entry.split(':');
                 const diff = parseFloat(parts[1]) || 0;
-                totalDiff += diff;
+                totalShares += diff;
                 if (parts[0] === address) {
-                    addressDiff += diff;
+                    addressShares += diff;
                 }
             }
-            currentWindowDifficulty = addressDiff;
-            if (totalDiff > 0) {
-                currentWindowPercent = (addressDiff / totalDiff) * 100;
+            currentWindowShares = addressShares;
+            if (totalShares > 0) {
+                currentWindowPercent = (addressShares / totalShares) * 100;
             }
         }
 
         return {
             balanceSats: balance?.balanceSats ?? 0,
             totalPaidSats: balance?.totalPaidSats ?? 0,
-            currentWindowDifficulty,
+            currentWindowShares,
             currentWindowPercent,
         };
     }

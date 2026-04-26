@@ -188,7 +188,7 @@ export class PplnsController {
      *                     = 0  no open claim
      *   - balanceLabel: 'credit' | 'debit' | 'zero' — ready-to-render category
      *   - totalPaidSats: lifetime on-chain payouts via this engine
-     *   - currentWindowDifficulty / currentWindowPercent
+     *   - currentWindowShares / currentWindowPercent
      */
     @Get(':address')
     async getAddressStatus(@Param('address') address: string) {

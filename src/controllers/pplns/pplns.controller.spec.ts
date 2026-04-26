@@ -15,12 +15,12 @@ describe('PplnsController', () => {
             getCurrentDistribution: jest.fn().mockResolvedValue(opts.distribution ?? []),
             isEnabled: jest.fn().mockReturnValue(opts.enabled ?? true),
             getWindowStats: jest.fn().mockResolvedValue(opts.windowStats ?? {
-                totalDifficulty: 0, windowSize: 0, shareCount: 0, minerCount: 0,
+                totalShares: 0, windowSize: 0, minerCount: 0,
             }),
             getAddressStatus: jest.fn().mockResolvedValue({
                 balanceSats: 0,
                 totalPaidSats: 0,
-                currentWindowDifficulty: 0,
+                currentWindowShares: 0,
                 currentWindowPercent: 0,
             }),
             getLedgerSummary: jest.fn().mockResolvedValue({
@@ -75,7 +75,7 @@ describe('PplnsController', () => {
                     { userAgent: 'Bitaxe/2.1.15', count: '2', bestDifficulty: '8192', totalHashRate: '1000000000000' },
                 ],
                 enabled: true,
-                windowStats: { totalDifficulty: 1000, windowSize: 4000, shareCount: 2, minerCount: 2 },
+                windowStats: { totalShares: 1000, windowSize: 4000, minerCount: 2 },
             });
 
             const res = await controller.info();
@@ -83,9 +83,8 @@ describe('PplnsController', () => {
             expect(clientService.getUserAgentsForAddresses).toHaveBeenCalledWith(['bc1qalice', 'bc1qbob']);
             expect(res).toEqual({
                 enabled: true,
-                totalDifficulty: 1000,
+                totalShares: 1000,
                 windowSize: 4000,
-                shareCount: 2,
                 minerCount: 2,
                 userAgents: [
                     { userAgent: 'Bitaxe/2.1.15', count: '2', bestDifficulty: '8192', totalHashRate: '1000000000000' },
@@ -164,7 +163,7 @@ describe('PplnsController', () => {
             (pplnsService.getAddressStatus as jest.Mock).mockResolvedValue({
                 balanceSats: 1234,
                 totalPaidSats: 5000,
-                currentWindowDifficulty: 100,
+                currentWindowShares: 100,
                 currentWindowPercent: 25,
             });
             const res = await controller.getAddressStatus('bc1qa');
@@ -177,7 +176,7 @@ describe('PplnsController', () => {
             (pplnsService.getAddressStatus as jest.Mock).mockResolvedValue({
                 balanceSats: -500,
                 totalPaidSats: 20000,
-                currentWindowDifficulty: 50,
+                currentWindowShares: 50,
                 currentWindowPercent: 10,
             });
             const res = await controller.getAddressStatus('bc1qa');

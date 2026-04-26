@@ -411,7 +411,7 @@ describe('PPLNS Regtest — 50-miner stress', () => {
         expect(stats.minerCount).toBe(MINER_COUNT);
         // Total work = sum(weight × 5 shares) for all miners
         const expectedTotalDiff = miners.reduce((s, _, i) => s + 5 * weightFor(i), 0);
-        expect(stats.totalDifficulty).toBeCloseTo(expectedTotalDiff, 0);
+        expect(stats.totalShares).toBeCloseTo(expectedTotalDiff, 0);
 
         // ── Get template + distribution from the service ──
         const template = await rpcCall('getblocktemplate', [{ rules: ['segwit'] }]);

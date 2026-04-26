@@ -820,9 +820,8 @@ describe('PplnsService', () => {
       ]);
 
       const stats = await service.getWindowStats();
-      expect(stats.shareCount).toBe(3);
       expect(stats.minerCount).toBe(2); // A and B
-      expect(stats.totalDifficulty).toBe(1000);
+      expect(stats.totalShares).toBe(1000);
       expect(stats.windowSize).toBe(4000);
     });
   });
@@ -843,7 +842,7 @@ describe('PplnsService', () => {
       const status = await service.getAddressStatus('bc1qa');
       expect(status.balanceSats).toBe(5000);
       expect(status.totalPaidSats).toBe(50000);
-      expect(status.currentWindowDifficulty).toBe(600);
+      expect(status.currentWindowShares).toBe(600);
       expect(status.currentWindowPercent).toBeCloseTo(60, 0);
     });
 
@@ -854,7 +853,7 @@ describe('PplnsService', () => {
       const status = await service.getAddressStatus('bc1qunknown');
       expect(status.balanceSats).toBe(0);
       expect(status.totalPaidSats).toBe(0);
-      expect(status.currentWindowDifficulty).toBe(0);
+      expect(status.currentWindowShares).toBe(0);
       expect(status.currentWindowPercent).toBe(0);
     });
   });
