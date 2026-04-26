@@ -788,13 +788,24 @@ export class GroupSoloService implements OnModuleInit {
     }
 
     private async addPending(groupId: string, address: string, sats: number): Promise<void> {
+        // Touch lastAcceptedShareAt on every credit. Convention: any row
+        // that just received money gets a fresh dormancy anchor — otherwise
+        // a recipient who is themselves dormant would have the dust-sweep
+        // cron absorb the just-credited sats on its next run (the sweep
+        // gates on pendingSats < minPayout AND lastAcceptedShareAt past
+        // the dormancy cutoff). The credit shouldn't count as the
+        // recipient "being active", but it should reset the clock so the
+        // sweep doesn't immediately reclaim what the kick just gave them.
+        const now = new Date();
         const existing = await this.balanceRepo.findOneBy({ address, groupId });
         if (existing) {
             existing.pendingSats += sats;
+            existing.lastAcceptedShareAt = now;
             await this.balanceRepo.save(existing);
         } else {
             await this.balanceRepo.save(this.balanceRepo.create({
                 address, groupId, pendingSats: sats, totalPaidSats: 0,
+                lastAcceptedShareAt: now,
             }));
         }
     }

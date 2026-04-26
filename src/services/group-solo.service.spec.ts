@@ -817,6 +817,42 @@ describe('GroupSoloService', () => {
         expect(charlieRow?.pendingSats).toBe(450);
     });
 
+    it('removeMemberState: kick redistribution stamps lastAcceptedShareAt on recipients (regression: dust-sweep protection)', async () => {
+        // The dust-sweep cron absorbs pending rows whose pendingSats <
+        // minPayout AND lastAcceptedShareAt < dormancyCutoff. Pre-fix,
+        // addPending didn't touch lastAcceptedShareAt — so a kick that
+        // redistributed sats to a recipient with a stale (or null)
+        // timestamp would let the very next sweep absorb the just-credited
+        // sats. The fix stamps now() on every credit.
+        const { service, groupService, balanceRepo } = makeService();
+        groupService._setMembership('bc1qalice', 'g1', true);
+        groupService._setMembership('bc1qbob', 'g1', true);
+
+        const STALE = new Date('2020-01-01T00:00:00Z');
+
+        // Seed: bob has 900 sats pending; alice has a stale balance row
+        // (mined long ago, dust-eligible by timestamp).
+        (balanceRepo._rows as any[]).push(
+            { address: 'bc1qbob', groupId: 'g1', pendingSats: 900, totalPaidSats: 0,
+              lastAcceptedShareAt: new Date() },
+            { address: 'bc1qalice', groupId: 'g1', pendingSats: 100, totalPaidSats: 0,
+              lastAcceptedShareAt: STALE },
+        );
+
+        const before = Date.now();
+        await service.removeMemberState('g1', 'bc1qbob', ['bc1qalice']);
+        const after = Date.now();
+
+        const aliceRow = (balanceRepo._rows as any[]).find(r => r.address === 'bc1qalice');
+        expect(aliceRow?.pendingSats).toBe(1000); // 100 existing + 900 redistributed
+        // Timestamp must have been refreshed inside the kick window —
+        // not left at STALE — otherwise the next sweep cron run would
+        // immediately absorb the just-credited 900 sats.
+        expect(aliceRow?.lastAcceptedShareAt).toBeInstanceOf(Date);
+        expect(aliceRow.lastAcceptedShareAt.getTime()).toBeGreaterThanOrEqual(before);
+        expect(aliceRow.lastAcceptedShareAt.getTime()).toBeLessThanOrEqual(after);
+    });
+
     // ── Finder-bonus per-miner coinbase ────────────────────────────
     //
     // The bonus output is built into each miner's own coinbase template
