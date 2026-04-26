@@ -75,13 +75,13 @@ interface StoredPplnsSnapshot {
 // DUST_LIMIT_SATS + coinbase weight constants live in
 // ./coinbase-distribution.ts — single source of truth.
 
-export interface PplnsPayoutEntry {
-    address: string;
-    /** Share of the block reward (0–100). */
-    percent: number;
-    /** On-chain sats this output carries. Authoritative; `percent` is derived. */
-    sats: number;
-}
+/**
+ * PPLNS-engine view of a coinbase output. Structurally identical to
+ * `CoinbaseDistributionEntry` (which lives in coinbase-distribution.ts);
+ * kept as a re-export so existing callers can import `PplnsPayoutEntry`
+ * without depending on the underlying math module directly.
+ */
+export type PplnsPayoutEntry = CoinbaseDistributionEntry;
 
 @Injectable()
 export class PplnsService implements OnModuleInit, OnModuleDestroy {
@@ -395,7 +395,7 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         });
 
         const payouts: PplnsPayoutEntry[] = result.payouts.length > 0
-            ? result.payouts.map(this.toPayoutEntry)
+            ? result.payouts
             : this.fallbackDistribution(blockRewardSats);
 
         this.cachedDistribution = payouts;
@@ -410,10 +410,6 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         });
 
         return payouts;
-    }
-
-    private toPayoutEntry(entry: CoinbaseDistributionEntry): PplnsPayoutEntry {
-        return { address: entry.address, percent: entry.percent, sats: entry.sats };
     }
 
     private async writeSnapshot(snapshot: StoredPplnsSnapshot): Promise<void> {

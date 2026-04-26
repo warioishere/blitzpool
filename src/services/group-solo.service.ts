@@ -10,6 +10,7 @@ import { PplnsGroupEntity } from '../ORM/pplns-group/pplns-group.entity';
 import { GroupService } from './group.service';
 import {
     buildCoinbaseDistribution,
+    CoinbaseDistributionEntry,
     DEFAULT_COINBASE_WEIGHT_BUDGET,
     resolveMinPayoutSats,
 } from './coinbase-distribution';
@@ -70,11 +71,12 @@ interface StoredSnapshot {
     balanceAfter: Array<[string, number]>;
 }
 
-export interface GroupSoloPayoutEntry {
-    address: string;
-    percent: number;
-    sats: number;
-}
+/**
+ * Group-solo view of a coinbase output. Structurally identical to
+ * `CoinbaseDistributionEntry`; kept as a re-export so callers can import
+ * `GroupSoloPayoutEntry` without depending on the underlying math module.
+ */
+export type GroupSoloPayoutEntry = CoinbaseDistributionEntry;
 
 @Injectable()
 export class GroupSoloService implements OnModuleInit {
@@ -291,7 +293,7 @@ export class GroupSoloService implements OnModuleInit {
         });
 
         const payouts: GroupSoloPayoutEntry[] = result.payouts.length > 0
-            ? result.payouts.map(p => ({ address: p.address, percent: p.percent, sats: p.sats }))
+            ? result.payouts
             : this.fallback(blockRewardSats);
 
         await this.writeSnapshot(groupId, finderAddress, {
@@ -613,13 +615,10 @@ export class GroupSoloService implements OnModuleInit {
             + `  coinbase dump:   ${JSON.stringify(result.payouts.map(p => ({ a: p.address, s: p.sats })))}`,
         );
 
-        const distribution: GroupSoloPayoutEntry[] = result.payouts.map(p => ({
-            address: p.address, percent: p.percent, sats: p.sats,
-        }));
         const ok = await this.applyDistributionTx({
             groupId,
             blockHeight,
-            distribution,
+            distribution: result.payouts,
             balanceAfter: result.balanceAfter,
             consideredAddresses: result.consideredAddresses,
             diffByAddr,
