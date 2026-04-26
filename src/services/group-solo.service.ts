@@ -495,7 +495,8 @@ export class GroupSoloService implements OnModuleInit {
             if (!ok) return;
 
             // Snapshot(s) + round cleared only after the TX committed. Order
-            // matters: clear the share window FIRST, snapshots SECOND. If a
+            // inside wipeRoundState matters: clear the share window FIRST,
+            // snapshots SECOND (resetRound, then deleteAllSnapshots). If a
             // concurrent stratum session calls getPayoutDistribution between
             // the two Redis ops, an empty share window triggers the early-
             // exit fallback path which does NOT write a snapshot — so no
@@ -503,8 +504,10 @@ export class GroupSoloService implements OnModuleInit {
             // order had a small race window where a new snapshot built from
             // soon-to-be-cleared shares could outlive resetRound and trip
             // the next block's mismatch guard.
-            await this.resetRound(groupId);
-            await this.deleteAllSnapshots(groupId);
+            //
+            // includeLastShareAt: false — block-found wipes the round but
+            // preserves the cross-round inactivity clock (PROP semantics).
+            await this.wipeRoundState(groupId, { includeSnapshots: true, includeLastShareAt: false });
         } finally {
             this.blockFoundLocks.delete(groupId);
         }
@@ -537,7 +540,7 @@ export class GroupSoloService implements OnModuleInit {
         const keys = redisKeys(groupId);
         const entries = await this.redis.zRange(keys.shares, 0, -1);
         if (!entries || entries.length === 0) {
-            await this.resetRound(groupId);
+            await this.wipeRoundState(groupId, { includeSnapshots: true, includeLastShareAt: false });
             return;
         }
 
@@ -552,7 +555,7 @@ export class GroupSoloService implements OnModuleInit {
             totalDiffRound += diff;
         }
         if (totalDiffRound <= 0) {
-            await this.resetRound(groupId);
+            await this.wipeRoundState(groupId, { includeSnapshots: true, includeLastShareAt: false });
             return;
         }
 
@@ -586,7 +589,7 @@ export class GroupSoloService implements OnModuleInit {
             // Degenerate edge: no fee configured AND no eligible miners.
             // Nothing to record; just clear the round so the next block
             // starts fresh.
-            await this.resetRound(groupId);
+            await this.wipeRoundState(groupId, { includeSnapshots: true, includeLastShareAt: false });
             return;
         }
 
@@ -629,7 +632,7 @@ export class GroupSoloService implements OnModuleInit {
         });
         if (!ok) return;
 
-        await this.resetRound(groupId);
+        await this.wipeRoundState(groupId, { includeSnapshots: true, includeLastShareAt: false });
     }
 
     /**
@@ -812,6 +815,41 @@ export class GroupSoloService implements OnModuleInit {
         // time since last work, not time since last round start.
     }
 
+    /**
+     * Wipe a group's per-round Redis state. Single helper for every code
+     * path that starts a round fresh — block-found, scheduled timer wipe,
+     * admin dissolve.
+     *
+     * Always wipes the share window (resetRound). Two opt-ins:
+     *
+     *   `includeSnapshots`  → also delete every per-finder coinbase
+     *                          snapshot. `false` is correct only when
+     *                          the caller has already deleted them or
+     *                          knows none exist (recompute fallback).
+     *
+     *   `includeLastShareAt` → also delete the inactivity hash. `true`
+     *                           for "full reset" semantics (dissolve,
+     *                           scheduled-timer wipe). `false` for
+     *                           block-found, where the inactivity clock
+     *                           survives across rounds so the admin-kick
+     *                           gate can look back weeks.
+     *
+     * Caller is expected to hold the relevant lock (e.g. blockFoundLocks)
+     * already — this helper does not coordinate concurrency.
+     */
+    private async wipeRoundState(
+        groupId: string,
+        opts: { includeSnapshots: boolean; includeLastShareAt: boolean },
+    ): Promise<void> {
+        await this.resetRound(groupId);
+        if (opts.includeLastShareAt) {
+            await this.redis.del(redisKeys(groupId).lastShareAt);
+        }
+        if (opts.includeSnapshots) {
+            await this.deleteAllSnapshots(groupId);
+        }
+    }
+
     // ── Member lifecycle (called by GroupService) ──────────────
 
     /**
@@ -900,10 +938,9 @@ export class GroupSoloService implements OnModuleInit {
      */
     async removeGroupState(groupId: string): Promise<void> {
         if (this.isEnabled()) {
-            await this.resetRound(groupId);
-            const keys = redisKeys(groupId);
-            await this.redis.del(keys.lastShareAt);
-            await this.deleteAllSnapshots(groupId);
+            // Full reset: round window, inactivity hash, all snapshots.
+            // Group is being dissolved — no semantics to preserve.
+            await this.wipeRoundState(groupId, { includeSnapshots: true, includeLastShareAt: true });
         }
         await this.balanceRepo.delete({ groupId });
         await this.historyRepo.delete({ groupId });
@@ -980,10 +1017,9 @@ export class GroupSoloService implements OnModuleInit {
         console.log(`[GroupSolo] Scheduled timer-reset firing for group ${groupId} (full wipe incl. pending)`);
 
         if (this.isEnabled()) {
-            await this.resetRound(groupId);
-            const keys = redisKeys(groupId);
-            await this.redis.del(keys.lastShareAt);
-            await this.deleteAllSnapshots(groupId);
+            // Variant B: full reset — round window AND inactivity clock,
+            // plus all snapshots. Members start fresh in every dimension.
+            await this.wipeRoundState(groupId, { includeSnapshots: true, includeLastShareAt: true });
         }
 
         // Variant B: wipe ALL pending balances. Positive balances are
