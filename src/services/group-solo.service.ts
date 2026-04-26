@@ -445,7 +445,7 @@ export class GroupSoloService implements OnModuleInit {
             }
             if (!snapshot || snapshot.distribution.length === 0) {
                 console.warn(`[GroupSolo] No snapshot for group ${groupId} (finder=${finderAddress}) — using window recalculation fallback`);
-                await this.onBlockFoundFromWindow(groupId, blockHeight, blockRewardSats);
+                await this.onBlockFoundFromWindow(groupId, blockHeight, blockRewardSats, finderAddress);
                 return;
             }
 
@@ -461,11 +461,11 @@ export class GroupSoloService implements OnModuleInit {
                     + `${blockRewardSats} for group ${groupId} — falling back to window recalc`,
                 );
                 await this.deleteAllSnapshots(groupId);
-                await this.onBlockFoundFromWindow(groupId, blockHeight, blockRewardSats);
+                await this.onBlockFoundFromWindow(groupId, blockHeight, blockRewardSats, finderAddress);
                 return;
             }
 
-            const snapshotAddrs = new Set(snapshot.distribution.map(d => d.address));
+            // Read the live window for diffByAddr / late-arriver tracking.
             const keys = redisKeys(groupId);
             const windowEntries = await this.redis.zRange(keys.shares, 0, -1);
             const windowAddrs = new Set<string>();
@@ -481,122 +481,28 @@ export class GroupSoloService implements OnModuleInit {
                 }
             }
 
-            try {
-                await this.historyRepo.manager.transaction(async (em) => {
-                    const historyRepo = em.getRepository(PplnsGroupBlockHistoryEntity);
-                    const balanceRepo = em.getRepository(PplnsGroupBalanceEntity);
-
-                    // Single IN-list fetch for every balance row we might
-                    // touch — anyone in balanceAfter, plus snapshot miners
-                    // (for totalPaidSats).
-                    const addrsNeedingBalance = new Set<string>();
-                    for (const addr of snapshot.balanceAfter.keys()) addrsNeedingBalance.add(addr);
-                    for (const d of snapshot.distribution) {
-                        if (d.address !== this.feeAddress) addrsNeedingBalance.add(d.address);
-                    }
-                    const existingBalances = addrsNeedingBalance.size > 0
-                        ? await balanceRepo.find({ where: { groupId, address: In(Array.from(addrsNeedingBalance)) } })
-                        : [];
-                    const balanceMap = new Map(existingBalances.map(b => [b.address, b]));
-
-                    const balancesToSave = new Map<string, PplnsGroupBalanceEntity>();
-                    const historyRows: PplnsGroupBlockHistoryEntity[] = [];
-                    const now = new Date();
-
-                    // 1. Apply absolute balanceAfter values from snapshot.
-                    for (const [addr, newBalance] of snapshot.balanceAfter) {
-                        let balance = balanceMap.get(addr);
-                        if (!balance) {
-                            balance = balanceRepo.create({
-                                address: addr, groupId,
-                                pendingSats: newBalance,
-                                totalPaidSats: 0,
-                                lastAcceptedShareAt: now,
-                            });
-                            balanceMap.set(addr, balance);
-                        } else {
-                            balance.pendingSats = newBalance;
-                            balance.lastAcceptedShareAt = now;
-                        }
-                        balancesToSave.set(balance.address, balance);
-                    }
-
-                    // 2. Coinbase outputs: history rows + totalPaidSats bump.
-                    for (const d of snapshot.distribution) {
-                        const isFee = d.address === this.feeAddress;
-                        if (!isFee) {
-                            let balance = balanceMap.get(d.address);
-                            if (!balance) {
-                                balance = balanceRepo.create({
-                                    address: d.address, groupId,
-                                    pendingSats: 0, totalPaidSats: 0,
-                                    lastAcceptedShareAt: now,
-                                });
-                                balanceMap.set(d.address, balance);
-                            }
-                            balance.totalPaidSats += d.sats;
-                            balancesToSave.set(balance.address, balance);
-                        }
-                        historyRows.push(historyRepo.create({
-                            groupId, blockHeight, address: d.address,
-                            paidSats: d.sats, percent: d.percent,
-                            sharesInRound: Math.round(diffByAddr.get(d.address) ?? 0),
-                            totalSharesInRound: Math.round(totalDiffRound),
-                            inCoinbase: true, rowType: 'coinbase',
-                        }));
-                    }
-
-                    // 3. Ledger-change audit rows for addresses whose balance
-                    //    shifted without appearing on-chain.
-                    for (const addr of snapshot.balanceAfter.keys()) {
-                        if (snapshotAddrs.has(addr)) continue;
-                        historyRows.push(historyRepo.create({
-                            groupId, blockHeight, address: addr,
-                            paidSats: 0, percent: 0,
-                            sharesInRound: Math.round(diffByAddr.get(addr) ?? 0),
-                            totalSharesInRound: Math.round(totalDiffRound),
-                            inCoinbase: false, rowType: 'pending',
-                        }));
-                    }
-
-                    // 4. Late arrivers: in window but not considered at
-                    //    snapshot-build time → audit only, no ledger impact.
-                    for (const addr of windowAddrs) {
-                        if (snapshot.consideredAddresses.has(addr)) continue;
-                        historyRows.push(historyRepo.create({
-                            groupId, blockHeight, address: addr,
-                            paidSats: 0, percent: 0,
-                            sharesInRound: Math.round(diffByAddr.get(addr) ?? 0),
-                            totalSharesInRound: Math.round(totalDiffRound),
-                            inCoinbase: false, rowType: 'pending',
-                        }));
-                        console.log(`[GroupSolo]   ${addr}: ${(diffByAddr.get(addr) ?? 0).toFixed(2)} shares in round but not in coinbase snapshot (late arrival, PROP rules)`);
-                    }
-
-                    if (balancesToSave.size > 0) {
-                        await balanceRepo.save(Array.from(balancesToSave.values()));
-                    }
-                    if (historyRows.length > 0) {
-                        await historyRepo.insert(historyRows);
-                    }
-                });
-            } catch (e: any) {
-                if (e?.code === '23505') {
-                    console.warn(`[GroupSolo] Block ${blockHeight} raced against duplicate write — skipping (23505)`);
-                    return;
-                }
-                throw e;
-            }
+            const ok = await this.applyDistributionTx({
+                groupId,
+                blockHeight,
+                distribution: snapshot.distribution,
+                balanceAfter: snapshot.balanceAfter,
+                consideredAddresses: snapshot.consideredAddresses,
+                diffByAddr,
+                totalDiffRound,
+                windowAddrs,
+                label: 'snapshot',
+            });
+            if (!ok) return;
 
             // Snapshot(s) + round cleared only after the TX committed. Order
             // matters: clear the share window FIRST, snapshots SECOND. If a
             // concurrent stratum session calls getPayoutDistribution between
             // the two Redis ops, an empty share window triggers the early-
-            // exit fallback path (line ~244) which does NOT write a
-            // snapshot — so no stale snapshot can survive into the next
-            // round. The reverse order had a small race window where a new
-            // snapshot built from soon-to-be-cleared shares could outlive
-            // resetRound and trip the next block's mismatch guard.
+            // exit fallback path which does NOT write a snapshot — so no
+            // stale snapshot can survive into the next round. The reverse
+            // order had a small race window where a new snapshot built from
+            // soon-to-be-cleared shares could outlive resetRound and trip
+            // the next block's mismatch guard.
             await this.resetRound(groupId);
             await this.deleteAllSnapshots(groupId);
         } finally {
@@ -605,10 +511,29 @@ export class GroupSoloService implements OnModuleInit {
     }
 
     /**
-     * Fallback when no snapshot is available (first block or race).
-     * All writes atomic in one TX; the pre-check in onBlockFound guards replay.
+     * Recompute fallback when no snapshot is available, or when the
+     * snapshot's blockReward disagrees with the block's actual reward.
+     *
+     * Reads the current Redis window + balances, runs the SAME
+     * `buildCoinbaseDistribution` math as the snapshot path (incl. finder-
+     * bonus + suppressMatchingDebits), then persists via the shared
+     * `applyDistributionTx`. Late arrivers don't exist in this path by
+     * construction — window-read and distribution-build happen back-to-back,
+     * so `consideredAddresses` covers every windowed miner.
+     *
+     * **Caveat**: the on-chain coinbase was built earlier from the template's
+     * snapshot. If shares arrived between template-send and block-find, this
+     * recomputed distribution may diverge from on-chain. The reward-mismatch
+     * guard in onBlockFound covers the most common drift cause; for the
+     * remaining gap operators must reconcile against the explorer (loud
+     * `CRITICAL RECOMPUTE` warning below carries the per-miner dump).
      */
-    private async onBlockFoundFromWindow(groupId: string, blockHeight: number, blockRewardSats: number): Promise<void> {
+    private async onBlockFoundFromWindow(
+        groupId: string,
+        blockHeight: number,
+        blockRewardSats: number,
+        finderAddress: string,
+    ): Promise<void> {
         const keys = redisKeys(groupId);
         const entries = await this.redis.zRange(keys.shares, 0, -1);
         if (!entries || entries.length === 0) {
@@ -616,97 +541,224 @@ export class GroupSoloService implements OnModuleInit {
             return;
         }
 
-        const addressDiff = new Map<string, number>();
-        let totalDiff = 0;
+        const addressShares = new Map<string, number>();
+        const diffByAddr = new Map<string, number>();
+        let totalDiffRound = 0;
         for (const e of entries) {
             const [addr, diffStr] = e.split(':');
             const diff = parseFloat(diffStr) || 0;
-            addressDiff.set(addr, (addressDiff.get(addr) ?? 0) + diff);
-            totalDiff += diff;
+            addressShares.set(addr, (addressShares.get(addr) ?? 0) + diff);
+            diffByAddr.set(addr, (diffByAddr.get(addr) ?? 0) + diff);
+            totalDiffRound += diff;
         }
-        if (totalDiff <= 0) {
+        if (totalDiffRound <= 0) {
             await this.resetRound(groupId);
             return;
         }
 
-        const rewardForMiners = Math.floor(((100 - this.feePercent) / 100) * blockRewardSats);
-        // Same pending-settlement rule as getPayoutDistribution: pending
-        // comes out of the miner cut, not on top. Otherwise total outputs
-        // exceed blockReward and Core rejects with bad-cb-amount.
-        const pendingEntities = await this.balanceRepo.find({ where: { groupId } });
-        const totalPending = pendingEntities.reduce((s, p) => s + (p.pendingSats ?? 0), 0);
-        const effectiveMinerReward = Math.max(0, rewardForMiners - totalPending);
+        const balanceEntities = await this.balanceRepo.find({ where: { groupId } });
+        const balances = new Map<string, number>();
+        for (const p of balanceEntities) balances.set(p.address, p.pendingSats);
+
+        // Read finder-bonus from the live group config — same as the snapshot
+        // path. Without this the fallback would silently emit a coinbase
+        // shape different from on-chain when finder-bonus is enabled.
+        const group = await this.groupRepo.findOneBy({ id: groupId });
+        const finderBonusSats = (group?.finderBonusSats ?? 0) > 0
+            ? group!.finderBonusSats!
+            : 0;
+
+        const result = buildCoinbaseDistribution({
+            addressShares,
+            balances,
+            blockRewardSats,
+            feePercent: this.feePercent,
+            feeAddress: this.feeAddress,
+            coinbaseWeightBudget: this.coinbaseWeightBudget,
+            minPayoutSats: this.minPayoutSats,
+            suppressMatchingDebits: true,
+            finderBonusSats,
+            finderAddress,
+            logLabel: `[GroupSolo fallback ${blockHeight}]`,
+        });
+
+        if (result.payouts.length === 0) {
+            // Degenerate edge: no fee configured AND no eligible miners.
+            // Nothing to record; just clear the round so the next block
+            // starts fresh.
+            await this.resetRound(groupId);
+            return;
+        }
+
+        // Loud operator warning: the ledger is about to be written from a
+        // recomputed distribution that MAY disagree with the actual on-chain
+        // coinbase if shares shifted between template-send and block-find.
+        // Mirrors PPLNS' applyDistributionWithoutSnapshot warning so an
+        // operator can manually reconcile against the block explorer.
+        const onChainTotal = result.payouts.reduce((s, p) => s + p.sats, 0);
+        console.warn(
+            `[GroupSolo CRITICAL RECOMPUTE] Block ${blockHeight} group ${groupId} `
+            + `applying RECOMPUTED distribution (no valid snapshot for finder ${finderAddress}). `
+            + `⚠️ This MAY diverge from the actual on-chain coinbase if shares shifted `
+            + `between template-send and block-find. Manually verify against the block `
+            + `explorer before trusting payout history for this block.\n`
+            + `  blockReward:     ${blockRewardSats} sats\n`
+            + `  onChain total:   ${onChainTotal} sats across ${result.payouts.length} outputs\n`
+            + `  window miners:   ${addressShares.size}\n`
+            + `  open balances:   ${balances.size}\n`
+            + `  finderBonus:     ${finderBonusSats} sats (config) → ${finderAddress}\n`
+            + `  coinbase dump:   ${JSON.stringify(result.payouts.map(p => ({ a: p.address, s: p.sats })))}`,
+        );
+
+        const distribution: GroupSoloPayoutEntry[] = result.payouts.map(p => ({
+            address: p.address, percent: p.percent, sats: p.sats,
+        }));
+        const ok = await this.applyDistributionTx({
+            groupId,
+            blockHeight,
+            distribution,
+            balanceAfter: result.balanceAfter,
+            consideredAddresses: result.consideredAddresses,
+            diffByAddr,
+            totalDiffRound,
+            // Window read and distribution build happen back-to-back here,
+            // so by construction every windowed address was considered —
+            // the late-arriver loop in applyDistributionTx is a no-op.
+            windowAddrs: new Set(addressShares.keys()),
+            label: 'fallback',
+        });
+        if (!ok) return;
+
+        await this.resetRound(groupId);
+    }
+
+    /**
+     * Apply a computed coinbase distribution to the database in one TX.
+     * Shared between the snapshot path (onBlockFound) and the recompute
+     * fallback (onBlockFoundFromWindow) so both paths produce identical
+     * history rows + balance updates for the same input.
+     *
+     * Returns true if the TX committed; false if it was skipped by the
+     * 23505 unique-index race guard. Callers use the boolean to decide
+     * whether to proceed with post-commit Redis cleanup (resetRound,
+     * deleteAllSnapshots).
+     */
+    private async applyDistributionTx(args: {
+        groupId: string;
+        blockHeight: number;
+        distribution: GroupSoloPayoutEntry[];
+        balanceAfter: Map<string, number>;
+        consideredAddresses: Set<string>;
+        diffByAddr: Map<string, number>;
+        totalDiffRound: number;
+        windowAddrs: Set<string>;
+        label: string;
+    }): Promise<boolean> {
+        const {
+            groupId, blockHeight, distribution, balanceAfter,
+            consideredAddresses, diffByAddr, totalDiffRound, windowAddrs, label,
+        } = args;
+        const distributionAddrs = new Set(distribution.map(d => d.address));
 
         try {
             await this.historyRepo.manager.transaction(async (em) => {
                 const historyRepo = em.getRepository(PplnsGroupBlockHistoryEntity);
                 const balanceRepo = em.getRepository(PplnsGroupBalanceEntity);
 
-                // Existing pending rows were already fetched above into
-                // pendingEntities (needed for totalPending). Index them
-                // here for the per-miner loop; no additional findOneBy
-                // round-trips required.
-                const balanceMap = new Map(pendingEntities.map(p => [p.address, p]));
+                // Single IN-list fetch for every balance row we might
+                // touch — anyone in balanceAfter, plus distribution miners
+                // (for totalPaidSats).
+                const addrsNeedingBalance = new Set<string>();
+                for (const addr of balanceAfter.keys()) addrsNeedingBalance.add(addr);
+                for (const d of distribution) {
+                    if (d.address !== this.feeAddress) addrsNeedingBalance.add(d.address);
+                }
+                const existingBalances = addrsNeedingBalance.size > 0
+                    ? await balanceRepo.find({ where: { groupId, address: In(Array.from(addrsNeedingBalance)) } })
+                    : [];
+                const balanceMap = new Map(existingBalances.map(b => [b.address, b]));
 
                 const balancesToSave = new Map<string, PplnsGroupBalanceEntity>();
                 const historyRows: PplnsGroupBlockHistoryEntity[] = [];
                 const now = new Date();
 
-                for (const [addr, diff] of addressDiff) {
-                    const ratio = diff / totalDiff;
-                    const sats = Math.floor(ratio * effectiveMinerReward);
-                    let existing = balanceMap.get(addr);
-                    const pending = existing?.pendingSats ?? 0;
-                    const totalSats = sats + pending;
-                    const percent = (totalSats / blockRewardSats) * 100;
-
-                    if (totalSats >= this.minPayoutSats) {
-                        if (existing && pending > 0) {
-                            existing.totalPaidSats += pending;
-                            existing.pendingSats = 0;
-                            existing.lastAcceptedShareAt = now;
-                            balancesToSave.set(existing.address, existing);
-                        }
-                        historyRows.push(historyRepo.create({
-                            groupId, blockHeight, address: addr,
-                            paidSats: totalSats, percent,
-                            sharesInRound: Math.round(diff),
-                            totalSharesInRound: Math.round(totalDiff),
-                            inCoinbase: true, rowType: 'coinbase',
-                        }));
-                    } else if (sats > 0) {
-                        if (!existing) {
-                            existing = balanceRepo.create({
-                                address: addr, groupId, pendingSats: 0, totalPaidSats: 0,
-                                lastAcceptedShareAt: now,
-                            });
-                            balanceMap.set(addr, existing);
-                        }
-                        existing.pendingSats += sats;
-                        existing.lastAcceptedShareAt = now;
-                        balancesToSave.set(existing.address, existing);
-                        historyRows.push(historyRepo.create({
-                            groupId, blockHeight, address: addr,
-                            paidSats: sats, percent,
-                            sharesInRound: Math.round(diff),
-                            totalSharesInRound: Math.round(totalDiff),
-                            inCoinbase: false, rowType: 'pending',
-                        }));
+                // 1. Apply absolute balanceAfter values from the distribution.
+                for (const [addr, newBalance] of balanceAfter) {
+                    let balance = balanceMap.get(addr);
+                    if (!balance) {
+                        balance = balanceRepo.create({
+                            address: addr, groupId,
+                            pendingSats: newBalance,
+                            totalPaidSats: 0,
+                            lastAcceptedShareAt: now,
+                        });
+                        balanceMap.set(addr, balance);
+                    } else {
+                        balance.pendingSats = newBalance;
+                        balance.lastAcceptedShareAt = now;
                     }
+                    balancesToSave.set(balance.address, balance);
                 }
 
-                if (this.feeAddress) {
-                    const feeSats = blockRewardSats - rewardForMiners;
-                    if (feeSats >= this.minPayoutSats) {
-                        historyRows.push(historyRepo.create({
-                            groupId, blockHeight, address: this.feeAddress,
-                            paidSats: feeSats, percent: this.feePercent,
-                            sharesInRound: 0, totalSharesInRound: 0,
-                            inCoinbase: true, rowType: 'coinbase',
-                        }));
-                    } else {
-                        console.warn(`[GroupSolo] Fallback: fee output ${feeSats} sats < dust — not recording fee history row`);
+                // 2. Coinbase outputs: history rows + totalPaidSats bump.
+                for (const d of distribution) {
+                    const isFee = d.address === this.feeAddress;
+                    if (!isFee) {
+                        let balance = balanceMap.get(d.address);
+                        if (!balance) {
+                            balance = balanceRepo.create({
+                                address: d.address, groupId,
+                                pendingSats: 0, totalPaidSats: 0,
+                                lastAcceptedShareAt: now,
+                            });
+                            balanceMap.set(d.address, balance);
+                        }
+                        balance.totalPaidSats += d.sats;
+                        balancesToSave.set(balance.address, balance);
                     }
+                    historyRows.push(historyRepo.create({
+                        groupId, blockHeight, address: d.address,
+                        paidSats: d.sats, percent: d.percent,
+                        sharesInRound: Math.round(diffByAddr.get(d.address) ?? 0),
+                        totalSharesInRound: Math.round(totalDiffRound),
+                        inCoinbase: true, rowType: 'coinbase',
+                    }));
+                }
+
+                // Track which addresses already have a row this block so the
+                // late-arriver loop can't append a second row for the same
+                // (groupId, blockHeight, address) and trip the 23505 path.
+                const emittedThisBlock = new Set<string>(distributionAddrs);
+
+                // 3. Ledger-change audit rows for addresses whose balance
+                //    shifted without appearing on-chain.
+                for (const addr of balanceAfter.keys()) {
+                    if (emittedThisBlock.has(addr)) continue;
+                    historyRows.push(historyRepo.create({
+                        groupId, blockHeight, address: addr,
+                        paidSats: 0, percent: 0,
+                        sharesInRound: Math.round(diffByAddr.get(addr) ?? 0),
+                        totalSharesInRound: Math.round(totalDiffRound),
+                        inCoinbase: false, rowType: 'pending',
+                    }));
+                    emittedThisBlock.add(addr);
+                }
+
+                // 4. Late arrivers: in window but not considered at
+                //    distribution-build time → audit only, no ledger impact.
+                //    Empty by construction in the recompute fallback path.
+                for (const addr of windowAddrs) {
+                    if (consideredAddresses.has(addr)) continue;
+                    if (emittedThisBlock.has(addr)) continue;
+                    historyRows.push(historyRepo.create({
+                        groupId, blockHeight, address: addr,
+                        paidSats: 0, percent: 0,
+                        sharesInRound: Math.round(diffByAddr.get(addr) ?? 0),
+                        totalSharesInRound: Math.round(totalDiffRound),
+                        inCoinbase: false, rowType: 'pending',
+                    }));
+                    emittedThisBlock.add(addr);
+                    console.log(`[GroupSolo]   ${addr}: ${(diffByAddr.get(addr) ?? 0).toFixed(2)} shares in round but not in coinbase distribution (late arrival, PROP rules)`);
                 }
 
                 if (balancesToSave.size > 0) {
@@ -716,15 +768,14 @@ export class GroupSoloService implements OnModuleInit {
                     await historyRepo.insert(historyRows);
                 }
             });
+            return true;
         } catch (e: any) {
             if (e?.code === '23505') {
-                console.warn(`[GroupSolo] Block ${blockHeight} (fallback) raced against duplicate write — skipping (23505)`);
-                return;
+                console.warn(`[GroupSolo] Block ${blockHeight} (${label}) raced against duplicate write — skipping (23505)`);
+                return false;
             }
             throw e;
         }
-
-        await this.resetRound(groupId);
     }
 
     private async addPending(groupId: string, address: string, sats: number): Promise<void> {

@@ -225,7 +225,7 @@ function makeService(envOverrides: Record<string, string> = {}) {
     // Inject redis by going through onModuleInit with a redis-shaped store
     (service as any).redis = redis;
     (service as any).enabled = true;
-    return { service, redis, historyRepo, balanceRepo, groupService };
+    return { service, redis, historyRepo, balanceRepo, groupRepo, groupService };
 }
 
 // ── Tests ────────────────────────────────────────────────────────
@@ -449,6 +449,66 @@ describe('GroupSoloService', () => {
         expect(aliceRow).toBeDefined();
         // Single miner with 100% of shares → paidSats ≈ 0.98 * R2 = 117_600_000
         expect(aliceRow.paidSats).toBeGreaterThan(100_000_000);
+    });
+
+    it('fallback path honors finder-bonus (regression: parity with snapshot path)', async () => {
+        // Pre-refactor, onBlockFoundFromWindow had its own simplified math
+        // and silently dropped finder-bonus emission. After the refactor it
+        // calls the same buildCoinbaseDistribution as the snapshot path,
+        // so the fallback's coinbase shape should match the snapshot's:
+        // a dedicated bonus output to the finder, on top of their
+        // proportional share.
+        //
+        // We trigger the fallback via the reward-mismatch guard so the
+        // snapshot path is bypassed and the recompute kicks in.
+        const { service, historyRepo, groupRepo, groupService } = makeService();
+        groupService._setMembership('bc1qalice', 'g1', true);
+        groupService._setMembership('bc1qbob', 'g1', true);
+
+        const BONUS = 50_000;
+        groupRepo._rows.push({ id: 'g1', finderBonusSats: BONUS } as any);
+
+        const R1 = 100_000_000;
+        await service.recordShare('bc1qalice', 500);
+        await service.recordShare('bc1qbob', 500);
+        await service.getPayoutDistribution('g1', R1, 'bc1qalice');
+
+        const R2 = 120_000_000;
+        const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+        try {
+            // Alice (the finder) wins. The snapshot was built for R1, so
+            // the reward-mismatch guard fires and routes to the fallback.
+            await service.onBlockFound(900_000, R2, 'bc1qalice');
+        } finally {
+            warnSpy.mockRestore();
+        }
+
+        // Bonus output: a coinbase row for Alice with paidSats ≥ BONUS.
+        // Alice has both her proportional row AND (since the bonus is
+        // emitted as a separate output) a row with sats == BONUS exactly,
+        // OR the proportional row alone if the engine merged them. The
+        // current implementation emits two separate outputs, so we expect
+        // at least one row that matches the bonus exactly.
+        const aliceRows = (historyRepo._rows as any[])
+            .filter(r => r.address === 'bc1qalice' && r.inCoinbase === true);
+        const bonusRow = aliceRows.find(r => r.paidSats === BONUS);
+        expect(bonusRow).toBeDefined();
+
+        // Bob (non-finder) gets only his proportional share — half of
+        // (R2 - fee - bonus) = half of (120M - 2.4M - 50k) ≈ 58_775_000.
+        const bobRow = (historyRepo._rows as any[])
+            .find(r => r.address === 'bc1qbob' && r.inCoinbase === true);
+        expect(bobRow).toBeDefined();
+        expect(bobRow.paidSats).toBeGreaterThan(50_000_000);
+        expect(bobRow.paidSats).toBeLessThan(60_000_000);
+
+        // Total on-chain miner cut (alice's two rows + bob) MUST equal
+        // R2 - fee = 117_600_000 to the sat (no overshoot, no shortage).
+        const minerCoinbasePaid = (historyRepo._rows as any[])
+            .filter(r => r.inCoinbase === true && r.address !== 'bc1qfee')
+            .reduce((sum, r) => sum + r.paidSats, 0);
+        const rewardForMiners = Math.floor(0.98 * R2);
+        expect(minerCoinbasePaid).toBe(rewardForMiners);
     });
 
     it('getRoundStats returns current round snapshot', async () => {
