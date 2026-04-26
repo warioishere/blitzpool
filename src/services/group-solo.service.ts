@@ -10,9 +10,8 @@ import { PplnsGroupEntity } from '../ORM/pplns-group/pplns-group.entity';
 import { GroupService } from './group.service';
 import {
     buildCoinbaseDistribution,
-    DUST_LIMIT_SATS,
     DEFAULT_COINBASE_WEIGHT_BUDGET,
-    DEFAULT_MIN_PAYOUT_SATS,
+    resolveMinPayoutSats,
 } from './coinbase-distribution';
 
 /**
@@ -29,9 +28,9 @@ import {
  */
 
 // Coinbase distribution math is shared with PPLNS via
-// ./coinbase-distribution.ts — see its docblock for invariants. Constants
-// (DUST_LIMIT_SATS, DEFAULT_COINBASE_WEIGHT_BUDGET) are re-imported from
-// there so there's a single source of truth.
+// ./coinbase-distribution.ts — see its docblock for invariants. Min-payout
+// resolution lives there too (resolveMinPayoutSats) so the env-parse +
+// dust-floor clamp has a single source of truth.
 
 function redisKeys(groupId: string) {
     return {
@@ -127,16 +126,8 @@ export class GroupSoloService implements OnModuleInit {
             10,
         ) || DEFAULT_COINBASE_WEIGHT_BUDGET;
         // Operational minimum payout — same env var as the PPLNS engine
-        // so groups inherit the pool's dust-vs-bloat policy. Clamped to
-        // the Bitcoin Core dust policy floor (DUST_LIMIT_SATS = 546).
-        const rawMinPayout = parseInt(
-            this.configService.get('PPLNS_MIN_PAYOUT_SATS') ?? DEFAULT_MIN_PAYOUT_SATS.toString(),
-            10,
-        );
-        this.minPayoutSats = Math.max(
-            DUST_LIMIT_SATS,
-            Number.isFinite(rawMinPayout) && rawMinPayout > 0 ? rawMinPayout : DEFAULT_MIN_PAYOUT_SATS,
-        );
+        // so groups inherit the pool's dust-vs-bloat policy.
+        this.minPayoutSats = resolveMinPayoutSats(this.configService.get('PPLNS_MIN_PAYOUT_SATS'));
         // Group-solo is always enabled if the service is loaded — routing is
         // address-driven via the GroupService's address→group cache.
         this.enabled = true;

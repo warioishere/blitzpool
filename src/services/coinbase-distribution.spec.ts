@@ -2,10 +2,12 @@ import {
     buildCoinbaseDistribution,
     CoinbaseDistributionEntry,
     DUST_LIMIT_SATS,
+    DEFAULT_MIN_PAYOUT_SATS,
     DEFAULT_COINBASE_WEIGHT_BUDGET,
     COINBASE_BASE_WEIGHT,
     COINBASE_OUTPUT_WEIGHT,
     COINBASE_WITNESS_COMMITMENT_WEIGHT,
+    resolveMinPayoutSats,
 } from './coinbase-distribution';
 
 const FEE_ADDR = 'bc1qfee';
@@ -1458,5 +1460,31 @@ describe('buildCoinbaseDistribution — credit/debit ledger model', () => {
                 errorSpy.mockRestore();
             }
         });
+    });
+});
+
+describe('resolveMinPayoutSats', () => {
+    it('returns the default when input is undefined', () => {
+        expect(resolveMinPayoutSats(undefined)).toBe(DEFAULT_MIN_PAYOUT_SATS);
+    });
+
+    it('returns the parsed value when input is a positive integer string above the dust floor', () => {
+        expect(resolveMinPayoutSats('10000')).toBe(10000);
+    });
+
+    it('clamps to DUST_LIMIT_SATS when input is below the floor', () => {
+        expect(resolveMinPayoutSats('100')).toBe(DUST_LIMIT_SATS);
+    });
+
+    it('falls back to default + clamps when input is non-numeric', () => {
+        expect(resolveMinPayoutSats('abc')).toBe(DEFAULT_MIN_PAYOUT_SATS);
+    });
+
+    it('falls back to default + clamps when input is zero', () => {
+        expect(resolveMinPayoutSats('0')).toBe(DEFAULT_MIN_PAYOUT_SATS);
+    });
+
+    it('falls back to default + clamps when input is negative', () => {
+        expect(resolveMinPayoutSats('-100')).toBe(DEFAULT_MIN_PAYOUT_SATS);
     });
 });

@@ -138,6 +138,26 @@ export const DUST_LIMIT_SATS = 546;
  */
 export const DEFAULT_MIN_PAYOUT_SATS = 5_000;
 
+/**
+ * Parse + clamp the operational minimum-payout setting from raw env input.
+ *
+ * Single source of truth for `PPLNS_MIN_PAYOUT_SATS` resolution — used by
+ * PplnsService, GroupSoloService, and DustSweepService. Behaviour:
+ *   - undefined / NaN / ≤ 0 input → DEFAULT_MIN_PAYOUT_SATS
+ *   - finite positive input      → input
+ *   - then clamped to ≥ DUST_LIMIT_SATS (Bitcoin Core relay-policy floor)
+ *
+ * Callers pass the raw env value, e.g. `configService.get('PPLNS_MIN_PAYOUT_SATS')`.
+ * Pure function — no NestJS / DI coupling so it stays testable in isolation.
+ */
+export function resolveMinPayoutSats(rawValue: string | undefined): number {
+    const parsed = parseInt(rawValue ?? DEFAULT_MIN_PAYOUT_SATS.toString(), 10);
+    return Math.max(
+        DUST_LIMIT_SATS,
+        Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MIN_PAYOUT_SATS,
+    );
+}
+
 export const DEFAULT_COINBASE_WEIGHT_BUDGET = 50_000;
 
 /**

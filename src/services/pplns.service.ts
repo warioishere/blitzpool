@@ -14,8 +14,7 @@ import {
     buildCoinbaseDistribution,
     CoinbaseDistributionEntry,
     DEFAULT_COINBASE_WEIGHT_BUDGET,
-    DEFAULT_MIN_PAYOUT_SATS,
-    DUST_LIMIT_SATS,
+    resolveMinPayoutSats,
     COINBASE_BASE_WEIGHT,
     COINBASE_OUTPUT_WEIGHT,
     COINBASE_WITNESS_COMMITMENT_WEIGHT,
@@ -124,17 +123,7 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         this.feeAddress = this.configService.get('PPLNS_FEE_ADDRESS') ?? '';
         this.feePercent = parseFloat(this.configService.get('PPLNS_FEE_PERCENT') ?? '2');
         this.coinbaseWeightBudget = parseInt(this.configService.get('PPLNS_COINBASE_WEIGHT_BUDGET') ?? DEFAULT_COINBASE_WEIGHT_BUDGET.toString(), 10) || DEFAULT_COINBASE_WEIGHT_BUDGET;
-        // Operational minimum payout — clamped to the Bitcoin Core dust
-        // policy floor (DUST_LIMIT_SATS = 546). Setting this below that
-        // would let us emit outputs Core rejects as standard.
-        const rawMinPayout = parseInt(
-            this.configService.get('PPLNS_MIN_PAYOUT_SATS') ?? DEFAULT_MIN_PAYOUT_SATS.toString(),
-            10,
-        );
-        this.minPayoutSats = Math.max(
-            DUST_LIMIT_SATS,
-            Number.isFinite(rawMinPayout) && rawMinPayout > 0 ? rawMinPayout : DEFAULT_MIN_PAYOUT_SATS,
-        );
+        this.minPayoutSats = resolveMinPayoutSats(this.configService.get('PPLNS_MIN_PAYOUT_SATS'));
         this.enabled = !!this.configService.get('PPLNS_PORT');
     }
 
