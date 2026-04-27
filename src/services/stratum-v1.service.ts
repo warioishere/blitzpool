@@ -21,6 +21,10 @@ import { ClientDifficultyStatisticsService } from '../ORM/client-difficulty-stat
 import { ShareTotalsCacheService } from './share-totals-cache.service';
 import { AddressSettingsCacheService } from './address-settings-cache.service';
 import { DifficultyScoresCacheService } from './difficulty-scores-cache.service';
+import { PplnsService } from './pplns.service';
+import { GroupSoloService } from './group-solo.service';
+import { MinerActiveModeService } from './miner-active-mode.service';
+import { PoolModeHashrateService } from '../ORM/pool-mode-hashrate/pool-mode-hashrate.service';
 
 @Injectable()
 export class StratumV1Service implements OnModuleInit {
@@ -45,6 +49,10 @@ export class StratumV1Service implements OnModuleInit {
     private readonly clientDifficultyStatisticsService: ClientDifficultyStatisticsService,
     private readonly shareTotalsCacheService: ShareTotalsCacheService,
     @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
+    private readonly pplnsService: PplnsService,
+    private readonly groupSoloService: GroupSoloService,
+    private readonly minerActiveModeService: MinerActiveModeService,
+    private readonly poolModeHashrateService: PoolModeHashrateService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -104,6 +112,13 @@ export class StratumV1Service implements OnModuleInit {
       portConfig.allowSuggestedDifficulty,
       portConfig.targetSharesPerMinute,
       this.redisClient,
+      portConfig.payoutMode ?? 'solo',
+      this.pplnsService,
+      this.groupSoloService,
+      this.minerActiveModeService,
+      this.poolModeHashrateService,
+      portConfig.minimumDifficulty ?? 0,
+      portConfig.ledgerWarmupShares ?? 0,
     );
 
     socket.on('close', async (hadError: boolean) => {

@@ -85,11 +85,22 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    # Persistence: AOF + everysec fsync = max 1s of share writes lost on a
+    # hard crash (well under the durability budget for a payout-bearing pool).
+    # RDB snapshots stay enabled at default cadence as a faster restart path.
+    #
+    # Eviction policy: volatile-lru evicts only keys with an explicit TTL —
+    # i.e. application cache entries (CLIENT_INFO_*, etc., set via REDIS_TTL).
+    # Share/round state (groupsolo:* and pplns:*) is written without a TTL on
+    # purpose, so volatile-lru never touches it. Earlier `allkeys-lru` would
+    # silently evict round shares once Redis hit the maxmemory limit, which
+    # would corrupt PROP-round splits and PPLNS window math.
     command: >
       valkey-server
       --appendonly yes
+      --appendfsync everysec
       --maxmemory ${REDIS_MAX_MEMORY:-1024mb}
-      --maxmemory-policy allkeys-lru
+      --maxmemory-policy volatile-lru
       --io-threads 2
       --io-threads-do-reads yes
       ${REDIS_PASSWORD:+--requirepass ${REDIS_PASSWORD}}
@@ -124,6 +135,8 @@ services:
       - "0.0.0.0:3339:3339/tcp"
       - "0.0.0.0:3334:3334/tcp"
       - "0.0.0.0:3335:3335/tcp"
+      # PPLNS stratum port (address-routed payouts, sliding N=4×netdiff window)
+      - "0.0.0.0:3340:3340/tcp"
     volumes:
       - "./blitzpool.env:/public-pool/.env:ro"
       - "./logs:/public-pool/logs"

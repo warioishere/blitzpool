@@ -20,6 +20,17 @@ import { PoolShareStatisticsEntity } from './src/ORM/pool-share-statistics/pool-
 import { PushSubscriptionEntity } from './src/ORM/push-subscriptions/push-subscription.entity';
 import { RpcBlockEntity } from './src/ORM/rpc-block/rpc-block.entity';
 import { TelegramSubscriptionsEntity } from './src/ORM/telegram-subscriptions/telegram-subscriptions.entity';
+import { PplnsBalanceEntity } from './src/ORM/pplns-balance/pplns-balance.entity';
+import { PplnsPayoutHistoryEntity } from './src/ORM/pplns-balance/pplns-payout-history.entity';
+import { PplnsGroupEntity } from './src/ORM/pplns-group/pplns-group.entity';
+import { PplnsGroupMemberEntity } from './src/ORM/pplns-group/pplns-group-member.entity';
+import { PplnsGroupBlockHistoryEntity } from './src/ORM/pplns-group/pplns-group-block-history.entity';
+import { PplnsGroupBalanceEntity } from './src/ORM/pplns-group/pplns-group-balance.entity';
+import { PplnsGroupInvitationEntity } from './src/ORM/pplns-group/pplns-group-invitation.entity';
+import { AddressEmailEntity } from './src/ORM/address-email/address-email.entity';
+import { EmailVerificationEntity } from './src/ORM/address-email/email-verification.entity';
+import { PoolModeHashrateEntity } from './src/ORM/pool-mode-hashrate/pool-mode-hashrate.entity';
+import { WorkerSharesEntity } from './src/ORM/worker-shares/worker-shares.entity';
 
 loadEnv({ path: process.env.TYPEORM_ENV_PATH ?? '.env' });
 
@@ -42,6 +53,17 @@ const entities = [
     PushSubscriptionEntity,
     RpcBlockEntity,
     TelegramSubscriptionsEntity,
+    PplnsBalanceEntity,
+    PplnsPayoutHistoryEntity,
+    PplnsGroupEntity,
+    PplnsGroupMemberEntity,
+    PplnsGroupBlockHistoryEntity,
+    PplnsGroupBalanceEntity,
+    PplnsGroupInvitationEntity,
+    AddressEmailEntity,
+    EmailVerificationEntity,
+    PoolModeHashrateEntity,
+    WorkerSharesEntity,
 ];
 
 const { autoLoadEntities, ...rest } = moduleOptions as DataSourceOptions & { autoLoadEntities?: boolean };

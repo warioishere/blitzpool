@@ -1,6 +1,6 @@
 {
   "name": "blitzpool",
-  "version": "2.0.4",
+  "version": "2.1.0",
   "description": "",
   "author": "",
   "private": true,
@@ -29,6 +29,7 @@
     "@nestjs/core": "^9.0.0",
     "@nestjs/platform-fastify": "^9.4.2",
     "@nestjs/schedule": "^4.1.2",
+    "@nestjs/throttler": "^4.2.1",
     "@nestjs/typeorm": "^10.0.0",
     "@scure/btc-signer": "^2.0.1",
     "async-mutex": "^0.5.0",
@@ -47,6 +48,7 @@
     "firebase-admin": "^12.7.0",
     "merkle-lib": "^2.0.10",
     "node-telegram-bot-api": "^0.61.0",
+    "nodemailer": "^8.0.5",
     "pg": "^8.11.3",
     "prom-client": "^15.1.0",
     "redis": "^4.6.0",
@@ -70,6 +72,7 @@
     "@types/jest": "29.5.1",
     "@types/node": "^18.16.12",
     "@types/node-telegram-bot-api": "^0.61.6",
+    "@types/nodemailer": "^8.0.0",
     "@types/supertest": "^2.0.11",
     "@typescript-eslint/eslint-plugin": "^5.0.0",
     "@typescript-eslint/parser": "^5.0.0",
@@ -97,7 +100,14 @@
     "rootDir": "src",
     "testRegex": ".*\\.spec\\.ts$",
     "transform": {
-      "^.+\\.(t|j)s$": ["ts-jest", { "tsconfig": { "allowJs": true } }]
+      "^.+\\.(t|j)s$": [
+        "ts-jest",
+        {
+          "tsconfig": {
+            "allowJs": true
+          }
+        }
+      ]
     },
     "transformIgnorePatterns": [
       "node_modules/(?!(@scure|@noble|micro-packed))"

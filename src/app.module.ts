@@ -3,6 +3,8 @@ import { CacheModule } from '@nestjs/cache-manager';
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
+import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+import { APP_GUARD } from '@nestjs/core';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { redisStore } from 'cache-manager-redis-yet';
 
@@ -15,6 +17,7 @@ import { AddressSettingsModule } from './ORM/address-settings/address-settings.m
 import { WorkerSharesModule } from './ORM/worker-shares/worker-shares.module';
 import { BlocksModule } from './ORM/blocks/blocks.module';
 import { ClientStatisticsModule } from './ORM/client-statistics/client-statistics.module';
+import { PoolModeHashrateModule } from './ORM/pool-mode-hashrate/pool-mode-hashrate.module';
 import { ClientModule } from './ORM/client/client.module';
 import { RpcBlocksModule } from './ORM/rpc-block/rpc-block.module';
 import { TelegramSubscriptionsModule } from './ORM/telegram-subscriptions/telegram-subscriptions.module';
@@ -49,6 +52,31 @@ import { FcmService } from './services/fcm.service';
 import { TemplateDistributionService } from './services/template-distribution.service';
 import { DownstreamReportService } from './services/downstream-report.service';
 import { JobDeclarationService } from './services/job-declaration.service';
+import { PplnsService } from './services/pplns.service';
+import { PplnsBalanceService } from './ORM/pplns-balance/pplns-balance.service';
+import { PplnsBalanceEntity } from './ORM/pplns-balance/pplns-balance.entity';
+import { PplnsPayoutHistoryEntity } from './ORM/pplns-balance/pplns-payout-history.entity';
+import { PplnsController } from './controllers/pplns/pplns.controller';
+import { GroupSoloService } from './services/group-solo.service';
+import { GroupService } from './services/group.service';
+import { GroupRoundResetService } from './services/group-round-reset.service';
+import { EmailService } from './services/email.service';
+import { AddressEmailService } from './services/address-email.service';
+import { CoinbaseCapacityMonitorService } from './services/coinbase-capacity-monitor.service';
+import { PplnsGroupInvitationService } from './services/pplns-group-invitation.service';
+import { MiningModeService } from './services/mining-mode.service';
+import { MinerActiveModeService } from './services/miner-active-mode.service';
+import { DustSweepService } from './services/dust-sweep.service';
+import { PplnsGroupEntity } from './ORM/pplns-group/pplns-group.entity';
+import { PplnsGroupMemberEntity } from './ORM/pplns-group/pplns-group-member.entity';
+import { PplnsGroupBlockHistoryEntity } from './ORM/pplns-group/pplns-group-block-history.entity';
+import { PplnsGroupBalanceEntity } from './ORM/pplns-group/pplns-group-balance.entity';
+import { PplnsGroupInvitationEntity } from './ORM/pplns-group/pplns-group-invitation.entity';
+import { AddressEmailEntity } from './ORM/address-email/address-email.entity';
+import { EmailVerificationEntity } from './ORM/address-email/email-verification.entity';
+import { PplnsGroupController } from './controllers/pplns-group/pplns-group.controller';
+import { PplnsInvitationController } from './controllers/pplns-invitation/pplns-invitation.controller';
+import { EmailController } from './controllers/email/email.controller';
 import { DownstreamReportController } from './controllers/downstream-report/downstream-report.controller';
 import { ExternalShareController } from './controllers/external-share/external-share.controller';
 import { PushController } from './controllers/push/push.controller';
@@ -61,6 +89,7 @@ import { buildDatabaseConfig } from './config/database.config';
 
 const ORMModules = [
     ClientStatisticsModule,
+    PoolModeHashrateModule,
     ClientModule,
     AddressSettingsModule,
     WorkerSharesModule,
@@ -125,7 +154,21 @@ const ORMModules = [
             },
         }),
         ScheduleModule.forRoot(),
+        // Default 60 requests per 60 seconds per IP (throttler v4 TTL is
+        // in seconds). Individual endpoints tighten further via @Throttle.
+        ThrottlerModule.forRoot({ ttl: 60, limit: 60 }),
         HttpModule,
+        TypeOrmModule.forFeature([
+            PplnsBalanceEntity,
+            PplnsPayoutHistoryEntity,
+            PplnsGroupEntity,
+            PplnsGroupMemberEntity,
+            PplnsGroupBlockHistoryEntity,
+            PplnsGroupBalanceEntity,
+            PplnsGroupInvitationEntity,
+            AddressEmailEntity,
+            EmailVerificationEntity,
+        ]),
         ...ORMModules
     ],
     controllers: [
@@ -135,7 +178,11 @@ const ORMModules = [
         DownstreamReportController,
         ExternalShareController,
         PushController,
-        InfoController
+        InfoController,
+        PplnsController,
+        PplnsGroupController,
+        PplnsInvitationController,
+        EmailController,
     ],
     providers: [
         // TimeslotMigrationService, // Disabled - migration incomplete, leaving data in mixed state
@@ -166,6 +213,20 @@ const ORMModules = [
         TemplateDistributionService,
         StratumV2Service,
         JobDeclarationService,
+        PplnsService,
+        PplnsBalanceService,
+        GroupSoloService,
+        GroupService,
+        GroupRoundResetService,
+        MiningModeService,
+        MinerActiveModeService,
+        DustSweepService,
+        EmailService,
+        AddressEmailService,
+        PplnsGroupInvitationService,
+        CoinbaseCapacityMonitorService,
+        // Global throttler guard — per-endpoint limits override via @Throttle().
+        { provide: APP_GUARD, useClass: ThrottlerGuard },
     ],
 })
 export class AppModule {

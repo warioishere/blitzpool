@@ -64,6 +64,10 @@ function createService(envOverrides: Record<string, string> = {}) {
     difficultyScoresCacheService as any, // difficultyScoresCacheService
     {} as any, // templateDistributionService
     {} as any, // jobDeclarationService
+    { isEnabled: () => false } as any, // pplnsService
+    { isEnabled: () => false, getGroupForAddress: () => undefined } as any, // groupSoloService
+    { mark: jest.fn(), get: jest.fn() } as any, // minerActiveModeService
+    { incrementAccepted: jest.fn(), getChart: jest.fn() } as any, // poolModeHashrateService
   );
 
   return { service, configService, clientService, addressSettingsCacheService, difficultyScoresCacheService };
@@ -296,6 +300,10 @@ describe('StratumV2Service', () => {
         expect.anything(), // shareTotalsCacheService
         expect.anything(), // extranonceManager
         expect.anything(), // templateDistributionService
+        expect.anything(), // pplnsService
+        expect.anything(), // groupSoloService
+        expect.anything(), // minerActiveModeService
+        expect.anything(), // poolModeHashrateService
       );
     });
   });

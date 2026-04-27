@@ -37,6 +37,10 @@ describe('StratumV1Service.onModuleInit', () => {
       {} as any,
       {} as unknown as ShareTotalsCacheService,
       { store: {} } as any,
+      { isEnabled: () => false } as any,
+      { isEnabled: () => false, getGroupForAddress: () => undefined } as any,
+      { mark: jest.fn(), get: jest.fn() } as any,
+      { incrementAccepted: jest.fn(), getChart: jest.fn() } as any,
     );
   }
 

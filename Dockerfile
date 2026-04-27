@@ -28,8 +28,10 @@ RUN apt-get update \
 
 ENV LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
 
-# Expose ports for Stratum (standard + high-diff), JDP, and API
-EXPOSE 3333 3334 3335 3339
+# Expose ports for Stratum V1 (3333), API (3334), Stratum V1 TLS (3335),
+# Stratum V1 high-difficulty (3339), and PPLNS (3340). Group-solo shares
+# port 3333 since routing is address-driven.
+EXPOSE 3333 3334 3335 3339 3340
 
 WORKDIR /public-pool
 

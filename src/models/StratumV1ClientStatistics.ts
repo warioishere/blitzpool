@@ -4,7 +4,7 @@ import { TimeSlotHelper } from '../utils/time-slot.helper';
 
 const CACHE_SIZE = 30;
 const CACHE_WINDOW_SECONDS = 300;
-const MIN_DIFF = 0.00001;
+const DEFAULT_MIN_DIFF = 0.00001;
 
 /**
  * Simplified client statistics tracker - PR #109 pattern
@@ -33,11 +33,21 @@ export class StratumV1ClientStatistics {
     // Configuration
     private targetSharesPerMinute: number;
     private targetSubmissionPerSecond: number;
+    /**
+     * VarDiff floor. The retarget algorithm will never suggest a value
+     * below this. Used on payout-mode ports (PPLNS / group-solo) to
+     * keep sub-500 GH/s devices off the pool instead of letting VarDiff
+     * drop them into sub-dust-sat territory.
+     */
+    private readonly minDifficulty: number;
 
-    constructor(targetSharesPerMinute: number) {
+    constructor(targetSharesPerMinute: number, minDifficulty: number = DEFAULT_MIN_DIFF) {
         this.submissionCacheStart = new Date();
         this.targetSharesPerMinute = targetSharesPerMinute > 0 ? targetSharesPerMinute : 6;
         this.targetSubmissionPerSecond = 60 / this.targetSharesPerMinute;
+        this.minDifficulty = Number.isFinite(minDifficulty) && minDifficulty > 0
+            ? minDifficulty
+            : DEFAULT_MIN_DIFF;
     }
 
     /**
@@ -140,8 +150,8 @@ export class StratumV1ClientStatistics {
         if (val === 0) {
             return null;
         }
-        if (val < MIN_DIFF) {
-            return MIN_DIFF;
+        if (val < this.minDifficulty) {
+            return this.minDifficulty;
         }
 
         const exponent = Math.floor(Math.log2(val));

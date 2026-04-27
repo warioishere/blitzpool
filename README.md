@@ -1,182 +1,401 @@
-# ⚡️ BlitzPool – Bitcoin Mining Pool
+# ⚡ Blitzpool – Non-Custodial Bitcoin Mining Pool
 
-Welcome to **BlitzPool**, a lightweight and open-source Bitcoin mining pool based on the [public-pool](https://github.com/benjamin-wilson/public-pool) project – extended with powerful new features and real-world integrations.
+**Blitzpool** is an open-source Bitcoin mining pool with a single distinguishing feature: **every payout — Solo, PPLNS, Group-Solo — is written directly into the coinbase transaction of the block that earned it**. No pool wallet, no custody period, no FPPS-style intermediate. Your sats arrive at your address with the block itself.
 
-Current Version: **v1.4.3**
+Current version: **v2.1.0**
 
-🌐 **Live Pool:** [https://blitzpool.yourdevice.ch/#/](https://blitzpool.yourdevice.ch/#/)
+🌐 Live pool: **https://blitzpool.yourdevice.ch**
+
+Fork of [public-pool](https://github.com/benjamin-wilson/public-pool), rebuilt around three coinbase-payout modes and a full Stratum V2 stack.
 
 ---
 
-## ✨ What's Special About BlitzPool?
+## What makes Blitzpool different
 
-BlitzPool extends the original `public-pool` implementation in multiple ways to enhance usability, automation, and miner transparency:
+| | Blitzpool | Typical FPPS / PPS+ | Custodial PPLNS |
+|---|---|---|---|
+| Payouts go directly on-chain | ✅ same block as the find | ❌ batch cron, hours to days | ❌ threshold-based |
+| Pool holds miner sats | ❌ never | ✅ between find & payout | ✅ until threshold |
+| Minimum payout | *none* — it's just a coinbase output | typically 0.001 BTC+ | same |
+| Share window | PPLNS 4× netdiff (anti-hop), Group-Solo PROP | FPPS contract | opaque |
+| Stratum V1 | ✅ | ✅ | ✅ |
+| Stratum V2 (Noise + TDP + JDP + extended channels) | ✅ | rare | almost never |
+| Non-custodial Group-Solo (friends mine together, reward split on-chain) | ✅ **unique worldwide** | — | — |
 
-### ✅ Core Features
-- Lightweight, performant Node.js mining pool
-- Full support for Bitcoin mainnet
-- Stratum V1 protocol support
-- Optional dedicated high-difficulty Stratum listener (port 3339 by default) that starts at difficulty 1,000,000 but still participates in the usual automatic difficulty retargeting.
-- Optimized for low-latency share submission with Nagle’s algorithm disabled by default.
-- Includes further performance improvements like UTF-8 socket encoding, cached network selection, and efficient big number handling.
-- Supports Extranonce Subscribe (XNSub) for dynamic extranonce updates
-- loads of Telegram Bot Commands to get basic mining infos
+Blitzpool is (to the operator's knowledge) the first Bitcoin pool that offers **all three payout modes non-custodially over both SV1 and SV2**.
 
-### 🚀 Extended Features by BlitzPool
+---
 
-- Dual-port Stratum service with configurable baseline difficulties via `STRATUM_START_DIFFICULTY` and `STRATUM_HIGH_DIFF_START_DIFFICULTY`, plus an optional high-difficulty listener bound to `STRATUM_HIGH_DIFF_PORT` (default `3339`) that still uses the adaptive difficulty controls once clients start submitting shares.
-- Redis support for distributed caching across multiple instances (see `blitzpool-example.env` for configuration)
+## The three payout modes
 
-### 🤖 Telegram Bot Commands
+### 🎯 Solo
 
-The BlitzPool Telegram bot offers real-time interaction and notification options via the following commands:
-Command	Description
-- /start	            Displays a welcome message and usage instructions
-- /subscribe	        Subscribe to receive block found notifications for your mining address
-- /subscribe_bestdiff	Toggle Best-Diff notifications on or off (default: on)
-- /bestdiff_reset	Reset the stored Best-Diff value for your miners
-- /difficulty	        Shows the current Bitcoin network difficulty
-- /next_difficulty	    Estimates the next network difficulty adjustment
-- /stats	            Displays detailed mining stats for your subscribed Bitcoin address
-- /poolhashrate          Shows the current pool hashrate
+Just you versus Bitcoin. You submit shares against the full network difficulty; when your share wins, the pool relays the block and the entire coinbase goes to your address. No fee. The pool never sees the sats.
 
-- ➡️ Subscriptions are address-based and persistent – no account or login needed.
-- ➡️ For Stats, worker addresse need to be given on every command. 
-- ➡️ btc worker addresse can be send encrypted with an own tool, pls see next steps:
+**When it fits:** big miner, wants the full reward when it hits, is fine with long dry spells between finds.
 
-#### 🔐 Encrypted Address Tracking
-- Subscribe with **encrypted BTC addresses** for enhanced privacy
-- Addresses are decrypted internally and securely matched to your mining activity
+### 🔗 PPLNS (Pay Per Last N Shares)
 
-Use our Encryption tool for btc worker addresses here:
+Sliding-window pooled mining with a **multi-output coinbase** and a **signed credit/debit ledger**. Every miner in the window gets their proportional share written as their own output in the same coinbase transaction that mints the block. No pool wallet touches the sats.
 
-https://github.com/warioishere/blitzpool-message-encryptor-for-TG
+- Window size: `4 × networkDifficulty` in diff-1-weighted shares
+- Anti-hop by design (sliding window, not per-block reset)
+- Sub-dust or weight-trimmed shares accumulate as a signed **pending credit** on the miner's ledger row; bonus recipients of the same block pick up a matching **pending debit**
+- Fee is a single coinbase output to `PPLNS_FEE_ADDRESS` — exact feePercent, never padded by trim / sub-dust sweep
+- Dedicated port, default `PPLNS_PORT=3340`
 
-### 📢 NTFY Notifications
+**When it fits:** mid-size ASIC, wants more regular variance smoothing than Solo, still values non-custodial payouts over FPPS convenience.
 
-BlitzPool can mirror its Telegram bot interactions over [ntfy](https://ntfy.sh/) topics.
-Enable the service by setting the following optional environment variables:
+#### The signed credit/debit ledger
+
+PPLNS's non-custodial guarantee is enforced by a per-miner signed balance (`pplns_balance.balanceSats`):
+
+- **`balanceSats > 0`** — pool owes the miner this much (pending credit, accumulated from sub-dust rounds or weight-trimmed blocks where their on-chain output didn't fit).
+- **`balanceSats < 0`** — miner owes the pool this much (debit booked when they received an on-chain bonus from another miner's trimmed / sub-dust share; settled automatically the next time they mine by reducing their rawFair).
+- **`balanceSats == 0`** — no open claim in either direction.
+
+Every sat a miner earns stays with that miner. Trimmed and sub-dust sats become a *credit* for the miner who earned them; the bonus recipient of the same block picks up a matching *debit*. The fee output gets exactly `feePercent`, never padded by sweep leftovers. The sum of all balances across the whole pool stays at `0` (bounded drift of up to `numMiners` sats per block from floor-rounding).
+
+**Abandonment:** when a miner goes dormant for `ABANDONED_BALANCE_DAYS` days (default 90 = 3 months), the daily sweep cron pair-matches their balance against abandoned counterparties (largest-credit ↔ largest-debit) and cancels both sides. Unpaired remainders stay in the ledger until a counterparty also becomes abandoned or the debitor returns. No active miner's fair share is ever touched by another miner's abandonment.
+
+See `src/services/coinbase-distribution.ts` for the full algorithm (5 phases incl. solvency cap) and `src/services/dust-sweep.service.ts` for the pair-aware sweep.
+
+### 👥 Group-Solo
+
+Friends mine together as a closed group. Every block a group finds is split proportionally to each member's shares in that round, paid directly in the coinbase. **Address-driven** routing — any port works. No group-admin has access to anyone's sats.
+
+- PROP-style: round resets on every found block
+- Minimum 2 members to activate a group
+- Admin-token auth (shown once on create); **email-verified invitations only** (see [Security](#security))
+- Admin can kick inactive members after 14 days; pending sats redistribute to the remaining members
+- Same 546-sat dust floor + coinbase-weight-budget trim as PPLNS
+
+**When it fits:** small crew of friends wants to combine hashrate against higher variance than pure Solo, but keeps full on-chain custody.
+
+---
+
+## Stratum V2 support
+
+Complete SV2 stack built in-tree:
+
+- **Noise handshake** (Act 1 / Act 2 / transport, verified against BraiinsOS & SRI reference)
+- **Standard channels** — per-miner difficulty, group channels
+- **Extended channels** — extranonce rolling, merkle-root reconstruction, pool-side share validation
+- **Template Distribution Protocol (TDP)** — pool-built templates
+- **Job Declaration Protocol (JDP)** — miners can declare their own templates; pool pays via `SetCustomMiningJob`
+- **JDP → SetCustomMiningJob bridge** — declared jobs flow to the extended-channel clients of the same address
+- SipHash-2-4 verified against all 16 official test vectors
+- 224 SV2 unit tests across 13 spec files
+
+SV2 listens on the same TCP ports as SV1; protocol detection on the first byte routes the socket.
+
+---
+
+## Stratum endpoints
+
+| Port | Protocol | Starting difficulty | Purpose |
+|---|---|---|---|
+| `3333` | SV1 / SV2 | `STRATUM_START_DIFFICULTY` (default 1000) | Default entry — Solo, Group-Solo |
+| `3339` | SV1 / SV2 | `STRATUM_HIGH_DIFF_START_DIFFICULTY` (default 1,000,000) | Mining-rental endpoint (NiceHash, MRR) |
+| `3340` | SV1 / SV2 | adaptive | **PPLNS** — explicit opt-in to PPLNS payout |
+| `6666` | SV1 TLS | adaptive | Encrypted Stratum (SV1 only) |
+| `3337` | SV2 JDP | — | Job Declaration Protocol, when `SV2_JDP_ENABLED=true` |
+
+Routing priority for a connecting miner:
+1. **Explicit PPLNS port (3340)** → PPLNS, regardless of group membership
+2. **Active group membership** for the miner's BTC address → Group-Solo (any non-PPLNS port)
+3. **Neither** → Solo
+
+Address-driven Group-Solo means a miner who is a member of a group doesn't have to reconfigure anything — the pool looks them up by BTC address on connect and routes accordingly.
+
+---
+
+## Security
+
+### Non-custodial by design
+
+The pool's production wallets do not exist. Every block that is mined on Blitzpool has the miner-address(es) as the direct destination in the coinbase transaction. An operator can't withhold payouts — they'd have to refuse to relay the block at all, and the miner would simply submit it elsewhere.
+
+### Email-required group invitations
+
+Adding a miner to a Group-Solo group is a two-phase invitation flow:
+
+1. Admin requests an invitation for a BTC address
+2. Pool sends a token-ified link to the **verified email** bound to that address
+3. The address-owner accepts (or declines) via the emailed link
+
+The invitation token lives only in the email body. The public `/app/:address` page shows a pending-invitations banner with a **masked** email hint but **never** the token — so a visitor to a miner's public dashboard can't accept on their behalf. This closes the "silent-add" attack where an admin would otherwise redirect an unsuspecting miner's payouts into their own group.
+
+Admin-side API endpoints strip the token too; cancellations go by `(groupId, address)`, not by token.
+
+### Idempotent block payouts
+
+Each block's payout bookkeeping is one Postgres transaction with a pre-check on `pplns_payout_history.(blockHeight, address)` and a unique index as defense-in-depth. Replays (process restart mid-block-find, concurrent writers racing for the same block) can't double-credit.
+
+### Coinbase weight guard
+
+Mainnet `bitcoin.conf` ships with `blockreservedweight=50000` WU. Blitzpool fits up to ~286 distinct miner outputs per block; additional miners accumulate in pending until the operator bumps the reservation. A capacity-alert service emails the operator (`POOL_ADMIN_EMAIL`) at 80 % / 95 % / recovery thresholds so the bump can happen before anyone is actually trimmed.
+
+---
+
+## Configuration
+
+### Stratum + pool basics
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `STRATUM_PORT` | `3333` | Primary SV1/SV2 listener |
+| `STRATUM_HIGH_DIFF_PORT` | `3339` | High-difficulty listener (mining rentals) |
+| `STRATUM_TLS_PORT` | `6666` | TLS SV1 |
+| `STRATUM_START_DIFFICULTY` | `1000` | Base starting diff |
+| `STRATUM_HIGH_DIFF_START_DIFFICULTY` | `1000000` | High-diff starting diff |
+| `TARGET_SHARES_PER_MINUTE` | `6` | Auto-retarget goal |
+| `DIFFICULTY_CHECK_INTERVAL_MS` | `60000` | Retarget cadence |
+| `JOB_RETENTION_MS` | `90000` | Old-job cleanup window |
+| `DEV_FEE_ADDRESS` | — | Optional dev fee address for Solo mode |
+| `DEV_FEE_PERCENT` | `1.5` | Dev fee % |
+
+### PPLNS mode
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PPLNS_PORT` | — | Enables PPLNS when set (suggested `3340`) |
+| `PPLNS_FEE_ADDRESS` | — | Pool fee output destination |
+| `PPLNS_FEE_PERCENT` | `2` | Pool fee % |
+| `PPLNS_COINBASE_WEIGHT_BUDGET` | `50000` | Max WU reserved for coinbase outputs (must match `bitcoin.conf:blockreservedweight`) |
+
+### Capacity monitor (email alerts)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `POOL_ADMIN_EMAIL` | — | Alert recipient; unset → monitor disabled |
+| `POOL_CAPACITY_ALERT_ENABLED` | `true` | Master switch |
+| `POOL_CAPACITY_ALERT_THRESHOLD` | `0.8` | Warning threshold (fraction of `maxMinerOutputs`) |
+| `POOL_CAPACITY_ALERT_URGENT_THRESHOLD` | `0.95` | Urgent threshold |
+
+### SMTP (for invitations + email verification + capacity alerts)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SMTP_HOST` / `SMTP_PORT` / `SMTP_SECURE` / `SMTP_USER` / `SMTP_PASS` / `SMTP_FROM` | — | Nodemailer transport; all required or email features stay disabled |
+| `POOL_BASE_URL` | — | Public UI URL used to build email links (`/#/email/verify/:token`, `/#/invite/:token`) |
+
+### SV2
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SV2_JDP_ENABLED` | `false` | Enable Job Declaration Protocol server |
+| `SV2_JDP_PORT` | `3337` | JDP listener |
+
+### Dust-sweep cron
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DUST_SWEEP_ENABLED` | `true` | Enables daily 03:00 dust cleanup |
+| `DUST_SWEEP_DORMANT_DAYS` | `30` | Pending sub-dust rows dormant for this long are absorbed to history |
+
+### Database
+
+See [Running Blitzpool with Postgres](#running-blitzpool-with-postgres).
+
+---
+
+## API
+
+### Pool-wide
+
+| Endpoint | Returns |
+|---|---|
+| `GET /api/info` | Block data, user agents, high scores, uptime |
+| `GET /api/network` | Bitcoin Core `getmininginfo` (difficulty, network hashrate, …) |
+| `GET /api/info/chart?range=1d\|1m` | Pool hashrate time-series |
+| `GET /api/info/chart/mode/:mode?range=7d` | Per-mode (`solo` / `pplns` / `group-solo`) hashrate time-series |
+| `GET /api/info/chart/live?range=1h\|6h\|12h\|24h` | Live 1-min hashrate |
+| `GET /api/info/shares` | Σ accepted + rejected diff-1 work, incl. `acceptedSinceBlock` (mode-agnostic, all three modes) |
+| `GET /api/info/accepted?range=1d\|3d\|7d` | Accepted share counts per 10-min slot |
+| `GET /api/info/rejected?range=1d\|3d\|7d` | Rejected shares per reason |
+| `GET /api/info/peers` | Bitcoin Core peers enriched with geoip |
+| `GET /api/info/block-template` | Current block template (solo-shaped) |
+| `GET /api/info/core` | `getnetworkinfo` output |
+| `GET /api/info/version` | Pool version |
+
+### Per miner / address
+
+| Endpoint | Returns |
+|---|---|
+| `GET /api/client/:address/accepted?range=1d\|3d\|7d` | Per-10-min diff-1 accepted |
+| `GET /api/client/:address/rejected?range=1d\|3d\|7d` | Per-reason rejects |
+| `GET /api/client/:address/block-template` | Mode-aware block template (solo / pplns-shaped / group-solo-shaped coinbase depending on the miner's mode) |
+| `GET /api/pplns/mode/:address` | Which mode the miner is currently routed to: `{ mode: 'solo' \| 'pplns' \| 'group-solo', groupId? }` |
+
+### PPLNS
+
+| Endpoint | Returns |
+|---|---|
+| `GET /api/pplns` | Pool-wide filtered info |
+| `GET /api/pplns/status` | Window size, total shares, network difficulty |
+| `GET /api/pplns/distribution` | Current payout distribution (addresses + percents) |
+| `GET /api/pplns/fees` | Fee config (percent, address, budget) |
+| `GET /api/pplns/chart?range=1d\|3d\|7d` | PPLNS-only hashrate time-series |
+| `GET /api/pplns/:address` | Miner's PPLNS status (pending, total paid, window %) |
+| `GET /api/pplns/:address/history` | Miner's block payout history |
+
+### Group-Solo
+
+| Endpoint | Returns / does |
+|---|---|
+| `GET /api/pplns/groups` | Public list of non-dissolved groups |
+| `GET /api/pplns/groups/by-address/:address` | Group this address is a member of (if any) |
+| `GET /api/pplns/groups/:id` | Group details (members, hashrate, balances) |
+| `GET /api/pplns/groups/:id/chart?range=1d\|3d\|7d` | Group hashrate time-series (drop-in compatible with `/info/chart`) |
+| `GET /api/pplns/groups/:id/accepted\|/rejected` | Group-wide share aggregates |
+| `GET /api/pplns/groups/:id/distribution` | Current round distribution |
+| `GET /api/pplns/groups/:id/best-difficulty` | Highest single-share diff in the round |
+| `GET /api/pplns/groups/:id/history` | Block-find history for the group |
+| `POST /api/pplns/groups` | Create a new group — returns admin token (shown **once**) |
+| `POST /api/pplns/groups/:id/invitations` | Admin: send invitation email (requires verified email binding on invitee) |
+| `POST /api/pplns/groups/:id/invitations/batch` | Admin: batch invite |
+| `GET /api/pplns/groups/:id/invitations` | Admin: list pending invitations (token stripped) |
+| `DELETE /api/pplns/groups/:id/invitations/by-address/:address` | Admin: cancel pending invitation |
+| `DELETE /api/pplns/groups/:id/members/:address` | Admin: remove member (14-day inactivity gate) |
+| `POST /api/pplns/groups/:id/transfer` | Transfer creator role, rotates admin token |
+| `DELETE /api/pplns/groups/:id` | Dissolve group |
+| `GET /api/pplns/invitations/by-address/:address` | Pending invitations for an address (masked email, no token) |
+| `GET /api/pplns/invitations/:token` | Public invitation detail (token = auth) |
+| `POST /api/pplns/invitations/:token/accept` | Accept invitation |
+| `POST /api/pplns/invitations/:token/decline` | Decline invitation |
+
+### Email binding (miner self-service)
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/email/register` | Register an email for a BTC address — sends verification mail |
+| `GET /api/email/verify/:token` | Consume verification token |
+| `GET /api/email/by-address/:address` | Check if/which email is bound (masked) |
+
+---
+
+## Notifications
+
+### Telegram bot
+
+Address-based, no login:
+
+- `/start` — welcome + usage
+- `/subscribe` / `/subscribe_bestdiff` — block-found + best-diff notifications
+- `/bestdiff_reset` — reset stored best-diff
+- `/difficulty` / `/next_difficulty` — network diff + next-retarget estimate
+- `/stats` — miner stats
+- `/poolhashrate` — pool-wide hashrate
+
+Miners can subscribe with **encrypted BTC addresses** (see [blitzpool-message-encryptor](https://github.com/warioishere/blitzpool-message-encryptor-for-TG) for the encryption helper).
+
+### ntfy
+
+Optional mirror of the Telegram bot to ntfy topics. Set:
 
 ```
-NTFY_SERVER_URL=<https://your-ntfy-server>
-NTFY_ACCESS_TOKEN=<token if required>
-NTFY_TOPIC_PREFIX=<optional prefix>
-NTFY_DIFF_NOTIFICATIONS=true   # publish best-diff alerts
+NTFY_SERVER_URL=https://your-ntfy-server
+NTFY_ACCESS_TOKEN=<optional>
+NTFY_TOPIC_PREFIX=<optional>
+NTFY_DIFF_NOTIFICATIONS=true
 ```
 
-On startup the pool subscribes to topics for all known BTC addresses using the
-`<prefix><address>` convention. Post commands like `/subscribe` or `/stats` to the
-topic of your address and the service will reply on the same channel:
+Post bot commands to the ntfy topic of your address and the service replies on the same channel:
 
 ```
-curl -d /stats $NTFY_SERVER_URL/myPrefix1ABC...
-curl -d "/subscribe 1DEF..." $NTFY_SERVER_URL/myPrefix1ABC...
+curl -d /stats  $NTFY_SERVER_URL/<prefix>1ABC...
+curl -d "/subscribe 1DEF..." $NTFY_SERVER_URL/<prefix>1ABC...
 ```
 
-### 🌍 GeoIP service
+### Push notifications
 
-BlitzPool enriches peer information using the free [ip-api.com](https://ip-api.com) geolocation service to resolve city and country details. Lookups are cached for ten minutes and automatically refreshed to keep data current. No configuration is required.
+Web-Push + Android FCM. See [`docs/PUSH_NOTIFICATIONS.md`](docs/PUSH_NOTIFICATIONS.md).
 
-#### 🛠️ Extra Services
-- Integrated `blockTemplateInterval` configuration
-- Hashrate corrections and updated statistics endpoints
-- Extended `/api/info/chart` endpoint with a `range` query supporting `1d` and `1m`
-- Pool hashrate statistics are kept for one month
-- Worker shares and total shares per address are kept for six months while session details are pruned after one day
-- Example: `GET /api/info/chart?range=1m` returns one month of pool hashrate data (defaults to `1d`)
-- Telegram bot subscriptions managed via a custom ORM
-- New `/api/info/shares` endpoint provides pool-wide accepted and rejected share totals
-- New `/api/info/rejected` endpoint lists rejected share reasons pool-wide (supports `range=1d|3d|7d`)
-- New `/api/client/<btc_address>/rejected` shows rejected reasons for a specific address with per-reason share counts and diff-1 weighted totals (supports `range=1d|3d|7d`)
-- New `/api/info/accepted` endpoint lists pool-wide accepted share counts per 10-minute slot (supports `range=1d|3d|7d`)
-- New `/api/client/<btc_address>/accepted` shows diff-1 weighted accepted share counts for a specific address per 10-minute slot
-- Old jobs are cleaned after 90 seconds by default (`JOB_RETENTION_MS` can adjust this)
-- Desired share rate per worker can be tuned with `TARGET_SHARES_PER_MINUTE` (default `6`)
-- How often miners are checked for new difficulty can be set via `DIFFICULTY_CHECK_INTERVAL_MS` (default `60000` ms)
+### GeoIP
 
-## 🗃️ Running BlitzPool with Postgres
+Pool peers are enriched via [ip-api.com](https://ip-api.com), 10-minute TTL cache, no config required.
 
-SQLite continues to be the default for development and lightweight installs. To stay on SQLite, keep `DB_TYPE` unset (or explicitly set it to `sqlite`) and continue mounting `./DB/public-pool.sqlite` inside your containers. No schema changes are required for this path.
+---
 
-For production we recommend switching to Postgres for better concurrency, durability, and operational tooling. Two ready-made Docker Compose stacks are provided:
+## Running Blitzpool with Postgres
 
-- `docker-compose-mainnet-pg.yml`
-- `docker-compose-mainnet-pg_pm2.yml`
+SQLite stays the default for development and lightweight installs — keep `DB_TYPE` unset (or `sqlite`) and mount `./DB/public-pool.sqlite` into your containers.
 
-Each stack provisions a managed `postgres` service, waits for it to become healthy, and mounts persistent data under `./full-setup/data/mainnet/public-pool/pg`. The Postgres credentials are injected via environment variables (`PG_HOST`, `PG_PORT`, `PG_USER`, `PG_PASSWORD`, `PG_DATABASE`, `PG_SSL`).
+For production, **Postgres is recommended** for concurrency + durability. Ready-made Docker Compose stack: `docker-compose-mainnet-pg.yml`.
 
-### Prerequisites
+It provisions a managed `postgres` service, waits for it to become healthy, and persists data under `./full-setup/data/mainnet/public-pool/pg`. Postgres credentials via `PG_HOST`, `PG_PORT`, `PG_USER`, `PG_PASSWORD`, `PG_DATABASE`, `PG_SSL`.
 
-1. Ensure Docker volumes under `full-setup/data/<network>/public-pool/pg` exist (`./full-setup/prepare.sh` will create them automatically).
-2. Provide Postgres credentials via `.env`, `docker compose --env-file`, or Docker secrets.
-3. Run the Nest migrations at least once (the compose stacks set `DB_RUN_MIGRATIONS=true` to run them automatically on boot).
+**Important:** production uses migrations, not `synchronize`. Every new entity needs a matching migration file under `src/migrations/`. `DB_RUN_MIGRATIONS=true` runs them on boot; the compose stacks do this automatically.
 
-When `DB_TYPE=postgres` and `DB_RUN_MIGRATIONS=true`, BlitzPool now runs both the TypeORM schema migrations and the SQLite→Postgres data copy on startup. The automatic copy skips itself if the Postgres tables already contain rows or the SQLite file is missing. Set `DB_MIGRATE_SQLITE_ON_BOOT=false` if you prefer to invoke `npm run migrate:sqlite-to-pg` manually.
+### Migrating existing SQLite data to Postgres
 
-### Selecting the database driver
-
-- **Production Postgres:** set `DB_TYPE=postgres` and populate the `PG_*` variables. The app disables `synchronize`, applies migrations from `dist/migrations`, and skips SQLite-specific PRAGMAs.
-- **Local development/tests:** keep `DB_TYPE` empty or `sqlite` to continue using the bundled SQLite database at `./DB/public-pool.sqlite`. Jest tests automatically exercise both drivers where applicable.
-- You can switch between drivers by updating the env file and restarting the service. Existing SQLite installs can remain on SQLite indefinitely; no forced migration is required.
-
-If you would like the Postgres deployment to mirror SQLite's automatic schema management, set `DB_AUTO_SYNCHRONIZE=true`. The primary instance (`NODE_APP_INSTANCE=0` or unset) will invoke `dataSource.synchronize()` once at boot after migrations run. Leave the flag unset to continue relying solely on migrations.
-
-## 🔄 Migrating existing SQLite data to Postgres
-
-Existing pools can migrate their on-disk SQLite database by following these steps:
-
-1. **Plan downtime and back up data.** Stop the pool to prevent concurrent writes, copy `DB/public-pool.sqlite`, and (if Postgres already contains data) take a database snapshot so you can roll back cleanly.
-2. **Provision Postgres and run the schema migrations.** The Docker Compose stacks set `DB_RUN_MIGRATIONS=true`, or you can run the Nest app once with that environment variable enabled to bootstrap the schema before copying any rows.
-3. **Execute a dry run** to confirm connectivity and row counts without writing data:
+1. Stop the pool, back up `DB/public-pool.sqlite`
+2. Bring up Postgres with `DB_RUN_MIGRATIONS=true` once to bootstrap the schema
+3. Dry run:
    ```bash
    PG_HOST=localhost PG_PORT=5432 PG_USER=pool PG_PASSWORD=secret PG_DATABASE=public_pool \
    npm run migrate:sqlite-to-pg -- --dry-run
    ```
-4. **Run the live migration** after confirming the dry run. The script copies each table in dependency order, preserves timestamps, and resets Postgres sequences so new rows continue incrementing correctly:
+4. Live run:
    ```bash
    npm run migrate:sqlite-to-pg -- --batch-size 1000
    ```
-   Use `--sqlite <path>` if your SQLite file lives somewhere other than the default `./DB/public-pool.sqlite`.
+   Use `--sqlite <path>` if your SQLite file lives elsewhere.
 
-If the migration fails midway, drop/restore the Postgres database from the backups taken in step 1 and re-run the script. The SQLite source is never modified, so replays are safe once the target has been reset. After a successful run, point your deployment at the new Postgres credentials (`DB_TYPE=postgres`, `PG_*` variables) and start the services. The resulting Postgres data will live under `full-setup/data/<network>/public-pool/pg` when using the provided compose stacks. Operators who previously mounted `db/pg/<network>` should move or copy their existing data into the new `full-setup/data/<network>/public-pool/pg` path before restarting.
+The SQLite source is never modified, so replays are safe after a reset. Post-migration, point your deployment at Postgres (`DB_TYPE=postgres`, `PG_*`) and start the services.
 
-## API
-
-- `GET /api/info/chart?range=1d|1m` – Returns pool hashrate statistics.
-- `GET /api/info/shares` – Provides pool-wide accepted and rejected share totals.
-- `GET /api/info/rejected?range=1d|3d|7d` – Lists rejected share reasons pool-wide (difficulty weighted).
-- `GET /api/info/accepted?range=1d|3d|7d` – Lists accepted share counts pool-wide per 10-minute slot.
-- `GET /api/info/block-template` – Returns the current block template used for mining.
-- `GET /api/info/core` – returns Bitcoin Core’s getnetworkinfo output (version, connections, warnings, etc.).
-- `GET /api/info/version` – Returns the BlitzPool version.
-- `GET /api/client/<btc_address>/rejected?range=1d|3d|7d` – Returns per 10-minute slot each rejected reason with its share count and diff-1 weighted total (`diffMinusOne`).
-- `GET /api/client/<btc_address>/accepted?range=1d|3d|7d` – Shows diff-1 weighted accepted share counts for a specific address per 10-minute slot.
-- `GET /api/client/<btc_address>/block-template` – Returns the block template a miner would use, including the coinbase transaction paying to the specified address. The response provides a human‑readable `blockTemplate` and the raw serialized `blockHex`.
-
-#### Blitzpool-UI
-
-Blitzpool UI can be found here:
-
-https://github.com/warioishere/blitzpool-ui/tree/blitzpool-ui-master
-
-Blitzpool UI has additional Features to show
-
-- total Shares per address
-- total shares per Worker
+See [`POSTGRESQL_MIGRATION_SUMMARY.md`](POSTGRESQL_MIGRATION_SUMMARY.md) for deeper details.
 
 ---
-💬 Contact
 
-For updates, support, and to join the community, reach out via:
+## Development
 
-    Matrix: @blitzpool:matrix.yourdevice.ch
+| Command | Does |
+|---|---|
+| `npm run start:dev` | Watch mode |
+| `npm run build` | Nest build → `dist/` |
+| `npm test` | Jest unit + integration tests (~600 tests) |
+| `npm run lint` | ESLint |
 
-    Telegram: https://t.me/blitzpool_official_switzerland
+Regtest-driven integration tests need a local bitcoind:
 
-🙏 Credits
+```bash
+~/bitcoin-29.0/bin/bitcoind -regtest -daemon \
+  -rpcuser=test -rpcpassword=test -rpcport=18443 \
+  -datadir=/tmp/blitzpool-regtest-datadir -fallbackfee=0.0002
+npx jest --no-coverage
+```
 
-This project is a fork of the excellent public-pool by benjamin-wilson, extended and maintained by the BlitzPool team at yourdevice.ch.
+`postinstall` runs `patch-package` from `patches/`.
 
+---
 
+## UI
 
+The frontend lives in its own repo: **[blitzpool-ui](https://github.com/warioishere/blitzpool-ui/tree/blitzpool-ui-master)**
 
+It talks to the pool's HTTP API (port 3334 by default) and exposes:
+
+- Splash page with pool hashrate + Block-Luck card + mining-mode showcase
+- Per-miner dashboard (mode-aware: solo / pplns / group-solo)
+- Payout-group create/manage flow (invitations, member list, round stats)
+- Mining-modes explainer page
+- Push-notifications, language toggle EN / DE, dark theme
+
+Runtime feature flag `PPLNS_GROUPS_PUBLISHED` (UI server ENV) gates the PPLNS + Group-Solo cards in a Coming-Soon state until the operator publishes them.
+
+---
+
+## Credits + contact
+
+Fork of [public-pool](https://github.com/benjamin-wilson/public-pool) by Benjamin Wilson, extended by the Blitzpool team at [yourdevice.ch](https://yourdevice.ch).
+
+- 💬 Telegram: <https://t.me/blitzpool_official_switzerland>
+- 💬 Matrix: `#blitzpool:matrix.yourdevice.ch`
+- 🐙 GitHub: <https://github.com/warioishere/blitzpool>
+- 🔔 ntfy (downtime alerts): <https://ntfy.yourdevice.ch/uptime-blitzpool>
+
+Made in Switzerland. 🇨🇭
+
+> *by Bitcoiners, for Bitcoiners who verify instead of trust.*

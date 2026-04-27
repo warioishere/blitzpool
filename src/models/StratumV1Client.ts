@@ -9,6 +9,7 @@ import { firstValueFrom, Subscription } from 'rxjs';
 import { clearInterval } from 'timers';
 
 import { recordConnectionFailure } from '../services/protocol-detector.service';
+import { normalizeBtcAddress } from '../utils/btc-address.utils';
 import { AddressSettingsService } from '../ORM/address-settings/address-settings.service';
 import { BlocksService } from '../ORM/blocks/blocks.service';
 import { ClientStatisticsService } from '../ORM/client-statistics/client-statistics.service';
@@ -38,6 +39,11 @@ import { StratumV1Service } from '../services/stratum-v1.service';
 import { ClientDifficultyStatisticsService } from '../ORM/client-difficulty-statistics/client-difficulty-statistics.service';
 import { ShareTotalsCacheService } from '../services/share-totals-cache.service';
 import { AddressSettingsCacheService } from '../services/address-settings-cache.service';
+import { PplnsService } from '../services/pplns.service';
+import { GroupSoloService } from '../services/group-solo.service';
+import { MinerActiveModeService } from '../services/miner-active-mode.service';
+import { PoolModeHashrateService } from '../ORM/pool-mode-hashrate/pool-mode-hashrate.service';
+import { PayoutMode } from './interfaces/unified-stratum.interfaces';
 
 
 export class StratumV1Client {
@@ -82,6 +88,18 @@ export class StratumV1Client {
     private difficultyCheckIntervalMs: number;
     private lastDifficultyCheck = 0;
 
+    /**
+     * Accepted-share counter for the payout-mode warmup gate. Shares
+     * 1..ledgerWarmupShares from a fresh session are validated but
+     * intentionally skip the PPLNS / group-solo ledger write — filters
+     * CPU miners that briefly reach the minimum diff but can't sustain
+     * a stream of shares. Not an address-level counter on purpose:
+     * every reconnect restarts warmup, which matches our intent (a
+     * miner that can't stay connected long enough to clear 10 shares
+     * isn't contributing meaningfully either).
+     */
+    private acceptedShareCount = 0;
+
     // Handshake timing monitoring
     private handshakeStartTime: number;
     private subscribeReceivedTime: number;
@@ -112,10 +130,27 @@ export class StratumV1Client {
         private readonly allowSuggestedDifficulty: boolean = true,
         private readonly targetSharesPerMinute: number = 6,
         private readonly redisClient?: any,
+        private readonly payoutMode: PayoutMode = 'solo',
+        private readonly pplnsService?: PplnsService,
+        private readonly groupSoloService?: GroupSoloService,
+        private readonly minerActiveModeService?: MinerActiveModeService,
+        private readonly poolModeHashrateService?: PoolModeHashrateService,
+        /** VarDiff floor passed through from StratumPortConfig. */
+        private readonly minimumDifficulty: number = 0,
+        /**
+         * Per-session warmup gate: shares 1..N-1 are validated but not
+         * recorded in the PPLNS / group-solo ledger. See the PPLNS port
+         * config comment in protocol-detector.service.ts for rationale.
+         */
+        private readonly ledgerWarmupShares: number = 0,
     ) {
-        this.initialDifficulty = Number.isFinite(initialDifficulty)
-            ? initialDifficulty
-            : 16384;
+        const rawInitial = Number.isFinite(initialDifficulty) ? initialDifficulty : 16384;
+        // Clamp to the port's minimum: a PPLNS connection that somehow
+        // picks up a lower suggested-difficulty would otherwise get
+        // dropped straight below the floor.
+        this.initialDifficulty = this.minimumDifficulty > 0
+            ? Math.max(rawInitial, this.minimumDifficulty)
+            : rawInitial;
         this.sessionDifficulty = this.initialDifficulty;
         this.pendingSessionDifficulty = this.sessionDifficulty;
 
@@ -355,6 +390,7 @@ export class StratumV1Client {
                         this.sessionStart = new Date();
                         this.statistics = new StratumV1ClientStatistics(
                             this.targetSharesPerMinute,
+                            this.minimumDifficulty,
                         );
                         this.sessionId = this.getRandomHexString();
                         this.extraNonce = this.sessionId;
@@ -416,8 +452,11 @@ export class StratumV1Client {
                     parsedMessage,
                 );
 
-                // Trim whitespace from address (common copy-paste error)
-                authorizationMessage.address = authorizationMessage.address?.trim();
+                // Trim + normalise bech32 (lowercase) before accepting. Without
+                // this, every downstream lookup (PPLNS window aggregate, group
+                // routing cache, ledger balance) keys on the user's raw form
+                // and fragments work across case variants. See btc-address.utils.
+                authorizationMessage.address = normalizeBtcAddress(authorizationMessage.address);
 
                 // Validate Bitcoin address before accepting authorization
                 try {
@@ -550,7 +589,12 @@ export class StratumV1Client {
                 }
 
                 this.clientSuggestedDifficulty = suggestDifficultyMessage;
-                this.sessionDifficulty = suggestDifficultyMessage.suggestedDifficulty;
+                // Clamp the client's suggestion to the port's floor. A
+                // PPLNS-port connection suggesting diff 64 would otherwise
+                // succeed and pollute the ledger with sub-dust shares.
+                this.sessionDifficulty = this.minimumDifficulty > 0
+                    ? Math.max(suggestDifficultyMessage.suggestedDifficulty, this.minimumDifficulty)
+                    : suggestDifficultyMessage.suggestedDifficulty;
                 await this.recordSessionDifficulty();
                 const success = await this.write(JSON.stringify(this.clientSuggestedDifficulty.response(this.sessionDifficulty)) + '\n');
                 if (!success) {
@@ -712,6 +756,35 @@ export class StratumV1Client {
         );
     }
 
+    /**
+     * Live lookup of the active group-id for this session's address. Returns null
+     * if group-solo isn't enabled, the address hasn't been authorized yet, or the
+     * address isn't a member of an active group. Called per-share/per-job because
+     * membership can change after connect (miner added to group while connected).
+     */
+    private activeGroupId(): string | null {
+        if (!this.groupSoloService?.isEnabled()) return null;
+        const address = this.clientAuthorization?.address;
+        if (!address) return null;
+        const entry = this.groupSoloService.getGroupForAddress(address);
+        return entry?.active ? entry.groupId : null;
+    }
+
+    /**
+     * Dispatch a rejected share to group-solo if the miner is currently in an
+     * active group AND not connected on the PPLNS port. A miner who deliberately
+     * chose the PPLNS port has opted out of group bookkeeping for this session,
+     * so their rejects must not inflate the group's reject counter.
+     */
+    private async dispatchGroupReject(): Promise<void> {
+        if (this.payoutMode === 'pplns') return;
+        if (!this.activeGroupId()) return;
+        await this.groupSoloService!.recordReject(
+            this.clientAuthorization.address,
+            this.sessionDifficulty,
+        );
+    }
+
     private async sendNewMiningJob(jobTemplate: IJobTemplate) {
         const jobStartTime = Date.now();
 
@@ -721,37 +794,79 @@ export class StratumV1Client {
         }
 
         let payoutInformation;
-        const devFeeAddress = this.configService.get('DEV_FEE_ADDRESS');
-        const devFeePercent = parseFloat(
-            this.configService.get('DEV_FEE_PERCENT') ?? '1.5',
-        );
 
         if (this.entity && this.clientAuthorization) {
             this.hashRate = this.statistics.hashRate;
         }
 
-        if (!this.clientAuthorization) {
-            if (!devFeeAddress) {
+        // Routing priority: explicit PPLNS port trumps group membership.
+        // If a miner chooses to connect to the PPLNS port, treat that as a
+        // deliberate opt-out from their group for this session — otherwise
+        // group-address-driven routing would silently hijack their shares
+        // back to group-solo even though they asked for PPLNS by port.
+        // Reverse order (group first) kept pre-PR for the Solo port, where
+        // address-driven group-solo is the whole point of that feature.
+        const jobGroupId = this.activeGroupId();
+        if (this.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
+            // PPLNS: Shared coinbase with proportional payouts
+            // Network difficulty is synced centrally via PplnsService's job subscription
+            payoutInformation = await this.pplnsService.getPayoutDistribution(jobTemplate.blockData.coinbasevalue);
+            this.noFee = false;
+            if (!payoutInformation || payoutInformation.length === 0) {
+                // No miners in window yet — skip the job rather than build a
+                // solo coinbase. Only realistic at pool cold-start or
+                // post-Redis-flush; once a share lands the next job builds
+                // a real PPLNS distribution. SV2 has the same K4 fix.
+                console.warn(
+                    `[StratumV1Client] PPLNS window empty — skipping job for ` +
+                    `${this.clientAuthorization?.address ?? '<unauth>'}, will retry on next template`,
+                );
                 return;
             }
+        } else if (jobGroupId) {
+            // Group-solo on non-PPLNS port: per-miner coinbase, PROP-style
+            // split + finder-bonus output to THIS connection's address.
+            // Each session's template names them as the bonus recipient,
+            // so whoever finds the block has the bonus already in the
+            // coinbase. Snapshots are keyed per finderAddress so
+            // onBlockFound can match the on-chain split exactly.
+            payoutInformation = await this.groupSoloService!.getPayoutDistribution(
+                jobGroupId,
+                jobTemplate.blockData.coinbasevalue,
+                this.clientAuthorization?.address,
+            );
             this.noFee = false;
-            payoutInformation = [
-                { address: devFeeAddress, percent: 100 },
-            ];
+            if (!payoutInformation || payoutInformation.length === 0) return;
         } else {
-            this.noFee = devFeeAddress == null || devFeeAddress.length < 1;
-            if (this.noFee) {
+            // Solo: Existing behavior
+            const devFeeAddress = this.configService.get('DEV_FEE_ADDRESS');
+            const devFeePercent = parseFloat(
+                this.configService.get('DEV_FEE_PERCENT') ?? '1.5',
+            );
+
+            if (!this.clientAuthorization) {
+                if (!devFeeAddress) {
+                    return;
+                }
+                this.noFee = false;
                 payoutInformation = [
-                    { address: this.clientAuthorization.address, percent: 100 },
+                    { address: devFeeAddress, percent: 100 },
                 ];
             } else {
-                payoutInformation = [
-                    { address: devFeeAddress, percent: devFeePercent },
-                    {
-                        address: this.clientAuthorization.address,
-                        percent: 100 - devFeePercent,
-                    },
-                ];
+                this.noFee = devFeeAddress == null || devFeeAddress.length < 1;
+                if (this.noFee) {
+                    payoutInformation = [
+                        { address: this.clientAuthorization.address, percent: 100 },
+                    ];
+                } else {
+                    payoutInformation = [
+                        { address: devFeeAddress, percent: devFeePercent },
+                        {
+                            address: this.clientAuthorization.address,
+                            percent: 100 - devFeePercent,
+                        },
+                    ];
+                }
             }
         }
 
@@ -848,6 +963,7 @@ export class StratumV1Client {
                 eStratumErrorCode[eStratumErrorCode.DuplicateShare],
                 this.sessionDifficulty,
             );
+            await this.dispatchGroupReject();
             const err = new StratumErrorMessage(
                 submission.id,
                 eStratumErrorCode.DuplicateShare,
@@ -883,6 +999,7 @@ export class StratumV1Client {
                 eStratumErrorCode[eStratumErrorCode.JobNotFound],
                 this.sessionDifficulty,
             );
+            await this.dispatchGroupReject();
             const err = new StratumErrorMessage(
                 submission.id,
                 eStratumErrorCode.JobNotFound,
@@ -915,6 +1032,7 @@ export class StratumV1Client {
                 eStratumErrorCode[eStratumErrorCode.JobNotFound],
                 this.sessionDifficulty,
             );
+            await this.dispatchGroupReject();
             console.warn(`Job template ${job.jobTemplateId} not found for job ${submission.jobId}`);
             delete this.stratumV1JobsService.jobs[submission.jobId];
             const err = new StratumErrorMessage(
@@ -971,6 +1089,22 @@ export class StratumV1Client {
                 if (result === 'SUCCESS!') {
                     await this.addressSettingsService.resetBestDifficultyAndShares();
                     await this.addressSettingsCacheService.clear();
+
+                    // Route block-found bookkeeping the same way the coinbase
+                    // was built — PPLNS port overrides group membership.
+                    const foundGroupId = this.activeGroupId();
+                    if (this.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
+                        await this.pplnsService.onBlockFound(
+                            jobTemplate.blockData.height,
+                            jobTemplate.blockData.coinbasevalue,
+                        );
+                    } else if (foundGroupId) {
+                        await this.groupSoloService!.onBlockFound(
+                            jobTemplate.blockData.height,
+                            jobTemplate.blockData.coinbasevalue,
+                            this.clientAuthorization.address,
+                        );
+                    }
                 }
             }
             try {
@@ -979,6 +1113,46 @@ export class StratumV1Client {
 
                 // Persist to Redis atomically (stateless service)
                 await this.clientStatisticsService.addAcceptedShare(this.entity, this.sessionDifficulty);
+
+                // Record share — PPLNS port overrides group membership, matching
+                // the coinbase-build + block-found routing above. After the
+                // routing decision, write a Redis port-marker so
+                // /api/pplns/mode/:address reflects the port the miner is
+                // ACTUALLY on right now. Marker has a 5-min TTL and is
+                // refreshed every share.
+                //
+                // PPLNS warmup gate: first `ledgerWarmupShares` shares
+                // of a fresh session are validated + counted in client
+                // stats, but skip the PPLNS ledger. CPU / low-GHz
+                // miners that briefly reach the minimum diff don't
+                // sustain enough shares to clear the gate. Gate applies
+                // ONLY to the PPLNS port — group-solo miners record
+                // every share (no min-diff / warmup configured there).
+                this.acceptedShareCount++;
+                const shareGroupId = this.activeGroupId();
+                let effectiveMode: 'solo' | 'pplns' | 'group-solo';
+                if (this.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
+                    const warmupCleared = this.acceptedShareCount > this.ledgerWarmupShares;
+                    if (warmupCleared) {
+                        await this.pplnsService.recordShare(
+                            this.clientAuthorization.address,
+                            this.sessionDifficulty,
+                        );
+                    }
+                    effectiveMode = 'pplns';
+                } else if (shareGroupId) {
+                    await this.groupSoloService!.recordShare(
+                        this.clientAuthorization.address,
+                        this.sessionDifficulty,
+                    );
+                    effectiveMode = 'group-solo';
+                } else {
+                    // Pure solo — no payout-service, but still tagged so
+                    // the per-mode hashrate aggregate stays complete.
+                    effectiveMode = 'solo';
+                }
+                await this.minerActiveModeService?.mark(this.clientAuthorization.address, effectiveMode);
+                await this.poolModeHashrateService?.incrementAccepted(effectiveMode, this.sessionDifficulty);
 
                 this.shareTotalsCacheService.increment(
                     this.clientAuthorization.address,
@@ -1067,6 +1241,7 @@ export class StratumV1Client {
                 eStratumErrorCode[eStratumErrorCode.LowDifficultyShare],
                 this.sessionDifficulty,
             );
+            await this.dispatchGroupReject();
             const err = new StratumErrorMessage(
                 submission.id,
                 eStratumErrorCode.LowDifficultyShare,

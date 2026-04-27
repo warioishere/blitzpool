@@ -19,6 +19,10 @@ import { ConfigService } from '@nestjs/config';
 import { StratumV1JobsService, IJobTemplate } from './services/stratum-v1-jobs.service';
 import { MetricsService } from './services/metrics.service';
 import { LiveHashrateService } from './services/live-hashrate.service';
+import { MiningModeService } from './services/mining-mode.service';
+import { PplnsService } from './services/pplns.service';
+import { GroupSoloService } from './services/group-solo.service';
+import { PoolModeHashrateService } from './ORM/pool-mode-hashrate/pool-mode-hashrate.service';
 
 describe('AppController /api/client/:address/block-template', () => {
   let app: NestFastifyApplication;
@@ -93,6 +97,10 @@ describe('AppController /api/client/:address/block-template', () => {
         },
         { provide: MetricsService, useValue: {} },
         { provide: LiveHashrateService, useValue: {} },
+        { provide: MiningModeService, useValue: { getMode: jest.fn().mockResolvedValue({ mode: 'solo' }) } },
+        { provide: PplnsService, useValue: { isEnabled: () => false, getPayoutDistribution: jest.fn() } },
+        { provide: GroupSoloService, useValue: { isEnabled: () => false, getPayoutDistribution: jest.fn() } },
+        { provide: PoolModeHashrateService, useValue: { getChart: jest.fn().mockResolvedValue([]), incrementAccepted: jest.fn() } },
       ],
     }).compile();
 

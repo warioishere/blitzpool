@@ -52,6 +52,7 @@ full-setup/blitzpool-testnet.env
 
 # Claude Code memory (local, not shared)
 .claude.local.md
+.claude/
 
 # Build output
 dist/

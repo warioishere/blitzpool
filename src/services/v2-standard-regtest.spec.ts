@@ -20,42 +20,11 @@
  */
 
 import * as bitcoinjs from 'bitcoinjs-lib';
-import * as http from 'http';
 import * as merkle from 'merkle-lib';
 import * as merkleProof from 'merkle-lib/proof';
 import { MiningJob } from '../models/MiningJob';
 import { IJobTemplate } from './stratum-v1-jobs.service';
-
-const RPC_URL = 'http://127.0.0.1:18443';
-const RPC_USER = 'test';
-const RPC_PASS = 'test';
-const NETWORK = bitcoinjs.networks.regtest;
-
-function rpcCall(method: string, params: any[] = []): Promise<any> {
-  return new Promise((resolve, reject) => {
-    const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method, params });
-    const auth = Buffer.from(`${RPC_USER}:${RPC_PASS}`).toString('base64');
-    const req = http.request(RPC_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Basic ${auth}` },
-    }, (res) => {
-      let data = '';
-      res.on('data', (chunk) => data += chunk);
-      res.on('end', () => {
-        try {
-          const parsed = JSON.parse(data);
-          if (parsed.error) reject(new Error(`RPC error: ${JSON.stringify(parsed.error)}`));
-          else resolve(parsed.result);
-        } catch (e) {
-          reject(new Error(`Invalid JSON: ${data}`));
-        }
-      });
-    });
-    req.on('error', reject);
-    req.write(body);
-    req.end();
-  });
-}
+import { NETWORK, rpcCall, mineBlock } from './__test-helpers__/regtest-harness';
 
 function buildJobTemplate(template: any, idSuffix: string): IJobTemplate {
   const transactions = template.transactions.map((t: any) => bitcoinjs.Transaction.fromHex(t.data));
@@ -98,16 +67,6 @@ function makeConfigService() {
   return { get: (_k: string) => 'blitzpool-regtest' } as any;
 }
 
-async function mineBlock(block: bitcoinjs.Block, targetHex: string): Promise<boolean> {
-  const target = Buffer.from(targetHex.padStart(64, '0'), 'hex');
-  for (let nonce = 0; nonce < 0xffffffff; nonce++) {
-    block.nonce = nonce;
-    const hash = bitcoinjs.crypto.hash256(block.toBuffer(true));
-    if (Buffer.from(hash).reverse().compare(target) <= 0) return true;
-  }
-  return false;
-}
-
 // ═══════════════════════════════════════════════════════════════
 // TESTS
 // ═══════════════════════════════════════════════════════════════
@@ -118,8 +77,18 @@ describe('V2 Standard Channel Regtest — fixed-coinbase path produces valid blo
     try {
       const info = await rpcCall('getblockchaininfo');
       expect(info.chain).toBe('regtest');
-      if (info.blocks < 17) {
+      // Force single-wallet state — unscoped wallet RPCs are ambiguous if a
+      // stale wallet from a prior session is still attached.
+      const wallets: string[] = await rpcCall('listwallets');
+      for (const name of wallets) {
+        if (name !== 'default') {
+          try { await rpcCall('unloadwallet', [name]); } catch { /* ignore */ }
+        }
+      }
+      if (!wallets.includes('default')) {
         try { await rpcCall('createwallet', ['default']); } catch { /* already exists */ }
+      }
+      if (info.blocks < 17) {
         const addr = await rpcCall('getnewaddress');
         await rpcCall('generatetoaddress', [17 - info.blocks, addr]);
       }
