@@ -15,9 +15,11 @@ import {
     CoinbaseDistributionEntry,
     DEFAULT_COINBASE_WEIGHT_BUDGET,
     resolveMinPayoutSats,
+    BUDGET_SAFETY_MARGIN_WU,
     COINBASE_BASE_WEIGHT,
     COINBASE_OUTPUT_WEIGHT,
     COINBASE_WITNESS_COMMITMENT_WEIGHT,
+    outputWeightForAddress,
 } from './coinbase-distribution';
 import {
     ParsedCoinbaseSnapshot,
@@ -229,14 +231,72 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         return this.minPayoutSats;
     }
 
+    /**
+     * Worst-case capacity estimate used by the capacity monitor. Assumes
+     * P2TR/P2WSH (172 WU) for every output and includes the same
+     * BUDGET_SAFETY_MARGIN_WU the adaptive trim holds back, so a "you're
+     * at 80 % capacity" alert reflects the same threshold the trim
+     * actually enforces. Real capacity is typically higher because most
+     * miners use P2WPKH (124 WU per output) — the monitor erring on the
+     * pessimistic side is the operationally correct bias.
+     */
     getMaxCoinbaseOutputs(): number {
         const feeOutputCount = this.feeAddress ? 1 : 0;
         return Math.floor(
             (this.coinbaseWeightBudget
+                - BUDGET_SAFETY_MARGIN_WU
                 - COINBASE_BASE_WEIGHT
                 - COINBASE_WITNESS_COMMITMENT_WEIGHT
                 - feeOutputCount * COINBASE_OUTPUT_WEIGHT)
             / COINBASE_OUTPUT_WEIGHT,
+        );
+    }
+
+    /**
+     * Adaptive capacity estimate based on the address-type mix of the
+     * MOST RECENT payout distribution. Projects "if more miners join
+     * with the same address-type mix, how many would fit?".
+     *
+     *   pool of 5 P2WPKH miners      → avg 124 WU → ~396 max
+     *   pool of 10 P2TR miners       → avg 172 WU → ~285 max
+     *   pool with 50/50 P2WPKH/P2TR  → avg 148 WU → ~332 max
+     *   no active miners (cold start)→ avg 124 WU → ~396 max
+     *
+     * Reads the per-template cached distribution so this is essentially
+     * free (no Redis round-trip). The number drifts as the address mix
+     * shifts; the UI should render this as "approximately N miner slots"
+     * rather than a hard limit. The hard worst-case lower bound is
+     * `getMaxCoinbaseOutputs()` — that one never depends on who's
+     * currently mining.
+     *
+     * Cold-start fallback is P2WPKH (124 WU) because >99 % of mining
+     * wallets default to bech32 P2WPKH; assuming worst-case here would
+     * make a fresh pool look smaller than it really is.
+     */
+    getMaxCoinbaseOutputsAdaptive(): number {
+        const P2WPKH_OUTPUT_WEIGHT = 124;
+        let avgOutputWeight = P2WPKH_OUTPUT_WEIGHT;
+
+        if (this.cachedDistribution && this.cachedDistribution.length > 0) {
+            let totalWeight = 0;
+            let count = 0;
+            for (const entry of this.cachedDistribution) {
+                // Skip the fee output — it's accounted for separately below.
+                if (entry.address === this.feeAddress) continue;
+                totalWeight += outputWeightForAddress(entry.address);
+                count++;
+            }
+            if (count > 0) avgOutputWeight = totalWeight / count;
+        }
+
+        const feeWeight = this.feeAddress ? outputWeightForAddress(this.feeAddress) : 0;
+        return Math.floor(
+            (this.coinbaseWeightBudget
+                - BUDGET_SAFETY_MARGIN_WU
+                - COINBASE_BASE_WEIGHT
+                - COINBASE_WITNESS_COMMITMENT_WEIGHT
+                - feeWeight)
+            / avgOutputWeight,
         );
     }
 

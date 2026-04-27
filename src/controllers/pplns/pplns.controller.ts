@@ -116,7 +116,11 @@ export class PplnsController {
             // numbers above — keeps frontend and backend aligned on the
             // exact "max miner outputs fitting a coinbase" count even
             // when feeEmitted is false (no fee address configured).
+            // `maxMinerOutputs` is the pessimistic worst-case (every
+            // output 172 WU), `maxMinerOutputsAdaptive` reflects the
+            // current address-type mix (~396 for a P2WPKH-only pool).
             maxMinerOutputs: this.pplnsService.getMaxCoinbaseOutputs(),
+            maxMinerOutputsAdaptive: this.pplnsService.getMaxCoinbaseOutputsAdaptive(),
             minDifficulty: gate.minDifficulty,
             warmupShares: gate.warmupShares,
         };

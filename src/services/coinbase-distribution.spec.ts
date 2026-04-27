@@ -782,13 +782,17 @@ describe('buildCoinbaseDistribution — credit/debit ledger model', () => {
         for (let i = 0; i < 50; i++) {
             addressShares.set(`bc1qaddr${i}`, 100_000 - i * 1000);
         }
+        // Budget calibrated for 4 miner outputs + 1 fee with the
+        // worst-case 172 WU per output (fake addresses fall back to
+        // the P2TR upper bound) plus BUDGET_SAFETY_MARGIN_WU = 200.
+        //   base 328 + commit 188 + fee 172 + 4 × 172 + margin 200 = 1576
         const r = buildCoinbaseDistribution({
             addressShares,
             balances: new Map(),
             blockRewardSats: 5_000_000_000,
             feePercent: 2,
             feeAddress: FEE_ADDR,
-            coinbaseWeightBudget: 1500,
+            coinbaseWeightBudget: 1576,
         });
         const minerOutputs = r.payouts.filter(p => p.address !== FEE_ADDR);
         expect(minerOutputs.length).toBe(4);
@@ -1277,9 +1281,10 @@ describe('buildCoinbaseDistribution — credit/debit ledger model', () => {
             // wrongly fit 2 miners and overshoot the budget.
             const reward = 5_000_000_000;
             const bonus = 50_000_000;
-            // Budget = base (328) + witness (188) + 3 outputs (3 × 172 = 516) = 1032
+            // Budget = base (328) + witness (188) + 3 outputs (3 × 172 = 516)
+            //          + safety margin (200) = 1232
             // → fits fee, bonus, and 1 miner output. With 3 miners → trim 2.
-            const tightBudget = 1032;
+            const tightBudget = 1232;
             const r = buildCoinbaseDistribution({
                 addressShares: shares({ [ALICE]: 100, [BOB]: 80, [CHARLIE]: 60 }),
                 balances: new Map(),

@@ -1,3 +1,5 @@
+import { AddressType, getAddressInfo } from 'bitcoin-address-validation';
+
 /**
  * Shared coinbase distribution math for PPLNS (and any future
  * proportional-coinbase payout mode). Group-Solo stays on its simpler
@@ -171,10 +173,12 @@ export const DEFAULT_COINBASE_WEIGHT_BUDGET = 50_000;
  *           prefix once total outputs exceed 252. See the commit
  *           that introduced 328 for the full math.
  *
- * OUTPUT  — P2TR upper bound: 34-byte scriptPubKey → 43 bytes
- *           serialized → 172 WU. Conservative choice over P2WPKH (124
- *           WU) so a group of all-Taproot miners can't silently
- *           overshoot the budget.
+ * OUTPUT  — P2TR / P2WSH upper bound: 34-byte scriptPubKey → 43 bytes
+ *           serialized → 172 WU. Used as the worst-case fallback when
+ *           an output's address type cannot be determined. The trim
+ *           ITSELF computes per-address weights via outputWeightForAddress
+ *           below — this constant is the safety net, not the source of
+ *           truth, so removing it would silently lose the fallback bound.
  *
  * WITNESS_COMMITMENT — segwit-commitment OP_RETURN: ~38-byte script
  *           → ~47 bytes serialized → ~188 WU.
@@ -182,6 +186,86 @@ export const DEFAULT_COINBASE_WEIGHT_BUDGET = 50_000;
 export const COINBASE_BASE_WEIGHT = 328;
 export const COINBASE_OUTPUT_WEIGHT = 172;
 export const COINBASE_WITNESS_COMMITMENT_WEIGHT = 188;
+
+/**
+ * Headroom held back from the configured coinbase weight budget by the
+ * adaptive trim. Defends against quiet drift between the constants here
+ * and the real serialized coinbase weight in MiningJob:
+ *
+ *   - POOL_IDENTIFIER getting bumped a few bytes without updating BASE
+ *   - A future address type being added to MiningJob without an entry
+ *     in OUTPUT_WEIGHT_BY_TYPE
+ *   - Output count crossing 65 535 (varint goes 3 → 5 bytes; theoretical
+ *     since 65 535 outputs ≫ any realistic PPLNS distribution, but free)
+ *
+ * 200 WU ≈ 50 stripped bytes — about ⅓ of one P2WPKH output, i.e. you
+ * lose at most one extra recipient per block and Bitcoin Core never sees
+ * a block within 200 WU of the cap. Tunable but probably never should be.
+ */
+export const BUDGET_SAFETY_MARGIN_WU = 200;
+
+/**
+ * Per-output weight in WU keyed by address type. Coinbase outputs are
+ * non-witness data, so weight = serialized bytes × 4. Each output is
+ * `8 (value) + 1 (script_len varint, never > 252) + N (scriptPubKey)`:
+ *
+ *   - P2WPKH (`bc1q…` 20-byte, 22 B script):  31 B → 124 WU
+ *   - P2SH   (`3…`,  20-byte hash, 23 B script): 32 B → 128 WU
+ *   - P2PKH  (`1…`,  20-byte hash, 25 B script): 34 B → 136 WU
+ *   - P2WSH  (`bc1q…` 32-byte, 34 B script):     43 B → 172 WU
+ *   - P2TR   (`bc1p…` 32-byte, 34 B script):     43 B → 172 WU
+ *
+ * Used by the adaptive trim so a P2WPKH-heavy pool fits more recipients
+ * into the same coinbase budget than a P2TR-heavy one (40-50 % more at
+ * the extreme), while still respecting the budget exactly.
+ */
+const OUTPUT_WEIGHT_BY_TYPE: Record<string, number> = {
+    [AddressType.p2wpkh]: 124,
+    [AddressType.p2sh]: 128,
+    [AddressType.p2pkh]: 136,
+    [AddressType.p2wsh]: 172,
+    [AddressType.p2tr]: 172,
+};
+
+/**
+ * Process-lifetime cache for the address-type → output-weight mapping.
+ * An address's script type never changes, so a single getAddressInfo()
+ * call per unique address is enough. After the first miss the lookup is
+ * O(1); each miss costs a few μs (regex + checksum verify in
+ * bitcoin-address-validation). Memory: ~80 B per entry; 100 K lifetime
+ * unique addresses ≈ 8 MB. The cache is module-local on purpose — both
+ * PplnsService and GroupSoloService reach this code, so a shared cache
+ * means addresses seen by either path benefit the other.
+ */
+const addressOutputWeightCache = new Map<string, number>();
+
+/**
+ * Return the coinbase-output weight for an address. Falls back to
+ * COINBASE_OUTPUT_WEIGHT (P2TR upper bound) when the address can't be
+ * parsed or has an unknown type — guarantees the trim never undercounts.
+ */
+export function outputWeightForAddress(address: string): number {
+    if (!address) return 0;
+    const cached = addressOutputWeightCache.get(address);
+    if (cached !== undefined) return cached;
+
+    let weight = COINBASE_OUTPUT_WEIGHT;
+    try {
+        const info = getAddressInfo(address);
+        weight = OUTPUT_WEIGHT_BY_TYPE[info.type] ?? COINBASE_OUTPUT_WEIGHT;
+    } catch {
+        // Unparseable address — keep worst-case fallback. MiningJob would
+        // also fail to build a script for this; the upstream caller has
+        // bigger problems than the trim being conservative.
+    }
+    addressOutputWeightCache.set(address, weight);
+    return weight;
+}
+
+/** Test-only: empty the address-type cache to keep tests deterministic. */
+export function clearAddressOutputWeightCacheForTests(): void {
+    addressOutputWeightCache.clear();
+}
 
 export interface CoinbaseDistributionInput {
     /** Share counts (diff1-weighted) by miner address for this round. */
@@ -428,35 +512,56 @@ export function buildCoinbaseDistribution(
         });
     }
 
-    // ── Phase 3+4: eligibility + weight-budget trim ────────────────
-    // feeEmitted was decided above (alongside feeSats / rewardForMiners)
-    // so that miner reward and the fee-output gate stay consistent —
-    // i.e. the fee is either subtracted AND emitted, or neither.
-    const feeOutputCount = feeEmitted ? 1 : 0;
-    const bonusOutputCount = bonusEmitted ? 1 : 0;
-    const maxMinerOutputs = Math.floor(
-        (budget
-            - COINBASE_BASE_WEIGHT
-            - COINBASE_WITNESS_COMMITMENT_WEIGHT
-            - feeOutputCount * COINBASE_OUTPUT_WEIGHT
-            - bonusOutputCount * COINBASE_OUTPUT_WEIGHT)
-        / COINBASE_OUTPUT_WEIGHT,
-    );
+    // ── Phase 3+4: eligibility + adaptive weight-budget trim ──────
+    // Compute per-output weight from each address's actual type via
+    // outputWeightForAddress (P2WPKH = 124 WU, P2TR = 172 WU, …)
+    // instead of assuming the worst-case constant for every output.
+    // Miners are sorted largest-target-first and added greedily; the
+    // loop continues past the first overflow so a heavy P2TR miner
+    // being trimmed doesn't block lighter P2WPKH miners that still
+    // fit. Result: deterministic, target-prioritised, budget-tight.
+    //
+    // BUDGET_SAFETY_MARGIN_WU is held BACK from the budget on purpose:
+    // an explicit headroom that covers the small number of edge cases
+    // where the constants might drift from the real serialized weight
+    // (POOL_IDENTIFIER bumped a few bytes, future varint encoding
+    // growth past 65 535 outputs, an output type added without
+    // updating OUTPUT_WEIGHT_BY_TYPE). Stays meaningful even when
+    // P2WPKH-heavy pools approach 100 % budget utilisation; without
+    // it the previously-implicit 48 WU/output cushion (172−124 each)
+    // disappears and any miscount goes straight to MAX_BLOCK_WEIGHT.
+    const effectiveBudget = budget - BUDGET_SAFETY_MARGIN_WU;
+
+    const feeOutputWeight = feeEmitted ? outputWeightForAddress(feeAddress) : 0;
+    const bonusOutputWeight = bonusEmitted && finderAddress
+        ? outputWeightForAddress(finderAddress)
+        : 0;
+    const fixedWeight = COINBASE_BASE_WEIGHT
+                      + COINBASE_WITNESS_COMMITMENT_WEIGHT
+                      + feeOutputWeight
+                      + bonusOutputWeight;
 
     const eligibleList = Array.from(computations.values())
         .filter(c => c.eligible)
         .sort((a, b) => b.target - a.target);
 
-    const keptCount = eligibleList.length > maxMinerOutputs && maxMinerOutputs > 0
-        ? maxMinerOutputs
-        : eligibleList.length;
-    const kept = eligibleList.slice(0, keptCount);
-    const trimmed = eligibleList.slice(keptCount);
+    const kept: MinerComputation[] = [];
+    const trimmed: MinerComputation[] = [];
+    let usedWeight = fixedWeight;
+    for (const miner of eligibleList) {
+        const outWeight = outputWeightForAddress(miner.address);
+        if (usedWeight + outWeight <= effectiveBudget) {
+            kept.push(miner);
+            usedWeight += outWeight;
+        } else {
+            trimmed.push(miner);
+        }
+    }
 
     if (trimmed.length > 0) {
         console.warn(
             `${label} trimmed ${trimmed.length} smallest outputs to balance `
-            + `(${eligibleList.length} → ${kept.length}, budget ${budget} WU)`,
+            + `(${eligibleList.length} → ${kept.length}, budget ${budget} WU, used ${usedWeight} WU, margin ${BUDGET_SAFETY_MARGIN_WU} WU)`,
         );
     }
 
