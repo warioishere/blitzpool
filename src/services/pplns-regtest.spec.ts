@@ -13,29 +13,20 @@
  * rpcpassword=test).
  */
 
-import * as bitcoinjs from 'bitcoinjs-lib';
 import { PplnsService } from './pplns.service';
 import { PplnsPayoutHistoryEntity } from '../ORM/pplns-balance/pplns-payout-history.entity';
 import { PplnsBalanceEntity } from '../ORM/pplns-balance/pplns-balance.entity';
 import { attachMockTxManager } from './__test-helpers__/mock-tx-manager';
 import {
     rpcCall,
-    buildCoinbase as buildCoinbaseHelper,
-    buildBlock,
-    mineBlock,
     createMockRedis,
+    assembleWithMiningJobAndTemplate,
 } from './__test-helpers__/regtest-harness';
 
 const ADDR_FEE = 'bcrt1qqj0r5w2ua3pe0sh6gthvfeegvwsa3t4edumqzf';
 const ADDR_ALICE = 'bcrt1q2jf90sp25mt4pte5swkr4cujpj5d8zzwdt09fq';
 const ADDR_BOB = 'bcrt1qt2amqww2n3dcz3ckx6nlentvm9e6rpxqrfmvl7';
 const ADDR_CHARLIE = 'bcrt1qlppw7cnqspnky6qzv8p2n468lpvwuct7ehp7l2';
-
-const buildCoinbase = (
-    payouts: { address: string; sats: number }[],
-    height: number,
-    witnessCommit: Buffer,
-) => buildCoinbaseHelper(payouts, height, witnessCommit, 'blitzpool-pplns-regtest');
 
 // ── Balance backing: single row store exposed as both service and repo
 // facades. onBlockFound reads via `this.balanceService.getAllWithBalance()`
@@ -148,34 +139,6 @@ function makeService(opts: { feeAddress?: string; feePercent?: string } = {}) {
     return { service, redis, balanceService: balanceBacking.service, historyRepo };
 }
 
-async function assembleAndSubmitBlock(distribution: { address: string; percent: number }[]) {
-    const template = await rpcCall('getblocktemplate', [{ rules: ['segwit'] }]);
-    const blockReward = template.coinbasevalue;
-
-    const payouts = distribution.map(d => ({
-        address: d.address,
-        sats: Math.floor((d.percent / 100) * blockReward),
-    }));
-    const totalAssigned = payouts.reduce((s, p) => s + p.sats, 0);
-    if (totalAssigned < blockReward && payouts.length > 0) {
-        payouts[0].sats += blockReward - totalAssigned;
-    }
-
-    const txs = template.transactions.map((t: any) => bitcoinjs.Transaction.fromHex(t.data));
-    const dummyCoinbase = new bitcoinjs.Transaction();
-    dummyCoinbase.version = 2;
-    dummyCoinbase.addInput(Buffer.alloc(32, 0), 0xffffffff, 0xffffffff);
-    dummyCoinbase.addOutput(Buffer.alloc(22, 0), 0);
-    dummyCoinbase.ins[0].witness = [Buffer.alloc(32, 0)];
-    const witnessCommit = bitcoinjs.Block.calculateMerkleRoot([dummyCoinbase, ...txs], true);
-
-    const coinbaseTx = buildCoinbase(payouts, template.height, witnessCommit);
-    const block = buildBlock(template, coinbaseTx, txs);
-    if (!mineBlock(block, template.target)) throw new Error('mine nonce exhausted');
-
-    const submitResult = await rpcCall('submitblock', [block.toHex(false)]);
-    return { template, blockReward, payouts, submitResult };
-}
 
 // ═══════════════════════════════════════════════════════════════════
 // Test
@@ -208,7 +171,7 @@ describe('PPLNS Regtest — pending-out-of-miner-cut invariant', () => {
     });
 
     it('active miners with non-zero pending → coinbase validates, total ≤ blockReward', async () => {
-        const { service, balanceService } = makeService();
+        const { service, balanceService, historyRepo } = makeService();
 
         // Seed pending from prior sub-dust rounds: Charlie accumulated
         // 50 000 sats over time without mining to the current window.
@@ -249,9 +212,15 @@ describe('PPLNS Regtest — pending-out-of-miner-cut invariant', () => {
         const totalPct = distribution.reduce((s, d) => s + d.percent, 0);
         expect(totalPct).toBeLessThanOrEqual(100.001);
 
-        // And Core must accept the block.
-        const { submitResult } = await assembleAndSubmitBlock(distribution);
+        // And Core must accept the block — through the production MiningJob path.
+        const { submitResult } = await assembleWithMiningJobAndTemplate(distribution, template, 'pplns-pending');
         expect(submitResult).toBeNull();
+
+        await service.onBlockFound(template.height, template.coinbasevalue);
+        const historyForBlock = (historyRepo._rows as any[]).filter(
+            r => r.blockHeight === template.height && r.rowType === 'coinbase',
+        );
+        expect(historyForBlock.length).toBe(distribution.length);
 
         console.log('✅ PPLNS with pending: coinbase total respects blockReward, Core accepted');
     }, 120000);
@@ -308,8 +277,8 @@ describe('PPLNS Regtest — pending-out-of-miner-cut invariant', () => {
         (svcB as any).enabled = true;
         svcB.setNetworkDifficulty(1e12);
 
-        // Build + submit the block using A's distribution.
-        const { submitResult } = await assembleAndSubmitBlock(distributionA);
+        // Build + submit the block using A's distribution — production MiningJob path.
+        const { submitResult } = await assembleWithMiningJobAndTemplate(distributionA, template, 'pplns-snapshot');
         expect(submitResult).toBeNull();
 
         // Book payouts via service B — must read the Redis snapshot, not fall through.
@@ -331,7 +300,7 @@ describe('PPLNS Regtest — pending-out-of-miner-cut invariant', () => {
 
     it('tiny feePercent → fee output dust-gated, block still validates', async () => {
         // 0.00001 % of 5 BTC subsidy = 500 sats < 546 dust.
-        const { service } = makeService({ feePercent: '0.00001' });
+        const { service, historyRepo } = makeService({ feePercent: '0.00001' });
         await service.recordShare(ADDR_ALICE, 100);
         await service.recordShare(ADDR_BOB, 100);
 
@@ -342,8 +311,14 @@ describe('PPLNS Regtest — pending-out-of-miner-cut invariant', () => {
         expect(addrs).not.toContain(ADDR_FEE);
         expect(addrs.sort()).toEqual([ADDR_ALICE, ADDR_BOB].sort());
 
-        const { submitResult } = await assembleAndSubmitBlock(distribution);
+        const { submitResult } = await assembleWithMiningJobAndTemplate(distribution, template, 'pplns-dust');
         expect(submitResult).toBeNull();
+
+        await service.onBlockFound(template.height, template.coinbasevalue);
+        const historyForBlock = (historyRepo._rows as any[]).filter(
+            r => r.blockHeight === template.height && r.rowType === 'coinbase',
+        );
+        expect(historyForBlock.length).toBe(distribution.length);
 
         console.log('✅ PPLNS dust-fee-gate: fee omitted, miners keep 100 %, block accepted');
     }, 120000);

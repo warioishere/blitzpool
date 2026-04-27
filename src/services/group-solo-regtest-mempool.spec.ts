@@ -23,7 +23,6 @@
  * wallet (rpcuser=test, rpcpassword=test).
  */
 
-import * as bitcoinjs from 'bitcoinjs-lib';
 import * as http from 'http';
 import { GroupSoloService } from './group-solo.service';
 import { PplnsGroupBlockHistoryEntity } from '../ORM/pplns-group/pplns-group-block-history.entity';
@@ -34,11 +33,9 @@ import {
     RPC_USER,
     RPC_PASS,
     rpcCall,
-    buildCoinbase as buildCoinbaseHelper,
-    buildBlock,
-    mineBlock,
     createMockRedis,
     createMockRepo,
+    assembleWithMiningJobAndTemplate,
 } from './__test-helpers__/regtest-harness';
 
 // Mining-side addresses: coinbase outputs go here.
@@ -51,12 +48,6 @@ const ADDR_BOB   = 'bcrt1qt2amqww2n3dcz3ckx6nlentvm9e6rpxqrfmvl7';
 // mempool of sends. 120 gives us ~20 mature UTXOs with headroom.
 const MIN_CHAIN_HEIGHT = 120;
 const MEMPOOL_TX_COUNT = 25;
-
-const buildCoinbase = (
-    payouts: { address: string; sats: number }[],
-    height: number,
-    witnessCommit: Buffer,
-) => buildCoinbaseHelper(payouts, height, witnessCommit, 'blitzpool-mempool-test');
 
 function walletRpc(wallet: string, method: string, params: any[] = []): Promise<any> {
     return new Promise((resolve, reject) => {
@@ -208,7 +199,7 @@ describe('Group-Solo Regtest — fat-mempool block validity', () => {
     });
 
     it('block with multi-type mempool transactions submits cleanly', async () => {
-        const { service } = makeService();
+        const { service, historyRepo } = makeService();
 
         // Two miners active; Alice's share weights the coinbase distribution.
         await service.recordShare(ADDR_ALICE, 700);
@@ -227,33 +218,10 @@ describe('Group-Solo Regtest — fat-mempool block validity', () => {
         // Distribution is independent of mempool — but the block built
         // from it has to validate together with the mempool txs.
         const distribution = await service.getPayoutDistribution('grp-1', template.coinbasevalue);
-        const payouts = distribution.map(d => ({
-            address: d.address,
-            sats: Math.floor((d.percent / 100) * template.coinbasevalue),
-        }));
-        const assigned = payouts.reduce((s, p) => s + p.sats, 0);
-        if (assigned < template.coinbasevalue) {
-            payouts[0].sats += template.coinbasevalue - assigned;
-        }
 
-        // Witness commitment: hash-tree of every tx's wtxid, with the
-        // coinbase contributing 32 zero bytes (BIP-141). bitcoinjs's
-        // `calculateMerkleRoot(…, true)` handles the coinbase detection
-        // internally as long as we pass a coinbase-shaped dummy first.
-        const txs = template.transactions.map((t: any) => bitcoinjs.Transaction.fromHex(t.data));
-        const dummyCoinbase = new bitcoinjs.Transaction();
-        dummyCoinbase.version = 2;
-        dummyCoinbase.addInput(Buffer.alloc(32, 0), 0xffffffff, 0xffffffff);
-        dummyCoinbase.addOutput(Buffer.alloc(22, 0), 0);
-        dummyCoinbase.ins[0].witness = [Buffer.alloc(32, 0)];
-        const witnessCommit = bitcoinjs.Block.calculateMerkleRoot([dummyCoinbase, ...txs], true);
-
-        const coinbaseTx = buildCoinbase(payouts, template.height, witnessCommit);
-        const block = buildBlock(template, coinbaseTx, txs);
-        const mined = mineBlock(block, template.target);
-        expect(mined).toBe(true);
-
-        const submitResult = await rpcCall('submitblock', [block.toHex(false)]);
+        // Production MiningJob path — handles witness commitment + merkle root correctly.
+        const mjDist = distribution.map(d => ({ address: d.address, percent: d.percent }));
+        const { submitResult } = await assembleWithMiningJobAndTemplate(mjDist, template, 'gs-mempool');
         console.log(`Submit result: ${submitResult === null ? 'SUCCESS' : submitResult}`);
         expect(submitResult).toBeNull();
 
@@ -265,6 +233,13 @@ describe('Group-Solo Regtest — fat-mempool block validity', () => {
         const mempoolAfter = await rpcCall('getmempoolinfo');
         expect(mempoolAfter.size).toBeLessThan(sent);
 
-        console.log(`✅ Block #${template.height} with ${txs.length} mempool txs (${payouts.length} coinbase outputs) accepted by Core`);
+        // onBlockFound books history rows and resets the group Redis state.
+        await service.onBlockFound(template.height, template.coinbasevalue, ADDR_ALICE);
+        const historyForBlock = (historyRepo._rows as any[]).filter(
+            r => r.blockHeight === template.height && r.rowType === 'coinbase',
+        );
+        expect(historyForBlock.length).toBe(distribution.length);
+
+        console.log(`✅ Block #${template.height} with ${template.transactions.length} mempool txs (${distribution.length} coinbase outputs) accepted by Core`);
     }, 180_000);
 });

@@ -19,53 +19,8 @@
  * Run: npx jest v2-standard-regtest --no-coverage
  */
 
-import * as bitcoinjs from 'bitcoinjs-lib';
-import * as merkle from 'merkle-lib';
-import * as merkleProof from 'merkle-lib/proof';
 import { MiningJob } from '../models/MiningJob';
-import { IJobTemplate } from './stratum-v1-jobs.service';
-import { NETWORK, rpcCall, mineBlock } from './__test-helpers__/regtest-harness';
-
-function buildJobTemplate(template: any, idSuffix: string): IJobTemplate {
-  const transactions = template.transactions.map((t: any) => bitcoinjs.Transaction.fromHex(t.data));
-  const tempCoinbaseTx = new bitcoinjs.Transaction();
-  tempCoinbaseTx.version = 2;
-  tempCoinbaseTx.addInput(Buffer.alloc(32, 0), 0xffffffff, 0xffffffff);
-  tempCoinbaseTx.ins[0].witness = [Buffer.alloc(32, 0)];
-  const txsWithDummy = [tempCoinbaseTx, ...transactions];
-
-  const transactionBuffers = txsWithDummy.map(tx => tx.getHash(false));
-  const merkleTree = merkle(transactionBuffers, bitcoinjs.crypto.hash256);
-  const merkleBranches: Buffer[] = merkleProof(merkleTree, transactionBuffers[0]).filter((h: any) => h != null);
-  const merkleRoot = merkleBranches.pop();
-  const merkle_branch = merkleBranches.slice(1).map(b => b.toString('hex'));
-
-  const block = new bitcoinjs.Block();
-  block.version = template.version;
-  block.prevHash = Buffer.from(template.previousblockhash, 'hex').reverse();
-  block.timestamp = template.curtime;
-  block.bits = parseInt(template.bits, 16);
-  block.merkleRoot = merkleRoot!;
-  block.transactions = txsWithDummy;
-  block.witnessCommit = bitcoinjs.Block.calculateMerkleRoot(txsWithDummy, true);
-
-  return {
-    block,
-    merkle_branch,
-    blockData: {
-      id: `regtest-${idSuffix}`,
-      creation: Date.now(),
-      coinbasevalue: template.coinbasevalue,
-      networkDifficulty: 1,
-      height: template.height,
-      clearJobs: true,
-    },
-  };
-}
-
-function makeConfigService() {
-  return { get: (_k: string) => 'blitzpool-regtest' } as any;
-}
+import { NETWORK, rpcCall, mineBlock, buildJobTemplate, makeConfigService } from './__test-helpers__/regtest-harness';
 
 // ═══════════════════════════════════════════════════════════════
 // TESTS

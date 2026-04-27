@@ -11,30 +11,21 @@
  * Run: npx jest group-solo-regtest --no-coverage
  */
 
-import * as bitcoinjs from 'bitcoinjs-lib';
 import { GroupSoloService } from './group-solo.service';
 import { PplnsGroupBlockHistoryEntity } from '../ORM/pplns-group/pplns-group-block-history.entity';
 import { PplnsGroupBalanceEntity } from '../ORM/pplns-group/pplns-group-balance.entity';
 import { attachMockTxManager } from './__test-helpers__/mock-tx-manager';
 import {
     rpcCall,
-    buildCoinbase as buildCoinbaseHelper,
-    buildBlock,
-    mineBlock,
     createMockRedis,
     createMockRepo,
+    assembleWithMiningJobAndTemplate,
 } from './__test-helpers__/regtest-harness';
 
 const ADDR_FEE = 'bcrt1qqj0r5w2ua3pe0sh6gthvfeegvwsa3t4edumqzf';
 const ADDR_ALICE = 'bcrt1q2jf90sp25mt4pte5swkr4cujpj5d8zzwdt09fq';
 const ADDR_BOB = 'bcrt1qt2amqww2n3dcz3ckx6nlentvm9e6rpxqrfmvl7';
 const ADDR_CHARLIE = 'bcrt1qlppw7cnqspnky6qzv8p2n468lpvwuct7ehp7l2';
-
-const buildCoinbase = (
-    payouts: { address: string; sats: number }[],
-    height: number,
-    witnessCommit: Buffer,
-) => buildCoinbaseHelper(payouts, height, witnessCommit, 'blitzpool-group-solo-test');
 
 function makeService() {
   const env: Record<string, string> = {
@@ -124,46 +115,19 @@ describe('Group-Solo Regtest — End-to-End with Bitcoin Core', () => {
     expect(addresses).toContain(ADDR_BOB);
     expect(addresses).not.toContain(ADDR_CHARLIE);
 
-    // Convert percent distribution to sat amounts for the coinbase
-    const payouts = distribution.map(d => ({
-      address: d.address,
-      sats: Math.floor((d.percent / 100) * blockReward),
-    }));
-    // Fix rounding remainder → add to fee output
-    const totalAssigned = payouts.reduce((s, p) => s + p.sats, 0);
-    if (totalAssigned < blockReward) {
-      payouts[0].sats += blockReward - totalAssigned;
-    }
-
     console.log(`\n=== Group-Solo Regtest ===`);
     console.log(`Height: ${height}`);
     console.log(`Block reward: ${blockReward} sats`);
-    console.log(`Distribution from service (${payouts.length} outputs):`);
-    payouts.forEach((p, i) => {
-      const label = p.address === ADDR_FEE ? 'FEE'
-        : p.address === ADDR_ALICE ? 'ALICE (60% shares)'
-        : p.address === ADDR_BOB ? 'BOB (40% shares)'
-        : p.address.substring(0, 20);
-      console.log(`  Output ${i}: ${p.sats} sats → ${label}`);
-    });
 
-    // Build + submit block
-    const txs = template.transactions.map((t: any) => bitcoinjs.Transaction.fromHex(t.data));
-    const dummyCoinbase = new bitcoinjs.Transaction();
-    dummyCoinbase.version = 2;
-    dummyCoinbase.addInput(Buffer.alloc(32, 0), 0xffffffff, 0xffffffff);
-    dummyCoinbase.addOutput(Buffer.alloc(22, 0), 0);
-    dummyCoinbase.ins[0].witness = [Buffer.alloc(32, 0)];
-    const witnessCommit = bitcoinjs.Block.calculateMerkleRoot([dummyCoinbase, ...txs], true);
-
-    const coinbaseTx = buildCoinbase(payouts, height, witnessCommit);
-    const block = buildBlock(template, coinbaseTx, txs);
-    const mined = mineBlock(block, template.target);
-    expect(mined).toBe(true);
-
-    const result = await rpcCall('submitblock', [block.toHex(false)]);
+    // Build + submit via production MiningJob path (distribution uses percent).
+    const mjDist = distribution.map(d => ({ address: d.address, percent: d.percent }));
+    const { submitResult: result, coinbaseTx } = await assembleWithMiningJobAndTemplate(mjDist, template, 'gs-basic');
     console.log(`Submit result: ${result === null ? 'SUCCESS!' : result}`);
     expect(result).toBeNull();
+
+    // Coinbase total must equal blockReward.
+    const coinbaseTotal = coinbaseTx.outs.reduce((s: number, o: any) => s + o.value, 0);
+    expect(coinbaseTotal).toBe(blockReward);
 
     // Verify chain tip advanced
     const info = await rpcCall('getblockchaininfo');
@@ -238,48 +202,19 @@ describe('Group-Solo Regtest — End-to-End with Bitcoin Core', () => {
     const bonusOutput = distribution.find(d => d.address === ADDR_ALICE && d.sats === FINDER_BONUS);
     expect(bonusOutput).toBeDefined();
 
-    // Convert to coinbase outputs. The service emits authoritative
-    // `sats` values now — use them directly (no rounding fix-up needed).
-    const payouts = distribution.map(d => ({ address: d.address, sats: d.sats }));
-    // Defence-in-depth: any tiny rounding undershoot vs blockReward goes
-    // to the fee output so the coinbase claims the full reward.
-    const totalAssigned = payouts.reduce((s, p) => s + p.sats, 0);
-    if (totalAssigned < blockReward) {
-      const feeIdx = payouts.findIndex(p => p.address === ADDR_FEE);
-      payouts[feeIdx >= 0 ? feeIdx : 0].sats += blockReward - totalAssigned;
-    }
-    expect(payouts.reduce((s, p) => s + p.sats, 0)).toBeLessThanOrEqual(blockReward);
-
     console.log(`\n=== Group-Solo Regtest (FINDER BONUS) ===`);
     console.log(`Height: ${height}`);
     console.log(`Block reward: ${blockReward} sats, finder bonus: ${FINDER_BONUS} sats`);
-    console.log(`Distribution from service (${payouts.length} outputs):`);
-    payouts.forEach((p, i) => {
-      const label = p.address === ADDR_FEE ? 'FEE'
-        : p.address === ADDR_ALICE ? (p.sats === FINDER_BONUS ? 'ALICE (BONUS)' : 'ALICE (60% prop)')
-        : p.address === ADDR_BOB ? 'BOB (40% prop)'
-        : p.address.substring(0, 20);
-      console.log(`  Output ${i}: ${p.sats} sats → ${label}`);
-    });
 
-    // Build + mine + submit block.
-    const txs = template.transactions.map((t: any) => bitcoinjs.Transaction.fromHex(t.data));
-    const dummyCoinbase = new bitcoinjs.Transaction();
-    dummyCoinbase.version = 2;
-    dummyCoinbase.addInput(Buffer.alloc(32, 0), 0xffffffff, 0xffffffff);
-    dummyCoinbase.addOutput(Buffer.alloc(22, 0), 0);
-    dummyCoinbase.ins[0].witness = [Buffer.alloc(32, 0)];
-    const witnessCommit = bitcoinjs.Block.calculateMerkleRoot([dummyCoinbase, ...txs], true);
-
-    const coinbaseTx = buildCoinbase(payouts, height, witnessCommit);
-    const block = buildBlock(template, coinbaseTx, txs);
-    const mined = mineBlock(block, template.target);
-    expect(mined).toBe(true);
-
-    // Real Core acceptance test — this is the whole point of the spec.
-    const result = await rpcCall('submitblock', [block.toHex(false)]);
+    // Build + mine + submit via production MiningJob path.
+    const mjDist = distribution.map(d => ({ address: d.address, percent: d.percent }));
+    const { submitResult: result, coinbaseTx } = await assembleWithMiningJobAndTemplate(mjDist, template, 'gs-bonus');
     console.log(`Submit result (bonus mode): ${result === null ? 'SUCCESS!' : result}`);
     expect(result).toBeNull();
+
+    // Coinbase total must equal blockReward exactly.
+    const coinbaseTotal = coinbaseTx.outs.reduce((s: number, o: any) => s + o.value, 0);
+    expect(coinbaseTotal).toBe(blockReward);
 
     // Chain tip advanced — block was accepted.
     const info = await rpcCall('getblockchaininfo');

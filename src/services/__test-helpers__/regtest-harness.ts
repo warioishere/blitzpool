@@ -4,8 +4,7 @@
  * The regtest specs all sit on top of:
  *   - one shared bitcoind (run sequentially via --runInBand),
  *   - the same JSON-RPC client (`rpcCall`),
- *   - the same hand-rolled coinbase / block / nonce-grinder
- *     (`buildCoinbase` / `buildBlock` / `mineBlock`), and
+ *   - the same MiningJob-based block assembly (`assembleWithMiningJobAndTemplate`),
  *   - in-memory fakes for the Redis client and TypeORM repos that
  *     each suite was previously copying line-for-line.
  *
@@ -14,7 +13,16 @@
  * without losing capability.
  */
 import * as bitcoinjs from 'bitcoinjs-lib';
+import * as ecc from 'tiny-secp256k1';
 import * as http from 'http';
+import * as merkle from 'merkle-lib';
+import * as merkleProof from 'merkle-lib/proof';
+
+import { MiningJob } from '../../models/MiningJob';
+import { IJobTemplate } from '../stratum-v1-jobs.service';
+
+// initEccLib is required for P2TR address support (bitcoinjs-lib).
+bitcoinjs.initEccLib(ecc);
 
 // ── Constants every spec was redeclaring ──────────────────────────
 
@@ -51,61 +59,87 @@ export function rpcCall(method: string, params: any[] = []): Promise<any> {
     });
 }
 
-// ── Block / coinbase construction ─────────────────────────────────
+// ── MiningJob helpers (production-path block assembly) ───────────
 
 /**
- * Build a regtest coinbase tx with the given payouts and the SegWit
- * witness-commitment OP_RETURN appended last. `marker` is a free-form
- * tag written to the coinbase script so it's easy to spot which spec
- * mined a given block when tailing bitcoind logs.
+ * Build an IJobTemplate from a raw getblocktemplate response.
+ * Uses a temporary dummy coinbase to compute merkle branches and the
+ * witness commitment; the real coinbase is slotted in by MiningJob.
+ * `block.merkleRoot` is left as a placeholder — copyAndUpdateBlock
+ * recomputes it from the actual coinbase + extranonces.
  */
-export function buildCoinbase(
-    payouts: { address: string; sats: number }[],
-    height: number,
-    witnessCommit: Buffer,
-    marker: string = 'blitzpool-regtest',
-): bitcoinjs.Transaction {
-    const tx = new bitcoinjs.Transaction();
-    tx.version = 2;
-    tx.addInput(Buffer.alloc(32, 0), 0xffffffff, 0xffffffff);
-    const heightEncoded = bitcoinjs.script.number.encode(height);
-    tx.ins[0].script = Buffer.concat([
-        Buffer.from([heightEncoded.length]),
-        heightEncoded,
-        Buffer.from(marker),
-        Buffer.alloc(4, 0),
-    ]);
-    tx.ins[0].witness = [Buffer.alloc(32, 0)];
-    for (const p of payouts) {
-        tx.addOutput(bitcoinjs.address.toOutputScript(p.address, NETWORK), p.sats);
-    }
-    const commitmentHeader = Buffer.from('aa21a9ed', 'hex');
-    tx.addOutput(
-        bitcoinjs.script.compile([
-            bitcoinjs.opcodes.OP_RETURN,
-            Buffer.concat([commitmentHeader, witnessCommit]),
-        ]),
-        0,
-    );
-    return tx;
-}
+export function buildJobTemplate(template: any, idSuffix: string): IJobTemplate {
+    const transactions = template.transactions.map((t: any) => bitcoinjs.Transaction.fromHex(t.data));
 
-/** Wire a coinbase + extra txs into a block header derived from `template`. */
-export function buildBlock(
-    template: any,
-    coinbaseTx: bitcoinjs.Transaction,
-    transactions: bitcoinjs.Transaction[] = [],
-): bitcoinjs.Block {
+    const tempCoinbaseTx = new bitcoinjs.Transaction();
+    tempCoinbaseTx.version = 2;
+    tempCoinbaseTx.addInput(Buffer.alloc(32, 0), 0xffffffff, 0xffffffff);
+    tempCoinbaseTx.ins[0].witness = [Buffer.alloc(32, 0)];
+    const txsWithDummy = [tempCoinbaseTx, ...transactions];
+
+    const transactionBuffers = txsWithDummy.map(tx => tx.getHash(false));
+    const merkleTree = merkle(transactionBuffers, bitcoinjs.crypto.hash256);
+    const merkleBranches: Buffer[] = merkleProof(merkleTree, transactionBuffers[0]).filter((h: any) => h != null);
+    merkleBranches.pop(); // drop root
+    const merkle_branch = merkleBranches.slice(1).map((b: Buffer) => b.toString('hex'));
+
     const block = new bitcoinjs.Block();
     block.version = template.version;
     block.prevHash = Buffer.from(template.previousblockhash, 'hex').reverse();
     block.timestamp = template.curtime;
     block.bits = parseInt(template.bits, 16);
-    block.nonce = 0;
-    block.transactions = [coinbaseTx, ...transactions];
-    block.merkleRoot = bitcoinjs.Block.calculateMerkleRoot(block.transactions, false);
-    return block;
+    block.merkleRoot = Buffer.alloc(32); // placeholder; MiningJob.copyAndUpdateBlock recomputes
+    block.transactions = txsWithDummy;
+    block.witnessCommit = bitcoinjs.Block.calculateMerkleRoot(txsWithDummy, true);
+
+    return {
+        block,
+        merkle_branch,
+        blockData: {
+            id: `regtest-${idSuffix}`,
+            creation: Date.now(),
+            coinbasevalue: template.coinbasevalue,
+            networkDifficulty: 1,
+            height: template.height,
+            clearJobs: true,
+        },
+    };
 }
+
+/** Minimal ConfigService stub — sufficient for MiningJob constructor. */
+export function makeConfigService(poolIdentifier = 'blitzpool-regtest'): any {
+    return { get: (k: string) => k === 'POOL_IDENTIFIER' ? poolIdentifier : undefined };
+}
+
+/**
+ * Build a block via the production MiningJob path and submit it to the
+ * regtest node. Uses an already-fetched `template` so the coinbase value
+ * matches exactly what was used for `getPayoutDistribution`.
+ *
+ * This is the exact path a Stratum V1 client goes through:
+ *   MiningJob(distribution) → copyAndUpdateBlock → submitblock
+ */
+export async function assembleWithMiningJobAndTemplate(
+    distribution: { address: string; percent: number }[],
+    template: any,
+    testId: string,
+    configService?: any,
+): Promise<{ submitResult: any; coinbaseTx: bitcoinjs.Transaction; miningJob: MiningJob }> {
+    const jobTemplate = buildJobTemplate(template, testId);
+    const cs = configService ?? makeConfigService();
+
+    const miningJob = new MiningJob(cs, NETWORK, `job-${testId}`, distribution, jobTemplate);
+    const block = miningJob.copyAndUpdateBlock(jobTemplate, 0, 0, '00000000', '00000000', template.curtime);
+
+    if (!mineBlock(block, template.target)) throw new Error('nonce exhausted');
+
+    const submitResult = await rpcCall('submitblock', [block.toHex(false)]);
+    const coinbaseTx = miningJob.cloneCoinbaseTransaction();
+
+    return { submitResult, coinbaseTx, miningJob };
+}
+
+// ── Nonce grinder ─────────────────────────────────────────────────
 
 /** Naive nonce grinder — fine for regtest (target = 0x7fffff…). */
 export function mineBlock(block: bitcoinjs.Block, targetHex: string): boolean {

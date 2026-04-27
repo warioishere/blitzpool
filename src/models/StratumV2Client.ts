@@ -27,6 +27,7 @@ import { ShareTotalsCacheService } from '../services/share-totals-cache.service'
 import { PplnsService } from '../services/pplns.service';
 import { GroupSoloService } from '../services/group-solo.service';
 import { MinerActiveModeService } from '../services/miner-active-mode.service';
+import { patchCoinbasePrefixVarint } from '../utils/coinbase-prefix.utils';
 import { PoolModeHashrateService } from '../ORM/pool-mode-hashrate/pool-mode-hashrate.service';
 import { ClientEntity } from '../ORM/client/client.entity';
 import { MiningJob } from './MiningJob';
@@ -1154,7 +1155,7 @@ export class StratumV2Client {
         // Patch the scriptSig length varint if this channel's total extranonce
         // size (prefix + rollable) != 8 bytes (the default MiningJob assumes).
         const totalExtranonceBytes = (channel.extranoncePrefix?.length ?? 0) + channel.extranonceSize;
-        const coinbasePrefix = this.patchCoinbasePrefixVarint(job.getCoinbasePrefixBuffer(), totalExtranonceBytes);
+        const coinbasePrefix = patchCoinbasePrefixVarint(job.getCoinbasePrefixBuffer(), totalExtranonceBytes);
         const coinbaseSuffix = job.getCoinbaseSuffixBuffer();
 
         const jobPayload = serializeNewExtendedMiningJob({
@@ -1215,28 +1216,6 @@ export class StratumV2Client {
     await this.sendExtendedMiningJobFromJobTemplate(jobTemplate, sendPrevHash, targetChannelId);
   }
 
-  /**
-   * Patch the scriptSig length varint in coinbasePrefix when the channel's
-   * extranonce size differs from MiningJob's hardcoded 8-byte slot.
-   * The varint sits at offset 41 in the non-witness coinbase serialization:
-   *   version(4) + input_count(1) + prev_txid(32) + input_index(4) = 41
-   */
-  private patchCoinbasePrefixVarint(prefix: Buffer, totalExtranonceSize: number): Buffer {
-    if (totalExtranonceSize === 8) return prefix;
-    if (prefix.length < 42) {
-      console.warn(`[SV2 ${this.sessionId}] patchCoinbasePrefixVarint: prefix too short (${prefix.length} < 42), skipping patch`);
-      return prefix;
-    }
-    const patched = Buffer.from(prefix);
-    const newVarint = patched[41] + (totalExtranonceSize - 8);
-    if (newVarint < 0 || newVarint > 0xFC) {
-      console.warn(`[SV2 ${this.sessionId}] patchCoinbasePrefixVarint: varint overflow (${newVarint}), skipping patch`);
-      return prefix;
-    }
-    patched[41] = newVarint;
-    return patched;
-  }
-
   private async sendExtendedMiningJobFromJobTemplate(jobTemplate: IJobTemplate, sendPrevHash: boolean, channelId: number): Promise<void> {
     const channel = this.channels.get(channelId);
     if (!channel) return;
@@ -1269,7 +1248,7 @@ export class StratumV2Client {
     // Patch the scriptSig length varint if this channel's total extranonce
     // size (prefix + rollable) != 8 bytes (the default MiningJob assumes).
     const totalExtranonceBytes = (channel.extranoncePrefix?.length ?? 0) + channel.extranonceSize;
-    const coinbasePrefix = this.patchCoinbasePrefixVarint(job.getCoinbasePrefixBuffer(), totalExtranonceBytes);
+    const coinbasePrefix = patchCoinbasePrefixVarint(job.getCoinbasePrefixBuffer(), totalExtranonceBytes);
     const coinbaseSuffix = job.getCoinbaseSuffixBuffer();
 
     const jobPayload = serializeNewExtendedMiningJob({

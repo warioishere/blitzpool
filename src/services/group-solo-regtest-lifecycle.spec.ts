@@ -31,30 +31,21 @@
  * serialization; Core picks up witnesses from the txs themselves).
  */
 
-import * as bitcoinjs from 'bitcoinjs-lib';
 import { GroupSoloService } from './group-solo.service';
 import { PplnsGroupBlockHistoryEntity } from '../ORM/pplns-group/pplns-group-block-history.entity';
 import { PplnsGroupBalanceEntity } from '../ORM/pplns-group/pplns-group-balance.entity';
 import { attachMockTxManager } from './__test-helpers__/mock-tx-manager';
 import {
     rpcCall,
-    buildCoinbase as buildCoinbaseHelper,
-    buildBlock,
-    mineBlock,
     createMockRedis,
     createMockRepo,
+    assembleWithMiningJobAndTemplate,
 } from './__test-helpers__/regtest-harness';
 
 const ADDR_FEE = 'bcrt1qqj0r5w2ua3pe0sh6gthvfeegvwsa3t4edumqzf';
 const ADDR_ALICE = 'bcrt1q2jf90sp25mt4pte5swkr4cujpj5d8zzwdt09fq';
 const ADDR_BOB = 'bcrt1qt2amqww2n3dcz3ckx6nlentvm9e6rpxqrfmvl7';
 const ADDR_CHARLIE = 'bcrt1qlppw7cnqspnky6qzv8p2n468lpvwuct7ehp7l2';
-
-const buildCoinbase = (
-    payouts: { address: string; sats: number }[],
-    height: number,
-    witnessCommit: Buffer,
-) => buildCoinbaseHelper(payouts, height, witnessCommit, 'blitzpool-lifecycle-test');
 
 function makeService(env: Record<string, string>) {
     const addressToGroup = new Map<string, { groupId: string; active: boolean }>();
@@ -83,40 +74,6 @@ function makeService(env: Record<string, string>) {
     return { service, redis, balanceRepo, historyRepo, addressToGroup };
 }
 
-/**
- * Pull a fresh getblocktemplate, build coinbase from the distribution,
- * compute the right witness commitment, mine and submit the block.
- * Returns the template + decision result; verify null == success.
- */
-async function assembleAndSubmitBlock(distribution: { address: string; percent: number }[]) {
-    const template = await rpcCall('getblocktemplate', [{ rules: ['segwit'] }]);
-    const blockReward = template.coinbasevalue;
-
-    const payouts = distribution.map(d => ({
-        address: d.address,
-        sats: Math.floor((d.percent / 100) * blockReward),
-    }));
-    const totalAssigned = payouts.reduce((s, p) => s + p.sats, 0);
-    if (totalAssigned < blockReward && payouts.length > 0) {
-        payouts[0].sats += blockReward - totalAssigned;
-    }
-
-    const txs = template.transactions.map((t: any) => bitcoinjs.Transaction.fromHex(t.data));
-    const dummyCoinbase = new bitcoinjs.Transaction();
-    dummyCoinbase.version = 2;
-    dummyCoinbase.addInput(Buffer.alloc(32, 0), 0xffffffff, 0xffffffff);
-    dummyCoinbase.addOutput(Buffer.alloc(22, 0), 0);
-    dummyCoinbase.ins[0].witness = [Buffer.alloc(32, 0)];
-    const witnessCommit = bitcoinjs.Block.calculateMerkleRoot([dummyCoinbase, ...txs], true);
-
-    const coinbaseTx = buildCoinbase(payouts, template.height, witnessCommit);
-    const block = buildBlock(template, coinbaseTx, txs);
-    const mined = mineBlock(block, template.target);
-    if (!mined) throw new Error('mineBlock exhausted nonce range');
-
-    const submitResult = await rpcCall('submitblock', [block.toHex(false)]);
-    return { template, blockReward, payouts, submitResult };
-}
 
 // ═══════════════════════════════════════════════════════════════════
 // Tests
@@ -189,27 +146,29 @@ describe('Group-Solo Regtest Lifecycle', () => {
         expect(addrs).not.toContain(ADDR_CHARLIE);
         expect(addrs.sort()).toEqual([ADDR_ALICE, ADDR_BOB, ADDR_FEE].sort());
 
-        const { submitResult, template: usedTemplate } = await assembleAndSubmitBlock(distribution);
+        // Production MiningJob path — same template used for distribution and block.
+        const mjDist = distribution.map(d => ({ address: d.address, percent: d.percent }));
+        const { submitResult } = await assembleWithMiningJobAndTemplate(mjDist, template, 'gs-kick');
         expect(submitResult).toBeNull();
 
-        // onBlockFound processes the block. Under the signed-ledger
-        // model the kicked member's redistributed pending lands as a
-        // positive credit on survivors without a matching debit (no
-        // prior block generated a residuum bonus to offset it), so the
-        // solvency cap keeps part of the redistributed amount as a
-        // carry-forward credit until a future block clears it.
-        // Survivors MUST be paid on-chain, and their remaining
-        // balance is bounded by the redistribution amount.
-        await service.onBlockFound(usedTemplate.height, usedTemplate.coinbasevalue, ADDR_ALICE);
+        // onBlockFound: solvency cap fires because survivors' redistributed pending
+        // (450 sats each) adds to their on-chain cut and overshoots the block reward
+        // by exactly 900 sats. The cap clips the full credit amount from each miner,
+        // so both pending balances carry forward unchanged at 450.
+        await service.onBlockFound(template.height, template.coinbasevalue, ADDR_ALICE);
         const aliceAfter = (balanceRepo._rows as any[]).find(r => r.address === ADDR_ALICE);
         const bobAfter = (balanceRepo._rows as any[]).find(r => r.address === ADDR_BOB);
         expect(aliceAfter).toBeDefined();
         expect(bobAfter).toBeDefined();
         expect(aliceAfter.totalPaidSats).toBeGreaterThan(0);
         expect(bobAfter.totalPaidSats).toBeGreaterThan(0);
-        expect(aliceAfter.pendingSats).toBeGreaterThanOrEqual(0);
+        // Solvency cap fully defers the redistributed pending → carry-forward ≈ 450.
+        // ±1 sat tolerance: the residuum sat from Phase 5b goes to Bob (highest weight),
+        // but the snapshot stores percents, so onBlockFound's Math.floor re-derivation
+        // may lose that residuum sat for Bob.
+        expect(aliceAfter.pendingSats).toBeGreaterThanOrEqual(449);
         expect(aliceAfter.pendingSats).toBeLessThanOrEqual(450);
-        expect(bobAfter.pendingSats).toBeGreaterThanOrEqual(0);
+        expect(bobAfter.pendingSats).toBeGreaterThanOrEqual(449);
         expect(bobAfter.pendingSats).toBeLessThanOrEqual(450);
 
         console.log('✅ kick-redistribute: survivors absorbed charlie\'s pending, block validated');
@@ -219,7 +178,7 @@ describe('Group-Solo Regtest Lifecycle', () => {
     it('dust-fee-gate: tiny feePercent → fee omitted, miners keep 100 %, block valid', async () => {
         // On regtest the subsidy is 50 BTC = 5_000_000_000 sats at early
         // heights. 0.00001 % → 0.0000001 × 5e9 = 500 sats < DUST_LIMIT 546.
-        const { service } = makeService({
+        const { service, historyRepo } = makeService({
             GROUP_SOLO_PORT: '3340',
             PPLNS_FEE_ADDRESS: ADDR_FEE,
             PPLNS_FEE_PERCENT: '0.00001',
@@ -243,8 +202,15 @@ describe('Group-Solo Regtest Lifecycle', () => {
         const totalPercent = distribution.reduce((s, d) => s + d.percent, 0);
         expect(totalPercent).toBeCloseTo(100, 2);
 
-        const { submitResult } = await assembleAndSubmitBlock(distribution);
+        const mjDist = distribution.map(d => ({ address: d.address, percent: d.percent }));
+        const { submitResult } = await assembleWithMiningJobAndTemplate(mjDist, template, 'gs-dust');
         expect(submitResult).toBeNull();
+
+        await service.onBlockFound(template.height, template.coinbasevalue, ADDR_ALICE);
+        const historyForBlock = (historyRepo._rows as any[]).filter(
+            r => r.blockHeight === template.height && r.rowType === 'coinbase',
+        );
+        expect(historyForBlock.length).toBe(distribution.length);
 
         console.log('✅ dust-fee-gate: fee omitted from coinbase, block accepted');
     }, 120000);
@@ -286,14 +252,15 @@ describe('Group-Solo Regtest Lifecycle', () => {
         // only in-memory state, it would fall back to
         // onBlockFoundFromWindow and book payouts differently.
 
-        const { submitResult, template: usedTemplate } = await assembleAndSubmitBlock(distributionA);
+        const mjDist = distributionA.map(d => ({ address: d.address, percent: d.percent }));
+        const { submitResult } = await assembleWithMiningJobAndTemplate(mjDist, template, 'gs-snapshot');
         expect(submitResult).toBeNull();
 
         // onBlockFound on svcB must read from Redis.
-        await svcB.onBlockFound(usedTemplate.height, usedTemplate.coinbasevalue, ADDR_ALICE);
+        await svcB.onBlockFound(template.height, template.coinbasevalue, ADDR_ALICE);
 
         const historyForBlock = (historyRepo._rows as any[]).filter(
-            r => r.blockHeight === usedTemplate.height && r.rowType === 'coinbase',
+            r => r.blockHeight === template.height && r.rowType === 'coinbase',
         );
         expect(historyForBlock.length).toBe(distributionA.length);
         expect(historyForBlock.map(r => r.address).sort())

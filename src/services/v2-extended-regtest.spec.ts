@@ -18,64 +18,9 @@
  */
 
 import * as bitcoinjs from 'bitcoinjs-lib';
-import * as merkle from 'merkle-lib';
-import * as merkleProof from 'merkle-lib/proof';
 import { MiningJob } from '../models/MiningJob';
-import { IJobTemplate } from './stratum-v1-jobs.service';
-import { NETWORK, rpcCall, mineBlock } from './__test-helpers__/regtest-harness';
-
-function buildJobTemplate(template: any, idSuffix: string): IJobTemplate {
-  const transactions = template.transactions.map((t: any) => bitcoinjs.Transaction.fromHex(t.data));
-  const tempCoinbaseTx = new bitcoinjs.Transaction();
-  tempCoinbaseTx.version = 2;
-  tempCoinbaseTx.addInput(Buffer.alloc(32, 0), 0xffffffff, 0xffffffff);
-  tempCoinbaseTx.ins[0].witness = [Buffer.alloc(32, 0)];
-  const txsWithDummy = [tempCoinbaseTx, ...transactions];
-
-  const transactionBuffers = txsWithDummy.map(tx => tx.getHash(false));
-  const merkleTree = merkle(transactionBuffers, bitcoinjs.crypto.hash256);
-  const merkleBranches: Buffer[] = merkleProof(merkleTree, transactionBuffers[0]).filter((h: any) => h != null);
-  const merkleRoot = merkleBranches.pop();
-  const merkle_branch = merkleBranches.slice(1).map(b => b.toString('hex'));
-
-  const block = new bitcoinjs.Block();
-  block.version = template.version;
-  block.prevHash = Buffer.from(template.previousblockhash, 'hex').reverse();
-  block.timestamp = template.curtime;
-  block.bits = parseInt(template.bits, 16);
-  block.merkleRoot = merkleRoot!;
-  block.transactions = txsWithDummy;
-  block.witnessCommit = bitcoinjs.Block.calculateMerkleRoot(txsWithDummy, true);
-
-  return {
-    block,
-    merkle_branch,
-    blockData: {
-      id: `regtest-${idSuffix}`,
-      creation: Date.now(),
-      coinbasevalue: template.coinbasevalue,
-      networkDifficulty: 1,
-      height: template.height,
-      clearJobs: true,
-    },
-  };
-}
-
-function makeConfigService() {
-  return { get: (_k: string) => 'blitzpool-regtest' } as any;
-}
-
-/**
- * Patch the scriptSig length varint at offset 41 when the channel's total
- * extranonce is not the default 8 bytes. Replicates
- * `StratumV2Client.patchCoinbasePrefixVarint`.
- */
-function patchCoinbasePrefixVarint(prefix: Buffer, totalExtranonceSize: number): Buffer {
-  if (totalExtranonceSize === 8) return prefix;
-  const patched = Buffer.from(prefix);
-  patched[41] += (totalExtranonceSize - 8);
-  return patched;
-}
+import { NETWORK, rpcCall, mineBlock, buildJobTemplate, makeConfigService } from './__test-helpers__/regtest-harness';
+import { patchCoinbasePrefixVarint } from '../utils/coinbase-prefix.utils';
 
 /**
  * End-to-end extended-channel block build + submit.
@@ -171,6 +116,55 @@ describe('V2 Extended Channel Regtest — coinbase reconstruction produces valid
     const minerExtranonce = Buffer.from('1122334455667788', 'hex');  // 8 bytes
     const height = await runExtendedRound(extranoncePrefix, minerExtranonce, 'ext12');
     console.log(`✅ V2 extended 12-byte extranonce accepted at height ${height}`);
+  }, 30000);
+
+  it('walking jobTemplate.merkle_branch from a real coinbase txid matches bitcoinjs.Block.calculateMerkleRoot', async () => {
+    // Closes the gap where this spec rebuilt the merkle root via
+    // `bitcoinjs.Block.calculateMerkleRoot(transactions, false)` instead of
+    // walking the path Production walks (`StratumV2Client.ts:1372-1378`,
+    // walking `extJob.merklePath`). If `jobTemplate.merkle_branch` were ever
+    // mis-extracted (wrong slice index, missing pop, mis-ordered siblings),
+    // the production block header would carry a different merkleRoot than
+    // bitcoinjs would compute from the transactions list — Bitcoin Core
+    // would silently reject every winning extended share.
+    const template = await rpcCall('getblocktemplate', [{ rules: ['segwit'] }]);
+    const minerAddress = await rpcCall('getnewaddress', ['', 'bech32']);
+    const jobTemplate = buildJobTemplate(template, 'mpathcheck');
+    const miningJob = new MiningJob(
+      makeConfigService(),
+      NETWORK,
+      'job-mpathcheck',
+      [{ address: minerAddress, percent: 100 }],
+      jobTemplate,
+    );
+
+    // Build the real (non-witness) coinbase bytes — same path Production
+    // hashes for share validation.
+    const realCoinbaseBytes = Buffer.concat([
+      miningJob.getCoinbasePrefixBuffer(),
+      Buffer.alloc(8, 0),                     // 8-byte extranonce slot, filled with zeros
+      miningJob.getCoinbaseSuffixBuffer(),
+    ]);
+    const coinbaseTxid = bitcoinjs.crypto.hash256(realCoinbaseBytes);
+
+    // Path A — walk jobTemplate.merkle_branch (what Production does on a winning share)
+    let walkedRoot = Buffer.from(coinbaseTxid);
+    const both = Buffer.alloc(64);
+    for (const sibHex of jobTemplate.merkle_branch) {
+      both.set(walkedRoot, 0);
+      both.set(Buffer.from(sibHex, 'hex'), 32);
+      walkedRoot = bitcoinjs.crypto.hash256(both);
+    }
+
+    // Path B — let bitcoinjs rebuild the full merkle tree from the
+    // transactions list (with the real coinbase swapped in)
+    const realCoinbaseTx = bitcoinjs.Transaction.fromBuffer(realCoinbaseBytes);
+    realCoinbaseTx.ins[0].witness = [Buffer.alloc(32, 0)];
+    const txsForRebuild = [realCoinbaseTx, ...jobTemplate.block.transactions.slice(1)];
+    const rebuiltRoot = bitcoinjs.Block.calculateMerkleRoot(txsForRebuild, false);
+
+    expect(walkedRoot.toString('hex')).toBe(rebuiltRoot.toString('hex'));
+    console.log(`✅ jobTemplate.merkle_branch walk matches full-tree merkleRoot (root=${walkedRoot.toString('hex').slice(0, 16)}…)`);
   }, 30000);
 
   it('share-validation txid matches block-reconstruction txid (no merkle mismatch)', async () => {

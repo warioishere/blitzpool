@@ -36,20 +36,12 @@ import { DUST_LIMIT_SATS } from './coinbase-distribution';
 import {
     NETWORK,
     rpcCall,
-    buildCoinbase as buildCoinbaseHelper,
-    buildBlock,
-    mineBlock,
     createMockRedis,
+    assembleWithMiningJobAndTemplate,
 } from './__test-helpers__/regtest-harness';
 
 const ADDR_FEE = 'bcrt1qqj0r5w2ua3pe0sh6gthvfeegvwsa3t4edumqzf';
 const MINER_COUNT = 50;
-
-const buildCoinbase = (
-    payouts: { address: string; sats: number }[],
-    height: number,
-    witnessCommit: Buffer,
-) => buildCoinbaseHelper(payouts, height, witnessCommit, 'blitzpool-stress-test');
 
 // ── Deterministic test-miner address generator ────────────────────
 //
@@ -174,34 +166,6 @@ function makeService() {
     return { service, redis, balanceService: balanceBacking.service, historyRepo };
 }
 
-async function assembleAndSubmitBlock(distribution: { address: string; percent: number }[]) {
-    const template = await rpcCall('getblocktemplate', [{ rules: ['segwit'] }]);
-    const blockReward = template.coinbasevalue;
-
-    const payouts = distribution.map(d => ({
-        address: d.address,
-        sats: Math.floor((d.percent / 100) * blockReward),
-    }));
-    const totalAssigned = payouts.reduce((s, p) => s + p.sats, 0);
-    if (totalAssigned < blockReward && payouts.length > 0) {
-        payouts[0].sats += blockReward - totalAssigned;
-    }
-
-    const txs = template.transactions.map((t: any) => bitcoinjs.Transaction.fromHex(t.data));
-    const dummyCoinbase = new bitcoinjs.Transaction();
-    dummyCoinbase.version = 2;
-    dummyCoinbase.addInput(Buffer.alloc(32, 0), 0xffffffff, 0xffffffff);
-    dummyCoinbase.addOutput(Buffer.alloc(22, 0), 0);
-    dummyCoinbase.ins[0].witness = [Buffer.alloc(32, 0)];
-    const witnessCommit = bitcoinjs.Block.calculateMerkleRoot([dummyCoinbase, ...txs], true);
-
-    const coinbaseTx = buildCoinbase(payouts, template.height, witnessCommit);
-    const block = buildBlock(template, coinbaseTx, txs);
-    if (!mineBlock(block, template.target)) throw new Error('nonce exhausted');
-
-    const submitResult = await rpcCall('submitblock', [block.toHex(false)]);
-    return { template, blockReward, payouts, submitResult };
-}
 
 // ═══════════════════════════════════════════════════════════════════
 // Test
@@ -281,7 +245,7 @@ describe('PPLNS Regtest — 50-miner stress', () => {
         const expectedTotalDiff = miners.reduce((s, _, i) => s + 5 * weightFor(i), 0);
         expect(stats.totalShares).toBeCloseTo(expectedTotalDiff, 0);
 
-        // ── Get template + distribution from the service ──
+        // ── Single template fetch — same value used for distribution AND block assembly ──
         const template = await rpcCall('getblocktemplate', [{ rules: ['segwit'] }]);
         const blockReward = template.coinbasevalue;
         const distribution = await service.getPayoutDistribution(blockReward);
@@ -311,9 +275,13 @@ describe('PPLNS Regtest — 50-miner stress', () => {
         //    passes with a lower cap if someone tunes the budget down.
         expect(distribution.length).toBeLessThanOrEqual(120);
 
-        // ── Submit block to Core ──
-        const { submitResult } = await assembleAndSubmitBlock(distribution);
+        // ── Submit block to Core via production MiningJob path ──
+        const { submitResult, coinbaseTx } = await assembleWithMiningJobAndTemplate(distribution, template, 'stress');
         expect(submitResult).toBeNull();
+
+        // Coinbase total must equal blockReward exactly (MiningJob puts remainder in outs[0]).
+        const coinbaseTotal = coinbaseTx.outs.reduce((s: number, o: any) => s + o.value, 0);
+        expect(coinbaseTotal).toBe(blockReward);
 
         // ── onBlockFound: audit rows written ──
         await service.onBlockFound(template.height, blockReward);

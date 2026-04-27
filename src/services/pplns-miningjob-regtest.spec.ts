@@ -20,11 +20,10 @@
  */
 
 import * as bitcoinjs from 'bitcoinjs-lib';
+import * as ecc from 'tiny-secp256k1';
 import * as crypto from 'crypto';
-import * as merkle from 'merkle-lib';
-import * as merkleProof from 'merkle-lib/proof';
-import { MiningJob } from '../models/MiningJob';
-import { IJobTemplate } from './stratum-v1-jobs.service';
+
+bitcoinjs.initEccLib(ecc);
 import { PplnsService } from './pplns.service';
 import { PplnsPayoutHistoryEntity } from '../ORM/pplns-balance/pplns-payout-history.entity';
 import { PplnsBalanceEntity } from '../ORM/pplns-balance/pplns-balance.entity';
@@ -32,8 +31,8 @@ import { attachMockTxManager } from './__test-helpers__/mock-tx-manager';
 import {
     NETWORK,
     rpcCall,
-    mineBlock,
     createMockRedis,
+    assembleWithMiningJobAndTemplate,
 } from './__test-helpers__/regtest-harness';
 
 // ── Addresses ────────────────────────────────────────────────────
@@ -53,51 +52,6 @@ function generateTestMinerAddresses(count: number): string[] {
         addresses.push(addr);
     }
     return addresses;
-}
-
-// ── IJobTemplate from getblocktemplate (same as v1-solo-regtest) ──
-
-function buildJobTemplate(template: any, idSuffix: string): IJobTemplate {
-    const transactions = template.transactions.map((t: any) => bitcoinjs.Transaction.fromHex(t.data));
-
-    const tempCoinbaseTx = new bitcoinjs.Transaction();
-    tempCoinbaseTx.version = 2;
-    tempCoinbaseTx.addInput(Buffer.alloc(32, 0), 0xffffffff, 0xffffffff);
-    tempCoinbaseTx.ins[0].witness = [Buffer.alloc(32, 0)];
-    const txsWithDummy = [tempCoinbaseTx, ...transactions];
-
-    const transactionBuffers = txsWithDummy.map(tx => tx.getHash(false));
-    const merkleTree = merkle(transactionBuffers, bitcoinjs.crypto.hash256);
-    const merkleBranches: Buffer[] = merkleProof(merkleTree, transactionBuffers[0]).filter((h: any) => h != null);
-    merkleBranches.pop(); // drop merkle root
-    const merkle_branch = merkleBranches.slice(1).map(b => b.toString('hex'));
-
-    const block = new bitcoinjs.Block();
-    block.version = template.version;
-    block.prevHash = Buffer.from(template.previousblockhash, 'hex').reverse();
-    block.timestamp = template.curtime;
-    block.bits = parseInt(template.bits, 16);
-    block.merkleRoot = Buffer.alloc(32); // placeholder; MiningJob recomputes
-    block.transactions = txsWithDummy;
-    block.witnessCommit = bitcoinjs.Block.calculateMerkleRoot(txsWithDummy, true);
-
-    return {
-        block,
-        merkle_branch,
-        blockData: {
-            id: `regtest-pplns-mj-${idSuffix}`,
-            creation: Date.now(),
-            coinbasevalue: template.coinbasevalue,
-            networkDifficulty: 1,
-            height: template.height,
-            clearJobs: true,
-        },
-    };
-}
-
-function makeConfigService() {
-    const env: Record<string, string> = { POOL_IDENTIFIER: 'blitzpool-pplns-mj-regtest' };
-    return { get: (key: string) => env[key] } as any;
 }
 
 // ── PPLNS service mock stack ─────────────────────────────────────
@@ -198,43 +152,6 @@ function makeService(opts: { feeAddress?: string; feePercent?: string } = {}) {
     return { service, redis, balanceService: balanceBacking.service, historyRepo };
 }
 
-// ── Block assembly via production MiningJob ──────────────────────
-
-async function assembleWithMiningJob(
-    distribution: { address: string; percent: number }[],
-    testId: string,
-): Promise<{ submitResult: any; template: any; coinbaseTx: bitcoinjs.Transaction }> {
-    const template = await rpcCall('getblocktemplate', [{ rules: ['segwit'] }]);
-    const jobTemplate = buildJobTemplate(template, testId);
-
-    // This is the EXACT production path:
-    // MiningJob receives { address, percent }[] and re-derives sats via
-    // Math.floor((percent / 100) * reward). The remainder goes to outs[0].
-    const miningJob = new MiningJob(
-        makeConfigService(),
-        NETWORK,
-        `pplns-mj-${testId}`,
-        distribution,
-        jobTemplate,
-    );
-
-    // copyAndUpdateBlock slots the MiningJob's coinbase into the block and
-    // recomputes the merkle root — same path as StratumV1Client.
-    const block = miningJob.copyAndUpdateBlock(
-        jobTemplate, 0, 0, '00000000', '00000000',
-        template.curtime,
-    );
-
-    if (!await mineBlock(block, template.target)) {
-        throw new Error('nonce exhausted');
-    }
-
-    const submitResult = await rpcCall('submitblock', [block.toHex(false)]);
-    const coinbaseTx = miningJob.cloneCoinbaseTransaction();
-
-    return { submitResult, template, coinbaseTx };
-}
-
 // ═══════════════════════════════════════════════════════════════════
 // Tests
 // ═══════════════════════════════════════════════════════════════════
@@ -264,7 +181,7 @@ describe('PPLNS × MiningJob Regtest — production coinbase path', () => {
     });
 
     it('PPLNS 3-miner distribution via MiningJob: Core accepts block', async () => {
-        const { service, balanceService } = makeService();
+        const { service, balanceService, historyRepo } = makeService();
 
         // Seed pending balances (same scenario as pplns-regtest.spec)
         (balanceService._rows as any[]).push(
@@ -278,7 +195,6 @@ describe('PPLNS × MiningJob Regtest — production coinbase path', () => {
         const template = await rpcCall('getblocktemplate', [{ rules: ['segwit'] }]);
         const distribution = await service.getPayoutDistribution(template.coinbasevalue);
 
-        // Sanity: fee + at least Alice + Bob
         const addrs = distribution.map(d => d.address);
         expect(addrs).toContain(ADDR_FEE);
         expect(addrs).toContain(ADDR_ALICE);
@@ -287,51 +203,62 @@ describe('PPLNS × MiningJob Regtest — production coinbase path', () => {
         const totalPct = distribution.reduce((s, d) => s + d.percent, 0);
         expect(totalPct).toBeLessThanOrEqual(100.001);
 
-        // THE KEY TEST: production MiningJob builds the coinbase, Core validates.
-        const { submitResult, coinbaseTx } = await assembleWithMiningJob(distribution, 'pplns-3');
+        const { submitResult, coinbaseTx } = await assembleWithMiningJobAndTemplate(distribution, template, 'pplns-3');
         expect(submitResult).toBeNull();
 
-        // Verify coinbase total = block reward (MiningJob remainder logic)
+        // Coinbase total = block reward (MiningJob remainder logic)
         const totalCoinbaseValue = coinbaseTx.outs.reduce((s, o) => s + o.value, 0);
         expect(totalCoinbaseValue).toBe(template.coinbasevalue);
 
         // Output count: distribution entries + 1 OP_RETURN witness commitment
         expect(coinbaseTx.outs.length).toBe(distribution.length + 1);
 
+        // onBlockFound books history rows for each distribution entry
+        await service.onBlockFound(template.height, template.coinbasevalue);
+        const historyRows = (historyRepo._rows as any[]).filter(
+            r => r.blockHeight === template.height && r.rowType === 'coinbase',
+        );
+        expect(historyRows.length).toBe(distribution.length);
+        expect(historyRows.map(r => r.address).sort())
+            .toEqual(distribution.map(d => d.address).sort());
+
         console.log(`✅ PPLNS 3-miner via MiningJob: ${distribution.length} outputs, Core accepted`);
     }, 120_000);
 
     it('PPLNS 20-miner distribution via MiningJob: Core accepts block', async () => {
-        const { service } = makeService();
+        const { service, historyRepo } = makeService();
         const miners = generateTestMinerAddresses(20);
 
-        // Varied share weights so distribution is non-trivial
         for (let i = 0; i < miners.length; i++) {
-            const weight = 100_000 * (20 - i) + 1; // descending weights
+            const weight = 100_000 * (20 - i) + 1;
             await service.recordShare(miners[i], weight);
         }
 
         const template = await rpcCall('getblocktemplate', [{ rules: ['segwit'] }]);
         const distribution = await service.getPayoutDistribution(template.coinbasevalue);
 
-        expect(distribution.length).toBeGreaterThanOrEqual(2); // fee + at least some miners
+        expect(distribution.length).toBeGreaterThanOrEqual(2);
 
         const totalPct = distribution.reduce((s, d) => s + d.percent, 0);
         expect(totalPct).toBeLessThanOrEqual(100.001);
 
-        const { submitResult, coinbaseTx } = await assembleWithMiningJob(distribution, 'pplns-20');
+        const { submitResult, coinbaseTx } = await assembleWithMiningJobAndTemplate(distribution, template, 'pplns-20');
         expect(submitResult).toBeNull();
 
         const totalCoinbaseValue = coinbaseTx.outs.reduce((s, o) => s + o.value, 0);
         expect(totalCoinbaseValue).toBe(template.coinbasevalue);
 
+        await service.onBlockFound(template.height, template.coinbasevalue);
+        const historyRows = (historyRepo._rows as any[]).filter(
+            r => r.blockHeight === template.height && r.rowType === 'coinbase',
+        );
+        expect(historyRows.length).toBe(distribution.length);
+
         console.log(`✅ PPLNS 20-miner via MiningJob: ${distribution.length} outputs, Core accepted`);
     }, 120_000);
 
     it('percent→sats round-trip: MiningJob amounts match buildCoinbaseDistribution sats', async () => {
-        // Verify MiningJob's float round-trip doesn't drift from the
-        // authoritative integer sats computed by buildCoinbaseDistribution.
-        const { service } = makeService();
+        const { service, historyRepo } = makeService();
         const miners = generateTestMinerAddresses(15);
 
         for (let i = 0; i < miners.length; i++) {
@@ -353,11 +280,7 @@ describe('PPLNS × MiningJob Regtest — production coinbase path', () => {
         // MiningJob adds remainder to outs[0]
         mjAmounts[0] += mjRewardBalance;
 
-        // Compare to authoritative sats
         const authSats = distribution.map(d => d.sats);
-        // The first entry may differ by the remainder amount (which is fine —
-        // both paths ensure total == blockReward). What matters is that the
-        // TOTAL never exceeds blockReward.
         const mjTotal = mjAmounts.reduce((s, v) => s + v, 0);
         const authTotal = authSats.reduce((s, v) => s + v, 0);
 
@@ -367,14 +290,18 @@ describe('PPLNS × MiningJob Regtest — production coinbase path', () => {
         // Per-entry drift should be tiny (only floor-rounding differences)
         for (let i = 0; i < distribution.length; i++) {
             const drift = Math.abs(mjAmounts[i] - authSats[i]);
-            // Remainder goes to outs[0], so allow up to N-1 sats drift there
             const maxDrift = i === 0 ? distribution.length : 1;
             expect(drift).toBeLessThanOrEqual(maxDrift);
         }
 
-        // And Core must still accept it
-        const { submitResult } = await assembleWithMiningJob(distribution, 'pplns-roundtrip');
+        const { submitResult } = await assembleWithMiningJobAndTemplate(distribution, template, 'pplns-roundtrip');
         expect(submitResult).toBeNull();
+
+        await service.onBlockFound(template.height, blockReward);
+        const historyRows = (historyRepo._rows as any[]).filter(
+            r => r.blockHeight === template.height && r.rowType === 'coinbase',
+        );
+        expect(historyRows.length).toBe(distribution.length);
 
         console.log(
             `✅ PPLNS percent→sats round-trip: mjTotal=${mjTotal}, authTotal=${authTotal}, ` +
@@ -382,42 +309,67 @@ describe('PPLNS × MiningJob Regtest — production coinbase path', () => {
         );
     }, 120_000);
 
-    it('PPLNS with P2TR + P2WPKH mixed addresses via MiningJob: Core accepts', async () => {
-        // MiningJob.getPaymentScript uses getAddressInfo + bitcoinjs.payments.*
-        // This verifies P2TR addresses (which use a different script path than
-        // P2WPKH) also produce valid coinbase outputs through the production path.
-        const { service } = makeService();
+    it('PPLNS with all 5 address types (P2WPKH+P2TR+P2PKH+P2WSH+P2SH) via MiningJob: Core accepts', async () => {
+        // Exercises every branch of MiningJob.getPaymentScript — one miner per
+        // address type. Core accepting the block proves all output scripts are valid.
+        const { service, historyRepo } = makeService();
 
-        // Generate P2TR addresses (32-byte x-only pubkey witness program)
-        const p2trAddresses: string[] = [];
-        for (let i = 0; i < 3; i++) {
-            const internalKey = crypto.createHash('sha256')
-                .update(`pplns-mj-p2tr-test-${i}`)
-                .digest();
-            // x-only pubkey must be 32 bytes; use the hash directly
-            const addr = bitcoinjs.payments.p2tr({
-                internalPubkey: internalKey,
-                network: NETWORK,
-            }).address!;
-            p2trAddresses.push(addr);
-        }
+        // P2TR (taproot, bech32m, bcrt1p…)
+        const p2trPriv = crypto.createHash('sha256').update('pplns-mj-p2tr-0').digest();
+        const p2trCompressed = ecc.pointFromScalar(p2trPriv, true)!;
+        const addrP2TR = bitcoinjs.payments.p2tr({
+            internalPubkey: Buffer.from(p2trCompressed.slice(1)),
+            network: NETWORK,
+        }).address!;
 
-        // Mix P2WPKH (fee, Alice, Bob) and P2TR addresses
-        await service.recordShare(ADDR_ALICE, 100);
-        await service.recordShare(ADDR_BOB, 100);
-        for (const addr of p2trAddresses) {
-            await service.recordShare(addr, 100);
-        }
+        // P2PKH (legacy base58, m… on regtest)
+        const p2pkhPriv = crypto.createHash('sha256').update('pplns-mj-p2pkh').digest();
+        const p2pkhPub = Buffer.from(ecc.pointFromScalar(p2pkhPriv, true)!);
+        const addrP2PKH = bitcoinjs.payments.p2pkh({ pubkey: p2pkhPub, network: NETWORK }).address!;
+
+        // P2WSH (segwit v0, 32-byte script hash, bcrt1q… 62 chars)
+        const p2wshPriv = crypto.createHash('sha256').update('pplns-mj-p2wsh').digest();
+        const p2wshPub = Buffer.from(ecc.pointFromScalar(p2wshPriv, true)!);
+        const addrP2WSH = bitcoinjs.payments.p2wsh({
+            redeem: bitcoinjs.payments.p2pk({ pubkey: p2wshPub, network: NETWORK }),
+            network: NETWORK,
+        }).address!;
+
+        // P2SH (legacy base58, 2… on regtest — same version byte as testnet)
+        const p2shPriv = crypto.createHash('sha256').update('pplns-mj-p2sh').digest();
+        const p2shPub = Buffer.from(ecc.pointFromScalar(p2shPriv, true)!);
+        const addrP2SH = bitcoinjs.payments.p2sh({
+            redeem: bitcoinjs.payments.p2pk({ pubkey: p2shPub, network: NETWORK }),
+            network: NETWORK,
+        }).address!;
+
+        await service.recordShare(ADDR_ALICE, 100);  // P2WPKH
+        await service.recordShare(addrP2TR, 100);    // P2TR
+        await service.recordShare(addrP2PKH, 100);   // P2PKH
+        await service.recordShare(addrP2WSH, 100);   // P2WSH
+        await service.recordShare(addrP2SH, 100);    // P2SH
 
         const template = await rpcCall('getblocktemplate', [{ rules: ['segwit'] }]);
         const distribution = await service.getPayoutDistribution(template.coinbasevalue);
 
-        const { submitResult, coinbaseTx } = await assembleWithMiningJob(distribution, 'pplns-mixed');
+        // All 5 miner types + fee must appear (assuming none fall below dust)
+        const addrs = distribution.map(d => d.address);
+        expect(addrs).toContain(ADDR_FEE);
+        expect(addrs).toContain(addrP2PKH);
+        expect(addrs).toContain(addrP2SH);
+
+        const { submitResult, coinbaseTx } = await assembleWithMiningJobAndTemplate(distribution, template, 'pplns-alltypes');
         expect(submitResult).toBeNull();
 
         const totalCoinbaseValue = coinbaseTx.outs.reduce((s, o) => s + o.value, 0);
         expect(totalCoinbaseValue).toBe(template.coinbasevalue);
 
-        console.log(`✅ PPLNS mixed P2WPKH+P2TR via MiningJob: ${distribution.length} outputs, Core accepted`);
+        await service.onBlockFound(template.height, template.coinbasevalue);
+        const historyRows = (historyRepo._rows as any[]).filter(
+            r => r.blockHeight === template.height && r.rowType === 'coinbase',
+        );
+        expect(historyRows.length).toBe(distribution.length);
+
+        console.log(`✅ PPLNS all 5 address types via MiningJob: ${distribution.length} outputs, Core accepted`);
     }, 120_000);
 });

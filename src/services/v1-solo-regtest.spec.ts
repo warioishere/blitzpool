@@ -13,63 +13,9 @@
  */
 
 import * as bitcoinjs from 'bitcoinjs-lib';
-import * as merkle from 'merkle-lib';
-import * as merkleProof from 'merkle-lib/proof';
+
 import { MiningJob } from '../models/MiningJob';
-import { IJobTemplate } from './stratum-v1-jobs.service';
-import { NETWORK, rpcCall, mineBlock } from './__test-helpers__/regtest-harness';
-
-// ── Build IJobTemplate from bitcoind's getblocktemplate ─────────
-// Replicates what StratumV1JobsService does so we can feed a MiningJob
-// the exact shape of data it expects in production.
-
-function buildJobTemplate(template: any, idSuffix: string): IJobTemplate {
-  const transactions = template.transactions.map((t: any) => bitcoinjs.Transaction.fromHex(t.data));
-
-  // Dummy coinbase to compute the merkle branch (real coinbase slots in later)
-  const tempCoinbaseTx = new bitcoinjs.Transaction();
-  tempCoinbaseTx.version = 2;
-  tempCoinbaseTx.addInput(Buffer.alloc(32, 0), 0xffffffff, 0xffffffff);
-  tempCoinbaseTx.ins[0].witness = [Buffer.alloc(32, 0)];
-  const txsWithDummy = [tempCoinbaseTx, ...transactions];
-
-  const transactionBuffers = txsWithDummy.map(tx => tx.getHash(false));
-  const merkleTree = merkle(transactionBuffers, bitcoinjs.crypto.hash256);
-  const merkleBranches: Buffer[] = merkleProof(merkleTree, transactionBuffers[0]).filter((h: any) => h != null);
-  const merkleRoot = merkleBranches.pop();
-  // Strip the first (coinbase) and the now-popped root; what remains is the merkle branch
-  const merkle_branch = merkleBranches.slice(1).map(b => b.toString('hex'));
-
-  const block = new bitcoinjs.Block();
-  block.version = template.version;
-  block.prevHash = Buffer.from(template.previousblockhash, 'hex').reverse();
-  block.timestamp = template.curtime;
-  block.bits = parseInt(template.bits, 16);
-  block.merkleRoot = merkleRoot!;
-  block.transactions = txsWithDummy;
-  block.witnessCommit = bitcoinjs.Block.calculateMerkleRoot(txsWithDummy, true);
-
-  return {
-    block,
-    merkle_branch,
-    blockData: {
-      id: `regtest-${idSuffix}`,
-      creation: Date.now(),
-      coinbasevalue: template.coinbasevalue,
-      networkDifficulty: 1,
-      height: template.height,
-      clearJobs: true,
-    },
-  };
-}
-
-function makeConfigService(overrides: Record<string, string> = {}) {
-  const env: Record<string, string> = {
-    POOL_IDENTIFIER: 'blitzpool-regtest',
-    ...overrides,
-  };
-  return { get: (key: string) => env[key] } as any;
-}
+import { NETWORK, rpcCall, mineBlock, buildJobTemplate, makeConfigService } from './__test-helpers__/regtest-harness';
 
 // ═══════════════════════════════════════════════════════════════
 // TESTS
@@ -211,5 +157,77 @@ describe('V1 Solo Regtest — MiningJob produces blocks Bitcoin Core accepts', (
 
     expect(reconstructed.toString('hex')).toBe(original);
     console.log(`✅ V1 coinbase prefix/suffix round-trip verified`);
+  }, 30000);
+
+  it('coinbase with all 5 supported address types (P2PKH/P2SH/P2WPKH/P2WSH/P2TR) is accepted', async () => {
+    // Closes the coverage gap where only P2WPKH was end-to-end-validated.
+    // Each branch of MiningJob.getPaymentScript is exercised in a single
+    // coinbase that Bitcoin Core then validates byte-for-byte.
+    const template = await rpcCall('getblocktemplate', [{ rules: ['segwit'] }]);
+
+    // Native types straight from bitcoind
+    const p2pkhAddr  = await rpcCall('getnewaddress', ['', 'legacy']);
+    const p2shAddr   = await rpcCall('getnewaddress', ['', 'p2sh-segwit']);
+    const p2wpkhAddr = await rpcCall('getnewaddress', ['', 'bech32']);
+    const p2trAddr   = await rpcCall('getnewaddress', ['', 'bech32m']);
+
+    // P2WSH: derive bitcoinjs-side from a real pubkey wrapped in a P2WPKH script.
+    // Coinbase outputs accept any well-formed scriptPubKey — the script doesn't
+    // need to be spendable by the wallet for block validity.
+    const seedAddr = await rpcCall('getnewaddress', ['', 'bech32']);
+    const seedInfo = await rpcCall('getaddressinfo', [seedAddr]);
+    const pubkey = Buffer.from(seedInfo.pubkey, 'hex');
+    const innerP2wpkh = bitcoinjs.payments.p2wpkh({ pubkey, network: NETWORK });
+    const p2wshPayment = bitcoinjs.payments.p2wsh({
+      redeem: { output: innerP2wpkh.output, network: NETWORK },
+      network: NETWORK,
+    });
+    const p2wshAddr = p2wshPayment.address!;
+
+    // 5 outputs × 20 % each. createCoinbaseTransaction puts the floor-rounding
+    // remainder in outs[0] (P2PKH here).
+    const payoutInformation = [
+      { address: p2pkhAddr,  percent: 20 },
+      { address: p2shAddr,   percent: 20 },
+      { address: p2wpkhAddr, percent: 20 },
+      { address: p2wshAddr,  percent: 20 },
+      { address: p2trAddr,   percent: 20 },
+    ];
+
+    const jobTemplate = buildJobTemplate(template, 'all5');
+    const miningJob = new MiningJob(
+      makeConfigService(),
+      NETWORK,
+      'job-all5',
+      payoutInformation,
+      jobTemplate,
+    );
+
+    const block = miningJob.copyAndUpdateBlock(
+      jobTemplate, 0, 0, '00000000', '00000000', template.curtime,
+    );
+
+    const coinbase = miningJob.cloneCoinbaseTransaction();
+    // 5 payout outs + OP_RETURN witness commitment = 6 total
+    expect(coinbase.outs.length).toBe(6);
+    const totalOut = coinbase.outs.slice(0, 5).reduce((s, o) => s + o.value, 0);
+    expect(totalOut).toBe(template.coinbasevalue);
+
+    // Sanity-check each output script type by decoding it back to an address.
+    // Catches a buggy MiningJob.getPaymentScript branch that emits the wrong
+    // script class (e.g. p2tr branch returning p2wpkh bytes).
+    expect(bitcoinjs.address.fromOutputScript(coinbase.outs[0].script, NETWORK)).toBe(p2pkhAddr);
+    expect(bitcoinjs.address.fromOutputScript(coinbase.outs[1].script, NETWORK)).toBe(p2shAddr);
+    expect(bitcoinjs.address.fromOutputScript(coinbase.outs[2].script, NETWORK)).toBe(p2wpkhAddr);
+    expect(bitcoinjs.address.fromOutputScript(coinbase.outs[3].script, NETWORK)).toBe(p2wshAddr);
+    expect(bitcoinjs.address.fromOutputScript(coinbase.outs[4].script, NETWORK)).toBe(p2trAddr);
+
+    expect(await mineBlock(block, template.target)).toBe(true);
+    const result = await rpcCall('submitblock', [block.toHex(false)]);
+    expect(result).toBeNull();
+
+    const info = await rpcCall('getblockchaininfo');
+    expect(info.blocks).toBe(template.height);
+    console.log(`✅ V1 coinbase with all 5 address types accepted at height ${template.height}`);
   }, 30000);
 });
