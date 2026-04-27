@@ -28,11 +28,12 @@
 
 import * as bitcoinjs from 'bitcoinjs-lib';
 import * as crypto from 'crypto';
+import * as ecc from 'tiny-secp256k1';
 import { PplnsService } from './pplns.service';
 import { PplnsPayoutHistoryEntity } from '../ORM/pplns-balance/pplns-payout-history.entity';
 import { PplnsBalanceEntity } from '../ORM/pplns-balance/pplns-balance.entity';
 import { attachMockTxManager } from './__test-helpers__/mock-tx-manager';
-import { DUST_LIMIT_SATS } from './coinbase-distribution';
+import { DEFAULT_COINBASE_WEIGHT_BUDGET, DUST_LIMIT_SATS } from './coinbase-distribution';
 import {
     NETWORK,
     rpcCall,
@@ -55,6 +56,43 @@ function generateTestMinerAddresses(count: number): string[] {
             .digest();
         const addr = bitcoinjs.payments.p2wpkh({ hash, network: NETWORK }).address!;
         addresses.push(addr);
+    }
+    return addresses;
+}
+
+// ── Mixed-type address generator (P2WPKH + P2TR) ─────────────────
+//
+// COINBASE_OUTPUT_WEIGHT in coinbase-distribution.ts is the P2TR
+// upper bound (172 WU). The trim formula uses this for *all* outputs
+// regardless of actual address type, which is conservatively safe ONLY
+// if the constant truly bounds the heaviest plausible script. To prove
+// that conservative-bound logic stays sound under real load, the
+// budget-trim test below feeds a 50/50 P2WPKH/P2TR mix through the
+// production coinbase builder and measures the actual serialized weight.
+function generateMixedTypeMinerAddresses(count: number): string[] {
+    const addresses: string[] = [];
+    for (let i = 0; i < count; i++) {
+        if (i % 2 === 0) {
+            // P2WPKH (124 WU per output) — half the miners
+            const hash = crypto.createHash('ripemd160')
+                .update(crypto.createHash('sha256').update(`blitzpool-mixed-pkh-${i}`).digest())
+                .digest();
+            addresses.push(bitcoinjs.payments.p2wpkh({ hash, network: NETWORK }).address!);
+        } else {
+            // P2TR (172 WU per output — the upper bound the trim assumes)
+            // Derive a deterministic but valid x-only pubkey via tiny-secp256k1.
+            // Most 32-byte values are valid scalars; loop on the rare invalid one.
+            let privkey: Buffer;
+            let nonce = 0;
+            do {
+                privkey = crypto.createHash('sha256')
+                    .update(`blitzpool-mixed-tr-${i}-${nonce++}`)
+                    .digest();
+            } while (!ecc.isPrivate(privkey));
+            const pubkey = Buffer.from(ecc.pointFromScalar(privkey, true)!);
+            const xOnly = pubkey.subarray(1); // strip y-parity byte
+            addresses.push(bitcoinjs.payments.p2tr({ internalPubkey: xOnly, network: NETWORK }).address!);
+        }
     }
     return addresses;
 }
@@ -270,10 +308,10 @@ describe('PPLNS Regtest — 50-miner stress', () => {
         }
 
         // 4. Output count bounded by weight budget — the default is
-        //    PPLNS_COINBASE_WEIGHT_BUDGET=20000, so ~115 outputs max.
-        //    With 50 miners we shouldn't hit that cap, but the test also
-        //    passes with a lower cap if someone tunes the budget down.
-        expect(distribution.length).toBeLessThanOrEqual(120);
+        //    PPLNS_COINBASE_WEIGHT_BUDGET=50000, so ~287 outputs max
+        //    (286 miners + 1 fee). With 50 miners we won't hit that cap;
+        //    the budget-cap exercise is the dedicated test below.
+        expect(distribution.length).toBeLessThanOrEqual(287);
 
         // ── Submit block to Core via production MiningJob path ──
         const { submitResult, coinbaseTx } = await assembleWithMiningJobAndTemplate(distribution, template, 'stress');
@@ -327,5 +365,96 @@ describe('PPLNS Regtest — 50-miner stress', () => {
         expect(balancesAfterReplay).toEqual(balancesBeforeReplay);
 
         console.log(`✅ 50-miner stress: block submit clean, distribution consistent, replay is no-op`);
+    }, 180_000);
+
+    it('coinbase weight stays within budget (50000 WU) under full-budget P2WPKH/P2TR mix', async () => {
+        // Belt-and-braces test for the assumption that COINBASE_OUTPUT_WEIGHT
+        // = 172 (P2TR upper bound) is a SAFE upper bound for the trim formula
+        // in coinbase-distribution.ts.
+        //
+        // What this protects against:
+        //   - Someone lowering COINBASE_OUTPUT_WEIGHT to e.g. 124 (P2WPKH)
+        //     "to be more accurate" — would silently overshoot the budget
+        //     when miners use Taproot.
+        //   - Someone trimming COINBASE_BASE_WEIGHT below the varint-grow
+        //     headroom that applies once output count crosses 252.
+        //   - Someone adding a new coinbase output (e.g. extra OP_RETURN)
+        //     without updating the trim formula.
+        //   - POOL_IDENTIFIER getting bumped to a length that pushes scriptSig
+        //     past what BASE_WEIGHT accounts for.
+        //
+        // What this does NOT need to prove (already guaranteed by config):
+        //   - Block fits under MAX_BLOCK_WEIGHT in production. Bitcoin Core
+        //     is configured with `blockreservedweight=50000`, so its
+        //     getblocktemplate already leaves exactly 50000 WU free for the
+        //     coinbase. As long as our coinbase stays ≤ 50000 WU, the
+        //     overall block-weight invariant holds by construction.
+        //
+        // Sizing: with budget 50000 WU and 1 fee output:
+        //   maxMinerOutputs = floor((50000 - 328 - 188 - 172) / 172) = 286
+        // We feed 320 eligible miners → trim must drop 320 - 286 = 34.
+        // The result is a coinbase that *fully exercises* the budget cap.
+        const MIXED_MINER_COUNT = 320;
+        const { service } = makeService();
+        const miners = generateMixedTypeMinerAddresses(MIXED_MINER_COUNT);
+
+        // Uniform high weight so every miner is well above the dust gate
+        // (no sub-dust filtering — we want the trim itself to be the limit).
+        // weight=10_000 with 320 miners gives each miner 1/320 of the
+        // miner-cut, far above DUST_LIMIT_SATS even at the lowest realistic
+        // regtest reward.
+        const submissions: Promise<void>[] = [];
+        for (let i = 0; i < MIXED_MINER_COUNT; i++) {
+            for (let s = 0; s < 3; s++) {
+                submissions.push(service.recordShare(miners[i], 10_000));
+            }
+        }
+        await Promise.all(submissions);
+
+        const template = await rpcCall('getblocktemplate', [{ rules: ['segwit'] }]);
+        const blockReward = template.coinbasevalue;
+        const distribution = await service.getPayoutDistribution(blockReward);
+
+        // Sanity: dust filter didn't kick in for these uniform-weight miners.
+        for (const d of distribution) {
+            const sats = Math.floor((d.percent / 100) * blockReward);
+            expect(sats).toBeGreaterThanOrEqual(DUST_LIMIT_SATS);
+        }
+
+        // 1. Trim ACTUALLY happened — distribution.length is bounded by the
+        //    weight-budget formula, not by miner count. With fee output
+        //    present, max ≈ 287 (286 miners + 1 fee). The exact bound also
+        //    depends on bonus-output presence, so we just assert it's
+        //    strictly less than (miners + fee).
+        expect(distribution.length).toBeLessThan(MIXED_MINER_COUNT + 1);
+        expect(distribution.length).toBeGreaterThan(0);
+
+        // 2. Build the coinbase via the production MiningJob path and read
+        //    back the ACTUAL serialized weight Bitcoin Core will see. This is
+        //    the load-bearing assertion: the trim formula's prediction must
+        //    not undershoot reality, regardless of the address-type mix.
+        const { submitResult, coinbaseTx, block } = await assembleWithMiningJobAndTemplate(
+            distribution, template, 'budget-cap',
+        );
+        const coinbaseWeight = coinbaseTx.weight();
+        expect(coinbaseWeight).toBeLessThanOrEqual(DEFAULT_COINBASE_WEIGHT_BUDGET);
+
+        // 3. Production-safety invariant: total block weight under the cap.
+        //    Holds trivially on regtest (empty mempool) but the assertion
+        //    documents the relationship the production config relies on.
+        //    `block.weight()` includes header + tx-count varint + every tx
+        //    (coinbase + mempool txs the template carries).
+        const totalBlockWeight = block.weight();
+        expect(totalBlockWeight).toBeLessThanOrEqual(4_000_000);
+
+        // 4. The block was actually accepted by bitcoind — proves the trimmed
+        //    coinbase is structurally valid even at the busy end of the budget.
+        expect(submitResult).toBeNull();
+
+        console.log(
+            `✅ Budget cap: ${MIXED_MINER_COUNT} miners (P2WPKH/P2TR mix) → ` +
+            `${distribution.length} outputs, coinbase=${coinbaseWeight} WU ` +
+            `(budget=${DEFAULT_COINBASE_WEIGHT_BUDGET}, headroom=${DEFAULT_COINBASE_WEIGHT_BUDGET - coinbaseWeight} WU)`
+        );
     }, 180_000);
 });

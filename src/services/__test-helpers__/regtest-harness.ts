@@ -124,7 +124,7 @@ export async function assembleWithMiningJobAndTemplate(
     template: any,
     testId: string,
     configService?: any,
-): Promise<{ submitResult: any; coinbaseTx: bitcoinjs.Transaction; miningJob: MiningJob }> {
+): Promise<{ submitResult: any; coinbaseTx: bitcoinjs.Transaction; miningJob: MiningJob; block: bitcoinjs.Block }> {
     const jobTemplate = buildJobTemplate(template, testId);
     const cs = configService ?? makeConfigService();
 
@@ -136,7 +136,7 @@ export async function assembleWithMiningJobAndTemplate(
     const submitResult = await rpcCall('submitblock', [block.toHex(false)]);
     const coinbaseTx = miningJob.cloneCoinbaseTransaction();
 
-    return { submitResult, coinbaseTx, miningJob };
+    return { submitResult, coinbaseTx, miningJob, block };
 }
 
 // ── Nonce grinder ─────────────────────────────────────────────────
