@@ -46,6 +46,42 @@ import { PoolModeHashrateService } from '../ORM/pool-mode-hashrate/pool-mode-has
 import { PayoutMode } from './interfaces/unified-stratum.interfaces';
 
 
+/**
+ * ckpool-style per-job difficulty clamp (stratifier.c:6200-6205, comment
+ * preserved): when a vardiff ratchet bumps the session difficulty up,
+ * miner firmware typically only applies the new target on the *next*
+ * `mining.notify` it receives — shares for jobs already in flight were
+ * legitimately computed against the OLD target. Without this clamp those
+ * shares get rejected as "Difficulty too low" even though the miner did
+ * exactly what we told it to do. Pool's response: accept & credit such
+ * shares against the OLD diff (or the new one, whichever is lower).
+ *
+ * `jobIdInt` is `parseInt(job.jobId, 16)` — the SV1 jobs service hands
+ * out monotonic integers serialized as hex (stratum-v1-jobs.service.ts:
+ * 187), so a numeric `<` is safe.
+ *
+ * Returns the difficulty to use for BOTH the validation `>=` check AND
+ * downstream accounting (PPLNS recordShare, group-solo recordShare,
+ * per-mode hashrate, share totals). Keeping these in lock-step prevents
+ * the miner from getting credit at the post-ratchet diff for work they
+ * actually did at the pre-ratchet diff.
+ */
+export function effectiveJobDifficulty(
+    jobIdInt: number,
+    currentDiff: number,
+    oldDiff: number,
+    diffChangeJobId: number | null,
+): number {
+    if (diffChangeJobId == null || !Number.isFinite(jobIdInt)) {
+        return currentDiff;
+    }
+    if (jobIdInt < diffChangeJobId) {
+        return Math.min(currentDiff, oldDiff);
+    }
+    return currentDiff;
+}
+
+
 export class StratumV1Client {
 
     private clientSubscription: SubscriptionMessage;
@@ -61,6 +97,12 @@ export class StratumV1Client {
     private readonly initialDifficulty: number;
     private sessionDifficulty: number;
     private pendingSessionDifficulty: number | null = null;
+    // ckpool-style vardiff race window state (see effectiveJobDifficulty
+    // above). Both fields advance only inside checkDifficulty(); reading
+    // them needs no locking because share validation runs on the same
+    // event-loop turn as the ratchet.
+    private oldSessionDifficulty: number;
+    private diffChangeJobId: number | null = null;
     private deviceOnlineNotified = false;
     private deviceOfflineNotified = false;
 
@@ -152,6 +194,7 @@ export class StratumV1Client {
             ? Math.max(rawInitial, this.minimumDifficulty)
             : rawInitial;
         this.sessionDifficulty = this.initialDifficulty;
+        this.oldSessionDifficulty = this.initialDifficulty;
         this.pendingSessionDifficulty = this.sessionDifficulty;
 
         const networkConfig = this.configService.get('NETWORK');
@@ -1057,15 +1100,29 @@ export class StratumV1Client {
         const header = updatedJobBlock.toBuffer(true);
         const { submissionDifficulty } = DifficultyUtils.calculateDifficulty(header);
 
-        //console.log(`DIFF: ${submissionDifficulty} of ${this.sessionDifficulty} from ${this.clientAuthorization.worker + '.' + this.sessionId}`);
+        // ckpool-style per-job clamp: a share for a job that predates the
+        // most recent vardiff ratchet is evaluated against MIN(current,
+        // old) — both for the >= validation AND for accounting, so the
+        // miner gets credit for exactly the work the job target asked
+        // for. Reject paths below intentionally still log against
+        // sessionDifficulty (current operational state).
+        const submittedJobIdInt = parseInt(submission.jobId, 16);
+        const effectiveDiff = effectiveJobDifficulty(
+            submittedJobIdInt,
+            this.sessionDifficulty,
+            this.oldSessionDifficulty,
+            this.diffChangeJobId,
+        );
+
+        //console.log(`DIFF: ${submissionDifficulty} of ${effectiveDiff} from ${this.clientAuthorization.worker + '.' + this.sessionId}`);
 
 
-        if (submissionDifficulty >= this.sessionDifficulty) {
+        if (submissionDifficulty >= effectiveDiff) {
             // Send success response immediately for minimum latency
             this.write(JSON.stringify(submission.response()) + '\n');
 
             // Accounting and block submission below — all fully awaited, nothing skipped
-            await this.poolShareStatisticsService.addAcceptedShare(this.sessionDifficulty);
+            await this.poolShareStatisticsService.addAcceptedShare(effectiveDiff);
 
             if (submissionDifficulty >= jobTemplate.blockData.networkDifficulty) {
                 console.log('!!! BLOCK FOUND !!!');
@@ -1109,10 +1166,10 @@ export class StratumV1Client {
             }
             try {
                 // Update live hashrate calculation
-                this.statistics.updateHashRate(this.sessionDifficulty);
+                this.statistics.updateHashRate(effectiveDiff);
 
                 // Persist to Redis atomically (stateless service)
-                await this.clientStatisticsService.addAcceptedShare(this.entity, this.sessionDifficulty);
+                await this.clientStatisticsService.addAcceptedShare(this.entity, effectiveDiff);
 
                 // Record share — PPLNS port overrides group membership, matching
                 // the coinbase-build + block-found routing above. After the
@@ -1136,14 +1193,14 @@ export class StratumV1Client {
                     if (warmupCleared) {
                         await this.pplnsService.recordShare(
                             this.clientAuthorization.address,
-                            this.sessionDifficulty,
+                            effectiveDiff,
                         );
                     }
                     effectiveMode = 'pplns';
                 } else if (shareGroupId) {
                     await this.groupSoloService!.recordShare(
                         this.clientAuthorization.address,
-                        this.sessionDifficulty,
+                        effectiveDiff,
                     );
                     effectiveMode = 'group-solo';
                 } else {
@@ -1152,12 +1209,12 @@ export class StratumV1Client {
                     effectiveMode = 'solo';
                 }
                 await this.minerActiveModeService?.mark(this.clientAuthorization.address, effectiveMode);
-                await this.poolModeHashrateService?.incrementAccepted(effectiveMode, this.sessionDifficulty);
+                await this.poolModeHashrateService?.incrementAccepted(effectiveMode, effectiveDiff);
 
                 this.shareTotalsCacheService.increment(
                     this.clientAuthorization.address,
                     this.clientAuthorization.worker,
-                    this.sessionDifficulty,
+                    effectiveDiff,
                 );
                 const now = new Date();
                 // only update every minute
@@ -1270,6 +1327,13 @@ export class StratumV1Client {
         if (targetDiff != this.sessionDifficulty) {
             //console.log(`Adjusting ${this.sessionId} difficulty from ${this.sessionDifficulty} to ${targetDiff}`);
             if (!Number.isFinite(targetDiff)) return;
+            // Snapshot the boundary BEFORE the ratchet: any job whose id
+            // is < the upcoming next-id was issued under the old diff.
+            // getNextId() returns the current counter value; addJob()
+            // bumps it, so this is exactly the id the next sendNewMiningJob
+            // call will assign (stratum-v1-jobs.service.ts:185-188).
+            this.oldSessionDifficulty = this.sessionDifficulty;
+            this.diffChangeJobId = parseInt(this.stratumV1JobsService.getNextId(), 16);
             this.sessionDifficulty = targetDiff;
             await this.recordSessionDifficulty();
 

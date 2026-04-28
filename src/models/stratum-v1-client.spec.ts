@@ -2,7 +2,7 @@ jest.mock('node-telegram-bot-api', () => jest.fn());
 
 import { Subscription } from 'rxjs';
 import * as net from 'net';
-import { StratumV1Client } from './StratumV1Client';
+import { StratumV1Client, effectiveJobDifficulty } from './StratumV1Client';
 
 interface CreateClientOptions {
   overrides?: Record<string, any>;
@@ -188,5 +188,37 @@ describe('StratumV1Client cpuminer fallback', () => {
     expect((client as any).sessionDifficulty).toBe(1000000);
     expect((client as any).usedSuggestedDifficulty).toBe(false);
     socket.destroy();
+  });
+});
+
+describe('effectiveJobDifficulty (ckpool-style vardiff race clamp)', () => {
+  it('returns currentDiff when no ratchet has happened yet', () => {
+    expect(effectiveJobDifficulty(42, 100, 100, null)).toBe(100);
+  });
+
+  it('clamps to MIN(current, old) for jobs issued before the ratchet (diff up)', () => {
+    // Ratchet from 100 → 200 at jobId 50. A share for job 49 (pre-ratchet)
+    // was computed against the old target; accept it at the old diff.
+    expect(effectiveJobDifficulty(49, 200, 100, 50)).toBe(100);
+  });
+
+  it('uses currentDiff for jobs issued at or after the ratchet boundary', () => {
+    // The ratchet boundary IS the next jobId — so jobId == diffChangeJobId
+    // is post-ratchet (the new job sent with clearJobs=true).
+    expect(effectiveJobDifficulty(50, 200, 100, 50)).toBe(200);
+    expect(effectiveJobDifficulty(51, 200, 100, 50)).toBe(200);
+  });
+
+  it('also clamps when diff ratchets DOWN (mirrors ckpool symmetry)', () => {
+    // Less common but kept consistent with ckpool stratifier.c:6204-6205.
+    // MIN(100, 200) = 100 — share at submissionDiff 150 on an old job
+    // would be accepted (150 ≥ 100) instead of rejected (150 < 200).
+    expect(effectiveJobDifficulty(49, 100, 200, 50)).toBe(100);
+  });
+
+  it('falls back to currentDiff if the submitted jobId is unparseable', () => {
+    // Real-world: every SV1 jobId is a hex int from getNextId(). NaN
+    // means a malformed submission; safest fallback is current diff.
+    expect(effectiveJobDifficulty(NaN, 200, 100, 50)).toBe(200);
   });
 });
