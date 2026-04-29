@@ -79,35 +79,34 @@ describe('LiveHashrateService', () => {
   });
 
   describe('getPoolLiveHashrate', () => {
-    it('uses mGet (batch) instead of sequential get calls', async () => {
-      const ts1 = ALIGNED_NOW - 60000;
-      const ts2 = ALIGNED_NOW;
+    // 1h lookback at 60s buckets = 61 bucket keys (inclusive of both endpoints).
+    const expectedPoolKeys1h = (() => {
+      const start = ALIGNED_NOW - 3600 * 1000;
+      const out: string[] = [];
+      for (let ts = start; ts <= ALIGNED_NOW; ts += 60000) out.push(`livehash:pool:${ts}`);
+      return out;
+    })();
 
-      setupScan([`livehash:pool:${ts1}`, `livehash:pool:${ts2}`]);
-      mockRedis.mGet.mockResolvedValue([
-        JSON.stringify({ hashrate: 1000 }),
-        JSON.stringify({ hashrate: 2000 }),
-      ]);
+    it('uses mGet (batch) over deterministic bucket keys, not SCAN', async () => {
+      mockRedis.mGet.mockResolvedValue(new Array(expectedPoolKeys1h.length).fill(null));
 
       await service.getPoolLiveHashrate(1);
 
+      expect(mockRedis.scan).not.toHaveBeenCalled();
       expect(mockRedis.get).not.toHaveBeenCalled();
       expect(mockRedis.mGet).toHaveBeenCalledTimes(1);
-      expect(mockRedis.mGet).toHaveBeenCalledWith([
-        `livehash:pool:${ts1}`,
-        `livehash:pool:${ts2}`,
-      ]);
+      expect(mockRedis.mGet).toHaveBeenCalledWith(expectedPoolKeys1h);
     });
 
     it('returns correct hashrate data points within the time window', async () => {
       const ts1 = ALIGNED_NOW - 60000;
       const ts2 = ALIGNED_NOW;
-
-      setupScan([`livehash:pool:${ts1}`, `livehash:pool:${ts2}`]);
-      mockRedis.mGet.mockResolvedValue([
-        JSON.stringify({ hashrate: 1500 }),
-        JSON.stringify({ hashrate: 2500 }),
-      ]);
+      const idx1 = expectedPoolKeys1h.indexOf(`livehash:pool:${ts1}`);
+      const idx2 = expectedPoolKeys1h.indexOf(`livehash:pool:${ts2}`);
+      const values: (string | null)[] = new Array(expectedPoolKeys1h.length).fill(null);
+      values[idx1] = JSON.stringify({ hashrate: 1500 });
+      values[idx2] = JSON.stringify({ hashrate: 2500 });
+      mockRedis.mGet.mockResolvedValue(values);
 
       const result = await service.getPoolLiveHashrate(1);
 
@@ -117,69 +116,56 @@ describe('LiveHashrateService', () => {
       expect(point2?.data).toBe(2500);
     });
 
-    it('filters out keys outside the requested time window', async () => {
-      const inside = ALIGNED_NOW - 30 * 60000;          // 30 min ago — inside 1h window
-      const outside = ALIGNED_NOW - 3 * 3600 * 1000;   // 3 hours ago — outside 1h window
-
-      setupScan([`livehash:pool:${inside}`, `livehash:pool:${outside}`]);
-      mockRedis.mGet.mockResolvedValue([JSON.stringify({ hashrate: 999 })]);
+    it('only requests keys inside the requested time window', async () => {
+      mockRedis.mGet.mockResolvedValue(new Array(expectedPoolKeys1h.length).fill(null));
 
       await service.getPoolLiveHashrate(1);
 
-      // mGet should only receive the key within the window
-      expect(mockRedis.mGet).toHaveBeenCalledWith([`livehash:pool:${inside}`]);
+      const args = mockRedis.mGet.mock.calls[0][0] as string[];
+      // Every requested key must be within [alignedStart, alignedNow]
+      const alignedStart = ALIGNED_NOW - 3600 * 1000;
+      for (const k of args) {
+        const ts = parseInt(k.split(':').pop() as string, 10);
+        expect(ts).toBeGreaterThanOrEqual(alignedStart);
+        expect(ts).toBeLessThanOrEqual(ALIGNED_NOW);
+      }
     });
 
-    it('skips mGet entirely when no keys are in range', async () => {
-      const outside = ALIGNED_NOW - 5 * 3600 * 1000;
-      setupScan([`livehash:pool:${outside}`]);
-
-      await service.getPoolLiveHashrate(1);
-
-      expect(mockRedis.mGet).not.toHaveBeenCalled();
-    });
-
-    it('returns empty array when scan finds no keys', async () => {
-      setupScan([]);
+    it('returns empty array when no buckets contain data (matches old SCAN behavior)', async () => {
+      mockRedis.mGet.mockResolvedValue(new Array(expectedPoolKeys1h.length).fill(null));
 
       const result = await service.getPoolLiveHashrate(1);
 
       expect(result).toEqual([]);
-      expect(mockRedis.mGet).not.toHaveBeenCalled();
     });
   });
 
   describe('getAddressLiveHashrate', () => {
     const ADDR = 'bc1qtest123';
+    const expectedAddrKeys1h = (() => {
+      const start = ALIGNED_NOW - 3600 * 1000;
+      const out: string[] = [];
+      for (let ts = start; ts <= ALIGNED_NOW; ts += 60000) out.push(`livehash:addr:${ADDR}:${ts}`);
+      return out;
+    })();
 
-    it('uses mGet (batch) instead of sequential get calls', async () => {
-      const ts1 = ALIGNED_NOW - 60000;
-      const ts2 = ALIGNED_NOW;
-
-      setupScan([
-        `livehash:addr:${ADDR}:${ts1}`,
-        `livehash:addr:${ADDR}:${ts2}`,
-      ]);
-      mockRedis.mGet.mockResolvedValue([
-        JSON.stringify({ hashrate: 100 }),
-        JSON.stringify({ hashrate: 200 }),
-      ]);
+    it('uses mGet (batch) over deterministic bucket keys, not SCAN', async () => {
+      mockRedis.mGet.mockResolvedValue(new Array(expectedAddrKeys1h.length).fill(null));
 
       await service.getAddressLiveHashrate(ADDR, 1);
 
+      expect(mockRedis.scan).not.toHaveBeenCalled();
       expect(mockRedis.get).not.toHaveBeenCalled();
       expect(mockRedis.mGet).toHaveBeenCalledTimes(1);
-      expect(mockRedis.mGet).toHaveBeenCalledWith([
-        `livehash:addr:${ADDR}:${ts1}`,
-        `livehash:addr:${ADDR}:${ts2}`,
-      ]);
+      expect(mockRedis.mGet).toHaveBeenCalledWith(expectedAddrKeys1h);
     });
 
     it('returns correct data points for the address', async () => {
       const ts = ALIGNED_NOW - 60000;
-
-      setupScan([`livehash:addr:${ADDR}:${ts}`]);
-      mockRedis.mGet.mockResolvedValue([JSON.stringify({ hashrate: 500 })]);
+      const idx = expectedAddrKeys1h.indexOf(`livehash:addr:${ADDR}:${ts}`);
+      const values: (string | null)[] = new Array(expectedAddrKeys1h.length).fill(null);
+      values[idx] = JSON.stringify({ hashrate: 500 });
+      mockRedis.mGet.mockResolvedValue(values);
 
       const result = await service.getAddressLiveHashrate(ADDR, 1);
 
@@ -187,23 +173,22 @@ describe('LiveHashrateService', () => {
       expect(point?.data).toBe(500);
     });
 
-    it('filters out keys outside the time window', async () => {
-      const inside = ALIGNED_NOW - 30 * 60000;
-      const outside = ALIGNED_NOW - 5 * 3600 * 1000;
-
-      setupScan([
-        `livehash:addr:${ADDR}:${inside}`,
-        `livehash:addr:${ADDR}:${outside}`,
-      ]);
-      mockRedis.mGet.mockResolvedValue([JSON.stringify({ hashrate: 777 })]);
+    it('only requests keys inside the requested time window', async () => {
+      mockRedis.mGet.mockResolvedValue(new Array(expectedAddrKeys1h.length).fill(null));
 
       await service.getAddressLiveHashrate(ADDR, 1);
 
-      expect(mockRedis.mGet).toHaveBeenCalledWith([`livehash:addr:${ADDR}:${inside}`]);
+      const args = mockRedis.mGet.mock.calls[0][0] as string[];
+      const alignedStart = ALIGNED_NOW - 3600 * 1000;
+      for (const k of args) {
+        const ts = parseInt(k.split(':').pop() as string, 10);
+        expect(ts).toBeGreaterThanOrEqual(alignedStart);
+        expect(ts).toBeLessThanOrEqual(ALIGNED_NOW);
+      }
     });
 
-    it('returns empty array when no keys found', async () => {
-      setupScan([]);
+    it('returns empty array when no buckets contain data (matches old SCAN behavior)', async () => {
+      mockRedis.mGet.mockResolvedValue(new Array(expectedAddrKeys1h.length).fill(null));
 
       const result = await service.getAddressLiveHashrate(ADDR, 1);
 

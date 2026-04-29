@@ -122,7 +122,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2048M
+          memory: 4096M
     networks:
       - bitcoin
     depends_on:

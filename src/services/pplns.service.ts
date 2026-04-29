@@ -312,11 +312,27 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         address = normalizeBtcAddress(address);
         if (!address) return;
 
+        // INCR has to land first because its return value becomes the zAdd
+        // score (deterministic ordering for trim). The remaining three
+        // writes go into one MULTI/EXEC: one round-trip instead of three,
+        // and the zset / total / per-address aggregate update atomically
+        // on this connection. Tightens consistency between the raw share
+        // set and the WINDOW_BY_ADDRESS hash that the hot read paths now
+        // depend on. The fallback handles redis clients without multi()
+        // (e.g. minimal test harnesses) — semantically identical, slower.
         const counter = await this.redis.incr(REDIS_KEY_COUNTER);
         const entry = `${address}:${difficulty}:${Date.now()}`;
-        await this.redis.zAdd(REDIS_KEY_SHARES, { score: counter, value: entry });
-        await this.redis.incrByFloat(REDIS_KEY_WINDOW_TOTAL, difficulty);
-        await this.redis.hIncrByFloat(REDIS_KEY_WINDOW_BY_ADDRESS, address, difficulty);
+        if (typeof this.redis.multi === 'function') {
+            await this.redis.multi()
+                .zAdd(REDIS_KEY_SHARES, { score: counter, value: entry })
+                .incrByFloat(REDIS_KEY_WINDOW_TOTAL, difficulty)
+                .hIncrByFloat(REDIS_KEY_WINDOW_BY_ADDRESS, address, difficulty)
+                .exec();
+        } else {
+            await this.redis.zAdd(REDIS_KEY_SHARES, { score: counter, value: entry });
+            await this.redis.incrByFloat(REDIS_KEY_WINDOW_TOTAL, difficulty);
+            await this.redis.hIncrByFloat(REDIS_KEY_WINDOW_BY_ADDRESS, address, difficulty);
+        }
 
         this.cachedDistribution = null;
 
@@ -826,17 +842,19 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
             return { totalShares: 0, windowSize: 0, minerCount: 0 };
         }
 
+        // Read the per-address aggregate hash instead of zRange-ing the raw
+        // share set. The hash is maintained lock-step with REDIS_KEY_SHARES
+        // by recordShare/trimWindow and falls back to the raw set if empty
+        // (see readWindowByAddress). distinct-address count and total stay
+        // semantically identical to the previous zRange-based path; cost
+        // drops from O(N shares) to O(N distinct miners).
         const totalStr = await this.redis.get(REDIS_KEY_WINDOW_TOTAL);
-        const entries = await this.redis.zRange(REDIS_KEY_SHARES, 0, -1);
-        const miners = new Set<string>();
-        for (const entry of (entries ?? [])) {
-            miners.add(entry.split(':')[0]);
-        }
+        const byAddr = await this.readWindowByAddress();
 
         return {
             totalShares: parseFloat(totalStr) || 0,
             windowSize: this.getWindowSize(),
-            minerCount: miners.size,
+            minerCount: byAddr.size,
         };
     }
 
@@ -860,17 +878,16 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         let currentWindowPercent = 0;
 
         if (this.redis) {
-            const entries = await this.redis.zRange(REDIS_KEY_SHARES, 0, -1);
+            // Read aggregate hash (with raw-set fallback) instead of zRange
+            // 0 -1 over the share window. Both addressShares and totalShares
+            // match the previous semantics: the hash is maintained as the
+            // diff-1 sum per address, and summing its values yields the same
+            // total the old loop computed from the raw entries.
+            const byAddr = await this.readWindowByAddress();
+            const addressShares = byAddr.get(address) ?? 0;
             let totalShares = 0;
-            let addressShares = 0;
-            for (const entry of (entries ?? [])) {
-                const parts = entry.split(':');
-                const diff = parseFloat(parts[1]) || 0;
-                totalShares += diff;
-                if (parts[0] === address) {
-                    addressShares += diff;
-                }
-            }
+            for (const v of byAddr.values()) totalShares += v;
+
             currentWindowShares = addressShares;
             if (totalShares > 0) {
                 currentWindowPercent = (addressShares / totalShares) * 100;
@@ -888,17 +905,14 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
     async getCurrentDistribution(): Promise<{ address: string; totalShares: number; percent: number }[]> {
         if (!this.redis) return [];
 
-        const entries = await this.redis.zRange(REDIS_KEY_SHARES, 0, -1);
-        if (!entries || entries.length === 0) return [];
+        // Read aggregate hash (with raw-set fallback) instead of zRange
+        // 0 -1. Each map entry already holds the diff-1 sum per address —
+        // the previous loop reconstructed exactly this from the raw entries.
+        const addressShares = await this.readWindowByAddress();
+        if (addressShares.size === 0) return [];
 
-        const addressShares = new Map<string, number>();
         let totalShares = 0;
-        for (const entry of entries) {
-            const parts = entry.split(':');
-            const shares = parseFloat(parts[1]) || 0;
-            addressShares.set(parts[0], (addressShares.get(parts[0]) ?? 0) + shares);
-            totalShares += shares;
-        }
+        for (const v of addressShares.values()) totalShares += v;
 
         return Array.from(addressShares.entries())
             .map(([address, shares]) => ({

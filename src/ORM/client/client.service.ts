@@ -332,6 +332,15 @@ export class ClientService implements OnModuleDestroy {
         return result;
     }
 
+    public async getTotalHashrateForAddresses(addresses: string[]): Promise<number> {
+        if (!addresses || addresses.length === 0) return 0;
+        const result = await this.clientRepository.createQueryBuilder('client')
+            .select('COALESCE(SUM(client.hashRate), 0)', 'totalHashRate')
+            .where('client.address IN (:...addresses)', { addresses })
+            .getRawOne();
+        return parseFloat(result?.totalHashRate ?? '0');
+    }
+
     /** Same aggregation as `getUserAgents` but restricted to a specific set of addresses. */
     public async getUserAgentsForAddresses(addresses: string[]) {
         if (!addresses || addresses.length === 0) return [];

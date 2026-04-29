@@ -213,7 +213,33 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Get pool-wide live hashrate for a time range
+   * Enumerate the deterministic bucket keys covering [alignedStart, alignedEnd]
+   * at 60 s granularity. Used by the read paths to skip a SCAN over the entire
+   * livehash:* keyspace (~500k keys at ~5k miners) and go straight to MGET.
+   */
+  private enumerateBucketKeys(
+    prefix: string,
+    alignedStart: number,
+    alignedEnd: number,
+  ): { keys: string[]; timestamps: number[] } {
+    const keys: string[] = [];
+    const timestamps: number[] = [];
+    for (let ts = alignedStart; ts <= alignedEnd; ts += 60000) {
+      keys.push(`${prefix}:${ts}`);
+      timestamps.push(ts);
+    }
+    return { keys, timestamps };
+  }
+
+  /**
+   * Get pool-wide live hashrate for a time range.
+   *
+   * Bucket keys are deterministic (`livehash:pool:{minute_ms}`), so the read
+   * generates the candidate key set directly and issues one MGET. Earlier
+   * code did SCAN MATCH `livehash:pool:*` first; that scaled with the total
+   * livehash keyspace (incl. the 100× larger `livehash:addr:*` set),
+   * regardless of how few pool keys existed.
+   * Output (after fillGaps) is unchanged: missing buckets surface as 0.
    */
   async getPoolLiveHashrate(lookbackHours: number = 1): Promise<HashrateDataPoint[]> {
     if (!this.redis) {
@@ -227,30 +253,22 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
       const alignedNow = Math.floor(now / 60000) * 60000 - 60000;
       const alignedStartTime = alignedNow - lookbackMs;
 
-      const keys = await this.scanKeys(`${this.POOL_PREFIX}:*`);
+      const { keys, timestamps } = this.enumerateBucketKeys(
+        this.POOL_PREFIX,
+        alignedStartTime,
+        alignedNow,
+      );
       const dataPoints: Array<{ label: number; data: number }> = [];
 
-      const validKeys: string[] = [];
-      const validTimestamps: number[] = [];
-      for (const key of keys) {
-        const timestampStr = key.substring(this.POOL_PREFIX.length + 1);
-        const timestamp = parseInt(timestampStr, 10);
-        if (!Number.isNaN(timestamp) && timestamp >= alignedStartTime && timestamp <= alignedNow) {
-          validKeys.push(key);
-          validTimestamps.push(timestamp);
-        }
-      }
-
-      if (validKeys.length > 0) {
-        const values = await this.redis.mGet(validKeys);
-        for (let i = 0; i < validKeys.length; i++) {
+      if (keys.length > 0) {
+        const values = await this.redis.mGet(keys);
+        for (let i = 0; i < keys.length; i++) {
+          if (!values[i]) continue;
           try {
-            if (values[i]) {
-              const parsed = JSON.parse(values[i]);
-              dataPoints.push({ label: validTimestamps[i], data: parsed.hashrate ?? 0 });
-            }
+            const parsed = JSON.parse(values[i]);
+            dataPoints.push({ label: timestamps[i], data: parsed.hashrate ?? 0 });
           } catch (error) {
-            console.warn(`[LiveHashrate] Error parsing pool key ${validKeys[i]}:`, error);
+            console.warn(`[LiveHashrate] Error parsing pool key ${keys[i]}:`, error);
           }
         }
       }
@@ -264,7 +282,8 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Get address-specific live hashrate for a time range
+   * Get address-specific live hashrate for a time range.
+   * Same direct-bucket-MGET approach as `getPoolLiveHashrate`.
    */
   async getAddressLiveHashrate(
     address: string,
@@ -281,30 +300,20 @@ export class LiveHashrateService implements OnModuleInit, OnModuleDestroy {
       const alignedNow = Math.floor(now / 60000) * 60000 - 60000;
       const alignedStartTime = alignedNow - lookbackMs;
 
-      const keys = await this.scanKeys(`${this.ADDR_PREFIX}:${address}:*`);
+      const { keys, timestamps } = this.enumerateBucketKeys(
+        `${this.ADDR_PREFIX}:${address}`,
+        alignedStartTime,
+        alignedNow,
+      );
       const dataPoints: Array<{ label: number; data: number }> = [];
 
-      const validKeys: string[] = [];
-      const validTimestamps: number[] = [];
-      for (const key of keys) {
-        const parts = key.split(':');
-        if (parts.length >= 4) {
-          const timestamp = parseInt(parts[parts.length - 1], 10);
-          if (!Number.isNaN(timestamp) && timestamp >= alignedStartTime && timestamp <= alignedNow) {
-            validKeys.push(key);
-            validTimestamps.push(timestamp);
-          }
-        }
-      }
-
-      if (validKeys.length > 0) {
-        const values = await this.redis.mGet(validKeys);
-        for (let i = 0; i < validKeys.length; i++) {
+      if (keys.length > 0) {
+        const values = await this.redis.mGet(keys);
+        for (let i = 0; i < keys.length; i++) {
+          if (!values[i]) continue;
           try {
-            if (values[i]) {
-              const parsed = JSON.parse(values[i]);
-              dataPoints.push({ label: validTimestamps[i], data: parsed.hashrate ?? 0 });
-            }
+            const parsed = JSON.parse(values[i]);
+            dataPoints.push({ label: timestamps[i], data: parsed.hashrate ?? 0 });
           } catch (error) {
             console.warn(`[LiveHashrate] Error parsing address key for ${address}:`, error);
           }

@@ -4,7 +4,9 @@ import { TelegramService } from './telegram.service';
 const onTextMock = jest.fn();
 const onMock = jest.fn();
 const setMyCommandsMock = jest.fn().mockResolvedValue(undefined);
-const sendMessageMock = jest.fn().mockResolvedValue(undefined);
+const sendMessageMock = jest.fn().mockResolvedValue({ message_id: 42 });
+const answerCallbackQueryMock = jest.fn().mockResolvedValue(true);
+const editMessageTextMock = jest.fn().mockResolvedValue(true);
 
 jest.mock('node-telegram-bot-api', () =>
     jest.fn().mockImplementation(() => ({
@@ -12,6 +14,8 @@ jest.mock('node-telegram-bot-api', () =>
         on: onMock,
         setMyCommands: setMyCommandsMock,
         sendMessage: sendMessageMock,
+        answerCallbackQuery: answerCallbackQueryMock,
+        editMessageText: editMessageTextMock,
     })),
 );
 
@@ -51,6 +55,9 @@ describe('TelegramService best diff commands', () => {
     const ntfyService = {
         resetBestDiffCache: jest.fn(),
     };
+    const pplnsService = {};
+    const groupService = {};
+    const groupSoloService = {};
 
     beforeEach(() => {
         jest.clearAllMocks();
@@ -85,6 +92,9 @@ describe('TelegramService best diff commands', () => {
             stratumV1Service as any,
             stratumV2Service as any,
             ntfyService as any,
+            pplnsService as any,
+            groupService as any,
+            groupSoloService as any,
         );
 
         await service.onModuleInit();
@@ -118,6 +128,9 @@ describe('TelegramService best diff commands', () => {
             stratumV1Service as any,
             stratumV2Service as any,
             ntfyService as any,
+            pplnsService as any,
+            groupService as any,
+            groupSoloService as any,
         );
 
         await service.onModuleInit();
@@ -136,11 +149,14 @@ describe('TelegramService best diff commands', () => {
         expect(sendMessageMock).toHaveBeenCalledWith(99, "Bitte gib 'on' oder 'off' an.");
     });
 
-    it('resets best diff using the default address', async () => {
+    it('resets best diff after confirming via inline keyboard', async () => {
         telegramSubscriptionsService.getDefault.mockResolvedValue({ address: '1BoatSLRHtKNngkdXEeobR76b53LETtpyT' });
         telegramSubscriptionsService.getChatSubscriptions.mockResolvedValue([
             { address: '1BoatSLRHtKNngkdXEeobR76b53LETtpyT', isDefault: true },
         ]);
+        sendMessageMock.mockResolvedValue({ message_id: 42 });
+        answerCallbackQueryMock.mockClear();
+        editMessageTextMock.mockClear();
 
         const service = new TelegramService(
             configService,
@@ -152,6 +168,9 @@ describe('TelegramService best diff commands', () => {
             stratumV1Service as any,
             stratumV2Service as any,
             ntfyService as any,
+            pplnsService as any,
+            groupService as any,
+            groupSoloService as any,
         );
 
         await service.onModuleInit();
@@ -163,21 +182,45 @@ describe('TelegramService best diff commands', () => {
             ([regex]) => regex instanceof RegExp && regex.source.includes('\\/bestdiff_reset')
         );
         expect(resetCall).toBeDefined();
-        const handler = resetCall?.[1] as (msg: any, match: RegExpExecArray | null) => Promise<void>;
+        const resetHandler = resetCall?.[1] as (msg: any, match: RegExpExecArray | null) => Promise<void>;
 
-        await handler(
+        await resetHandler(
             { chat: { id: 99 } },
             ['/bestdiff_reset'] as unknown as RegExpExecArray
         );
+
+        // Confirmation prompt is sent — no destructive side effects yet.
+        expect(sendMessageMock).toHaveBeenCalledWith(
+            99,
+            expect.stringContaining('zurücksetzen'),
+            expect.objectContaining({
+                reply_markup: expect.objectContaining({
+                    inline_keyboard: expect.any(Array),
+                }),
+            }),
+        );
+        expect(addressSettingsService.updateBestDifficulty).not.toHaveBeenCalled();
+        expect(stratumV1Service.resetBestDifficultyForAddress).not.toHaveBeenCalled();
+
+        // Simulate user tapping "Yes, reset" — fires the callback_query listener.
+        const callbackCall = onMock.mock.calls.find(([event]) => event === 'callback_query');
+        expect(callbackCall).toBeDefined();
+        const callbackHandler = callbackCall?.[1] as (query: any) => Promise<void>;
+
+        await callbackHandler({
+            id: 'q1',
+            data: 'bdr:yes',
+            message: { chat: { id: 99 }, message_id: 42 },
+        });
 
         expect(addressSettingsService.updateBestDifficulty).toHaveBeenCalledWith(address, 0, null);
         expect(ntfyService.resetBestDiffCache).toHaveBeenCalledWith(address);
         expect(stratumV1Service.resetBestDifficultyForAddress).toHaveBeenCalledWith(address);
         expect(stratumV1Service.resetClientsForAddress).not.toHaveBeenCalled();
         expect((service as any).bestDiffCache.has(address)).toBe(false);
-        expect(sendMessageMock).toHaveBeenCalledWith(
-            99,
-            'Best Difficulty für 1Boa...TtpyT zurückgesetzt.'
+        expect(editMessageTextMock).toHaveBeenCalledWith(
+            expect.stringContaining('zurückgesetzt'),
+            expect.objectContaining({ chat_id: 99, message_id: 42 }),
         );
     });
 
@@ -195,6 +238,9 @@ describe('TelegramService best diff commands', () => {
             stratumV1Service as any,
             stratumV2Service as any,
             ntfyService as any,
+            pplnsService as any,
+            groupService as any,
+            groupSoloService as any,
         );
 
         await service.onModuleInit();
@@ -248,6 +294,9 @@ describe('TelegramService best diff commands', () => {
             stratumV1Service as any,
             stratumV2Service as any,
             ntfyService as any,
+            pplnsService as any,
+            groupService as any,
+            groupSoloService as any,
         );
 
         const secondaryService = new TelegramService(
@@ -260,6 +309,9 @@ describe('TelegramService best diff commands', () => {
             stratumV1Service as any,
             stratumV2Service as any,
             ntfyService as any,
+            pplnsService as any,
+            groupService as any,
+            groupSoloService as any,
         );
 
         (primaryService as any).bestDiffCache.set(address, persistedBest);

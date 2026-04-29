@@ -19,7 +19,23 @@ function createMockRedis() {
     return h;
   };
 
-  return {
+  const incrByFloatImpl = async (key: string, amount: number) => {
+    const val = parseFloat(store.get(key) ?? '0') + amount;
+    store.set(key, val.toString());
+    return val;
+  };
+  const zAddImpl = async (_key: string, entry: { score: number; value: string }) => {
+    zset.push(entry);
+    zset.sort((a, b) => a.score - b.score);
+  };
+  const hIncrByFloatImpl = async (key: string, field: string, amount: number) => {
+    const h = getHash(key);
+    const cur = parseFloat(h.get(field) ?? '0') + amount;
+    h.set(field, cur.toString());
+    return cur;
+  };
+
+  const mock: any = {
     incr: jest.fn(async (key: string) => {
       const val = parseInt(store.get(key) ?? '0', 10) + 1;
       store.set(key, val.toString());
@@ -29,15 +45,8 @@ function createMockRedis() {
     set: jest.fn(async (key: string, value: string, _opts?: any) => { store.set(key, value); }),
     del: jest.fn(async (key: string) => { store.delete(key); hashes.delete(key); }),
     expire: jest.fn(async (_key: string, _seconds: number) => 1),
-    incrByFloat: jest.fn(async (key: string, amount: number) => {
-      const val = parseFloat(store.get(key) ?? '0') + amount;
-      store.set(key, val.toString());
-      return val;
-    }),
-    zAdd: jest.fn(async (_key: string, entry: { score: number; value: string }) => {
-      zset.push(entry);
-      zset.sort((a, b) => a.score - b.score);
-    }),
+    incrByFloat: jest.fn(incrByFloatImpl),
+    zAdd: jest.fn(zAddImpl),
     zRange: jest.fn(async (_key: string, start: number, end: number) => {
       if (end === -1) end = zset.length - 1;
       return zset.slice(start, end + 1).map(e => e.value);
@@ -51,17 +60,36 @@ function createMockRedis() {
       if (!h) return {};
       return Object.fromEntries(h.entries());
     }),
-    hIncrByFloat: jest.fn(async (key: string, field: string, amount: number) => {
-      const h = getHash(key);
-      const cur = parseFloat(h.get(field) ?? '0') + amount;
-      h.set(field, cur.toString());
-      return cur;
+    hIncrByFloat: jest.fn(hIncrByFloatImpl),
+    multi: jest.fn(() => {
+      const ops: Array<() => Promise<any>> = [];
+      const builder: any = {
+        zAdd: (key: string, entry: { score: number; value: string }) => {
+          ops.push(() => zAddImpl(key, entry));
+          return builder;
+        },
+        incrByFloat: (key: string, amt: number) => {
+          ops.push(() => incrByFloatImpl(key, amt));
+          return builder;
+        },
+        hIncrByFloat: (key: string, field: string, amt: number) => {
+          ops.push(() => hIncrByFloatImpl(key, field, amt));
+          return builder;
+        },
+        exec: async () => {
+          const results = [];
+          for (const op of ops) results.push(await op());
+          return results;
+        },
+      };
+      return builder;
     }),
     // Helpers for tests
     _getZset: () => zset,
     _getHash: (key: string) => hashes.get(key),
     _clear: () => { store.clear(); zset = []; hashes.clear(); },
   };
+  return mock;
 }
 
 // ── Mock Balance backing (service + repo over shared store) ──────

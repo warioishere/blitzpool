@@ -76,10 +76,13 @@ function createMockRedis() {
             if (!h) return {};
             return Object.fromEntries(h.entries());
         }),
-        zRem: jest.fn(async (key: string, value: string) => {
+        zRem: jest.fn(async (key: string, value: string | string[]) => {
             const z = getZ(key);
-            const idx = z.findIndex(e => e.value === value);
-            if (idx >= 0) z.splice(idx, 1);
+            const targets = Array.isArray(value) ? value : [value];
+            const targetSet = new Set(targets);
+            for (let i = z.length - 1; i >= 0; i--) {
+                if (targetSet.has(z[i].value)) z.splice(i, 1);
+            }
         }),
         // node-redis v4 cursor-based SCAN. The mock returns ALL matching
         // keys in a single page since the in-memory store is small;

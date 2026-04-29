@@ -40,4 +40,4 @@ COPY --from=build /build/dist ./dist
 COPY --from=build /build/node_modules ./node_modules
 COPY --from=build /build/package*.json ./
 
-CMD ["/usr/local/bin/node", "--max-old-space-size=1536", "dist/main"]
+CMD ["/usr/local/bin/node", "--max-old-space-size=3072", "dist/main"]

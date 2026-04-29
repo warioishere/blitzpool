@@ -38,6 +38,9 @@ describe('TelegramService device notifications', () => {
     const ntfyService = {
         resetBestDiffCache: jest.fn(),
     };
+    const pplnsService = {};
+    const groupService = {};
+    const groupSoloService = {};
 
     beforeEach(() => {
         jest.clearAllMocks();
@@ -61,6 +64,9 @@ describe('TelegramService device notifications', () => {
             stratumV1Service as any,
             {} as any,
             ntfyService as any,
+            pplnsService as any,
+            groupService as any,
+            groupSoloService as any,
         );
 
         expect(TelegramBot).toHaveBeenCalledWith('token', { polling: true });
@@ -97,6 +103,9 @@ describe('TelegramService device notifications', () => {
             stratumV1Service as any,
             {} as any,
             ntfyService as any,
+            pplnsService as any,
+            groupService as any,
+            groupSoloService as any,
         );
 
         await service.onModuleInit();
@@ -129,6 +138,9 @@ describe('TelegramService device notifications', () => {
             stratumV1Service as any,
             {} as any,
             ntfyService as any,
+            pplnsService as any,
+            groupService as any,
+            groupSoloService as any,
         );
 
         await service.onModuleInit();
@@ -162,6 +174,9 @@ describe('TelegramService device notifications', () => {
             stratumV1Service as any,
             {} as any,
             ntfyService as any,
+            pplnsService as any,
+            groupService as any,
+            groupSoloService as any,
         );
 
         await service.onModuleInit();

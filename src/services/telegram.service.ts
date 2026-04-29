@@ -7,6 +7,7 @@ import * as TelegramBot from 'node-telegram-bot-api';
 import { NumberSuffix } from '../utils/NumberSuffix';
 import { decryptMessageIfNeeded } from '../utils/message-decryptor';
 import { TelegramSubscriptionsService } from '../ORM/telegram-subscriptions/telegram-subscriptions.service';
+import { TelegramSubscriptionsEntity } from '../ORM/telegram-subscriptions/telegram-subscriptions.entity';
 import { ClientService } from '../ORM/client/client.service';
 import { AddressSettingsService } from '../ORM/address-settings/address-settings.service';
 import { ClientStatisticsService } from '../ORM/client-statistics/client-statistics.service';
@@ -14,6 +15,9 @@ import { BestDifficultyTrackerService } from '../ORM/best-difficulty-tracker/bes
 import { StratumV1Service } from './stratum-v1.service';
 import { StratumV2Service } from './stratum-v2.service';
 import { NtfyService } from './ntfy.service';
+import { PplnsService } from './pplns.service';
+import { GroupService } from './group.service';
+import { GroupSoloService } from './group-solo.service';
 import { buildStatsMessage, buildWorkersOverviewMessage } from './common-command-handlers';
 
 @Injectable()
@@ -23,6 +27,10 @@ export class TelegramService implements OnModuleInit {
     private numberSuffix: NumberSuffix;
     private bestDiffCache: Map<string, number> = new Map();
     private chatLanguages: Map<number, 'de' | 'en'> = new Map();
+    // Short-lived map for pending /bestdiff_reset confirmations.
+    // Bitcoin addresses don't fit in callback_data (64-byte limit), so the
+    // address is held here keyed by chatId:messageId and looked up on tap.
+    private pendingBestdiffResets: Map<string, { address: string; expiresAt: number }> = new Map();
     private shouldRegisterHandlers = false;
     private readonly deviceNotificationFormatters: Record<'de' | 'en', Intl.DateTimeFormat>;
 
@@ -140,7 +148,10 @@ export class TelegramService implements OnModuleInit {
         private readonly stratumV1Service: StratumV1Service,
         @Inject(forwardRef(() => StratumV2Service))
         private readonly stratumV2Service: StratumV2Service,
-        private readonly ntfyService: NtfyService
+        private readonly ntfyService: NtfyService,
+        private readonly pplnsService: PplnsService,
+        private readonly groupService: GroupService,
+        private readonly groupSoloService: GroupSoloService,
     ) {
         this.numberSuffix = new NumberSuffix();
         this.diffNotifications = (this.configService.get('TELEGRAM_DIFF_NOTIFICATIONS')?.toLowerCase() === 'true') || false;
@@ -214,8 +225,13 @@ export class TelegramService implements OnModuleInit {
             { command: '/next_difficulty', description: 'Zeigt erwartete Änderung der Netzwerk-Difficulty' },
             { command: '/stats', description: 'Zeigt die Stats für deine Miner Adresse an' },
             { command: '/show_workers', description: 'Zeigt Worker-Übersicht' },
-            { command: '/send_hourly', description: 'Stündliche Stats/Worker (on/off show_workers show_stats)' },
+            { command: '/send_hourly', description: 'Stündliche Stats/Worker-Berichte (Menü)' },
             { command: '/poolhashrate', description: 'Zeigt die aktuelle Pool-Hashrate' },
+            { command: '/pplns_status', description: 'PPLNS-Status für deine Adresse' },
+            { command: '/pplns_top', description: 'Top 10 Miner im PPLNS-Window' },
+            { command: '/group_status', description: 'Status der Gruppe deiner Adresse' },
+            { command: '/group_members', description: 'Mitglieder deiner Gruppe' },
+            { command: '/group_history', description: 'Block-Auszahlungen deiner Gruppe' },
             { command: '/remove', description: 'Adresse entfernen' },
             { command: '/show_addresses', description: 'Zeigt gespeicherte Adressen' },
             { command: '/deutsch', description: 'Bot-Antworten auf Deutsch' },
@@ -233,8 +249,13 @@ export class TelegramService implements OnModuleInit {
             { command: '/next_difficulty', description: 'Show expected network difficulty change' },
             { command: '/stats', description: 'Show stats for your miner address' },
             { command: '/show_workers', description: 'Show worker overview' },
-            { command: '/send_hourly', description: 'Hourly stats/workers (on/off show_workers show_stats)' },
+            { command: '/send_hourly', description: 'Hourly stats/worker reports (menu)' },
             { command: '/poolhashrate', description: 'Show current pool hashrate' },
+            { command: '/pplns_status', description: 'PPLNS status for your address' },
+            { command: '/pplns_top', description: 'Top 10 miners in PPLNS window' },
+            { command: '/group_status', description: 'Status of the group your address belongs to' },
+            { command: '/group_members', description: 'Members of your group' },
+            { command: '/group_history', description: 'Block payouts of your group' },
             { command: '/remove', description: 'Remove address' },
             { command: '/show_addresses', description: 'Show stored addresses' },
             { command: '/deutsch', description: 'Bot replies in German' },
@@ -245,6 +266,19 @@ export class TelegramService implements OnModuleInit {
         await this.bot.setMyCommands(commandsDe);
         await this.bot.setMyCommands(commandsDe, { language_code: 'de' });
         await this.bot.setMyCommands(commandsEn, { language_code: 'en' });
+
+        // Replace any previously configured web-app menu button with the
+        // built-in commands menu, so tapping the menu icon shows the bot
+        // commands directly. Typings on node-telegram-bot-api 0.61 don't
+        // expose this method statically.
+        const setMenuButton = (this.bot as any).setChatMenuButton;
+        if (typeof setMenuButton === 'function') {
+            try {
+                await setMenuButton.call(this.bot, { menu_button: { type: 'commands' } });
+            } catch (err) {
+                console.error('[Telegram] setChatMenuButton failed:', (err as Error).message);
+            }
+        }
 
         this.bot.onText(/\/deutsch/, (msg) => {
             this.chatLanguages.set(msg.chat.id, 'de');
@@ -265,13 +299,13 @@ export class TelegramService implements OnModuleInit {
         this.bot.onText(/\/encryption_help/, (msg) => {
             this.reply(msg.chat.id, {
                 de: `So verschlüsselst du deine BTC-Adresse:\n` +
-                    `1. Nutze das Tool: https://github.com/warioishere/blitzpool-message-encryptor-for-TG\n` +
-                    `   oder melde dich mit deiner BTC-Adresse auf dem Web-UI an und verwende den integrierten Verschlüssler.\n` +
-                    `2. Sende mir dann /subscribe <verschlüsselte Adresse>`,
+                    `1. Logge dich im Web-UI mit deiner BTC-Adresse ein.\n` +
+                    `2. Nutze den dort integrierten Verschlüssler — kopiere den ausgegebenen Text.\n` +
+                    `3. Sende mir: /subscribe <verschlüsselte Adresse>`,
                 en: `How to encrypt your BTC address:\n` +
-                    `1. Use the tool: https://github.com/warioishere/blitzpool-message-encryptor-for-TG\n` +
-                    `   or log in with your BTC address on the web UI and use the integrated encryptor.\n` +
-                    `2. Then send /subscribe <encrypted address>`
+                    `1. Log in to the web UI with your BTC address.\n` +
+                    `2. Use the integrated encryptor — copy the resulting text.\n` +
+                    `3. Send me: /subscribe <encrypted address>`
             });
         });
 
@@ -357,27 +391,31 @@ export class TelegramService implements OnModuleInit {
                 return;
             }
 
+            const lang = this.getLanguage(chatId);
+            const trimmed = this.formatAddress(address);
+            const text = lang === 'de'
+                ? `Best Difficulty für ${trimmed} wirklich zurücksetzen?`
+                : `Really reset best difficulty for ${trimmed}?`;
+            const reply_markup: TelegramBot.InlineKeyboardMarkup = {
+                inline_keyboard: [[
+                    {
+                        text: lang === 'de' ? '✅ Ja, zurücksetzen' : '✅ Yes, reset',
+                        callback_data: 'bdr:yes',
+                    },
+                    {
+                        text: lang === 'de' ? '❌ Abbrechen' : '❌ Cancel',
+                        callback_data: 'bdr:no',
+                    },
+                ]],
+            };
             try {
-                // Reset via stratum services (handles DB, cache, workers, and broadcast)
-                await this.stratumV1Service.resetBestDifficultyForAddress(address);
-                await this.stratumV2Service.resetBestDifficultyForAddress(address);
-
-                // Clear local notification service caches
-                await this.addressSettingsService.updateBestDifficulty(address, 0, null);
-                await this.trackerService.resetTracker(address);
-                this.bestDiffCache.delete(address);
-                this.ntfyService.resetBestDiffCache(address);
-
-                this.reply(chatId, {
-                    de: `Best Difficulty für ${this.formatAddress(address)} zurückgesetzt.`,
-                    en: `Best difficulty for ${this.formatAddress(address)} reset.`
+                const sent = await this.bot.sendMessage(chatId, text, { reply_markup });
+                this.pendingBestdiffResets.set(`${chatId}:${sent.message_id}`, {
+                    address,
+                    expiresAt: Date.now() + 5 * 60 * 1000,
                 });
-            } catch (error) {
-                console.error('Fehler bei /bestdiff_reset:', error);
-                this.reply(chatId, {
-                    de: 'Fehler beim Zurücksetzen der Best Difficulty. Bitte später erneut versuchen.',
-                    en: 'Failed to reset best difficulty. Please try again later.'
-                });
+            } catch (err) {
+                console.error('[Telegram] /bestdiff_reset prompt failed:', (err as Error).message);
             }
         });
 
@@ -423,39 +461,44 @@ export class TelegramService implements OnModuleInit {
             this.reply(msg.chat.id, {
                 de: `Willkommen beim BlitzPool Status Bot! 💡
 
-Du kannst mir:
-– direkt schreiben (z. B. /subscribe BitcoinAdresse)
-– oder verschlüsselt senden (z. B. über das Verschlüsselungstool)
+Erste Schritte:
+1. Adresse hinzufügen: /subscribe <bc1q…>
+2. Adressen verwalten: /show_addresses (Tap zum Wechseln/Entfernen)
+3. Alle Befehle: tippe auf das Menü-Icon ☰ unten links
 
-🔐 Du kannst mir die BTC Worker Adresse auch verschlüsselt senden:
-1. Lesst euch die README durch: https://github.com/warioishere/blitzpool-message-encryptor-for-TG/blob/master/README.md
-2a. Ladet den Python-Script für Linux und Mac herunter: https://cloud.yourdevice.ch/s/TbqdwE24jTRmtRp
-2b. Oder für Windows: https://github.com/warioishere/blitzpool-message-encryptor-for-TG/releases/tag/v1.0.0
-3a. Führt den Script im Terminal aus mit './encrypt-message.py'
-3b. Oder auf Windows mit Doppelklick auf die .exe
-4. Gebt eure BTC-Adresse ein.
-5. Sende '/subscribe <verschlüsselte Adresse>' direkt an mich.
-6. Sende '/stats <verschlüsselte Adresse>' für deine Statistiken.
-
-Ich entschlüssle ihn und reagiere genau wie bei Klartext. 🔒`,
+🔐 Adresse verschlüsselt senden? /encryption_help
+🌐 Sprache: /deutsch / /english`,
                 en: `Welcome to the BlitzPool status bot! 💡
 
-You can:
-– message me directly (e.g. /subscribe BitcoinAddress)
-– or send it encrypted (e.g. using the encryption tool)
+Getting started:
+1. Add an address: /subscribe <bc1q…>
+2. Manage addresses: /show_addresses (tap to switch/remove)
+3. All commands: tap the menu icon ☰ at the bottom left
 
-🔐 You can also send the BTC worker address encrypted:
-1. Read the README: https://github.com/warioishere/blitzpool-message-encryptor-for-TG/blob/master/README.md
-2a. Download the Python script for Linux and Mac: https://cloud.yourdevice.ch/s/TbqdwE24jTRmtRp
-2b. Or for Windows: https://github.com/warioishere/blitzpool-message-encryptor-for-TG/releases/tag/v1.0.0
-3a. Run the script with './encrypt-message.py'
-3b. Or on Windows double click the .exe
-4. Enter your BTC address.
-5. Send '/subscribe <encrypted address>' directly to me.
-6. Send '/stats <encrypted address>' for your statistics.
-
-I will decrypt it and respond just like with plain text. 🔒`
+🔐 Send an encrypted address? /encryption_help
+🌐 Language: /deutsch / /english`
             });
+        });
+
+        this.bot.onText(/\/pplns_status(?:\s+(.+))?/, async (msg, match) => {
+            const chatId = msg.chat.id;
+            await this.handlePplnsStatus(chatId, match?.[1]?.trim());
+        });
+
+        this.bot.onText(/\/pplns_top/, async (msg) => {
+            await this.handlePplnsTop(msg.chat.id);
+        });
+
+        this.bot.onText(/\/group_status(?:\s+(.+))?/, async (msg, match) => {
+            await this.handleGroupStatus(msg.chat.id, match?.[1]?.trim());
+        });
+
+        this.bot.onText(/\/group_members(?:\s+(.+))?/, async (msg, match) => {
+            await this.handleGroupMembers(msg.chat.id, match?.[1]?.trim());
+        });
+
+        this.bot.onText(/\/group_history(?:\s+(.+))?/, async (msg, match) => {
+            await this.handleGroupHistory(msg.chat.id, match?.[1]?.trim());
         });
 
         this.bot.onText(/\/difficulty/, async (msg) => {
@@ -556,12 +599,19 @@ I will decrypt it and respond just like with plain text. 🔒`
                 return;
             }
 
-            await this.telegramSubscriptionsService.removeSubscription(chatId, address);
-            this.bestDiffCache.delete(address);
-            this.reply(chatId, {
-                de: 'Adresse entfernt.',
-                en: 'Address removed.'
-            });
+            const removed = await this.telegramSubscriptionsService.removeSubscription(chatId, address);
+            if (removed) {
+                this.bestDiffCache.delete(address);
+                this.reply(chatId, {
+                    de: 'Adresse entfernt.',
+                    en: 'Address removed.'
+                });
+            } else {
+                this.reply(chatId, {
+                    de: 'Adresse war nicht gespeichert.',
+                    en: 'Address was not saved.'
+                });
+            }
         });
 
         this.bot.onText(/\/show_addresses/, async (msg) => {
@@ -574,11 +624,16 @@ I will decrypt it and respond just like with plain text. 🔒`
                 });
                 return;
             }
-            const lines = subs.map(s => `${s.isDefault ? '*' : ''}${this.formatAddress(s.address)}`).join('\n');
-            this.reply(chatId, {
-                de: `Gespeicherte Adressen:\n${lines}\n* = Standard`,
-                en: `Stored addresses:\n${lines}\n* = default`
-            });
+            const lang = this.getLanguage(chatId);
+            const { text, reply_markup } = this.buildAddressKeyboardMessage(subs, lang);
+            await this.bot.sendMessage(chatId, text, { reply_markup });
+        });
+
+        this.bot.on('callback_query', async (query) => {
+            const data = query.data ?? '';
+            if (data.startsWith('addr:')) await this.handleAddressCallback(query);
+            else if (data.startsWith('bdr:')) await this.handleBestdiffResetCallback(query);
+            else if (data.startsWith('hr:')) await this.handleHourlyCallback(query);
         });
 
         this.bot.onText(/\/show_workers(?:\s+(.+))?/, async (msg, match) => {
@@ -722,75 +777,24 @@ I will decrypt it and respond just like with plain text. 🔒`
             }
         });
 
-        this.bot.onText(/^\/send_hourly(?:\s+(\S+)(?:\s+(\S+))?(?:\s+(\S+))?)?$/, async (msg, match) => {
+        this.bot.onText(/^\/send_hourly\b.*$/, async (msg) => {
             const chatId = msg.chat.id;
-            const action = match?.[1]?.toLowerCase();
-            const arg1 = match?.[2]?.toLowerCase();
-            const arg2 = match?.[3]?.toLowerCase();
+            const lang = this.getLanguage(chatId);
 
-            // Validate action (on/off)
-            if (!action || !['on', 'off'].includes(action)) {
+            const subs = await this.telegramSubscriptionsService.getChatSubscriptions(chatId);
+            if (subs.length === 0) {
                 this.reply(chatId, {
-                    de: "Bitte gib 'on' oder 'off' an.\nVerwendung: /send_hourly on show_workers show_stats",
-                    en: "Please provide 'on' or 'off'.\nUsage: /send_hourly on show_workers show_stats"
+                    de: 'Keine Adresse gespeichert. Nutze /subscribe, um eine hinzuzufügen.',
+                    en: 'No address stored. Use /subscribe to add one.'
                 });
                 return;
             }
 
-            const enabled = action === 'on';
-
-            if (enabled) {
-                // When turning on, need at least one feature
-                const features = [arg1, arg2].filter(f => f);
-                const validFeatures = new Set(['show_workers', 'show_stats']);
-                const hasValidFeature = features.some(f => validFeatures.has(f));
-
-                if (features.length === 0 || !hasValidFeature) {
-                    this.reply(chatId, {
-                        de: "Bitte gib mindestens 'show_workers' oder 'show_stats' an.\nVerwendung: /send_hourly on show_workers show_stats",
-                        en: "Please provide at least 'show_workers' or 'show_stats'.\nUsage: /send_hourly on show_workers show_stats"
-                    });
-                    return;
-                }
-
-                const showWorkers = features.includes('show_workers');
-                const showStats = features.includes('show_stats');
-
-                try {
-                    await this.telegramSubscriptionsService.updateHourlyNotifications(chatId, true, showStats, showWorkers);
-
-                    // Send first report immediately (after 1 minute)
-                    setTimeout(async () => {
-                        await this.sendHourlyReportsForChat(chatId, showStats, showWorkers);
-                    }, 60 * 1000);
-
-                    const featureList = [showWorkers ? 'show_workers' : null, showStats ? 'show_stats' : null].filter(Boolean).join(' + ');
-                    this.reply(chatId, {
-                        de: `Stündliche Benachrichtigungen aktiviert für: ${featureList}`,
-                        en: `Hourly notifications enabled for: ${featureList}`
-                    });
-                } catch (error) {
-                    console.error('Fehler bei /send_hourly:', error);
-                    this.reply(chatId, {
-                        de: 'Fehler beim Aktivieren der stündlichen Benachrichtigungen. Bitte später erneut versuchen.',
-                        en: 'Failed to enable hourly notifications. Please try again later.'
-                    });
-                }
-            } else {
-                // When turning off, disable all
-                try {
-                    await this.telegramSubscriptionsService.updateHourlyNotifications(chatId, false, false, false);
-                    this.reply(chatId, {
-                        de: 'Stündliche Benachrichtigungen deaktiviert.',
-                        en: 'Hourly notifications disabled.'
-                    });
-                } catch (error) {
-                    console.error('Fehler bei /send_hourly:', error);
-                    this.reply(chatId, {
-                        de: 'Fehler beim Deaktivieren der stündlichen Benachrichtigungen. Bitte später erneut versuchen.',
-                        en: 'Failed to disable hourly notifications. Please try again later.'
-                    });
-                }
+            try {
+                const { text, reply_markup } = this.buildHourlyMenu(subs[0], lang);
+                await this.bot.sendMessage(chatId, text, { reply_markup });
+            } catch (err) {
+                console.error('[Telegram] /send_hourly menu failed:', (err as Error).message);
             }
         });
 
@@ -971,6 +975,546 @@ I will decrypt it and respond just like with plain text. 🔒`
             }
         } catch (err) {
             console.error('Fehler beim Ausführen der Stundlich-Benachrichtigungen:', err);
+        }
+    }
+
+    // ── PPLNS / Group-Solo command handlers ──────────────────────────
+    //
+    // All handlers respect the trim-only rule for outbound addresses
+    // (`formatAddress`) and accept either plain or encrypted address
+    // arguments via the existing `resolveAddressForChat` helper.
+
+    private formatSats(sats: number): string {
+        const sign = sats < 0 ? '-' : '';
+        return `${sign}${Math.abs(sats).toLocaleString('en-US')}`;
+    }
+
+    private formatHashrate(hashRate: number): string {
+        const th = (hashRate ?? 0) / 1e12;
+        return `${th.toFixed(2)} TH/s`;
+    }
+
+    private buildAddressKeyboardMessage(
+        subs: TelegramSubscriptionsEntity[],
+        lang: 'de' | 'en',
+    ): { text: string; reply_markup: TelegramBot.InlineKeyboardMarkup } {
+        const sorted = [...subs].sort((a, b) => a.id - b.id);
+        const inline_keyboard = sorted.map(s => ([
+            {
+                text: `${s.isDefault ? '⭐ ' : ''}${this.formatAddress(s.address)}`,
+                callback_data: `addr:set:${s.id}`,
+            },
+            {
+                text: '🗑',
+                callback_data: `addr:rm:${s.id}`,
+            },
+        ]));
+        const text = lang === 'de'
+            ? 'Gespeicherte Adressen — tippe auf eine Adresse, um sie als Standard zu setzen, 🗑 zum Entfernen.\n⭐ = Standard'
+            : 'Stored addresses — tap an address to set it as default, 🗑 to remove.\n⭐ = default';
+        return { text, reply_markup: { inline_keyboard } };
+    }
+
+    private async handleAddressCallback(query: TelegramBot.CallbackQuery): Promise<void> {
+        const data = query.data ?? '';
+        if (!data.startsWith('addr:')) return;
+
+        const chatId = query.message?.chat.id;
+        const messageId = query.message?.message_id;
+        if (!chatId || !messageId) return;
+
+        const lang = this.getLanguage(chatId);
+        try {
+            const m = data.match(/^addr:(set|rm):(\d+)$/);
+            if (!m) {
+                await this.bot.answerCallbackQuery(query.id);
+                return;
+            }
+            const action = m[1] as 'set' | 'rm';
+            const id = parseInt(m[2], 10);
+
+            const subs = await this.telegramSubscriptionsService.getChatSubscriptions(chatId);
+            const target = subs.find(s => s.id === id);
+            if (!target) {
+                await this.bot.answerCallbackQuery(query.id, {
+                    text: lang === 'de' ? 'Adresse nicht mehr vorhanden.' : 'Address no longer exists.',
+                });
+                return;
+            }
+
+            const trimmed = this.formatAddress(target.address);
+            if (action === 'set') {
+                if (target.isDefault) {
+                    await this.bot.answerCallbackQuery(query.id, {
+                        text: lang === 'de' ? `${trimmed} ist schon Standard.` : `${trimmed} is already default.`,
+                    });
+                    return;
+                }
+                await this.telegramSubscriptionsService.saveSubscription(chatId, target.address);
+                await this.bot.answerCallbackQuery(query.id, {
+                    text: lang === 'de' ? `Standard: ${trimmed}` : `Default: ${trimmed}`,
+                });
+            } else {
+                const removed = await this.telegramSubscriptionsService.removeSubscription(chatId, target.address);
+                await this.bot.answerCallbackQuery(query.id, {
+                    text: removed
+                        ? (lang === 'de' ? `${trimmed} entfernt.` : `${trimmed} removed.`)
+                        : (lang === 'de' ? `${trimmed} nicht gefunden.` : `${trimmed} not found.`),
+                });
+            }
+
+            const fresh = await this.telegramSubscriptionsService.getChatSubscriptions(chatId);
+            if (fresh.length === 0) {
+                await this.bot.editMessageText(
+                    lang === 'de' ? 'Keine Adresse gespeichert.' : 'No addresses stored.',
+                    { chat_id: chatId, message_id: messageId },
+                );
+                return;
+            }
+            const { text, reply_markup } = this.buildAddressKeyboardMessage(fresh, lang);
+            await this.bot.editMessageText(text, {
+                chat_id: chatId,
+                message_id: messageId,
+                reply_markup,
+            });
+        } catch (err) {
+            console.error('[Telegram] callback_query failed:', (err as Error).message);
+            try { await this.bot.answerCallbackQuery(query.id); } catch {}
+        }
+    }
+
+    private buildHourlyMenu(
+        sub: TelegramSubscriptionsEntity,
+        lang: 'de' | 'en',
+    ): { text: string; reply_markup: TelegramBot.InlineKeyboardMarkup } {
+        const statsOn = sub.hourlyStatsEnabled;
+        const workersOn = sub.hourlyWorkersEnabled;
+        const statsLabel = lang === 'de'
+            ? `Stats: ${statsOn ? '✅ AN' : '❌ AUS'}`
+            : `Stats: ${statsOn ? '✅ ON' : '❌ OFF'}`;
+        const workersLabel = lang === 'de'
+            ? `Worker: ${workersOn ? '✅ AN' : '❌ AUS'}`
+            : `Workers: ${workersOn ? '✅ ON' : '❌ OFF'}`;
+        const text = lang === 'de'
+            ? 'Stündliche Berichte — tippe zum Umschalten:'
+            : 'Hourly reports — tap to toggle:';
+        return {
+            text,
+            reply_markup: {
+                inline_keyboard: [[
+                    { text: statsLabel, callback_data: 'hr:stats' },
+                    { text: workersLabel, callback_data: 'hr:workers' },
+                ]],
+            },
+        };
+    }
+
+    private async handleHourlyCallback(query: TelegramBot.CallbackQuery): Promise<void> {
+        const data = query.data ?? '';
+        const chatId = query.message?.chat.id;
+        const messageId = query.message?.message_id;
+        if (!chatId || !messageId) return;
+        const lang = this.getLanguage(chatId);
+
+        try {
+            const subs = await this.telegramSubscriptionsService.getChatSubscriptions(chatId);
+            if (subs.length === 0) {
+                await this.bot.answerCallbackQuery(query.id, {
+                    text: lang === 'de' ? 'Keine Adresse gespeichert.' : 'No address stored.',
+                });
+                return;
+            }
+            const current = subs[0];
+            let newStats = current.hourlyStatsEnabled;
+            let newWorkers = current.hourlyWorkersEnabled;
+            if (data === 'hr:stats') newStats = !newStats;
+            else if (data === 'hr:workers') newWorkers = !newWorkers;
+            else { await this.bot.answerCallbackQuery(query.id); return; }
+
+            const wasEnabled = current.hourlyStatsEnabled || current.hourlyWorkersEnabled;
+            const enabled = newStats || newWorkers;
+            await this.telegramSubscriptionsService.updateHourlyNotifications(chatId, enabled, newStats, newWorkers);
+
+            if (!wasEnabled && enabled) {
+                setTimeout(async () => {
+                    await this.sendHourlyReportsForChat(chatId, newStats, newWorkers);
+                }, 60 * 1000);
+            }
+
+            await this.bot.answerCallbackQuery(query.id);
+            const updated = { ...current, hourlyStatsEnabled: newStats, hourlyWorkersEnabled: newWorkers } as TelegramSubscriptionsEntity;
+            const { text, reply_markup } = this.buildHourlyMenu(updated, lang);
+            await this.bot.editMessageText(text, {
+                chat_id: chatId,
+                message_id: messageId,
+                reply_markup,
+            });
+        } catch (err) {
+            console.error('[Telegram] hourly callback failed:', (err as Error).message);
+            try { await this.bot.answerCallbackQuery(query.id); } catch {}
+        }
+    }
+
+    private async handleBestdiffResetCallback(query: TelegramBot.CallbackQuery): Promise<void> {
+        const data = query.data ?? '';
+        const chatId = query.message?.chat.id;
+        const messageId = query.message?.message_id;
+        if (!chatId || !messageId) return;
+
+        const lang = this.getLanguage(chatId);
+        const key = `${chatId}:${messageId}`;
+        const pending = this.pendingBestdiffResets.get(key);
+        this.pendingBestdiffResets.delete(key);
+
+        try {
+            if (!pending || pending.expiresAt < Date.now()) {
+                await this.bot.answerCallbackQuery(query.id, {
+                    text: lang === 'de' ? 'Anfrage abgelaufen.' : 'Request expired.',
+                });
+                await this.bot.editMessageText(
+                    lang === 'de' ? 'Anfrage abgelaufen.' : 'Request expired.',
+                    { chat_id: chatId, message_id: messageId },
+                );
+                return;
+            }
+
+            const trimmed = this.formatAddress(pending.address);
+
+            if (data === 'bdr:no') {
+                await this.bot.answerCallbackQuery(query.id, {
+                    text: lang === 'de' ? 'Abgebrochen.' : 'Cancelled.',
+                });
+                await this.bot.editMessageText(
+                    lang === 'de' ? `Reset abgebrochen — ${trimmed}` : `Reset cancelled — ${trimmed}`,
+                    { chat_id: chatId, message_id: messageId },
+                );
+                return;
+            }
+
+            await this.stratumV1Service.resetBestDifficultyForAddress(pending.address);
+            await this.stratumV2Service.resetBestDifficultyForAddress(pending.address);
+            await this.addressSettingsService.updateBestDifficulty(pending.address, 0, null);
+            await this.trackerService.resetTracker(pending.address);
+            this.bestDiffCache.delete(pending.address);
+            this.ntfyService.resetBestDiffCache(pending.address);
+
+            await this.bot.answerCallbackQuery(query.id, {
+                text: lang === 'de' ? 'Zurückgesetzt.' : 'Reset.',
+            });
+            await this.bot.editMessageText(
+                lang === 'de'
+                    ? `Best Difficulty zurückgesetzt — ${trimmed}`
+                    : `Best difficulty reset — ${trimmed}`,
+                { chat_id: chatId, message_id: messageId },
+            );
+        } catch (err) {
+            console.error('[Telegram] /bestdiff_reset callback failed:', (err as Error).message);
+            try {
+                await this.bot.answerCallbackQuery(query.id, {
+                    text: lang === 'de' ? 'Fehler beim Zurücksetzen.' : 'Reset failed.',
+                });
+            } catch {}
+        }
+    }
+
+    private async handlePplnsStatus(chatId: number, addressParam?: string): Promise<void> {
+        if (!this.pplnsService.isEnabled()) {
+            await this.reply(chatId, {
+                de: 'PPLNS ist auf diesem Pool nicht aktiv.',
+                en: 'PPLNS is not enabled on this pool.'
+            });
+            return;
+        }
+
+        const address = await this.resolveAddressForChat(chatId, addressParam);
+        if (!address) return;
+
+        try {
+            const [status, window, distribution, myHashrate] = await Promise.all([
+                this.pplnsService.getAddressStatus(address),
+                this.pplnsService.getWindowStats(),
+                this.pplnsService.getCurrentDistribution(),
+                this.clientService.getTotalHashrateForAddresses([address]),
+            ]);
+
+            const pplnsAddresses = distribution.map(d => d.address);
+            const totalPplnsHashrate = pplnsAddresses.length > 0
+                ? await this.clientService.getTotalHashrateForAddresses(pplnsAddresses)
+                : 0;
+
+            const trimmed = this.formatAddress(address);
+            const percent = status.currentWindowPercent.toFixed(2);
+            const myShares = this.numberSuffix.to(status.currentWindowShares);
+            const totalShares = this.numberSuffix.to(window.totalShares);
+            const minerCount = window.minerCount;
+
+            const balance = status.balanceSats;
+            const totalPaid = status.totalPaidSats;
+
+            const ledgerDe = balance > 0
+                ? `${this.formatSats(balance)} sats (Pool schuldet dir)`
+                : balance < 0
+                    ? `${this.formatSats(balance)} sats (du schuldest dem Pool — wird mit nächster Auszahlung verrechnet)`
+                    : '0 sats';
+            const ledgerEn = balance > 0
+                ? `${this.formatSats(balance)} sats (pool owes you)`
+                : balance < 0
+                    ? `${this.formatSats(balance)} sats (you owe the pool — settled at the next payout)`
+                    : '0 sats';
+
+            await this.reply(chatId, {
+                de: `PPLNS Status — ${trimmed}\n` +
+                    `Window-Anteil: ${percent}%\n` +
+                    `Deine Hashrate: ${this.formatHashrate(myHashrate)}\n` +
+                    `PPLNS-Hashrate (gesamt): ${this.formatHashrate(totalPplnsHashrate)}\n` +
+                    `Deine Shares: ${myShares}\n` +
+                    `Pool-Shares (Window): ${totalShares}\n` +
+                    `Aktive Miner im Window: ${minerCount}\n` +
+                    `Saldo: ${ledgerDe}\n` +
+                    `Lifetime ausbezahlt: ${this.formatSats(totalPaid)} sats`,
+                en: `PPLNS status — ${trimmed}\n` +
+                    `Window share: ${percent}%\n` +
+                    `Your hashrate: ${this.formatHashrate(myHashrate)}\n` +
+                    `PPLNS hashrate (total): ${this.formatHashrate(totalPplnsHashrate)}\n` +
+                    `Your shares: ${myShares}\n` +
+                    `Pool shares (window): ${totalShares}\n` +
+                    `Active miners in window: ${minerCount}\n` +
+                    `Ledger: ${ledgerEn}\n` +
+                    `Lifetime paid: ${this.formatSats(totalPaid)} sats`,
+            });
+        } catch (err) {
+            console.error('[Telegram] /pplns_status failed:', (err as Error).message);
+            await this.reply(chatId, {
+                de: 'PPLNS-Status konnte nicht geladen werden.',
+                en: 'Could not load PPLNS status.'
+            });
+        }
+    }
+
+    private async handlePplnsTop(chatId: number): Promise<void> {
+        if (!this.pplnsService.isEnabled()) {
+            await this.reply(chatId, {
+                de: 'PPLNS ist auf diesem Pool nicht aktiv.',
+                en: 'PPLNS is not enabled on this pool.'
+            });
+            return;
+        }
+
+        try {
+            const distribution = await this.pplnsService.getCurrentDistribution();
+            if (distribution.length === 0) {
+                await this.reply(chatId, {
+                    de: 'Keine Shares im aktuellen PPLNS-Window.',
+                    en: 'No shares in the current PPLNS window.'
+                });
+                return;
+            }
+
+            const top = distribution.slice(0, 10);
+            const lines = top.map((entry, idx) =>
+                `${(idx + 1).toString().padStart(2, ' ')}. ${this.formatAddress(entry.address)}   ${entry.percent.toFixed(2)}%`
+            );
+
+            await this.reply(chatId, {
+                de: `Top 10 PPLNS-Miner (von ${distribution.length} aktiven):\n${lines.join('\n')}`,
+                en: `Top 10 PPLNS miners (out of ${distribution.length} active):\n${lines.join('\n')}`,
+            });
+        } catch (err) {
+            console.error('[Telegram] /pplns_top failed:', (err as Error).message);
+            await this.reply(chatId, {
+                de: 'PPLNS-Top-Liste konnte nicht geladen werden.',
+                en: 'Could not load PPLNS top list.'
+            });
+        }
+    }
+
+    private async handleGroupStatus(chatId: number, addressParam?: string): Promise<void> {
+        const address = await this.resolveAddressForChat(chatId, addressParam);
+        if (!address) return;
+
+        const entry = this.groupService.getGroupForAddress(address);
+        if (!entry) {
+            await this.reply(chatId, {
+                de: `${this.formatAddress(address)} ist in keiner Gruppe.`,
+                en: `${this.formatAddress(address)} is not in any group.`
+            });
+            return;
+        }
+
+        try {
+            const [group, members, round, best] = await Promise.all([
+                this.groupService.getGroup(entry.groupId),
+                this.groupService.listMembers(entry.groupId),
+                this.groupSoloService.getRoundStats(entry.groupId),
+                this.groupSoloService.getRoundBestDifficulty(entry.groupId),
+            ]);
+
+            if (!group) {
+                await this.reply(chatId, {
+                    de: 'Gruppe nicht mehr verfügbar.',
+                    en: 'Group is no longer available.'
+                });
+                return;
+            }
+
+            const memberAddresses = members.map(m => m.address);
+            const groupHashrate = memberAddresses.length > 0
+                ? await this.clientService.getTotalHashrateForAddresses(memberAddresses)
+                : 0;
+
+            const member = round.perAddress.find(p => p.address === address);
+            const myShare = member ? `${member.percent.toFixed(2)}%` : '0%';
+            const myShares = member ? this.numberSuffix.to(member.totalShares) : '0';
+            const totalShares = this.numberSuffix.to(round.totalShares);
+            const totalRejected = this.numberSuffix.to(round.totalRejected);
+            const memberCount = round.perAddress.length;
+
+            const bestDiffStr = best.bestDifficulty > 0
+                ? `${this.numberSuffix.to(best.bestDifficulty)} (${this.formatAddress(best.address ?? '')})`
+                : '—';
+
+            await this.reply(chatId, {
+                de: `Gruppe: ${group.name}\n` +
+                    `Aktive Miner (Round): ${memberCount}\n` +
+                    `Gruppen-Hashrate: ${this.formatHashrate(groupHashrate)}\n` +
+                    `Dein Anteil: ${myShare} (${myShares})\n` +
+                    `Round-Shares gesamt: ${totalShares}\n` +
+                    `Round-Rejected: ${totalRejected}\n` +
+                    `Beste Round-Difficulty: ${bestDiffStr}`,
+                en: `Group: ${group.name}\n` +
+                    `Active miners (round): ${memberCount}\n` +
+                    `Group hashrate: ${this.formatHashrate(groupHashrate)}\n` +
+                    `Your share: ${myShare} (${myShares})\n` +
+                    `Round shares total: ${totalShares}\n` +
+                    `Round rejected: ${totalRejected}\n` +
+                    `Best round difficulty: ${bestDiffStr}`,
+            });
+        } catch (err) {
+            console.error('[Telegram] /group_status failed:', (err as Error).message);
+            await this.reply(chatId, {
+                de: 'Gruppen-Status konnte nicht geladen werden.',
+                en: 'Could not load group status.'
+            });
+        }
+    }
+
+    private async handleGroupMembers(chatId: number, addressParam?: string): Promise<void> {
+        const address = await this.resolveAddressForChat(chatId, addressParam);
+        if (!address) return;
+
+        const entry = this.groupService.getGroupForAddress(address);
+        if (!entry) {
+            await this.reply(chatId, {
+                de: `${this.formatAddress(address)} ist in keiner Gruppe.`,
+                en: `${this.formatAddress(address)} is not in any group.`
+            });
+            return;
+        }
+
+        try {
+            const [group, members, round] = await Promise.all([
+                this.groupService.getGroup(entry.groupId),
+                this.groupService.listMembers(entry.groupId),
+                this.groupSoloService.getRoundStats(entry.groupId),
+            ]);
+
+            if (!group) {
+                await this.reply(chatId, {
+                    de: 'Gruppe nicht mehr verfügbar.',
+                    en: 'Group is no longer available.'
+                });
+                return;
+            }
+
+            const shareByAddr = new Map<string, number>();
+            for (const p of round.perAddress) shareByAddr.set(p.address, p.percent);
+
+            // Sort: members with shares first (desc), then alphabetical fallback.
+            const sorted = [...members].sort((a, b) => {
+                const sa = shareByAddr.get(a.address) ?? -1;
+                const sb = shareByAddr.get(b.address) ?? -1;
+                return sb - sa;
+            });
+
+            const lines = sorted.map(m => {
+                const share = shareByAddr.get(m.address);
+                const shareStr = share !== undefined ? `${share.toFixed(2)}%` : '—';
+                const trimmed = this.formatAddress(m.address);
+                const youMarker = m.address === address ? ' (du)' : '';
+                const youMarkerEn = m.address === address ? ' (you)' : '';
+                return { de: `${trimmed}   ${shareStr}${youMarker}`, en: `${trimmed}   ${shareStr}${youMarkerEn}` };
+            });
+
+            await this.reply(chatId, {
+                de: `Mitglieder von "${group.name}" (${members.length}):\n${lines.map(l => l.de).join('\n')}`,
+                en: `Members of "${group.name}" (${members.length}):\n${lines.map(l => l.en).join('\n')}`,
+            });
+        } catch (err) {
+            console.error('[Telegram] /group_members failed:', (err as Error).message);
+            await this.reply(chatId, {
+                de: 'Mitgliederliste konnte nicht geladen werden.',
+                en: 'Could not load member list.'
+            });
+        }
+    }
+
+    private async handleGroupHistory(chatId: number, addressParam?: string): Promise<void> {
+        const address = await this.resolveAddressForChat(chatId, addressParam);
+        if (!address) return;
+
+        const entry = this.groupService.getGroupForAddress(address);
+        if (!entry) {
+            await this.reply(chatId, {
+                de: `${this.formatAddress(address)} ist in keiner Gruppe.`,
+                en: `${this.formatAddress(address)} is not in any group.`
+            });
+            return;
+        }
+
+        try {
+            const [group, history] = await Promise.all([
+                this.groupService.getGroup(entry.groupId),
+                this.groupSoloService.getBlockHistory(entry.groupId, 50),
+            ]);
+
+            if (!group) {
+                await this.reply(chatId, {
+                    de: 'Gruppe nicht mehr verfügbar.',
+                    en: 'Group is no longer available.'
+                });
+                return;
+            }
+
+            // Filter to entries for this address; aggregate by block.
+            const own = history.filter(h => h.address === address).slice(0, 10);
+
+            if (own.length === 0) {
+                await this.reply(chatId, {
+                    de: `Keine Auszahlungen für ${this.formatAddress(address)} in "${group.name}".`,
+                    en: `No payouts for ${this.formatAddress(address)} in "${group.name}".`
+                });
+                return;
+            }
+
+            const lang = this.getLanguage(chatId);
+            const formatter = this.deviceNotificationFormatters[lang];
+
+            const lines = own.map(h => {
+                const when = h.createdAt ? formatter.format(new Date(h.createdAt)) : '—';
+                const amount = this.formatSats(h.paidSats ?? 0);
+                return `Block ${h.blockHeight} — ${when} — ${amount} sats`;
+            });
+
+            await this.reply(chatId, {
+                de: `Letzte Auszahlungen für ${this.formatAddress(address)} in "${group.name}":\n${lines.join('\n')}`,
+                en: `Recent payouts for ${this.formatAddress(address)} in "${group.name}":\n${lines.join('\n')}`,
+            });
+        } catch (err) {
+            console.error('[Telegram] /group_history failed:', (err as Error).message);
+            await this.reply(chatId, {
+                de: 'Block-Historie konnte nicht geladen werden.',
+                en: 'Could not load block history.'
+            });
         }
     }
 }

@@ -117,8 +117,16 @@ export class PushNotificationService implements OnModuleInit {
 
     /**
      * Send notifications for a specific address (dispatches to both Unified Push and FCM)
+     *
+     * Skips both DB roundtrips when the in-memory presence cache says the
+     * address has no subscription at all — the common case for the vast
+     * majority of mining addresses. Falls through to the DB path while the
+     * cache is bootstrapping (correct, just unoptimised).
      */
     private async sendNotificationsForAddress(address: string, difficulty: number): Promise<void> {
+        if (!this.pushSubscriptionService.hasAnySubscription(address)) {
+            return;
+        }
         await this.sendUnifiedPushBestDiff(address, difficulty);
         await this.sendFcmBestDiff(address, difficulty);
     }
@@ -218,7 +226,10 @@ export class PushNotificationService implements OnModuleInit {
     async checkBestDifficulty(): Promise<void> {
 
         try {
-            const addresses = await this.pushSubscriptionService.getAddressesWithSubscriptions();
+            // Prefer the in-memory cache (zero DB roundtrip); if it isn't
+            // ready yet, fall back to the original DISTINCT query.
+            const addresses = this.pushSubscriptionService.getCachedAddressesWithSubscriptions()
+                ?? await this.pushSubscriptionService.getAddressesWithSubscriptions();
 
             if (addresses.length === 0) {
                 return;
@@ -277,6 +288,15 @@ export class PushNotificationService implements OnModuleInit {
         timestamp: Date;
         isReturning?: boolean;
     }): Promise<void> {
+        // Stratum connect/disconnect fires this on every session for every
+        // address — but only a handful of addresses ever subscribe to push.
+        // The presence cache lets us skip the per-type DB roundtrips for
+        // addresses that have no subscription at all (i.e. the vast
+        // majority of mining addresses). Falls through transparently
+        // whenever the cache is not ready.
+        if (!this.pushSubscriptionService.hasAnySubscription(params.address)) {
+            return;
+        }
         try {
             await this.sendUnifiedPushDeviceStatus(params);
             await this.sendFcmDeviceStatus(params);
@@ -427,6 +447,9 @@ export class PushNotificationService implements OnModuleInit {
         _block: any,
         message: string,
     ): Promise<void> {
+        if (!this.pushSubscriptionService.hasAnySubscription(address)) {
+            return;
+        }
         try {
             await this.sendUnifiedPushBlockFound(address, height, message);
             await this.sendFcmBlockFound(address, height, message);

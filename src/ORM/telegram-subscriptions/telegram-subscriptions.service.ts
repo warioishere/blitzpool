@@ -40,12 +40,23 @@ export class TelegramSubscriptionsService {
         });
     }
 
-    public async removeSubscription(chatId: number, address: string) {
-        await this.telegramSubscriptions.delete({ telegramChatId: chatId, address });
+    /**
+     * Removes a subscription. Returns true if a row was actually deleted,
+     * false if no matching row existed. Callers use this to give the user
+     * an honest reply (the previous version always said "removed" even
+     * when nothing matched, masking a bot/DB hiccup we observed once
+     * in production).
+     */
+    public async removeSubscription(chatId: number, address: string): Promise<boolean> {
+        const result = await this.telegramSubscriptions.delete({ telegramChatId: chatId, address });
+        const removed = (result.affected ?? 0) > 0;
+        if (!removed) return false;
+
         const remaining = await this.getChatSubscriptions(chatId);
         if (remaining.length > 0 && !remaining.some(r => r.isDefault)) {
             await this.telegramSubscriptions.update({ id: remaining[0].id }, { isDefault: true });
         }
+        return true;
     }
 
     public async updateBestDiffNotification(chatId: number, enabled: boolean): Promise<void> {

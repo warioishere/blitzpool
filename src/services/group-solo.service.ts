@@ -875,12 +875,21 @@ export class GroupSoloService implements OnModuleInit {
             const keys = redisKeys(groupId);
             const entries = await this.redis.zRange(keys.shares, 0, -1);
             let removedDiff = 0;
+            const toRemove: string[] = [];
             for (const e of (entries ?? [])) {
                 const [addr, diffStr] = e.split(':');
                 if (addr === address) {
-                    await this.redis.zRem(keys.shares, e);
+                    toRemove.push(e);
                     removedDiff += parseFloat(diffStr) || 0;
                 }
+            }
+            // Single batched zRem instead of one per matched entry.
+            // node-redis v4 zRem accepts a string[] for variadic ZREM,
+            // so a member with thousands of shares costs 1 round trip
+            // instead of thousands. Skipped when nothing matches so
+            // we don't issue an empty zRem (some clients reject that).
+            if (toRemove.length > 0) {
+                await this.redis.zRem(keys.shares, toRemove);
             }
             if (removedDiff > 0) {
                 await this.redis.incrByFloat(keys.total, -removedDiff);
