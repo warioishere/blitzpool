@@ -264,7 +264,14 @@ export class PushNotificationService implements OnModuleInit {
                         await this.sendNotificationsForAddress(address, currentDifficulty);
                         await this.trackerService.updateTracker(address, currentDifficulty);
                     } else if (currentDifficulty < tracker.bestDifficulty) {
-                        console.log(`[PushNotification] WARNING: Difficulty decreased for ${address}: was ${this.formatDifficulty(tracker.bestDifficulty)}, now ${this.formatDifficulty(currentDifficulty)}`);
+                        // address_settings is the source of truth. A drop is
+                        // expected after /bestdiff_reset (settings -> 0 before
+                        // resetTracker lands) and for legacy rows that lost
+                        // precision under the old `real` column. Sync the
+                        // tracker down silently — the previous WARNING log
+                        // was a leftover from the pre-migration drift bug
+                        // (1776000000000-AddressSettingsBestDifficultyToDouble).
+                        await this.trackerService.updateTracker(address, currentDifficulty);
                     }
                 } catch (error: any) {
                     console.error(`[PushNotification] Error checking address ${address}:`, error.message);
