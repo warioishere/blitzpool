@@ -1,5 +1,5 @@
-import { Body, Controller, Delete, Get, Headers, HttpException, HttpStatus, Param, Patch, Post, Query } from '@nestjs/common';
-import { Throttle } from '@nestjs/throttler';
+import { Body, Controller, Delete, Get, Headers, HttpException, HttpStatus, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 import { GroupService, GroupServiceError, GroupRoundResetSettings } from '../../services/group.service';
 import { normalizeBtcAddress } from '../../utils/btc-address.utils';
 import { GroupSoloService } from '../../services/group-solo.service';
@@ -317,6 +317,7 @@ export class PplnsGroupController {
     // 10 invites / minute per IP. An admin with a valid token could
     // otherwise DoS the SMTP provider or spam addresses for tribunal-style
     // harassment. Token-auth isn't a substitute for rate-limiting here.
+    @UseGuards(ThrottlerGuard)
     @Throttle(10, 60)
     @Post(':id/invitations')
     async createInvitation(
@@ -340,6 +341,7 @@ export class PplnsGroupController {
      * still abort — they're an auth issue, not per-address.
      */
     // Tighter than single because each call can send many mails.
+    @UseGuards(ThrottlerGuard)
     @Throttle(5, 60)
     @Post(':id/invitations/batch')
     async createInvitationsBatch(

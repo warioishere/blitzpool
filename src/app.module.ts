@@ -3,8 +3,7 @@ import { CacheModule } from '@nestjs/cache-manager';
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
-import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
-import { APP_GUARD } from '@nestjs/core';
+import { ThrottlerModule } from '@nestjs/throttler';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { redisStore } from 'cache-manager-redis-yet';
 
@@ -154,8 +153,11 @@ const ORMModules = [
             },
         }),
         ScheduleModule.forRoot(),
-        // Default 60 requests per 60 seconds per IP (throttler v4 TTL is
-        // in seconds). Individual endpoints tighten further via @Throttle.
+        // ThrottlerModule loaded only so per-endpoint @UseGuards(ThrottlerGuard)
+        // + @Throttle(...) on a handful of abuse-prone POSTs (email register,
+        // group create / invitation, invitation accept / decline) can resolve
+        // their backend. Defaults are intentionally unused — there is no
+        // global guard, and untagged endpoints are not rate-limited.
         ThrottlerModule.forRoot({ ttl: 60, limit: 60 }),
         HttpModule,
         TypeOrmModule.forFeature([
@@ -225,8 +227,6 @@ const ORMModules = [
         AddressEmailService,
         PplnsGroupInvitationService,
         CoinbaseCapacityMonitorService,
-        // Global throttler guard — per-endpoint limits override via @Throttle().
-        { provide: APP_GUARD, useClass: ThrottlerGuard },
     ],
 })
 export class AppModule {

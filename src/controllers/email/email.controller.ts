@@ -1,5 +1,5 @@
-import { Body, Controller, Get, HttpException, HttpStatus, Param, Post } from '@nestjs/common';
-import { Throttle } from '@nestjs/throttler';
+import { Body, Controller, Get, HttpException, HttpStatus, Param, Post, UseGuards } from '@nestjs/common';
+import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 import { AddressEmailService, AddressEmailServiceError } from '../../services/address-email.service';
 import { maskEmail } from '../../utils/email-mask.utils';
 
@@ -21,6 +21,7 @@ export class EmailController {
     // 5 register attempts / minute per IP. Each call sends an email —
     // looser limits invite SMTP-quota abuse and spam-listing of the
     // pool's sender domain.
+    @UseGuards(ThrottlerGuard)
     @Throttle(5, 60)
     @Post('register')
     async register(@Body() body: RegisterDto): Promise<{ ok: true; verificationSent: true }> {
