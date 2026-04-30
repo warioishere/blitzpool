@@ -4,7 +4,7 @@ import { PplnsGroupInvitationService, InvitationServiceError } from './pplns-gro
 
 function makeRepo<T>() {
     const rows: T[] = [];
-    return {
+    const repo: any = {
         rows,
         save: jest.fn(async (row: T) => {
             const idx = (rows as any[]).findIndex((r: any) =>
@@ -47,8 +47,30 @@ function makeRepo<T>() {
             rows.push(...remaining as any);
             return { affected: before - rows.length };
         }),
-        update: jest.fn(async () => ({ affected: 0 })),
+        update: jest.fn(async (where: any, patch: any) => {
+            let affected = 0;
+            for (const r of rows as any[]) {
+                if (Object.entries(where).every(([k, v]) => {
+                    if (v && typeof v === 'object' && (v as any)._type === 'lessThan') {
+                        return r[k]?.getTime?.() < (v as any)._value?.getTime?.();
+                    }
+                    return r[k] === v;
+                })) {
+                    Object.assign(r, patch);
+                    affected += 1;
+                }
+            }
+            return { affected };
+        }),
     };
+    // .manager.transaction(cb) shim — runs the callback against the same
+    // repo instance (no real isolation needed in tests).
+    repo.manager = {
+        transaction: jest.fn(async (cb: any) => {
+            return cb({ getRepository: () => repo });
+        }),
+    };
+    return repo;
 }
 
 function makeService(opts: { emailEnabled?: boolean } = {}) {
@@ -231,6 +253,7 @@ describe('PplnsGroupInvitationService', () => {
             address: 'bc1qbob',
             email: 'bob@example.com',
             status: 'pending',
+            inviteType: 'directed',
             createdAt: new Date(Date.now() - 100_000),
             expiresAt: new Date(Date.now() - 1000),
         });
@@ -244,5 +267,167 @@ describe('PplnsGroupInvitationService', () => {
         // visitor of /app/:address accept the invitation on the recipient's
         // behalf. Reference r1.token to avoid an unused-binding complaint.
         expect(r1.token).toBeTruthy();
+    });
+
+    // ── Open invitation links ───────────────────────────────────────
+
+    it('createOpenInvite: rejects bad admin token', async () => {
+        const { service } = makeService();
+        await expect(service.createOpenInvite('g1', '24h', 'bad-token'))
+            .rejects.toMatchObject({ code: 'invalid-token' });
+    });
+
+    it('createOpenInvite: rejects unknown TTL preset', async () => {
+        const { service } = makeService();
+        await expect(service.createOpenInvite('g1', 'forever' as any, 'good-token'))
+            .rejects.toMatchObject({ code: 'invalid-ttl' });
+    });
+
+    it('createOpenInvite: persists row with inviteType=open + null address/email', async () => {
+        const { service, invitationRepo } = makeService();
+        const r = await service.createOpenInvite('g1', '24h', 'good-token');
+        expect(r.token).toBeTruthy();
+        expect(r.expiresAt.getTime()).toBeGreaterThan(Date.now());
+
+        expect(invitationRepo.rows).toHaveLength(1);
+        const row = invitationRepo.rows[0];
+        expect(row.inviteType).toBe('open');
+        expect(row.address).toBeNull();
+        expect(row.email).toBeNull();
+        expect(row.status).toBe('pending');
+    });
+
+    it('createOpenInvite: replaces previous active link (atomic revoke)', async () => {
+        const { service, invitationRepo } = makeService();
+        const r1 = await service.createOpenInvite('g1', '24h', 'good-token');
+        const r2 = await service.createOpenInvite('g1', '7d', 'good-token');
+        expect(r2.token).not.toBe(r1.token);
+
+        const old = invitationRepo.rows.find((r: any) => r.token === r1.token);
+        const fresh = invitationRepo.rows.find((r: any) => r.token === r2.token);
+        expect(old.status).toBe('revoked');
+        expect(fresh.status).toBe('pending');
+    });
+
+    it('getActiveOpenInvite: returns null when none, returns latest when active', async () => {
+        const { service } = makeService();
+        const empty = await service.getActiveOpenInvite('g1', 'good-token');
+        expect(empty).toBeNull();
+
+        const r = await service.createOpenInvite('g1', '7d', 'good-token');
+        const active = await service.getActiveOpenInvite('g1', 'good-token');
+        expect(active?.token).toBe(r.token);
+    });
+
+    it('getActiveOpenInvite: returns null when current link is past TTL', async () => {
+        const { service, invitationRepo } = makeService();
+        const r = await service.createOpenInvite('g1', '1h', 'good-token');
+        const row = invitationRepo.rows.find((x: any) => x.token === r.token);
+        row.expiresAt = new Date(Date.now() - 1000);
+        const active = await service.getActiveOpenInvite('g1', 'good-token');
+        expect(active).toBeNull();
+    });
+
+    it('revokeOpenInvite: marks current pending link as revoked; idempotent', async () => {
+        const { service, invitationRepo } = makeService();
+        await service.createOpenInvite('g1', '24h', 'good-token');
+        await service.revokeOpenInvite('g1', 'good-token');
+        expect(invitationRepo.rows[0].status).toBe('revoked');
+        // Second call is a no-op (no pending rows left).
+        await service.revokeOpenInvite('g1', 'good-token');
+        expect(invitationRepo.rows[0].status).toBe('revoked');
+    });
+
+    it('getOpenInvitePublic: returns group context for valid token', async () => {
+        const { service } = makeService();
+        const r = await service.createOpenInvite('g1', '7d', 'good-token');
+        const info = await service.getOpenInvitePublic(r.token);
+        expect(info?.groupId).toBe('g1');
+        expect(info?.groupName).toBe('Friends');
+        expect(info?.token).toBe(r.token);
+    });
+
+    it('getOpenInvitePublic: returns null for revoked / expired / unknown / dissolved', async () => {
+        const { service, invitationRepo, groupService } = makeService();
+        // Unknown
+        expect(await service.getOpenInvitePublic('nope')).toBeNull();
+        // Revoked
+        const r = await service.createOpenInvite('g1', '24h', 'good-token');
+        await service.revokeOpenInvite('g1', 'good-token');
+        expect(await service.getOpenInvitePublic(r.token)).toBeNull();
+        // Expired
+        await service.createOpenInvite('g1', '1h', 'good-token');
+        const last = invitationRepo.rows[invitationRepo.rows.length - 1];
+        last.expiresAt = new Date(Date.now() - 1000);
+        expect(await service.getOpenInvitePublic(last.token)).toBeNull();
+        // Group dissolved
+        await service.createOpenInvite('g1', '7d', 'good-token');
+        const live = invitationRepo.rows[invitationRepo.rows.length - 1];
+        groupService.getGroup = jest.fn(async (id: string) => ({
+            id, name: 'Friends', creatorAddress: 'bc1qadmin', dissolvedAt: new Date(),
+        }));
+        expect(await service.getOpenInvitePublic(live.token)).toBeNull();
+    });
+
+    it('acceptOpenInvite: rejects address with no verified email', async () => {
+        const { service } = makeService();
+        const r = await service.createOpenInvite('g1', '24h', 'good-token');
+        await expect(service.acceptOpenInvite(r.token, 'bc1qcarol'))
+            .rejects.toMatchObject({ code: 'email-not-verified' });
+    });
+
+    it('acceptOpenInvite: rejects bad address shape', async () => {
+        const { service } = makeService();
+        const r = await service.createOpenInvite('g1', '24h', 'good-token');
+        await expect(service.acceptOpenInvite(r.token, ''))
+            .rejects.toMatchObject({ code: 'invalid-address' });
+    });
+
+    it('acceptOpenInvite: creates membership and leaves link reusable', async () => {
+        const { service, addressEmailService, memberRepo, invitationRepo } = makeService();
+        addressEmailService._setVerified('bc1qbob', 'bob@example.com');
+        addressEmailService._setVerified('bc1qcarol', 'carol@example.com');
+
+        const r = await service.createOpenInvite('g1', '7d', 'good-token');
+        const m1 = await service.acceptOpenInvite(r.token, 'bc1qbob');
+        expect(m1.address).toBe('bc1qbob');
+        expect(memberRepo.rows).toHaveLength(1);
+        // Link still pending — second user can also claim it.
+        const row = invitationRepo.rows.find((x: any) => x.token === r.token);
+        expect(row.status).toBe('pending');
+
+        const m2 = await service.acceptOpenInvite(r.token, 'bc1qcarol');
+        expect(m2.address).toBe('bc1qcarol');
+        expect(memberRepo.rows).toHaveLength(2);
+    });
+
+    it('acceptOpenInvite: rejects when link is past TTL (and marks expired)', async () => {
+        const { service, addressEmailService, invitationRepo } = makeService();
+        addressEmailService._setVerified('bc1qbob', 'bob@example.com');
+        const r = await service.createOpenInvite('g1', '1h', 'good-token');
+        const row = invitationRepo.rows.find((x: any) => x.token === r.token);
+        row.expiresAt = new Date(Date.now() - 1000);
+
+        await expect(service.acceptOpenInvite(r.token, 'bc1qbob'))
+            .rejects.toMatchObject({ code: 'expired' });
+        expect(row.status).toBe('expired');
+    });
+
+    it('acceptOpenInvite: rejects revoked link', async () => {
+        const { service, addressEmailService } = makeService();
+        addressEmailService._setVerified('bc1qbob', 'bob@example.com');
+        const r = await service.createOpenInvite('g1', '24h', 'good-token');
+        await service.revokeOpenInvite('g1', 'good-token');
+        await expect(service.acceptOpenInvite(r.token, 'bc1qbob'))
+            .rejects.toMatchObject({ code: 'expired' });
+    });
+
+    it('directed-invite accept() refuses an open token (404)', async () => {
+        const { service, addressEmailService } = makeService();
+        addressEmailService._setVerified('bc1qbob', 'bob@example.com');
+        const r = await service.createOpenInvite('g1', '24h', 'good-token');
+        // Wrong endpoint — directed accept doesn't take an address.
+        await expect(service.accept(r.token))
+            .rejects.toMatchObject({ code: 'not-found' });
     });
 });

@@ -5,7 +5,10 @@ import { normalizeBtcAddress } from '../../utils/btc-address.utils';
 import { GroupSoloService } from '../../services/group-solo.service';
 import { computeNextResetAt } from '../../services/group-round-reset.service';
 import { PplnsGroupEntity } from '../../ORM/pplns-group/pplns-group.entity';
-import { InvitationServiceError, PplnsGroupInvitationService } from '../../services/pplns-group-invitation.service';
+import { InvitationServiceError, PplnsGroupInvitationService, OPEN_INVITE_TTL_PRESETS, OpenInviteTtl } from '../../services/pplns-group-invitation.service';
+import { JoinRequestServiceError, PplnsGroupJoinRequestService } from '../../services/pplns-group-join-request.service';
+import { ConfigService } from '@nestjs/config';
+import { maskEmail } from '../../utils/email-mask.utils';
 import { AddressEmailService } from '../../services/address-email.service';
 import { ClientService } from '../../ORM/client/client.service';
 import { ClientStatisticsService } from '../../ORM/client-statistics/client-statistics.service';
@@ -41,6 +44,8 @@ export class PplnsGroupController {
         private readonly clientService: ClientService,
         private readonly clientStatisticsService: ClientStatisticsService,
         private readonly clientRejectedStatisticsService: ClientRejectedStatisticsService,
+        private readonly configService: ConfigService,
+        private readonly joinRequestService: PplnsGroupJoinRequestService,
     ) {}
 
     /** Sum of live hashrates across all workers of an address. Matches /api/client/:address. */
@@ -55,6 +60,126 @@ export class PplnsGroupController {
     async list() {
         const groups = await this.groupService.listGroups();
         return groups.map(g => this.publicGroupView(g));
+    }
+
+    /**
+     * GET /pplns/groups/public?page=1&pageSize=50
+     *
+     * Public directory of opt-in groups. Sorted by total hashrate desc so
+     * the most active groups surface first. Each row is enriched with
+     * member count + summed live hashrate so the directory card has all
+     * the data it needs without a follow-up call per group.
+     *
+     * Pagination is server-side because a popular pool could have many
+     * public groups; the UI infinite-scrolls or paginates client-side.
+     */
+    @Get('public')
+    async listPublic(
+        @Query('page') pageStr?: string,
+        @Query('pageSize') pageSizeStr?: string,
+    ) {
+        const page = Math.max(1, parseInt(pageStr ?? '1', 10) || 1);
+        const pageSize = Math.min(100, Math.max(1, parseInt(pageSizeStr ?? '50', 10) || 50));
+
+        const all = await this.groupService.listGroups();
+        const publicGroups = all.filter(g => g.isPublic);
+
+        // Compute member counts + hashrates in parallel; the listing is
+        // cheap-ish (filtered to public groups) so this scales fine for
+        // realistic pool sizes.
+        const enriched = await Promise.all(publicGroups.map(async g => {
+            const members = await this.groupService.listMembers(g.id);
+            const memberCount = members.length;
+            const totalHashrate = (await Promise.all(members.map(m => this.addressHashrate(m.address))))
+                .reduce((sum, h) => sum + h, 0);
+            return {
+                ...this.publicGroupView(g),
+                memberCount,
+                totalHashrate,
+            };
+        }));
+
+        enriched.sort((a, b) => b.totalHashrate - a.totalHashrate);
+
+        const total = enriched.length;
+        const start = (page - 1) * pageSize;
+        const items = enriched.slice(start, start + pageSize);
+        return {
+            page,
+            pageSize,
+            total,
+            items,
+        };
+    }
+
+    /**
+     * GET /pplns/groups/join-requests/by-address/:address
+     *
+     * Pending join requests submitted by this address — used by the
+     * directory page to show "Pending review" instead of the request
+     * form on groups the user has already pinged. Public, no auth: no
+     * sensitive data is exposed (just group ids the user already knows
+     * they applied to).
+     *
+     * MUST be declared before `@Get(':id')` so 'join-requests' isn't
+     * captured as a group id.
+     */
+    @Get('join-requests/by-address/:address')
+    async listJoinRequestsForAddress(@Param('address') address: string) {
+        return this.joinRequestService.listForAddress(address);
+    }
+
+    /**
+     * GET /pplns/groups/public/:id
+     *
+     * Public detail page for a directory group. Returns a directory row
+     * plus the recent block-history (capped) so the user can see if the
+     * group has ever found anything. Member list is intentionally NOT
+     * exposed — that's a privacy boundary; non-members shouldn't see who
+     * else is mining there.
+     */
+    @Get('public/:id')
+    async detailsPublic(@Param('id') id: string) {
+        const group = await this.groupService.getGroup(id);
+        if (!group || group.dissolvedAt || !group.isPublic) {
+            throw new HttpException({ code: 'not-found' }, HttpStatus.NOT_FOUND);
+        }
+        const members = await this.groupService.listMembers(id);
+        const memberCount = members.length;
+        const totalHashrate = (await Promise.all(members.map(m => this.addressHashrate(m.address))))
+            .reduce((sum, h) => sum + h, 0);
+        const history = await this.groupSoloService.getBlockHistory(id, 20);
+        return {
+            ...this.publicGroupView(group),
+            memberCount,
+            totalHashrate,
+            recentBlocks: history,
+        };
+    }
+
+    /**
+     * POST /pplns/groups/public/:id/join-request
+     * Body: { address: string, message?: string }
+     *
+     * User-submitted request to join a public group. Public — the trust
+     * anchor is the verified email binding for the supplied address.
+     * Rate-limited per-IP (preventing spam from a single source) and
+     * per-address (multi-layer in service: DB unique partial index +
+     * service-level pending cap + reject cooldown).
+     */
+    @UseGuards(ThrottlerGuard)
+    @Throttle(5, 60)
+    @Post('public/:id/join-request')
+    async createJoinRequest(
+        @Param('id') id: string,
+        @Body() body: { address?: string; message?: string },
+    ) {
+        try {
+            const r = await this.joinRequestService.createJoinRequest(id, body?.address ?? '', body?.message);
+            return { id: r.id, groupId: r.groupId, status: r.status, createdAt: r.createdAt };
+        } catch (e) {
+            throw this.toHttpError(e);
+        }
     }
 
     @Get(':id')
@@ -112,8 +237,13 @@ export class PplnsGroupController {
                 lastAcceptedShareAt,
             };
             if (isAdmin) {
+                // Privacy: even the admin only sees a masked email so a
+                // leaked admin token can't be used to build a BTC↔email
+                // mapping for members. The mask still lets the admin
+                // distinguish "verified email present" from "no email"
+                // (null → no binding, masked string → bound + verified).
                 const binding = await this.addressEmailService.getVerified(m.address);
-                row.email = binding?.email ?? null;
+                row.email = binding ? maskEmail(binding.email) : null;
             }
             return row;
         }));
@@ -327,7 +457,9 @@ export class PplnsGroupController {
     ) {
         try {
             const result = await this.invitationService.createInvitation(id, body.address ?? '', token);
-            return { invited: true, email: result.email, expiresAt: result.expiresAt };
+            // Privacy: return the masked email so the success toast confirms
+            // "invite went out" without revealing the BTC↔email mapping.
+            return { invited: true, email: maskEmail(result.email), expiresAt: result.expiresAt };
         } catch (e) {
             throw this.toHttpError(e);
         }
@@ -369,7 +501,7 @@ export class PplnsGroupController {
             seen.add(dedupKey);
             try {
                 const r = await this.invitationService.createInvitation(id, addr, token);
-                invited.push({ address: addr, email: r.email, expiresAt: r.expiresAt });
+                invited.push({ address: addr, email: maskEmail(r.email), expiresAt: r.expiresAt });
             } catch (e) {
                 if (e instanceof GroupServiceError && e.code === 'invalid-token') {
                     throw this.toHttpError(e);
@@ -409,11 +541,82 @@ export class PplnsGroupController {
             const rows = await this.invitationService.listPendingForGroup(id);
             return rows.map(r => ({
                 address: r.address,
-                email: r.email,
+                // Privacy: masked even for the admin — see detailsForGroupId.
+                email: r.email ? maskEmail(r.email) : null,
                 createdAt: r.createdAt,
                 expiresAt: r.expiresAt,
                 status: r.status,
             }));
+        } catch (e) {
+            throw this.toHttpError(e);
+        }
+    }
+
+    /**
+     * POST /pplns/groups/:id/invitations/open
+     * Generate (or replace) the active open-invite link for the group.
+     * Body: { ttl: '1h' | '24h' | '7d' | '30d' }
+     * Response: { token, expiresAt, link } where link is the public URL
+     * the admin can share. Atomic-replaces any existing active open link.
+     */
+    @UseGuards(ThrottlerGuard)
+    @Throttle(10, 60)
+    @Post(':id/invitations/open')
+    async createOpenInvitation(
+        @Param('id') id: string,
+        @Body() body: { ttl?: string },
+        @Headers('x-admin-token') token?: string,
+    ) {
+        try {
+            const ttl = body?.ttl as OpenInviteTtl;
+            const result = await this.invitationService.createOpenInvite(id, ttl, token);
+            const baseUrl = (this.configService.get<string>('POOL_BASE_URL') ?? '').replace(/\/+$/, '');
+            const link = baseUrl ? `${baseUrl}/#/invite/open/${result.token}` : `/#/invite/open/${result.token}`;
+            return { token: result.token, expiresAt: result.expiresAt, link };
+        } catch (e) {
+            throw this.toHttpError(e);
+        }
+    }
+
+    /**
+     * GET /pplns/groups/:id/invitations/open/active
+     * Returns the currently active open-invite link (or null). Admin-token
+     * gated — the token is the live secret, never exposed publicly.
+     */
+    @Get(':id/invitations/open/active')
+    async getActiveOpenInvitation(
+        @Param('id') id: string,
+        @Headers('x-admin-token') token?: string,
+    ) {
+        try {
+            const result = await this.invitationService.getActiveOpenInvite(id, token);
+            if (!result) return { active: false };
+            const baseUrl = (this.configService.get<string>('POOL_BASE_URL') ?? '').replace(/\/+$/, '');
+            const link = baseUrl ? `${baseUrl}/#/invite/open/${result.token}` : `/#/invite/open/${result.token}`;
+            return {
+                active: true,
+                token: result.token,
+                expiresAt: result.expiresAt,
+                createdAt: result.createdAt,
+                link,
+            };
+        } catch (e) {
+            throw this.toHttpError(e);
+        }
+    }
+
+    /**
+     * DELETE /pplns/groups/:id/invitations/open
+     * Manually revoke the active open-invite link. Idempotent.
+     */
+    @Delete(':id/invitations/open')
+    async revokeOpenInvitation(
+        @Param('id') id: string,
+        @Headers('x-admin-token') token?: string,
+    ) {
+        try {
+            await this.invitationService.revokeOpenInvite(id, token);
+            return { revoked: true };
         } catch (e) {
             throw this.toHttpError(e);
         }
@@ -434,6 +637,75 @@ export class PplnsGroupController {
         try {
             await this.invitationService.cancelInvitationByAddress(id, address, token);
             return { cancelled: true };
+        } catch (e) {
+            throw this.toHttpError(e);
+        }
+    }
+
+    /**
+     * GET /pplns/groups/:id/join-requests?includeDecided=1
+     * List user-initiated join requests. Admin-token gated. Default returns
+     * only pending; pass `includeDecided=1` to also see recent approvals
+     * and rejections (useful for audit / undo-ish flows).
+     */
+    @Get(':id/join-requests')
+    async listJoinRequests(
+        @Param('id') id: string,
+        @Query('includeDecided') includeDecided?: string,
+        @Headers('x-admin-token') token?: string,
+    ) {
+        try {
+            const rows = await this.joinRequestService.listForGroup(id, token, {
+                includeDecided: includeDecided === '1' || includeDecided === 'true',
+            });
+            return rows.map(r => ({
+                id: r.id,
+                address: r.address,
+                // Privacy: masked even for the admin — see detailsForGroupId.
+                email: maskEmail(r.email),
+                message: r.message,
+                status: r.status,
+                createdAt: r.createdAt,
+                decidedAt: r.decidedAt,
+            }));
+        } catch (e) {
+            throw this.toHttpError(e);
+        }
+    }
+
+    /**
+     * POST /pplns/groups/:id/join-requests/:reqId/approve
+     * Approve a pending join request — adds the address as a member and
+     * notifies them by email. Admin-token gated.
+     */
+    @Post(':id/join-requests/:reqId/approve')
+    async approveJoinRequest(
+        @Param('id') id: string,
+        @Param('reqId') reqId: string,
+        @Headers('x-admin-token') token?: string,
+    ) {
+        try {
+            await this.joinRequestService.approveRequest(id, reqId, token);
+            return { approved: true };
+        } catch (e) {
+            throw this.toHttpError(e);
+        }
+    }
+
+    /**
+     * POST /pplns/groups/:id/join-requests/:reqId/reject
+     * Reject a pending join request and notify the requester by email.
+     * Admin-token gated.
+     */
+    @Post(':id/join-requests/:reqId/reject')
+    async rejectJoinRequest(
+        @Param('id') id: string,
+        @Param('reqId') reqId: string,
+        @Headers('x-admin-token') token?: string,
+    ) {
+        try {
+            await this.joinRequestService.rejectRequest(id, reqId, token);
+            return { rejected: true };
         } catch (e) {
             throw this.toHttpError(e);
         }
@@ -491,6 +763,7 @@ export class PplnsGroupController {
                 finderBonusSats: updated.finderBonusSats ?? 0,
                 lastRoundResetAt: updated.lastRoundResetAt,
                 nextResetAt: computeNextResetAt(updated as PplnsGroupEntity),
+                isPublic: updated.isPublic ?? false,
             };
         } catch (e) {
             throw this.toHttpError(e);
@@ -535,6 +808,7 @@ export class PplnsGroupController {
         finderBonusSats?: number | null;
         lastRoundResetAt?: Date | null;
         dissolvedAt?: Date | null;
+        isPublic?: boolean;
     }) {
         // Round-reset config + finder bonus are intentionally exposed on the
         // public view — every member needs them to render the "next reset in
@@ -553,6 +827,7 @@ export class PplnsGroupController {
             finderBonusSats: group.finderBonusSats ?? 0,
             lastRoundResetAt: group.lastRoundResetAt ?? null,
             nextResetAt: computeNextResetAt(group as PplnsGroupEntity),
+            isPublic: group.isPublic ?? false,
         };
     }
 
@@ -590,6 +865,20 @@ export class PplnsGroupController {
                 'group-dissolved': HttpStatus.GONE,
                 'invalid-address': HttpStatus.BAD_REQUEST,
                 'config-missing': HttpStatus.SERVICE_UNAVAILABLE,
+            }[e.code] ?? HttpStatus.BAD_REQUEST;
+            return new HttpException({ code: e.code, message: e.message }, status);
+        }
+        if (e instanceof JoinRequestServiceError) {
+            const status = {
+                'not-found': HttpStatus.NOT_FOUND,
+                'invalid-address': HttpStatus.BAD_REQUEST,
+                'email-not-verified': HttpStatus.FAILED_DEPENDENCY,
+                'already-member': HttpStatus.CONFLICT,
+                'address-in-group': HttpStatus.CONFLICT,
+                'request-pending': HttpStatus.CONFLICT,
+                'too-many-pending': HttpStatus.TOO_MANY_REQUESTS,
+                'reject-cooldown': HttpStatus.TOO_MANY_REQUESTS,
+                'group-dissolved': HttpStatus.GONE,
             }[e.code] ?? HttpStatus.BAD_REQUEST;
             return new HttpException({ code: e.code, message: e.message }, status);
         }

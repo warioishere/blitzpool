@@ -81,6 +81,11 @@ export interface GroupRoundResetSettings {
     /** Admin's IANA timezone (browser-supplied). Required for any preset. */
     timezone?: string;
     finderBonusSats?: string | number | null;
+    /**
+     * Toggle public visibility. When true, the group surfaces in the
+     * public directory and accepts join-requests. Omit to leave unchanged.
+     */
+    isPublic?: boolean;
 }
 
 export type RoundResetPreset = 'daily' | 'weekly' | 'monthly' | 'custom';
@@ -215,6 +220,7 @@ export class GroupService implements OnModuleInit {
             creatorAddress: normalizedAddress,
             adminTokenHash: this.hashToken(adminToken),
             active: false,
+            isPublic: false,
         }));
 
         await this.memberRepo.save(this.memberRepo.create({
@@ -535,6 +541,14 @@ export class GroupService implements OnModuleInit {
                 }
                 group.finderBonusSats = parsed;
             }
+        }
+
+        // isPublic — pure visibility toggle. No cross-field constraints;
+        // a group can be public regardless of round-reset config. Strict
+        // boolean coercion so malformed JSON ("yes", 1, etc.) doesn't slip
+        // into a Postgres BOOLEAN column.
+        if (settings.isPublic !== undefined) {
+            group.isPublic = settings.isPublic === true;
         }
 
         // If a preset is configured we need a TZ on the entity — either

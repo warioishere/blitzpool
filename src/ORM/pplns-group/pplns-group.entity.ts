@@ -19,6 +19,16 @@ export class PplnsGroupEntity {
     @Column({ type: 'boolean', default: false })
     active: boolean;
 
+    /**
+     * When true, the group is listed in the public directory at
+     * `/pplns/groups/public` and accepts unsolicited join-requests. The
+     * admin opts into this — default is false, so pre-existing groups
+     * (created before this column was added) stay private until they
+     * explicitly enable visibility.
+     */
+    @Column({ type: 'boolean', default: false })
+    isPublic: boolean;
+
     @CreateDateColumn()
     createdAt: Date;
 

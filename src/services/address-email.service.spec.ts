@@ -90,7 +90,7 @@ describe('AddressEmailService — K1-minimal FCFS-lock + binding-change notifica
         const arg = (emailService.sendBindingChangeAttempt as jest.Mock).mock.calls[0][0];
         expect(arg.to).toBe('bob@example.com');
         expect(arg.address).toBe('bc1qbob');
-        expect(arg.attemptedEmailMasked).toBe('e***@evil.com');
+        expect(arg.attemptedEmailMasked).toBe('e***@e***.com');
         // No verification email sent to attacker
         expect(emailService.sendVerification).not.toHaveBeenCalled();
     });

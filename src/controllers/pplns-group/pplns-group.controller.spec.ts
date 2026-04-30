@@ -24,6 +24,8 @@ describe('PplnsGroupController.chart', () => {
             ),
         };
         const clientRejectedStatisticsService = {} as any;
+        const configService = { get: jest.fn(() => undefined) } as any;
+        const joinRequestService = {} as any;
         const controller = new PplnsGroupController(
             groupService as any,
             groupSoloService,
@@ -32,6 +34,8 @@ describe('PplnsGroupController.chart', () => {
             clientService,
             clientStatisticsService as any,
             clientRejectedStatisticsService,
+            configService,
+            joinRequestService,
         );
         return { controller, groupService, clientStatisticsService };
     }
