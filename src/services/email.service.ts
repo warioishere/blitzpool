@@ -29,6 +29,14 @@ interface BindingChangeAttemptContext {
     attemptedEmailMasked: string;
 }
 
+interface JoinRequestDecisionContext {
+    to: string;
+    address: string;
+    groupName: string;
+    /** Public group dashboard URL — recipient lands on the joined group on approve. */
+    groupUrl: string;
+}
+
 export type CapacityAlertLevel = 'warning' | 'urgent' | 'recovery';
 
 export interface CapacityAlertContext {
@@ -148,6 +156,53 @@ export class EmailService implements OnModuleInit {
             html,
             text,
         });
+    }
+
+    /**
+     * Notify a miner that their public-directory join request was approved
+     * and they're now a member of the group. Best-effort — we log and
+     * swallow on failure so the approval flow doesn't fail the admin's
+     * request just because SMTP is down.
+     */
+    async sendJoinRequestApproved(ctx: JoinRequestDecisionContext): Promise<void> {
+        if (!this.enabled || !this.transport) return;
+        const subject = `Welcome to ${sanitizeHeader(ctx.groupName)} — Blitz Pool`;
+        const html = renderJoinDecisionHtml(ctx, 'approved');
+        const text = renderJoinDecisionText(ctx, 'approved');
+        try {
+            await this.transport.sendMail({
+                from: this.fromAddress,
+                to: ctx.to,
+                subject,
+                html,
+                text,
+            });
+        } catch (e) {
+            this.logger.warn(`sendJoinRequestApproved failed: ${(e as Error).message}`);
+        }
+    }
+
+    /**
+     * Notify a miner that their public-directory join request was rejected.
+     * No reason text is sent — keeping the admin UI minimal (no per-decision
+     * comment field). Best-effort, same swallow-on-failure semantics.
+     */
+    async sendJoinRequestRejected(ctx: JoinRequestDecisionContext): Promise<void> {
+        if (!this.enabled || !this.transport) return;
+        const subject = `Join request to ${sanitizeHeader(ctx.groupName)} declined — Blitz Pool`;
+        const html = renderJoinDecisionHtml(ctx, 'rejected');
+        const text = renderJoinDecisionText(ctx, 'rejected');
+        try {
+            await this.transport.sendMail({
+                from: this.fromAddress,
+                to: ctx.to,
+                subject,
+                html,
+                text,
+            });
+        } catch (e) {
+            this.logger.warn(`sendJoinRequestRejected failed: ${(e as Error).message}`);
+        }
     }
 
     /**
@@ -325,6 +380,56 @@ function renderInvitationText(ctx: InvitationEmailContext): string {
         ``,
         `Invitation expires ${ctx.expiresAt.toUTCString()}.`,
         `If you don't recognise the inviter, decline.`,
+    ].join('\n');
+}
+
+function renderJoinDecisionHtml(ctx: JoinRequestDecisionContext, decision: 'approved' | 'rejected'): string {
+    const isApproved = decision === 'approved';
+    const headline = isApproved ? 'Welcome — request approved' : 'Request declined';
+    const body = `
+<h1 style="margin:0 0 16px;font-size:22px;font-weight:600;color:${COLOR_TEXT};">${escapeHtml(headline)}</h1>
+<p style="margin:0 0 16px;font-size:14px;line-height:1.6;color:${COLOR_TEXT};">
+  Your join request to <strong style="color:${COLOR_PRIMARY};">${escapeHtml(ctx.groupName)}</strong> has been
+  <strong>${isApproved ? 'approved' : 'declined'}</strong> by the group admin.
+</p>
+<p style="margin:0 0 24px;padding:12px 16px;background:${COLOR_BG};border-radius:6px;font-family:'Roboto Mono',monospace;font-size:13px;color:${COLOR_PRIMARY};word-break:break-all;">
+  ${escapeHtml(ctx.address)}
+</p>
+${isApproved ? `
+<p style="margin:0 0 16px;font-size:14px;line-height:1.6;color:${COLOR_TEXT};">
+  Your address is now a member. Future blocks will be paid out via the group's PROP-style coinbase split.
+</p>
+<table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:0 0 24px;">
+  <tr><td>${buttonHtml(ctx.groupUrl, 'Open group dashboard')}</td></tr>
+</table>
+<p style="margin:0;font-size:12px;color:${COLOR_MUTED};">
+  Or paste this link: <a href="${escapeAttr(ctx.groupUrl)}" style="color:${COLOR_PRIMARY};">${escapeHtml(ctx.groupUrl)}</a>
+</p>
+` : `
+<p style="margin:0;font-size:14px;line-height:1.6;color:${COLOR_TEXT};">
+  No further action is needed. You can request to join other public groups any time.
+</p>
+`}
+`;
+    return shellHtml(headline, body);
+}
+
+function renderJoinDecisionText(ctx: JoinRequestDecisionContext, decision: 'approved' | 'rejected'): string {
+    if (decision === 'approved') {
+        return [
+            `Your join request to "${sanitizeHeader(ctx.groupName)}" was approved.`,
+            ``,
+            `Address: ${ctx.address}`,
+            ``,
+            `Open group dashboard: ${ctx.groupUrl}`,
+        ].join('\n');
+    }
+    return [
+        `Your join request to "${sanitizeHeader(ctx.groupName)}" was declined by the admin.`,
+        ``,
+        `Address: ${ctx.address}`,
+        ``,
+        `No further action is needed. You can request to join other public groups any time.`,
     ].join('\n');
 }
 

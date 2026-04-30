@@ -63,6 +63,7 @@ import { EmailService } from './services/email.service';
 import { AddressEmailService } from './services/address-email.service';
 import { CoinbaseCapacityMonitorService } from './services/coinbase-capacity-monitor.service';
 import { PplnsGroupInvitationService } from './services/pplns-group-invitation.service';
+import { PplnsGroupJoinRequestService } from './services/pplns-group-join-request.service';
 import { MiningModeService } from './services/mining-mode.service';
 import { MinerActiveModeService } from './services/miner-active-mode.service';
 import { DustSweepService } from './services/dust-sweep.service';
@@ -71,6 +72,7 @@ import { PplnsGroupMemberEntity } from './ORM/pplns-group/pplns-group-member.ent
 import { PplnsGroupBlockHistoryEntity } from './ORM/pplns-group/pplns-group-block-history.entity';
 import { PplnsGroupBalanceEntity } from './ORM/pplns-group/pplns-group-balance.entity';
 import { PplnsGroupInvitationEntity } from './ORM/pplns-group/pplns-group-invitation.entity';
+import { PplnsGroupJoinRequestEntity } from './ORM/pplns-group/pplns-group-join-request.entity';
 import { AddressEmailEntity } from './ORM/address-email/address-email.entity';
 import { EmailVerificationEntity } from './ORM/address-email/email-verification.entity';
 import { PplnsGroupController } from './controllers/pplns-group/pplns-group.controller';
@@ -168,6 +170,7 @@ const ORMModules = [
             PplnsGroupBlockHistoryEntity,
             PplnsGroupBalanceEntity,
             PplnsGroupInvitationEntity,
+            PplnsGroupJoinRequestEntity,
             AddressEmailEntity,
             EmailVerificationEntity,
         ]),
@@ -226,6 +229,7 @@ const ORMModules = [
         EmailService,
         AddressEmailService,
         PplnsGroupInvitationService,
+        PplnsGroupJoinRequestService,
         CoinbaseCapacityMonitorService,
     ],
 })

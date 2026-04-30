@@ -398,6 +398,19 @@ describe('GroupService', () => {
         }, token)).rejects.toMatchObject({ code: 'incomplete-schedule' });
     });
 
+    it('updateRoundResetConfig: isPublic toggle — defaults false, settable, defensive coerce', async () => {
+        const { id, token } = await freshGroup();
+        // Fresh group is private by default.
+        const initial = await service.getGroup(id);
+        expect(initial?.isPublic).toBe(false);
+        // Flip to public.
+        const pub = await service.updateRoundResetConfig(id, { isPublic: true }, token);
+        expect(pub.isPublic).toBe(true);
+        // Flip back to private; non-boolean inputs coerce to false (defensive).
+        const priv = await service.updateRoundResetConfig(id, { isPublic: 'yes' as any }, token);
+        expect(priv.isPublic).toBe(false);
+    });
+
     it('updateRoundResetConfig: PATCH semantics — undefined leaves columns alone', async () => {
         const { id, token } = await freshGroup();
         await service.updateRoundResetConfig(id, {

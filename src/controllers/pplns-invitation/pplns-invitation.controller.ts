@@ -1,4 +1,4 @@
-import { Controller, Get, HttpException, HttpStatus, Param, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, HttpException, HttpStatus, Param, Post, UseGuards } from '@nestjs/common';
 import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 import { InvitationServiceError, PplnsGroupInvitationService } from '../../services/pplns-group-invitation.service';
 
@@ -76,6 +76,50 @@ export class PplnsInvitationController {
         try {
             await this.invitationService.decline(token);
             return { ok: true };
+        } catch (e) {
+            throw this.toHttp(e);
+        }
+    }
+
+    /**
+     * GET /api/pplns/invitations/open/:token
+     * Public landing-page lookup for an open invite. Returns just enough
+     * to render the join form: group name + expiry. No member list, no
+     * admin secrets. 404 if the token is unknown, expired, revoked, or
+     * for a dissolved group.
+     */
+    @Get('open/:token')
+    async openInviteByToken(@Param('token') token: string) {
+        const result = await this.invitationService.getOpenInvitePublic(token);
+        if (!result) {
+            throw new HttpException({ code: 'not-found', message: 'Open invitation not found or no longer valid' }, HttpStatus.NOT_FOUND);
+        }
+        return {
+            token: result.token,
+            groupId: result.groupId,
+            groupName: result.groupName,
+            expiresAt: result.expiresAt,
+        };
+    }
+
+    /**
+     * POST /api/pplns/invitations/open/:token/accept
+     * Accept an open invite by binding it to a specific address. The
+     * address must have a verified email binding (same trust anchor as
+     * directed invites). Multi-use: the link stays valid until TTL.
+     */
+    // 10 req/min per IP. Open links can be claimed by anyone, so this is
+    // the realistic abuse vector — limit harder than the directed flow.
+    @UseGuards(ThrottlerGuard)
+    @Throttle(10, 60)
+    @Post('open/:token/accept')
+    async acceptOpen(
+        @Param('token') token: string,
+        @Body() body: { address?: string },
+    ) {
+        try {
+            const member = await this.invitationService.acceptOpenInvite(token, body?.address ?? '');
+            return { address: member.address, role: member.role, joinedAt: member.joinedAt, groupId: member.groupId };
         } catch (e) {
             throw this.toHttp(e);
         }
