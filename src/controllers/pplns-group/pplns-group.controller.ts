@@ -8,6 +8,7 @@ import { PplnsGroupEntity } from '../../ORM/pplns-group/pplns-group.entity';
 import { InvitationServiceError, PplnsGroupInvitationService, OPEN_INVITE_TTL_PRESETS, OpenInviteTtl } from '../../services/pplns-group-invitation.service';
 import { JoinRequestServiceError, PplnsGroupJoinRequestService } from '../../services/pplns-group-join-request.service';
 import { ConfigService } from '@nestjs/config';
+import { maskEmail } from '../../utils/email-mask.utils';
 import { AddressEmailService } from '../../services/address-email.service';
 import { ClientService } from '../../ORM/client/client.service';
 import { ClientStatisticsService } from '../../ORM/client-statistics/client-statistics.service';
@@ -236,8 +237,13 @@ export class PplnsGroupController {
                 lastAcceptedShareAt,
             };
             if (isAdmin) {
+                // Privacy: even the admin only sees a masked email so a
+                // leaked admin token can't be used to build a BTC↔email
+                // mapping for members. The mask still lets the admin
+                // distinguish "verified email present" from "no email"
+                // (null → no binding, masked string → bound + verified).
                 const binding = await this.addressEmailService.getVerified(m.address);
-                row.email = binding?.email ?? null;
+                row.email = binding ? maskEmail(binding.email) : null;
             }
             return row;
         }));
@@ -451,7 +457,9 @@ export class PplnsGroupController {
     ) {
         try {
             const result = await this.invitationService.createInvitation(id, body.address ?? '', token);
-            return { invited: true, email: result.email, expiresAt: result.expiresAt };
+            // Privacy: return the masked email so the success toast confirms
+            // "invite went out" without revealing the BTC↔email mapping.
+            return { invited: true, email: maskEmail(result.email), expiresAt: result.expiresAt };
         } catch (e) {
             throw this.toHttpError(e);
         }
@@ -493,7 +501,7 @@ export class PplnsGroupController {
             seen.add(dedupKey);
             try {
                 const r = await this.invitationService.createInvitation(id, addr, token);
-                invited.push({ address: addr, email: r.email, expiresAt: r.expiresAt });
+                invited.push({ address: addr, email: maskEmail(r.email), expiresAt: r.expiresAt });
             } catch (e) {
                 if (e instanceof GroupServiceError && e.code === 'invalid-token') {
                     throw this.toHttpError(e);
@@ -533,7 +541,8 @@ export class PplnsGroupController {
             const rows = await this.invitationService.listPendingForGroup(id);
             return rows.map(r => ({
                 address: r.address,
-                email: r.email,
+                // Privacy: masked even for the admin — see detailsForGroupId.
+                email: r.email ? maskEmail(r.email) : null,
                 createdAt: r.createdAt,
                 expiresAt: r.expiresAt,
                 status: r.status,
@@ -652,7 +661,8 @@ export class PplnsGroupController {
             return rows.map(r => ({
                 id: r.id,
                 address: r.address,
-                email: r.email,
+                // Privacy: masked even for the admin — see detailsForGroupId.
+                email: maskEmail(r.email),
                 message: r.message,
                 status: r.status,
                 createdAt: r.createdAt,
