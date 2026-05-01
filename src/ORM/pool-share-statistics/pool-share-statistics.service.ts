@@ -5,7 +5,11 @@ import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
 
 import { PoolShareStatisticsEntity } from './pool-share-statistics.entity';
-import { DIFFICULTY_1, REDIS_STATISTICS_TTL } from '../../constants/mining.constants';
+import {
+  DIFFICULTY_1,
+  MAX_REASONABLE_DIFFICULTY,
+  REDIS_STATISTICS_TTL,
+} from '../../constants/mining.constants';
 import { TimeSlotHelper } from '../../utils/time-slot.helper';
 
 @Injectable()
@@ -36,6 +40,22 @@ export class PoolShareStatisticsService implements OnModuleInit {
     if (!Number.isFinite(accepted) || !Number.isFinite(rejected)) {
       console.warn(
         `discarded non-finite share stats: accepted=${accepted}, rejected=${rejected}`,
+      );
+      return;
+    }
+
+    // Defense-in-depth ceiling. The pool's Postgres `pool_share_statistics`
+    // accepted/rejected columns are `real` (max ~3.4e38). If even a single
+    // share (or accumulated bucket) exceeds the column range, the bulk
+    // upsert fails and the flusher gets stuck on the bad bucket forever —
+    // every subsequent share for that 10-min window then hangs in Redis.
+    // Real miners never legitimately submit shares above MAX_REASONABLE_
+    // DIFFICULTY (~3x network). Anything bigger is a misconfigured SV2
+    // client, a probing tool, or a corruption bug somewhere upstream.
+    // Discard with a loud warning rather than poison the bucket.
+    if (accepted > MAX_REASONABLE_DIFFICULTY || rejected > MAX_REASONABLE_DIFFICULTY) {
+      console.warn(
+        `[PoolShareStatisticsService] Discarded out-of-range share: accepted=${accepted}, rejected=${rejected} (limit ${MAX_REASONABLE_DIFFICULTY})`,
       );
       return;
     }

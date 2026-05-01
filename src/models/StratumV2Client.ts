@@ -33,6 +33,7 @@ import { ClientEntity } from '../ORM/client/client.entity';
 import { MiningJob } from './MiningJob';
 import { StratumV1ClientStatistics } from './StratumV1ClientStatistics';
 import { DifficultyUtils } from '../utils/difficulty.utils';
+import { MAX_REASONABLE_DIFFICULTY } from '../constants/mining.constants';
 
 import { Sv2NoiseSession } from './sv2/sv2-noise';
 import { Sv2FrameReader, Sv2FrameWriter } from './sv2/sv2-frame';
@@ -599,6 +600,25 @@ export class StratumV2Client {
     if (portMinDiff > 0 && channelDifficulty < portMinDiff) {
       channelDifficulty = portMinDiff;
     }
+    // Sanity ceiling. A misconfigured client (or attacker) sending a tiny
+    // maxTarget forces clampDifficultyToMaxTarget into the e+50 range —
+    // each subsequent rejected share then writes that absurd value into
+    // the pool-shares Redis bucket, eventually overflowing the Postgres
+    // `real` column (3.4e38) and freezing all pool-wide stats endpoints.
+    // Refuse channels that would resolve to a difficulty no real miner
+    // would ever legitimately need. See MAX_REASONABLE_DIFFICULTY for the
+    // threshold rationale.
+    if (channelDifficulty > MAX_REASONABLE_DIFFICULTY) {
+      console.warn(
+        `[SV2 ${this.sessionId}] ❌ OpenStandardMiningChannel rejected: max-target-out-of-range (computed difficulty ${channelDifficulty.toExponential(3)} exceeds ceiling ${MAX_REASONABLE_DIFFICULTY.toExponential(0)})`,
+      );
+      const errorPayload = serializeOpenMiningChannelError({
+        requestId: msg.requestId,
+        errorCode: 'max-target-out-of-range',
+      });
+      await this.sendFrame(Sv2MsgType.OPEN_STANDARD_MINING_CHANNEL_ERROR, errorPayload, 0);
+      return;
+    }
     // Update connection-level difficulty for vardiff baseline
     if (isFirstChannel) {
       this.sessionDifficulty = channelDifficulty;
@@ -787,6 +807,18 @@ export class StratumV2Client {
     if (extPortMinDiff > 0 && channelDifficulty < extPortMinDiff) {
       channelDifficulty = extPortMinDiff;
     }
+    // Sanity ceiling — see handleOpenChannel for rationale.
+    if (channelDifficulty > MAX_REASONABLE_DIFFICULTY) {
+      console.warn(
+        `[SV2 ${this.sessionId}] ❌ OpenExtendedMiningChannel rejected: max-target-out-of-range (computed difficulty ${channelDifficulty.toExponential(3)} exceeds ceiling ${MAX_REASONABLE_DIFFICULTY.toExponential(0)})`,
+      );
+      const errorPayload = serializeOpenMiningChannelError({
+        requestId: msg.requestId,
+        errorCode: 'max-target-out-of-range',
+      });
+      await this.sendFrame(Sv2MsgType.OPEN_STANDARD_MINING_CHANNEL_ERROR, errorPayload, 0);
+      return;
+    }
     if (isFirstChannel) {
       this.sessionDifficulty = channelDifficulty;
     }
@@ -899,6 +931,17 @@ export class StratumV2Client {
     const updatePortMinDiff = this.portConfig.minimumDifficulty ?? 0;
     if (updatePortMinDiff > 0 && newDifficulty < updatePortMinDiff) {
       newDifficulty = updatePortMinDiff;
+    }
+    // Sanity ceiling — refuse to apply an absurd difficulty via
+    // UpdateChannel for the same reason we refuse it on OpenChannel.
+    // Stick with the existing channel.sessionDifficulty rather than
+    // closing the channel; the miner can either retry with a larger
+    // maxTarget or live with their previously-assigned diff.
+    if (newDifficulty > MAX_REASONABLE_DIFFICULTY) {
+      console.warn(
+        `[SV2 ${this.sessionId}] UpdateChannel ${msg.channelId} ignored: computed difficulty ${newDifficulty.toExponential(3)} exceeds ceiling ${MAX_REASONABLE_DIFFICULTY.toExponential(0)} (keeping ${channel.sessionDifficulty.toFixed(4)})`,
+      );
+      return;
     }
 
     const diffChanged = newDifficulty !== channel.sessionDifficulty;

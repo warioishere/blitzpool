@@ -91,4 +91,31 @@ describe('PoolShareStatisticsService', () => {
       consoleSpy.mockRestore();
     }
   });
+
+  it('discards out-of-range share values to protect Postgres `real` column', async () => {
+    const consoleSpy = jest.spyOn(console, 'warn').mockImplementation();
+
+    try {
+      // Reproduces the production incident on 2026-05-01: a buggy SV2
+      // client opened a channel with absurdly small maxTarget, getting
+      // assigned diff ≈ 9.8e53. Each rejected share writes that into
+      // Redis pool:shares:* — and Postgres `real` (max ~3.4e38) refuses
+      // the bucket on flush, freezing all pool-wide stats endpoints.
+      await service.addRejectedShare(9.8e53);
+      expect(mockRedisClient.hIncrByFloat).not.toHaveBeenCalled();
+
+      await service.addAcceptedShare(9.8e53);
+      expect(mockRedisClient.hIncrByFloat).not.toHaveBeenCalled();
+    } finally {
+      consoleSpy.mockRestore();
+    }
+  });
+
+  it('still accepts large but plausible share values below the ceiling', async () => {
+    // Network difficulty is ~3.5e14 in 2026 — values up to MAX_REASONABLE_
+    // DIFFICULTY (1e15) must continue to flow through unchanged.
+    await service.addAcceptedShare(1e14);
+    expect(mockRedisClient.hIncrByFloat).toHaveBeenCalledTimes(1);
+    expect(mockRedisClient.expire).toHaveBeenCalledTimes(1);
+  });
 });

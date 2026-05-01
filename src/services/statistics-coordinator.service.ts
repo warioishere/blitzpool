@@ -300,9 +300,66 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
         await this.redisClient.del(keysToDelete);
       }
     } catch (error) {
-      console.error('[StatisticsCoordinator] Failed to flush pool shares to database:', error);
-      // Keys remain in Redis for retry on next flush
+      // Bulk insert is all-or-nothing under Postgres transactions. A single
+      // out-of-range value (e.g. accepted/rejected > 3.4e38 from a corrupt
+      // Redis bucket) poisons the entire batch and every subsequent flush
+      // tick, freezing pool-wide chart/share/accepted endpoints.
+      //
+      // Fall back to per-bucket inserts so good buckets land in Postgres
+      // and only the offending key is quarantined (deleted from Redis with
+      // a warning, preserving accepted/rejected for the non-corrupt slots).
+      console.error(
+        `[StatisticsCoordinator] Bulk pool-shares flush failed (${(error as Error).message}); falling back to per-bucket inserts`,
+      );
+      await this.flushPoolSharesIndividually(records, keysToDelete);
     }
+  }
+
+  /**
+   * Per-bucket fallback for `flushPoolShares()` when the bulk upsert is
+   * rejected by Postgres. Inserts each bucket in its own statement so good
+   * data still flows; for bad buckets, deletes the Redis key with a loud
+   * warning so the flusher doesn't get stuck on the same poisoned bucket
+   * forever. Lossy by design — but losing one corrupt 10-min bucket beats
+   * losing all subsequent pool-wide stats indefinitely.
+   */
+  private async flushPoolSharesIndividually(
+    records: Array<{ time: number; accepted: number; rejected: number }>,
+    keys: string[],
+  ): Promise<void> {
+    let goodBuckets = 0;
+    const goodKeys: string[] = [];
+    const quarantineKeys: string[] = [];
+
+    for (let i = 0; i < records.length; i++) {
+      const record = records[i];
+      const key = keys[i];
+      try {
+        await this.bulkUpsertPoolShares([record]);
+        goodBuckets++;
+        goodKeys.push(key);
+      } catch (error) {
+        console.error(
+          `[StatisticsCoordinator] Quarantining corrupt pool-shares bucket ${key} (time=${record.time}, accepted=${record.accepted}, rejected=${record.rejected}): ${(error as Error).message}`,
+        );
+        quarantineKeys.push(key);
+      }
+    }
+
+    const keysToDel = [...goodKeys, ...quarantineKeys];
+    if (keysToDel.length > 0) {
+      try {
+        await this.redisClient.del(keysToDel);
+      } catch (error) {
+        console.error(
+          `[StatisticsCoordinator] Failed to delete pool-shares keys after fallback flush: ${(error as Error).message}`,
+        );
+      }
+    }
+
+    console.log(
+      `[StatisticsCoordinator] Per-bucket flush complete: ${goodBuckets} flushed, ${quarantineKeys.length} quarantined`,
+    );
   }
 
   /**
