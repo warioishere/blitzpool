@@ -393,15 +393,26 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
     type Snapshot = { key: string; timeSlot: number; fields: Array<{ mode: string; diff: number }> };
     const snapshots: Snapshot[] = [];
 
-    // Pass 1: read snapshots of every COMPLETE slot. Skip the current
-    // slot — writes are still landing there and the coordinator must not
-    // race the writer.
+    // Pre-filter current slot, then pipeline the HGETALL reads. Same shape
+    // as the other flushers — sequential awaits across many keys add up.
+    const eligibleKeys: string[] = [];
+    const eligibleTimes: number[] = [];
     for (const key of keys) {
-      try {
-        const timeSlot = parseInt(key.split(':')[2], 10);
-        if (!Number.isFinite(timeSlot) || timeSlot === currentSlot) continue;
+      const timeSlot = parseInt(key.split(':')[2], 10);
+      if (!Number.isFinite(timeSlot) || timeSlot === currentSlot) continue;
+      eligibleKeys.push(key);
+      eligibleTimes.push(timeSlot);
+    }
 
-        const data = await this.redisClient.hGetAll(key);
+    if (eligibleKeys.length === 0) return;
+
+    const hashResults = await this.pipelinedHGetAll(eligibleKeys);
+
+    for (let i = 0; i < eligibleKeys.length; i++) {
+      const key = eligibleKeys[i];
+      const timeSlot = eligibleTimes[i];
+      const data = hashResults[i];
+      try {
         if (!data || Object.keys(data).length === 0) continue;
 
         const fields: Array<{ mode: string; diff: number }> = [];
@@ -412,7 +423,7 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
 
         if (fields.length > 0) snapshots.push({ key, timeSlot, fields });
       } catch (err) {
-        console.error(`[StatisticsCoordinator] Failed to read pool-mode-hashrate snapshot from ${key}:`, err);
+        console.error(`[StatisticsCoordinator] Failed to parse pool-mode-hashrate snapshot from ${key}:`, err);
       }
     }
 
@@ -526,26 +537,31 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
     const records: Array<Partial<ClientStatisticsEntity>> = [];
     const keysToDelete: string[] = [];
 
+    // Pre-filter: drop the current incomplete slot before pipelining HGETALLs.
+    // Saves N network round-trips for slot keys we'd skip anyway.
+    const eligibleKeys: string[] = [];
     for (const key of keys) {
+      const parts = key.split(':');
+      if (parts.length < 6) {
+        console.warn(`[StatisticsCoordinator] Invalid client shares key format: ${key}`);
+        continue;
+      }
+      if (parseInt(parts[5]) === currentSlot) continue;
+      eligibleKeys.push(key);
+    }
+
+    if (eligibleKeys.length === 0) return;
+
+    // Pipelined HGETALL — one round-trip per 500 keys instead of N.
+    const hashResults = await this.pipelinedHGetAll(eligibleKeys);
+
+    for (let i = 0; i < eligibleKeys.length; i++) {
+      const key = eligibleKeys[i];
+      const data = hashResults[i];
       try {
-        // Parse key: client:shares:{address}:{worker}:{session}:{timestamp}
-        const parts = key.split(':');
-        if (parts.length < 6) {
-          console.warn(`[StatisticsCoordinator] Invalid client shares key format: ${key}`);
-          continue;
-        }
-
-        const timeSlot = parseInt(parts[5]);
-
-        // CRITICAL FIX: Skip current incomplete slot - only flush complete slots
-        if (timeSlot === currentSlot) {
-          continue;
-        }
-
-        const data = await this.redisClient.hGetAll(key);
-
         if (!data || !data.shares) continue;
 
+        const parts = key.split(':');
         const address = parts[2];
         const clientName = parts[3];
         const sessionId = parts[4];
@@ -574,10 +590,9 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
           rejectedLowDifficultyShareDiff1: parseFloat(data.rejectedLowDifficultyShareDiff1) || 0,
         });
 
-        // Track key for deletion AFTER successful database flush
         keysToDelete.push(key);
       } catch (error) {
-        console.error(`[StatisticsCoordinator] Failed to extract client statistics from ${key}:`, error);
+        console.error(`[StatisticsCoordinator] Failed to parse client statistics from ${key}:`, error);
       }
     }
 
@@ -657,39 +672,39 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
     const records: Array<Partial<PoolRejectedStatisticsEntity>> = [];
     const keysToDelete: string[] = [];
 
+    // Pre-filter current slot, then pipeline the HGETALL reads.
+    const eligibleKeys: string[] = [];
+    const eligibleTimes: number[] = [];
     for (const key of keys) {
+      const parts = key.split(':');
+      if (parts.length < 3) continue;
+      const time = parseInt(parts[2]);
+      if (time === currentSlot) continue;
+      eligibleKeys.push(key);
+      eligibleTimes.push(time);
+    }
+
+    if (eligibleKeys.length === 0) return;
+
+    const hashResults = await this.pipelinedHGetAll(eligibleKeys);
+
+    for (let i = 0; i < eligibleKeys.length; i++) {
+      const key = eligibleKeys[i];
+      const time = eligibleTimes[i];
+      const data = hashResults[i];
       try {
-        // Parse key: pool:rejected:{timestamp}
-        const parts = key.split(':');
-        if (parts.length < 3) continue;
-
-        const time = parseInt(parts[2]);
-
-        // CRITICAL FIX: Skip current incomplete slot - only flush complete slots
-        if (time === currentSlot) {
-          continue;
-        }
-
-        const data = await this.redisClient.hGetAll(key);
-
         if (!data || Object.keys(data).length === 0) continue;
 
-        // Each hash field is a rejection reason, value is the count (difficulty sum)
         for (const [reason, count] of Object.entries(data)) {
           const countValue = parseFloat(count as string) || 0;
           if (countValue > 0) {
-            records.push({
-              time,
-              reason,
-              count: countValue,
-            });
+            records.push({ time, reason, count: countValue });
           }
         }
 
-        // Track key for deletion AFTER successful database flush
         keysToDelete.push(key);
       } catch (error) {
-        console.error(`[StatisticsCoordinator] Failed to extract pool rejected statistics from ${key}:`, error);
+        console.error(`[StatisticsCoordinator] Failed to parse pool rejected statistics from ${key}:`, error);
       }
     }
 
@@ -723,26 +738,34 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
     const records: Array<Partial<ClientRejectedStatisticsEntity>> = [];
     const keysToDelete: string[] = [];
 
+    // Pre-filter current slot, then pipeline the HGETALL reads.
+    const eligibleKeys: string[] = [];
+    const eligibleAddrs: string[] = [];
+    const eligibleTimes: number[] = [];
     for (const key of keys) {
+      const parts = key.split(':');
+      if (parts.length < 4) continue;
+      const address = parts[2];
+      const time = parseInt(parts[3]);
+      if (time === currentSlot) continue;
+      eligibleKeys.push(key);
+      eligibleAddrs.push(address);
+      eligibleTimes.push(time);
+    }
+
+    if (eligibleKeys.length === 0) return;
+
+    const hashResults = await this.pipelinedHGetAll(eligibleKeys);
+
+    for (let i = 0; i < eligibleKeys.length; i++) {
+      const key = eligibleKeys[i];
+      const address = eligibleAddrs[i];
+      const time = eligibleTimes[i];
+      const data = hashResults[i];
       try {
-        // Parse key: client:rejected:{address}:{timestamp}
-        const parts = key.split(':');
-        if (parts.length < 4) continue;
-
-        const address = parts[2];
-        const time = parseInt(parts[3]);
-
-        // CRITICAL FIX: Skip current incomplete slot - only flush complete slots
-        if (time === currentSlot) {
-          continue;
-        }
-
-        const data = await this.redisClient.hGetAll(key);
-
         if (!data || Object.keys(data).length === 0) continue;
 
-        // Hash fields are: {reason}:count and {reason}:shares
-        // Group by reason
+        // Hash fields are: {reason}:count and {reason}:shares — group by reason.
         const reasonStats = new Map<string, { count: number; shares: number }>();
 
         for (const [field, value] of Object.entries(data)) {
@@ -764,23 +787,15 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
           }
         }
 
-        // Convert to records
         for (const [reason, stats] of reasonStats.entries()) {
           if (stats.count > 0 || stats.shares > 0) {
-            records.push({
-              address,
-              time,
-              reason,
-              count: stats.count,
-              shares: stats.shares,
-            });
+            records.push({ address, time, reason, count: stats.count, shares: stats.shares });
           }
         }
 
-        // Track key for deletion AFTER successful database flush
         keysToDelete.push(key);
       } catch (error) {
-        console.error(`[StatisticsCoordinator] Failed to extract client rejected statistics from ${key}:`, error);
+        console.error(`[StatisticsCoordinator] Failed to parse client rejected statistics from ${key}:`, error);
       }
     }
 
@@ -816,11 +831,13 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
 
     const updates: Array<{ address: string; key: string; shares: number }> = [];
 
-    // Step 1: Read all deltas (but DON'T modify Redis yet)
-    for (const key of keys) {
-      try {
-        const data = await this.redisClient.hGetAll(key);
+    // Step 1: Pipelined read of all deltas (one round-trip per 500 keys)
+    const hashResults = await this.pipelinedHGetAll(keys);
 
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      const data = hashResults[i];
+      try {
         if (!data || !data.delta) continue;
 
         const delta = parseFloat(data.delta);
@@ -831,7 +848,7 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
 
         updates.push({ address, key, shares: delta });
       } catch (error) {
-        console.error(`[StatisticsCoordinator] Failed to extract address total from ${key}:`, error);
+        console.error(`[StatisticsCoordinator] Failed to parse address total from ${key}:`, error);
       }
     }
 
@@ -894,12 +911,16 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
 
     const updates: Array<{ address: string; clientName: string; key: string; shares: number }> = [];
 
-    for (const key of keys) {
-      try {
-        // Skip non-data keys
-        if (key.endsWith(':hydrated') || key.endsWith(':lock')) continue;
+    // Pre-filter non-data keys (hydrated / lock markers), then pipeline reads.
+    const dataKeys = keys.filter(k => !k.endsWith(':hydrated') && !k.endsWith(':lock'));
+    if (dataKeys.length === 0) return;
 
-        const data = await this.redisClient.hGetAll(key);
+    const hashResults = await this.pipelinedHGetAll(dataKeys);
+
+    for (let i = 0; i < dataKeys.length; i++) {
+      const key = dataKeys[i];
+      const data = hashResults[i];
+      try {
         if (!data || !data.delta) continue;
 
         const delta = parseFloat(data.delta);
@@ -913,7 +934,7 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
 
         updates.push({ address, clientName, key, shares: delta });
       } catch (error) {
-        console.error(`[StatisticsCoordinator] Failed to extract worker total from ${key}:`, error);
+        console.error(`[StatisticsCoordinator] Failed to parse worker total from ${key}:`, error);
       }
     }
 
@@ -975,6 +996,41 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
     } while (cursor !== '0');
 
     return Array.from(keysSet);  // Convert Set back to array
+  }
+
+  /**
+   * Pipeline N HGETALLs into one Redis round-trip per batch.
+   *
+   * Replaces sequential `for (key) { await hGetAll(key) }` loops which add
+   * one network round-trip per key. With 1500+ keys per flush (worker
+   * totals) and ~3 ms RTT, sequential reads alone burn 4-5s every flush.
+   * Pipelined: ~50 ms total for the same key count.
+   *
+   * Returns hashes in the SAME ORDER as the input keys array; missing or
+   * errored entries are mapped to null. Batched at 500 keys/pipeline so
+   * a hot pool with 10k+ session keys doesn't allocate one giant buffer.
+   */
+  private async pipelinedHGetAll(keys: string[]): Promise<Array<Record<string, string> | null>> {
+    if (keys.length === 0) return [];
+    const BATCH = 500;
+    const out: Array<Record<string, string> | null> = [];
+    for (let i = 0; i < keys.length; i += BATCH) {
+      const batch = keys.slice(i, i + BATCH);
+      const pipeline = this.redisClient.multi();
+      for (const key of batch) pipeline.hGetAll(key);
+      const results = await pipeline.exec();
+      for (const r of results) {
+        // node-redis v4 returns the hash object directly for hGetAll;
+        // null/undefined / array (error reply) → mapped to null so the
+        // caller's null-check protects downstream parsing.
+        if (r && typeof r === 'object' && !Array.isArray(r)) {
+          out.push(r as Record<string, string>);
+        } else {
+          out.push(null);
+        }
+      }
+    }
+    return out;
   }
 
   /**

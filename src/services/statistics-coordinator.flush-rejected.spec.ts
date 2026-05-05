@@ -32,10 +32,33 @@ describe('StatisticsCoordinatorService – flushClientStatistics rejected accumu
 
     beforeEach(() => {
         mockWorkerShares = { addRejectedBulk: jest.fn().mockResolvedValue(undefined) };
+        // multi() returns a chain that records hGetAll calls and replays
+        // the previously-mocked hGetAll responses on .exec(). Mirrors the
+        // production node-redis v4 behaviour just enough for the
+        // pipelinedHGetAll helper introduced for the flush refactor.
         mockRedis = {
             scan: jest.fn(),
             hGetAll: jest.fn(),
             del: jest.fn().mockResolvedValue(undefined),
+            multi: jest.fn(function (this: any) {
+                const queued: Array<{ key: string }> = [];
+                const chain: any = {
+                    hGetAll: (key: string) => { queued.push({ key }); return chain; },
+                    exec: async () => {
+                        const out: any[] = [];
+                        for (const _ of queued) {
+                            // Pop the next queued hGetAll mock response.
+                            // jest's mockResolvedValueOnce queue is shared
+                            // with direct hGetAll calls — fine for tests
+                            // that only use one path at a time.
+                            const result = await mockRedis.hGetAll();
+                            out.push(result);
+                        }
+                        return out;
+                    },
+                };
+                return chain;
+            }),
         };
     });
 
