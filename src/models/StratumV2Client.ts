@@ -2224,13 +2224,8 @@ export class StratumV2Client {
 
   private async recordRejectedShare(errorType: string, difficulty?: number): Promise<void> {
     const diff = difficulty ?? this.sessionDifficulty;
-    const accepted = await this.poolRejectedStatisticsService.addRejectedShare(
-      errorType,
-      diff,
-    );
-    if (accepted) {
-      await this.poolShareStatisticsService.addRejectedShare(diff);
-    }
+    await this.poolRejectedStatisticsService.addRejectedShare(errorType, diff);
+    await this.poolShareStatisticsService.addRejectedShare(diff);
     if (this.address) {
       await this.clientRejectedStatisticsService.addRejectedShare(
         this.address,
