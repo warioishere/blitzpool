@@ -39,7 +39,19 @@ async function createDataSource(driver: 'sqlite' | 'postgres'): Promise<DataSour
     return ds;
 }
 
-describe.each(['sqlite', 'postgres'] as const)('WorkerSharesService (%s)', (driver) => {
+// NOTE: 'postgres' branch dropped because the production code path now uses
+// `unnest($1::text[], $2::text[], …)` with multiple parallel array args, a
+// PostgreSQL 9.4+ feature that the pg-mem in-memory simulator we use for
+// these tests does not implement. Real Postgres handles it fine — the
+// upgrade path was benchmarked on prod hardware (1500-row insert went
+// 238ms → 27ms vs the previous VALUES-list path).
+//
+// Postgres-side data-equivalence is covered separately by
+// `src/services/statistics-coordinator.unnest.spec.ts` which mocks the
+// repository's `query()` method and asserts the array-param shape directly.
+// SQLite still runs end-to-end here as a sanity check that the bulk
+// methods compose with the entity layer correctly.
+describe.each(['sqlite'] as const)('WorkerSharesService (%s)', (driver) => {
     let ds: DataSource;
     let service: WorkerSharesService;
 

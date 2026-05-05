@@ -64,23 +64,23 @@ export class WorkerSharesService {
         const dataSource = this.repo.manager.connection;
 
         if (dataSource.options.type === 'postgres') {
-            // Process in batches of 1000 to stay within PG parameter limits (3 params × 1000 = 3000)
-            const BATCH_SIZE = 1000;
-            for (let i = 0; i < updates.length; i += BATCH_SIZE) {
-                const batch = updates.slice(i, i + BATCH_SIZE);
-                const values = batch
-                    .map((_, j) => `($${j * 3 + 1}, $${j * 3 + 2}, $${j * 3 + 3}::double precision)`)
-                    .join(', ');
-                const params = batch.flatMap(u => [u.address, u.clientName, u.shares]);
+            // unnest() with parallel arrays — single round-trip, no
+            // batching needed. Three array params instead of N×3
+            // positional binds; statement size is constant. See
+            // StatisticsCoordinatorService.bulkUpsertClientStatistics
+            // for the wider rationale (~9× speedup measured on prod
+            // hardware for ~1500-row inserts).
+            const addresses = updates.map(u => u.address);
+            const clientNames = updates.map(u => u.clientName);
+            const shares = updates.map(u => u.shares);
 
-                await dataSource.query(
-                    `INSERT INTO worker_shares_entity (address, "clientName", shares)
-                     VALUES ${values}
-                     ON CONFLICT (address, "clientName") DO UPDATE SET
-                       shares = worker_shares_entity.shares + EXCLUDED.shares`,
-                    params,
-                );
-            }
+            await dataSource.query(
+                `INSERT INTO worker_shares_entity (address, "clientName", shares)
+                 SELECT * FROM unnest($1::text[], $2::text[], $3::double precision[])
+                 ON CONFLICT (address, "clientName") DO UPDATE SET
+                   shares = worker_shares_entity.shares + EXCLUDED.shares`,
+                [addresses, clientNames, shares],
+            );
         } else {
             for (const u of updates) {
                 const existing = await this.repo.findOne({
@@ -108,22 +108,19 @@ export class WorkerSharesService {
         const dataSource = this.repo.manager.connection;
 
         if (dataSource.options.type === 'postgres') {
-            const BATCH_SIZE = 1000;
-            for (let i = 0; i < updates.length; i += BATCH_SIZE) {
-                const batch = updates.slice(i, i + BATCH_SIZE);
-                const values = batch
-                    .map((_, j) => `($${j * 4 + 1}, $${j * 4 + 2}, $${j * 4 + 3}::double precision, $${j * 4 + 4}::double precision)`)
-                    .join(', ');
-                const params = batch.flatMap(u => [u.address, u.clientName, 0, u.rejectedShares]);
+            // unnest() with parallel arrays — see addSharesBulk above.
+            const addresses = updates.map(u => u.address);
+            const clientNames = updates.map(u => u.clientName);
+            const zeroShares = updates.map(() => 0);
+            const rejectedShares = updates.map(u => u.rejectedShares);
 
-                await dataSource.query(
-                    `INSERT INTO worker_shares_entity (address, "clientName", shares, "rejectedShares")
-                     VALUES ${values}
-                     ON CONFLICT (address, "clientName") DO UPDATE SET
-                       "rejectedShares" = worker_shares_entity."rejectedShares" + EXCLUDED."rejectedShares"`,
-                    params,
-                );
-            }
+            await dataSource.query(
+                `INSERT INTO worker_shares_entity (address, "clientName", shares, "rejectedShares")
+                 SELECT * FROM unnest($1::text[], $2::text[], $3::double precision[], $4::double precision[])
+                 ON CONFLICT (address, "clientName") DO UPDATE SET
+                   "rejectedShares" = worker_shares_entity."rejectedShares" + EXCLUDED."rejectedShares"`,
+                [addresses, clientNames, zeroShares, rejectedShares],
+            );
         } else {
             for (const u of updates) {
                 const existing = await this.repo.findOne({

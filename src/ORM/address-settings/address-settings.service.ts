@@ -89,32 +89,21 @@ export class AddressSettingsService {
         const databaseType = this.addressSettingsRepository.manager.connection.options.type;
 
         if (databaseType === 'postgres') {
-            // PostgreSQL: Use $1, $2, $3... placeholders
-            const caseWhenParts: string[] = [];
-            const parameters: any[] = [];
-            let paramIndex = 1;
-
-            updates.forEach((update) => {
-                caseWhenParts.push(`WHEN $${paramIndex} THEN $${paramIndex + 1}::double precision`);
-                parameters.push(update.address, update.shares);
-                paramIndex += 2;
-            });
-
-            // WHERE IN clause with $N placeholders
-            const whereClause = updates.map((_, idx) => `$${paramIndex + idx}`).join(',');
-            const whereAddresses = updates.map(u => u.address);
+            // UPDATE … FROM unnest(arrays) — replaces the previous CASE/WHEN
+            // pattern that built a 3N-placeholder WHERE-IN-list per call.
+            // Two array params (addresses + deltas), constant SQL size, much
+            // smaller wire payload. Same atomic UPDATE semantics.
+            const addresses = updates.map(u => u.address);
+            const deltas = updates.map(u => u.shares);
 
             const query = `
-                UPDATE address_settings_entity
-                SET shares = shares + CASE address ${caseWhenParts.join(' ')} END
-                WHERE address IN (${whereClause})
+                UPDATE address_settings_entity AS t
+                SET shares = t.shares + d.delta
+                FROM (SELECT unnest($1::text[]) AS address, unnest($2::double precision[]) AS delta) AS d
+                WHERE t.address = d.address
             `;
 
-            // Execute as SINGLE atomic transaction
-            await this.addressSettingsRepository.query(query, [
-                ...parameters,
-                ...whereAddresses
-            ]);
+            await this.addressSettingsRepository.query(query, [addresses, deltas]);
         } else {
             // SQLite: Use ? placeholders
             // SQLite 3.40+ supports 32,766 parameters (we use ~800 for 400 addresses)
