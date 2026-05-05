@@ -361,7 +361,8 @@ export class PplnsGroupInvitationService {
         groupId: string,
         ttl: OpenInviteTtl,
         adminToken: string | undefined,
-    ): Promise<{ token: string; expiresAt: Date }> {
+        approvalRequired: boolean = false,
+    ): Promise<{ token: string; expiresAt: Date; approvalRequired: boolean }> {
         await this.groupService.requireAdminToken(groupId, adminToken);
 
         const ttlMs = OPEN_INVITE_TTL_PRESETS[ttl];
@@ -388,11 +389,12 @@ export class PplnsGroupInvitationService {
                 email: null,
                 status: 'pending',
                 inviteType: 'open',
+                approvalRequired,
                 expiresAt,
             }));
         });
 
-        return { token, expiresAt };
+        return { token, expiresAt, approvalRequired };
     }
 
     /**
@@ -403,7 +405,7 @@ export class PplnsGroupInvitationService {
     async getActiveOpenInvite(
         groupId: string,
         adminToken: string | undefined,
-    ): Promise<{ token: string; expiresAt: Date; createdAt: Date } | null> {
+    ): Promise<{ token: string; expiresAt: Date; createdAt: Date; approvalRequired: boolean } | null> {
         await this.groupService.requireAdminToken(groupId, adminToken);
         const row = await this.invitationRepo.findOne({
             where: { groupId, inviteType: 'open', status: 'pending' },
@@ -411,7 +413,12 @@ export class PplnsGroupInvitationService {
         });
         if (!row) return null;
         if (row.expiresAt.getTime() < Date.now()) return null;
-        return { token: row.token, expiresAt: row.expiresAt, createdAt: row.createdAt };
+        return {
+            token: row.token,
+            expiresAt: row.expiresAt,
+            createdAt: row.createdAt,
+            approvalRequired: row.approvalRequired,
+        };
     }
 
     /**
@@ -440,6 +447,7 @@ export class PplnsGroupInvitationService {
         groupId: string;
         groupName: string;
         expiresAt: Date;
+        approvalRequired: boolean;
     } | null> {
         const invitation = await this.invitationRepo.findOneBy({ token });
         if (!invitation || invitation.inviteType !== 'open') return null;
@@ -452,6 +460,7 @@ export class PplnsGroupInvitationService {
             groupId: invitation.groupId,
             groupName: group.name,
             expiresAt: invitation.expiresAt,
+            approvalRequired: invitation.approvalRequired,
         };
     }
 
@@ -475,6 +484,16 @@ export class PplnsGroupInvitationService {
             invitation.status = 'expired';
             await this.invitationRepo.save(invitation);
             throw new InvitationServiceError('expired', 'Open invitation has expired');
+        }
+        // Approval-required mode: refuse to auto-add. The frontend MUST route
+        // the joiner through the join-request flow instead. Backend-enforced
+        // because the public accept endpoint can otherwise be hit directly
+        // via curl, bypassing any frontend gate.
+        if (invitation.approvalRequired) {
+            throw new InvitationServiceError(
+                'approval-required',
+                'This link requires admin approval — submit a join request instead.',
+            );
         }
 
         const normalized = normalizeBtcAddress(address);

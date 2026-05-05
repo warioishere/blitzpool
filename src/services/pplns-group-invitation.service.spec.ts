@@ -430,4 +430,57 @@ describe('PplnsGroupInvitationService', () => {
         await expect(service.accept(r.token))
             .rejects.toMatchObject({ code: 'not-found' });
     });
+
+    it('createOpenInvite: defaults approvalRequired=false when not passed', async () => {
+        const { service, invitationRepo } = makeService();
+        const r = await service.createOpenInvite('g1', '24h', 'good-token');
+        expect(r.approvalRequired).toBe(false);
+        expect(invitationRepo.rows[0].approvalRequired).toBe(false);
+    });
+
+    it('createOpenInvite: persists approvalRequired=true when explicitly opted-in', async () => {
+        const { service, invitationRepo } = makeService();
+        const r = await service.createOpenInvite('g1', '24h', 'good-token', true);
+        expect(r.approvalRequired).toBe(true);
+        expect(invitationRepo.rows[0].approvalRequired).toBe(true);
+    });
+
+    it('getOpenInvitePublic: surfaces approvalRequired so the frontend can branch', async () => {
+        const { service } = makeService();
+        const auto = await service.createOpenInvite('g1', '7d', 'good-token', false);
+        const approve = await service.createOpenInvite('g1', '7d', 'good-token', true);
+        // Second create revoked the first; only the latest is publicly visible.
+        expect(await service.getOpenInvitePublic(auto.token)).toBeNull();
+        expect((await service.getOpenInvitePublic(approve.token))?.approvalRequired).toBe(true);
+    });
+
+    it('getActiveOpenInvite: surfaces approvalRequired to the admin UI', async () => {
+        const { service } = makeService();
+        await service.createOpenInvite('g1', '7d', 'good-token', true);
+        const active = await service.getActiveOpenInvite('g1', 'good-token');
+        expect(active?.approvalRequired).toBe(true);
+    });
+
+    it('acceptOpenInvite: refuses approvalRequired link with approval-required code', async () => {
+        // Backend-enforced — a curl POST to /invitations/open/:token/accept
+        // bypassing the frontend session must still get rejected so the
+        // admin's vet-each-applicant intent can't be circumvented.
+        const { service, addressEmailService, memberRepo } = makeService();
+        addressEmailService._setVerified('bc1qbob', 'bob@example.com');
+        const r = await service.createOpenInvite('g1', '24h', 'good-token', true);
+
+        await expect(service.acceptOpenInvite(r.token, 'bc1qbob'))
+            .rejects.toMatchObject({ code: 'approval-required' });
+        expect(memberRepo.rows).toHaveLength(0);
+    });
+
+    it('acceptOpenInvite: still auto-accepts when approvalRequired is false', async () => {
+        const { service, addressEmailService, memberRepo } = makeService();
+        addressEmailService._setVerified('bc1qbob', 'bob@example.com');
+        const r = await service.createOpenInvite('g1', '24h', 'good-token', false);
+
+        const member = await service.acceptOpenInvite(r.token, 'bc1qbob');
+        expect(member.address).toBe('bc1qbob');
+        expect(memberRepo.rows).toHaveLength(1);
+    });
 });

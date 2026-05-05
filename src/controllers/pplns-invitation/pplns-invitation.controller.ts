@@ -99,6 +99,7 @@ export class PplnsInvitationController {
             groupId: result.groupId,
             groupName: result.groupName,
             expiresAt: result.expiresAt,
+            approvalRequired: result.approvalRequired,
         };
     }
 
@@ -130,6 +131,10 @@ export class PplnsInvitationController {
             const status = e.code === 'not-found' ? HttpStatus.NOT_FOUND
                 : e.code === 'expired' || e.code === 'group-dissolved' ? HttpStatus.GONE
                 : e.code === 'already-declined' || e.code === 'already-member' ? HttpStatus.CONFLICT
+                // 403 for approval-required: the link is valid, but this
+                // path is not how to redeem it — frontend must redirect to
+                // the join-request flow.
+                : e.code === 'approval-required' ? HttpStatus.FORBIDDEN
                 : HttpStatus.BAD_REQUEST;
             return new HttpException({ code: e.code, message: e.message }, status);
         }

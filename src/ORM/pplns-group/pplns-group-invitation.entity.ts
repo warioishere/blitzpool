@@ -52,6 +52,16 @@ export class PplnsGroupInvitationEntity {
     @Column({ type: 'varchar', length: 16, default: 'directed' })
     inviteType: PplnsGroupInvitationType;
 
+    /**
+     * When true on an open invite, the public accept endpoint refuses to
+     * auto-add the joiner — they have to go through the join-request flow
+     * so the admin can vet them. Ignored for directed invites (the admin
+     * already picked the address there). Defaults to false to preserve
+     * pre-existing open-link semantics.
+     */
+    @Column({ type: 'boolean', default: false })
+    approvalRequired: boolean;
+
     @CreateDateColumn()
     createdAt: Date;
 

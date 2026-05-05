@@ -564,15 +564,21 @@ export class PplnsGroupController {
     @Post(':id/invitations/open')
     async createOpenInvitation(
         @Param('id') id: string,
-        @Body() body: { ttl?: string },
+        @Body() body: { ttl?: string; approvalRequired?: boolean },
         @Headers('x-admin-token') token?: string,
     ) {
         try {
             const ttl = body?.ttl as OpenInviteTtl;
-            const result = await this.invitationService.createOpenInvite(id, ttl, token);
+            const approvalRequired = body?.approvalRequired === true;
+            const result = await this.invitationService.createOpenInvite(id, ttl, token, approvalRequired);
             const baseUrl = (this.configService.get<string>('POOL_BASE_URL') ?? '').replace(/\/+$/, '');
             const link = baseUrl ? `${baseUrl}/#/invite/open/${result.token}` : `/#/invite/open/${result.token}`;
-            return { token: result.token, expiresAt: result.expiresAt, link };
+            return {
+                token: result.token,
+                expiresAt: result.expiresAt,
+                approvalRequired: result.approvalRequired,
+                link,
+            };
         } catch (e) {
             throw this.toHttpError(e);
         }
@@ -598,6 +604,7 @@ export class PplnsGroupController {
                 token: result.token,
                 expiresAt: result.expiresAt,
                 createdAt: result.createdAt,
+                approvalRequired: result.approvalRequired,
                 link,
             };
         } catch (e) {
