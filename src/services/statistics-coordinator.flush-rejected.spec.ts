@@ -12,7 +12,6 @@ const PAST_SLOT = 1700000060000;
 function buildService(mockRedis: any, mockWorkerShares: Partial<WorkerSharesService>) {
     const service = new StatisticsCoordinatorService(
         { store: {} } as any,           // cacheManager — no Redis store so onModuleInit is skipped
-        {} as any,                       // poolShareStatisticsRepository
         {} as any,                       // poolRejectedStatisticsRepository
         {} as any,                       // clientStatisticsRepository
         {} as any,                       // clientRejectedStatisticsRepository

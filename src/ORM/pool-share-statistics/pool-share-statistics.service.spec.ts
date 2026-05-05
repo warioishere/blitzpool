@@ -1,111 +1,99 @@
 import { PoolShareStatisticsService } from './pool-share-statistics.service';
 
 describe('PoolShareStatisticsService', () => {
-  let mockRedisClient: any;
-  let cacheManager: any;
+  let mockRepo: any;
   let service: PoolShareStatisticsService;
 
-  beforeEach(async () => {
-    mockRedisClient = {
-      hIncrByFloat: jest.fn().mockResolvedValue(undefined),
-      expire: jest.fn().mockResolvedValue(undefined),
+  beforeEach(() => {
+    mockRepo = {
+      increment: jest.fn().mockResolvedValue({ affected: 1 }),
+      insert: jest.fn().mockResolvedValue(undefined),
+      find: jest.fn(),
+      createQueryBuilder: jest.fn(),
     };
-
-    cacheManager = {
-      store: {
-        client: mockRedisClient,
-      },
-    };
-
-    service = new PoolShareStatisticsService({} as any, cacheManager as any);
-    await service.onModuleInit();
+    service = new PoolShareStatisticsService(mockRepo);
   });
 
-  it('atomically increments accepted shares in Redis', async () => {
+  it('uses repo.increment for accepted shares', async () => {
     await service.addAcceptedShare(3);
 
-    expect(mockRedisClient.hIncrByFloat).toHaveBeenCalledWith(
-      expect.stringMatching(/^pool:shares:\d+$/),
+    expect(mockRepo.increment).toHaveBeenCalledTimes(1);
+    expect(mockRepo.increment).toHaveBeenCalledWith(
+      { time: expect.any(Number) },
       'accepted',
       3,
     );
-    expect(mockRedisClient.expire).toHaveBeenCalledWith(
-      expect.stringMatching(/^pool:shares:\d+$/),
-      expect.any(Number),
-    );
+    expect(mockRepo.insert).not.toHaveBeenCalled();
   });
 
-  it('atomically increments rejected shares in Redis', async () => {
+  it('uses repo.increment for rejected shares', async () => {
     await service.addRejectedShare(2);
 
-    expect(mockRedisClient.hIncrByFloat).toHaveBeenCalledWith(
-      expect.stringMatching(/^pool:shares:\d+$/),
+    expect(mockRepo.increment).toHaveBeenCalledWith(
+      { time: expect.any(Number) },
       'rejected',
       2,
     );
   });
 
-  it('sends hIncrByFloat and expire in parallel via Promise.all', async () => {
-    const callOrder: string[] = [];
-    mockRedisClient.hIncrByFloat.mockImplementation(() => { callOrder.push('hIncrByFloat'); return Promise.resolve(); });
-    mockRedisClient.expire.mockImplementation(() => { callOrder.push('expire'); return Promise.resolve(); });
+  it('inserts a fresh row with zeroed sibling column on cold-slot accepted', async () => {
+    mockRepo.increment.mockResolvedValueOnce({ affected: 0 });
 
     await service.addAcceptedShare(5);
 
-    // Both should be called (hIncrByFloat + expire)
-    expect(callOrder).toContain('hIncrByFloat');
-    expect(callOrder).toContain('expire');
-    expect(mockRedisClient.hIncrByFloat).toHaveBeenCalledTimes(1);
-    expect(mockRedisClient.expire).toHaveBeenCalledTimes(1);
+    expect(mockRepo.increment).toHaveBeenCalledTimes(1);
+    expect(mockRepo.insert).toHaveBeenCalledWith({
+      time: expect.any(Number),
+      accepted: 5,
+      rejected: 0,
+    });
   });
 
-  it('batches both accepted and rejected increments with expire', async () => {
-    await (service as any).handleShare(3, 2);
+  it('inserts a fresh row with zeroed sibling column on cold-slot rejected', async () => {
+    mockRepo.increment.mockResolvedValueOnce({ affected: 0 });
 
-    // 2x hIncrByFloat (accepted + rejected) + 1x expire
-    expect(mockRedisClient.hIncrByFloat).toHaveBeenCalledTimes(2);
-    expect(mockRedisClient.expire).toHaveBeenCalledTimes(1);
+    await service.addRejectedShare(7);
+
+    expect(mockRepo.insert).toHaveBeenCalledWith({
+      time: expect.any(Number),
+      accepted: 0,
+      rejected: 7,
+    });
   });
 
-  it('does not track when Redis is not available', async () => {
-    const serviceNoRedis = new PoolShareStatisticsService({} as any, { store: {} } as any);
-    await serviceNoRedis.onModuleInit();
+  it('retries increment if insert races on the unique-time index', async () => {
+    // Mirrors PoolModeHashrateService behavior: a concurrent writer
+    // inserted the slot row first, our insert collides on the unique
+    // index, fall back to incrementing the existing row.
+    mockRepo.increment.mockResolvedValueOnce({ affected: 0 });
+    mockRepo.insert.mockRejectedValueOnce(new Error('unique constraint'));
+    mockRepo.increment.mockResolvedValueOnce({ affected: 1 });
 
-    const consoleSpy = jest.spyOn(console, 'error').mockImplementation();
+    await service.addAcceptedShare(4);
 
-    try {
-      await serviceNoRedis.addAcceptedShare(3);
-      expect(mockRedisClient.hIncrByFloat).not.toHaveBeenCalled();
-    } finally {
-      consoleSpy.mockRestore();
-    }
+    expect(mockRepo.increment).toHaveBeenCalledTimes(2);
+    expect(mockRepo.insert).toHaveBeenCalledTimes(1);
   });
 
-  it('discards non-finite share values', async () => {
-    const consoleSpy = jest.spyOn(console, 'warn').mockImplementation();
+  it('discards non-finite share values without touching the database', async () => {
+    await service.addAcceptedShare(NaN);
+    await service.addAcceptedShare(Infinity);
 
-    try {
-      await service.addAcceptedShare(NaN);
-      expect(mockRedisClient.hIncrByFloat).not.toHaveBeenCalled();
-    } finally {
-      consoleSpy.mockRestore();
-    }
+    expect(mockRepo.increment).not.toHaveBeenCalled();
+    expect(mockRepo.insert).not.toHaveBeenCalled();
   });
 
   it('discards out-of-range share values to protect Postgres `real` column', async () => {
     const consoleSpy = jest.spyOn(console, 'warn').mockImplementation();
-
     try {
-      // Reproduces the production incident on 2026-05-01: a buggy SV2
-      // client opened a channel with absurdly small maxTarget, getting
-      // assigned diff ≈ 9.8e53. Each rejected share writes that into
-      // Redis pool:shares:* — and Postgres `real` (max ~3.4e38) refuses
-      // the bucket on flush, freezing all pool-wide stats endpoints.
+      // Repro: 2026-05-01 buggy SV2 client opened a channel with absurdly
+      // small maxTarget and got assigned diff ~9.8e53. Postgres `real`
+      // (~3.4e38) would refuse the column, freezing pool-wide stats.
       await service.addRejectedShare(9.8e53);
-      expect(mockRedisClient.hIncrByFloat).not.toHaveBeenCalled();
-
       await service.addAcceptedShare(9.8e53);
-      expect(mockRedisClient.hIncrByFloat).not.toHaveBeenCalled();
+
+      expect(mockRepo.increment).not.toHaveBeenCalled();
+      expect(mockRepo.insert).not.toHaveBeenCalled();
     } finally {
       consoleSpy.mockRestore();
     }
@@ -115,7 +103,23 @@ describe('PoolShareStatisticsService', () => {
     // Network difficulty is ~3.5e14 in 2026 — values up to MAX_REASONABLE_
     // DIFFICULTY (1e15) must continue to flow through unchanged.
     await service.addAcceptedShare(1e14);
-    expect(mockRedisClient.hIncrByFloat).toHaveBeenCalledTimes(1);
-    expect(mockRedisClient.expire).toHaveBeenCalledTimes(1);
+
+    expect(mockRepo.increment).toHaveBeenCalledTimes(1);
+    expect(mockRepo.increment).toHaveBeenCalledWith(
+      { time: expect.any(Number) },
+      'accepted',
+      1e14,
+    );
+  });
+
+  it('swallows DB errors so a failed stats write never blocks share flow', async () => {
+    const consoleSpy = jest.spyOn(console, 'warn').mockImplementation();
+    try {
+      mockRepo.increment.mockRejectedValueOnce(new Error('connection refused'));
+
+      await expect(service.addAcceptedShare(1)).resolves.toBeUndefined();
+    } finally {
+      consoleSpy.mockRestore();
+    }
   });
 });
