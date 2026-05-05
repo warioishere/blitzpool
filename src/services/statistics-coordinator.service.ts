@@ -5,6 +5,7 @@ import { Repository, DataSource } from 'typeorm';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
 
+import { PoolShareStatisticsEntity } from '../ORM/pool-share-statistics/pool-share-statistics.entity';
 import { PoolRejectedStatisticsEntity } from '../ORM/pool-rejected-statistics/pool-rejected-statistics.entity';
 import { ClientStatisticsEntity } from '../ORM/client-statistics/client-statistics.entity';
 import { ClientRejectedStatisticsEntity } from '../ORM/client-rejected-statistics/client-rejected-statistics.entity';
@@ -32,6 +33,8 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
 
   constructor(
     @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
+    @InjectRepository(PoolShareStatisticsEntity)
+    private readonly poolShareStatisticsRepository: Repository<PoolShareStatisticsEntity>,
     @InjectRepository(PoolRejectedStatisticsEntity)
     private readonly poolRejectedStatisticsRepository: Repository<PoolRejectedStatisticsEntity>,
     @InjectRepository(ClientStatisticsEntity)
@@ -221,10 +224,8 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
       // Note: flushWorkerTotals writes shares to worker_shares_entity,
       // and flushClientStatistics writes rejectedShares to the same table.
       // Running them in parallel causes deadlocks, so worker totals run first.
-      // Pool-share aggregates moved to direct PG writes (see
-      // PoolShareStatisticsService) — they no longer go through Redis,
-      // so there's nothing for the coordinator to flush for them.
       await Promise.all([
+        this.flushPoolShares(),
         this.flushClientStatistics(),
         this.flushPoolRejectedStatistics(),
         this.flushClientRejectedStatistics(),
@@ -241,6 +242,124 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
     } finally {
       this.isFlushing = false;
     }
+  }
+
+  /**
+   * Flush pool shares from Redis to database
+   * Pattern: pool:shares:{timestamp} -> HASH {accepted, rejected}
+   *
+   * CRITICAL: Only flushes COMPLETE time slots (not current incomplete slot)
+   */
+  private async flushPoolShares(): Promise<void> {
+    const pattern = 'pool:shares:*';
+    const keys = await this.scanKeys(pattern);
+
+    if (keys.length === 0) return;
+
+    const currentSlot = TimeSlotHelper.getCurrentSlot();
+    const records: Array<{ time: number; accepted: number; rejected: number }> = [];
+    const keysToDelete: string[] = [];
+
+    for (const key of keys) {
+      try {
+        // Extract timestamp from key (pool:shares:1234567890)
+        const timeSlot = parseInt(key.split(':')[2]);
+
+        // CRITICAL FIX: Skip current incomplete slot - only flush complete slots
+        if (timeSlot === currentSlot) {
+          continue;
+        }
+
+        const data = await this.redisClient.hGetAll(key);
+
+        if (!data || (!data.accepted && !data.rejected)) continue;
+
+        const accepted = parseFloat(data.accepted) || 0;
+        const rejected = parseFloat(data.rejected) || 0;
+
+        if (accepted === 0 && rejected === 0) continue;
+
+        records.push({ time: timeSlot, accepted, rejected });
+
+        // Track key for deletion AFTER successful database flush
+        keysToDelete.push(key);
+      } catch (error) {
+        console.error(`[StatisticsCoordinator] Failed to extract pool shares from ${key}:`, error);
+      }
+    }
+
+    if (records.length === 0) return;
+
+    // Bulk upsert to database
+    try {
+      await this.bulkUpsertPoolShares(records);
+      console.log(`[StatisticsCoordinator] Flushed ${records.length} complete pool share time slots`);
+
+      // Delete Redis keys ONLY after successful database flush
+      if (keysToDelete.length > 0) {
+        await this.redisClient.del(keysToDelete);
+      }
+    } catch (error) {
+      // Bulk insert is all-or-nothing under Postgres transactions. A single
+      // out-of-range value (e.g. accepted/rejected > 3.4e38 from a corrupt
+      // Redis bucket) poisons the entire batch and every subsequent flush
+      // tick, freezing pool-wide chart/share/accepted endpoints.
+      //
+      // Fall back to per-bucket inserts so good buckets land in Postgres
+      // and only the offending key is quarantined (deleted from Redis with
+      // a warning, preserving accepted/rejected for the non-corrupt slots).
+      console.error(
+        `[StatisticsCoordinator] Bulk pool-shares flush failed (${(error as Error).message}); falling back to per-bucket inserts`,
+      );
+      await this.flushPoolSharesIndividually(records, keysToDelete);
+    }
+  }
+
+  /**
+   * Per-bucket fallback for `flushPoolShares()` when the bulk upsert is
+   * rejected by Postgres. Inserts each bucket in its own statement so good
+   * data still flows; for bad buckets, deletes the Redis key with a loud
+   * warning so the flusher doesn't get stuck on the same poisoned bucket
+   * forever. Lossy by design — but losing one corrupt 10-min bucket beats
+   * losing all subsequent pool-wide stats indefinitely.
+   */
+  private async flushPoolSharesIndividually(
+    records: Array<{ time: number; accepted: number; rejected: number }>,
+    keys: string[],
+  ): Promise<void> {
+    let goodBuckets = 0;
+    const goodKeys: string[] = [];
+    const quarantineKeys: string[] = [];
+
+    for (let i = 0; i < records.length; i++) {
+      const record = records[i];
+      const key = keys[i];
+      try {
+        await this.bulkUpsertPoolShares([record]);
+        goodBuckets++;
+        goodKeys.push(key);
+      } catch (error) {
+        console.error(
+          `[StatisticsCoordinator] Quarantining corrupt pool-shares bucket ${key} (time=${record.time}, accepted=${record.accepted}, rejected=${record.rejected}): ${(error as Error).message}`,
+        );
+        quarantineKeys.push(key);
+      }
+    }
+
+    const keysToDel = [...goodKeys, ...quarantineKeys];
+    if (keysToDel.length > 0) {
+      try {
+        await this.redisClient.del(keysToDel);
+      } catch (error) {
+        console.error(
+          `[StatisticsCoordinator] Failed to delete pool-shares keys after fallback flush: ${(error as Error).message}`,
+        );
+      }
+    }
+
+    console.log(
+      `[StatisticsCoordinator] Per-bucket flush complete: ${goodBuckets} flushed, ${quarantineKeys.length} quarantined`,
+    );
   }
 
   /**
@@ -708,6 +827,56 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
     } while (cursor !== '0');
 
     return Array.from(keysSet);  // Convert Set back to array
+  }
+
+  /**
+   * Bulk upsert pool shares to database (PostgreSQL or SQLite)
+   */
+  private async bulkUpsertPoolShares(records: Array<{ time: number; accepted: number; rejected: number }>): Promise<void> {
+    const dbType = this.dataSource.options.type;
+
+    if (dbType === 'postgres') {
+      // PostgreSQL: Use ON CONFLICT for atomic upserts
+      const values: any[] = [];
+      let paramIndex = 1;
+
+      const valueTuples = records.map(r => {
+        const tuple = `($${paramIndex}, $${paramIndex + 1}, $${paramIndex + 2})`;
+        values.push(r.time, r.accepted, r.rejected);
+        paramIndex += 3;
+        return tuple;
+      }).join(', ');
+
+      const query = `
+        INSERT INTO pool_share_statistics_entity (time, accepted, rejected)
+        VALUES ${valueTuples}
+        ON CONFLICT (time) DO UPDATE SET
+          accepted = pool_share_statistics_entity.accepted + EXCLUDED.accepted,
+          rejected = pool_share_statistics_entity.rejected + EXCLUDED.rejected,
+          "updatedAt" = NOW()
+      `;
+
+      await this.poolShareStatisticsRepository.query(query, values);
+    } else {
+      // SQLite: Use INSERT ... ON CONFLICT to accumulate shares (not replace)
+      const values: any[] = [];
+      const valueTuples = records.map(r => {
+        const tuple = `(?, ?, ?)`;
+        values.push(r.time, r.accepted, r.rejected);
+        return tuple;
+      }).join(', ');
+
+      const query = `
+        INSERT INTO pool_share_statistics_entity (time, accepted, rejected)
+        VALUES ${valueTuples}
+        ON CONFLICT (time) DO UPDATE SET
+          accepted = accepted + excluded.accepted,
+          rejected = rejected + excluded.rejected,
+          updatedAt = datetime('now')
+      `;
+
+      await this.poolShareStatisticsRepository.query(query, values);
+    }
   }
 
   /**
