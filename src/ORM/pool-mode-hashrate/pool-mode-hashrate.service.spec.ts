@@ -2,34 +2,27 @@ jest.mock('node-telegram-bot-api', () => jest.fn());
 
 import { PoolModeHashrateService } from './pool-mode-hashrate.service';
 import { TimeSlotHelper } from '../../utils/time-slot.helper';
-import { DIFFICULTY_1 } from '../../constants/mining.constants';
+import { DIFFICULTY_1, MAX_REASONABLE_DIFFICULTY } from '../../constants/mining.constants';
 
 /**
- * These tests pin the invariant that finally fixed the "PPLNS curve
- * doesn't match total" bug: this service MUST use the same slot
- * convention (end-time, via TimeSlotHelper) and the same
- * current-slot-exclusion filter as ClientStatisticsService
- * .getChartDataForSite. Reinventing a Math.floor/BUCKET_MS bucket
- * scheme was exactly what caused the 10-min divergence in prod.
+ * These tests pin two invariants:
+ *
+ *   1. Writes go through Redis only — no per-share PG hit. Rewriting this
+ *      service to call repo.increment() per share was what created the
+ *      production lock-contention hotspot on 2026-05-05 (3 hot rows on
+ *      `pool_mode_hashrate` × ~250 shares/s starved the 10-conn PG pool
+ *      and bled into other coordinator flushes). Coordinator picks up
+ *      the Redis hash and bulk-upserts to PG every 60s.
+ *
+ *   2. The chart read MUST keep using the same slot convention (end-time,
+ *      via TimeSlotHelper) and the same current-slot-exclusion filter as
+ *      ClientStatisticsService.getChartDataForSite. Reinventing a
+ *      Math.floor/BUCKET_MS scheme caused the original "PPLNS curve
+ *      doesn't match total" 10-min divergence.
  */
 
-interface RecordedOp {
-    op: 'increment' | 'insert';
-    args: any[];
-}
-
-function makeRepo(ops: RecordedOp[], chartRows: any[], opts: { rowExists?: boolean; insertThrows?: boolean } = {}) {
-    let rowExists = opts.rowExists ?? false;
+function makeRepo(chartRows: any[]) {
     return {
-        increment: jest.fn(async (...args: any[]) => {
-            ops.push({ op: 'increment', args });
-            return { affected: rowExists ? 1 : 0, raw: undefined, generatedMaps: [] };
-        }),
-        insert: jest.fn(async (...args: any[]) => {
-            ops.push({ op: 'insert', args });
-            if (opts.insertThrows) throw new Error('duplicate key');
-            rowExists = true;  // subsequent increments now succeed
-        }),
         createQueryBuilder: (_alias: string) => {
             const captured: Record<string, any> = {};
             const qb: any = {
@@ -50,80 +43,145 @@ function makeRepo(ops: RecordedOp[], chartRows: any[], opts: { rowExists?: boole
     };
 }
 
+function makeCacheManager(redisClient: any) {
+    return { store: { client: redisClient } };
+}
+
 describe('PoolModeHashrateService', () => {
 
-    describe('incrementAccepted', () => {
-        it('cold slot: increment misses → insert creates the row', async () => {
-            const ops: RecordedOp[] = [];
-            const repo = makeRepo(ops, [], { rowExists: false });
-            const service = new PoolModeHashrateService(repo as any);
+    describe('incrementAccepted (Redis-buffer write path)', () => {
+        let mockRedis: any;
+        let service: PoolModeHashrateService;
 
+        beforeEach(async () => {
+            mockRedis = {
+                hIncrByFloat: jest.fn().mockResolvedValue(undefined),
+                expire: jest.fn().mockResolvedValue(undefined),
+            };
+            const repo = makeRepo([]);
+            service = new PoolModeHashrateService(repo as any, makeCacheManager(mockRedis) as any);
+            await service.onModuleInit();
+        });
+
+        it('hIncrByFloats the mode field of pool:mode-hashrate:{slot}', async () => {
             const expectedSlot = TimeSlotHelper.getCurrentSlot();
             await service.incrementAccepted('pplns', 500);
 
-            expect(ops).toHaveLength(2);
-            expect(ops[0].op).toBe('increment');
-            expect(ops[0].args[0]).toEqual({ mode: 'pplns', time: expectedSlot });
-            expect(ops[0].args[1]).toBe('diff');
-            expect(ops[0].args[2]).toBe(500);
-
-            expect(ops[1].op).toBe('insert');
-            expect(ops[1].args[0]).toEqual({ mode: 'pplns', time: expectedSlot, diff: 500 });
+            expect(mockRedis.hIncrByFloat).toHaveBeenCalledTimes(1);
+            expect(mockRedis.hIncrByFloat).toHaveBeenCalledWith(
+                `pool:mode-hashrate:${expectedSlot}`,
+                'pplns',
+                500,
+            );
         });
 
-        it('warm slot: increment hits → no insert', async () => {
-            const ops: RecordedOp[] = [];
-            const repo = makeRepo(ops, [], { rowExists: true });
-            const service = new PoolModeHashrateService(repo as any);
+        it('refreshes the slot key TTL alongside the increment', async () => {
+            await service.incrementAccepted('solo', 100);
 
-            await service.incrementAccepted('pplns', 250);
-
-            expect(ops).toHaveLength(1);
-            expect(ops[0].op).toBe('increment');
+            expect(mockRedis.expire).toHaveBeenCalledTimes(1);
+            expect(mockRedis.expire).toHaveBeenCalledWith(
+                expect.stringMatching(/^pool:mode-hashrate:\d+$/),
+                expect.any(Number),
+            );
         });
 
-        it('regression M1: race between two cold-slot writers retries the increment', async () => {
-            // Two concurrent writers see no row → both try insert. The
-            // second insert collides on UQ_pool_mode_hashrate_mode_time.
-            // The race-loser must retry the increment (now warm) so its
-            // difficulty isn't lost to a silent rollback.
-            const ops: RecordedOp[] = [];
-            const repo = makeRepo(ops, [], { rowExists: false, insertThrows: true });
-            const service = new PoolModeHashrateService(repo as any);
+        it('does not hit the repository — no per-share PG write', async () => {
+            const repoSpy = makeRepo([]);
+            const incrementSpy = jest.fn();
+            const insertSpy = jest.fn();
+            (repoSpy as any).increment = incrementSpy;
+            (repoSpy as any).insert = insertSpy;
+            const local = new PoolModeHashrateService(repoSpy as any, makeCacheManager(mockRedis) as any);
+            await local.onModuleInit();
 
-            await service.incrementAccepted('pplns', 100);
+            await local.incrementAccepted('group-solo', 250);
 
-            expect(ops).toHaveLength(3);
-            expect(ops.map(o => o.op)).toEqual(['increment', 'insert', 'increment']);
+            expect(incrementSpy).not.toHaveBeenCalled();
+            expect(insertSpy).not.toHaveBeenCalled();
         });
 
-        it('ignores non-positive or NaN difficulties', async () => {
-            const ops: RecordedOp[] = [];
-            const repo = makeRepo(ops, []);
-            const service = new PoolModeHashrateService(repo as any);
+        it('uses one slot key per timeslot, three hash fields per mode', async () => {
+            await service.incrementAccepted('solo', 1);
+            await service.incrementAccepted('pplns', 1);
+            await service.incrementAccepted('group-solo', 1);
 
+            const keys = new Set(mockRedis.hIncrByFloat.mock.calls.map((c: any[]) => c[0]));
+            expect(keys.size).toBe(1);  // single key for the slot
+            const fields = mockRedis.hIncrByFloat.mock.calls.map((c: any[]) => c[1]);
+            expect(new Set(fields)).toEqual(new Set(['solo', 'pplns', 'group-solo']));
+        });
+
+        it('ignores non-positive or non-finite difficulties', async () => {
             await service.incrementAccepted('pplns', 0);
-            await service.incrementAccepted('pplns', -1);
+            await service.incrementAccepted('pplns', -5);
             await service.incrementAccepted('pplns', NaN);
+            await service.incrementAccepted('pplns', Infinity);
 
-            expect(ops).toHaveLength(0);
+            expect(mockRedis.hIncrByFloat).not.toHaveBeenCalled();
         });
 
-        it('swallows DB errors — share submit must never fail on stats write', async () => {
-            const repo = {
-                increment: jest.fn().mockRejectedValue(new Error('boom')),
-                insert: jest.fn(),
-            } as any;
-            const service = new PoolModeHashrateService(repo);
+        it('discards out-of-range share values to protect the `real` PG column', async () => {
+            const consoleSpy = jest.spyOn(console, 'warn').mockImplementation();
+            try {
+                // Same incident class as PoolShareStatistics: a buggy SV2
+                // client opens a channel with absurdly small maxTarget,
+                // gets assigned diff in the e+50 range. PG `real` (~3.4e38)
+                // refuses such a value on coordinator flush. Discard at
+                // write time so the slot key stays clean.
+                await service.incrementAccepted('pplns', 9.8e53);
+                expect(mockRedis.hIncrByFloat).not.toHaveBeenCalled();
+            } finally {
+                consoleSpy.mockRestore();
+            }
+        });
 
-            await expect(service.incrementAccepted('pplns', 100)).resolves.toBeUndefined();
+        it('still accepts large but plausible values below MAX_REASONABLE_DIFFICULTY', async () => {
+            // ~3.5e14 is real network difficulty in 2026; ceiling is 1e15.
+            await service.incrementAccepted('pplns', 1e14);
+            expect(mockRedis.hIncrByFloat).toHaveBeenCalledTimes(1);
+        });
+
+        it('exactly at the ceiling: discards', async () => {
+            // Strict-greater-than guard, so MAX is allowed.
+            const consoleSpy = jest.spyOn(console, 'warn').mockImplementation();
+            try {
+                await service.incrementAccepted('pplns', MAX_REASONABLE_DIFFICULTY * 1.01);
+                expect(mockRedis.hIncrByFloat).not.toHaveBeenCalled();
+            } finally {
+                consoleSpy.mockRestore();
+            }
+        });
+
+        it('swallows Redis errors — share submit must never fail on stats write', async () => {
+            mockRedis.hIncrByFloat.mockRejectedValueOnce(new Error('redis down'));
+            const consoleSpy = jest.spyOn(console, 'warn').mockImplementation();
+            try {
+                await expect(service.incrementAccepted('pplns', 100)).resolves.toBeUndefined();
+            } finally {
+                consoleSpy.mockRestore();
+            }
+        });
+
+        it('no-ops when redis client is unavailable (no throw, no fall-through to PG)', async () => {
+            const consoleSpy = jest.spyOn(console, 'error').mockImplementation();
+            try {
+                const repo = makeRepo([]);
+                const noRedis = new PoolModeHashrateService(repo as any, { store: {} } as any);
+                await noRedis.onModuleInit();
+
+                await noRedis.incrementAccepted('pplns', 100);
+                // Nothing crashes; nothing written.
+            } finally {
+                consoleSpy.mockRestore();
+            }
         });
     });
 
-    describe('getChart', () => {
-        it('uses same bucket convention + current-slot exclusion as getChartDataForSite', async () => {
-            const repo = makeRepo([], []);
-            const service = new PoolModeHashrateService(repo as any);
+    describe('getChart (read path unchanged)', () => {
+        it('uses TimeSlotHelper.getCurrentSlot() and excludes the current incomplete slot', async () => {
+            const repo = makeRepo([]);
+            const mockRedis = { hIncrByFloat: jest.fn(), expire: jest.fn() };
+            const service = new PoolModeHashrateService(repo as any, makeCacheManager(mockRedis) as any);
 
             let captured: any;
             const origCreateQb = repo.createQueryBuilder;
@@ -141,24 +199,17 @@ describe('PoolModeHashrateService', () => {
             await service.getChart('pplns', '1d');
 
             expect(captured.mode).toBe('pplns');
-            // The invariant that matters: currentSlot MUST come from
-            // TimeSlotHelper (end-time convention). If a future refactor
-            // brings back Math.floor(now/BUCKET)*BUCKET here, this
-            // assertion breaks — which is exactly the regression we want
-            // to catch.
+            // currentSlot MUST come from TimeSlotHelper (end-time). If a
+            // future refactor inlines Math.floor(now/BUCKET)*BUCKET here,
+            // this assertion breaks — which is the regression we want.
             expect(captured.currentSlot).toBe(TimeSlotHelper.getCurrentSlot());
             expect(captured.since).toBeLessThan(captured.currentSlot);
         });
 
-        it('applies the shares × DIFFICULTY_1 / 600 hashrate formula via SQL', async () => {
-            // The addSelect string is what matters — we just check it appears
-            // and matches ClientStatisticsService.getChartDataForSite format.
-            // Inspected indirectly: the service delegates arithmetic to SQL,
-            // so the returned row's .data is passed through Number() unchanged.
-            const repo = makeRepo([], [
-                { label: '1700000000000', data: '5000000000' },
-            ]);
-            const service = new PoolModeHashrateService(repo as any);
+        it('passes through SQL-aggregated data column unchanged', async () => {
+            const repo = makeRepo([{ label: '1700000000000', data: '5000000000' }]);
+            const mockRedis = { hIncrByFloat: jest.fn(), expire: jest.fn() };
+            const service = new PoolModeHashrateService(repo as any, makeCacheManager(mockRedis) as any);
 
             const chart = await service.getChart('pplns', '1d');
 
@@ -170,8 +221,9 @@ describe('PoolModeHashrateService', () => {
                 ['1d', 1], ['3d', 3], ['7d', 7],
             ];
             for (const [range, days] of expectations) {
-                const repo = makeRepo([], []);
-                const service = new PoolModeHashrateService(repo as any);
+                const repo = makeRepo([]);
+                const mockRedis = { hIncrByFloat: jest.fn(), expire: jest.fn() };
+                const service = new PoolModeHashrateService(repo as any, makeCacheManager(mockRedis) as any);
 
                 let captured: any;
                 const origCreateQb = repo.createQueryBuilder;
@@ -189,8 +241,6 @@ describe('PoolModeHashrateService', () => {
                 await service.getChart('pplns', range);
                 const nowAfter = Date.now();
 
-                // `since = Date.now() - days*24h` inside the service. Allow any
-                // Date.now() between the test's before/after to pass.
                 const expectedMin = nowBefore - days * 24 * 60 * 60 * 1000;
                 const expectedMax = nowAfter - days * 24 * 60 * 60 * 1000;
                 expect(captured.since).toBeGreaterThanOrEqual(expectedMin);
@@ -199,16 +249,12 @@ describe('PoolModeHashrateService', () => {
         });
     });
 
-    // Constants are re-exported for callers — keeps consumers from
-    // reaching into the @nestjs/typeorm layer and lets them trust the
-    // mining.constants source of truth.
     it('re-exports SLOT_DURATION_MS matching mining.constants', async () => {
         const reExported = await import('./pool-mode-hashrate.service');
         const constants = await import('../../constants/mining.constants');
         expect(reExported.SLOT_DURATION_MS).toBe(constants.SLOT_DURATION_MS);
     });
 
-    // Safety: assertion that the formula multiplier is what clients expect.
     it('DIFFICULTY_1 matches mining.constants (guards against accidental inline overrides)', () => {
         expect(DIFFICULTY_1).toBe(4294967296);
     });

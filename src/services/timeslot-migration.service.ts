@@ -221,7 +221,7 @@ export class TimeslotMigrationService implements OnModuleInit {
       }
 
       const redisClient = store.client;
-      const patterns = ['pool:rejected:*', 'pool:shares:*'];
+      const patterns = ['pool:rejected:*', 'pool:shares:*', 'pool:mode-hashrate:*'];
       let totalKeysDeleted = 0;
 
       for (const pattern of patterns) {

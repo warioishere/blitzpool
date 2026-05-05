@@ -14,6 +14,7 @@ function buildService(mockRedis: any, mockWorkerShares: Partial<WorkerSharesServ
         { store: {} } as any,           // cacheManager — no Redis store so onModuleInit is skipped
         {} as any,                       // poolShareStatisticsRepository
         {} as any,                       // poolRejectedStatisticsRepository
+        {} as any,                       // poolModeHashrateRepository
         {} as any,                       // clientStatisticsRepository
         {} as any,                       // clientRejectedStatisticsRepository
         { options: { type: 'postgres' }, query: jest.fn() } as unknown as DataSource,
