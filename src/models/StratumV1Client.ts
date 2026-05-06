@@ -1165,37 +1165,45 @@ export class StratumV1Client {
             // Accounting and block submission below — all fully awaited, nothing skipped
             await this.poolShareStatisticsService.addAcceptedShare(effectiveDiff);
 
-            // A `stale-creditable` share happened to also meet network
-            // difficulty: corner-of-corner case (≈ 1-in-2-billion shares
-            // × within STALE_GRACE_MS of a block change). The share's
-            // prev_hash points to the previous tip, so any submitblock
-            // call would be rejected by bitcoind as `bad-prevblk`. Skip
-            // the block-submit path entirely — the work credit above
-            // (poolShareStatisticsService.addAcceptedShare + the PPLNS /
-            // group-solo recordShare further down) honors the miner's
-            // valid work without writing a phantom row to the
-            // blocks table or wasting an RPC round-trip.
-            const isStaleCreditable = classification === 'stale-creditable';
-            if (submissionDifficulty >= jobTemplate.blockData.networkDifficulty && !isStaleCreditable) {
+            if (submissionDifficulty >= jobTemplate.blockData.networkDifficulty) {
+                // ckpool-style: a possible block-solve is ALWAYS submitted to
+                // bitcoind, even for shares against retired/stale templates
+                // (stratifier.c:6191-6195 "Make sure we always submit any
+                // possible block solve"). bitcoind authoritatively decides
+                // validity — a stale-creditable hit during a reorg could
+                // still be a valid alternative tip. The block-bookkeeping
+                // (`blocksService.save`, push notification, PPLNS payout
+                // distribution) is gated on `result === 'SUCCESS!'` below
+                // so a rejected block does NOT write a phantom row to
+                // `blocks_entity` or push a "block found" notification.
                 console.log('!!! BLOCK FOUND !!!');
                 const blockHex = updatedJobBlock.toHex(false);
                 const result = await this.bitcoinRpcService.SUBMIT_BLOCK(blockHex);
-                await this.blocksService.save({
-                    height: jobTemplate.blockData.height,
-                    minerAddress: this.clientAuthorization.address,
-                    worker: this.clientAuthorization.worker,
-                    sessionId: this.entity.sessionId,
-                    blockData: blockHex
-                });
 
-                await this.notificationService.notifySubscribersBlockFound(
-                    this.clientAuthorization.address,
-                    jobTemplate.blockData.height,
-                    updatedJobBlock,
-                    result,
-                );
-                //success
-                if (result === 'SUCCESS!') {
+                if (result !== 'SUCCESS!') {
+                    // bitcoind rejected (bad-prevblk for a stale tip,
+                    // duplicate from a race, or RPC error). Log and skip
+                    // the bookkeeping. Work-credit for the share itself
+                    // already happened above and stays — the miner did
+                    // the work, they get paid for it, regardless of
+                    // whether their block found a home.
+                    console.warn(`[Block submit rejected at height ${jobTemplate.blockData.height}]: ${result}`);
+                } else {
+                    await this.blocksService.save({
+                        height: jobTemplate.blockData.height,
+                        minerAddress: this.clientAuthorization.address,
+                        worker: this.clientAuthorization.worker,
+                        sessionId: this.entity.sessionId,
+                        blockData: blockHex
+                    });
+
+                    await this.notificationService.notifySubscribersBlockFound(
+                        this.clientAuthorization.address,
+                        jobTemplate.blockData.height,
+                        updatedJobBlock,
+                        result,
+                    );
+
                     await this.addressSettingsService.resetBestDifficultyAndShares();
                     await this.addressSettingsCacheService.clear();
 

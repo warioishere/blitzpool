@@ -1160,6 +1160,207 @@ describe('StratumV2Client', () => {
       socket.destroy();
     });
 
+    /**
+     * Block-submit gating: if bitcoind rejects the block (bad-prevblk on a
+     * stale solve, duplicate from a race, RPC error), the pool MUST NOT:
+     *   - write to `blocks_entity` (no phantom row in the operator UI)
+     *   - send "block found" push notifications to subscribers
+     *   - reset best-difficulty on the address
+     *   - run PPLNS / group-solo `onBlockFound` (no payout snapshot)
+     *
+     * Mirrors ckpool's `out_submit` semantics — submit always (let bitcoind
+     * decide validity), record only on confirmed success. Pre-refactor the
+     * V2 TDP path saved + notified unconditionally.
+     */
+    it('TDP SubmitSolution: bitcoind REJECTS → no blocksService.save, no push notification', async () => {
+      const socket = new MockSocket();
+      const services = createMockServices();
+      services.stratumV2Service.getNoiseConfig.mockReturnValue(noiseConfig);
+      // Wire the spies we want to assert against.
+      const blocksSave = jest.fn().mockResolvedValue(undefined);
+      services.blocksService = { save: blocksSave } as any;
+      services.notificationService.notifySubscribersBlockFound.mockClear();
+
+      const { Subject } = require('rxjs');
+      const jobSubject = new Subject();
+      services.stratumV1JobsService.newMiningJob$ = jobSubject.asObservable();
+      services.stratumV1JobsService.newMiningJob$.subscribe = jest.fn((cb: any) => jobSubject.subscribe(cb));
+
+      const extranonceManager = new Sv2ExtranonceManager();
+      // handleSubmitSolution returns the structured response shape with
+      // `result` set to a non-SUCCESS string (bitcoind rejection).
+      const mockTdpService = {
+        getLatestTemplate: jest.fn().mockReturnValue(undefined),
+        handleSubmitSolution: jest.fn().mockResolvedValue({
+          result: 'bad-prevblk',
+          blockHex: 'deadbeef',
+          height: 800000,
+          coinbasevalue: 312500000,
+        }),
+        newTemplate$: { subscribe: jest.fn() },
+        newPrevHash$: { subscribe: jest.fn() },
+      };
+
+      const initiator = new Sv2NoiseInitiator();
+      const act1 = await initiator.generateAct1();
+
+      const client = new StratumV2Client(
+        socket as any, act1,
+        { port: 3337, initialDifficulty: 16384, allowSuggestedDifficulty: true, targetSharesPerMinute: 6 },
+        services.stratumV2Service as any,
+        services.stratumV1JobsService as any,
+        services.bitcoinRpcService,
+        services.clientService as any,
+        services.clientStatisticsService as any,
+        services.notificationService as any,
+        services.blocksService,
+        services.configService as any,
+        services.addressSettingsService,
+        services.addressSettingsCacheService as any,
+        services.poolShareStatisticsService as any,
+        services.poolRejectedStatisticsService as any,
+        services.clientRejectedStatisticsService as any,
+        services.externalSharesService,
+        services.clientDifficultyStatisticsService,
+        services.shareTotalsCacheService as any,
+        extranonceManager,
+        mockTdpService as any,
+      );
+
+      // Bypass DB call inside ensureEntity by pre-populating the entity.
+      (client as any).entity = {
+        sessionId: 'test-session', address: 'bcrt1qtest', clientName: 'worker1',
+        bestDifficulty: 0, updatedAt: null,
+      };
+      (client as any).address = 'bcrt1qtest';
+      (client as any).workerName = 'worker1';
+
+      await new Promise(resolve => setTimeout(resolve, 100));
+      const act2 = socket.drainWritten();
+      initiator.processAct2(act2);
+
+      const setupPayload = serializeSetupConnection({
+        protocol: 0, minVersion: 2, maxVersion: 2, flags: 0,
+        endpoint_host: 'localhost', endpoint_port: 3337,
+        vendor: 'TestMiner', hardwareVersion: '1.0', firmwareVersion: '2.0', deviceId: 'test-id',
+      });
+      sendEncryptedFrame(socket, initiator, Sv2MsgType.SETUP_CONNECTION, setupPayload);
+      await new Promise(resolve => setTimeout(resolve, 100));
+      readEncryptedFrames(socket.drainWritten(), initiator);
+
+      const solutionPayload = serializeTdpSubmitSolution({
+        templateId: 1n, version: 0x20000000,
+        headerTimestamp: 1700000000, headerNonce: 0x12345678,
+        coinbaseTx: Buffer.alloc(100, 0xcc),
+      });
+      sendEncryptedFrame(socket, initiator, Sv2MsgType.TDP_SUBMIT_SOLUTION, solutionPayload);
+      await new Promise(resolve => setTimeout(resolve, 150));
+
+      // GATING ASSERTIONS: bookkeeping must NOT have run.
+      expect(blocksSave).not.toHaveBeenCalled();
+      expect(services.notificationService.notifySubscribersBlockFound).not.toHaveBeenCalled();
+
+      socket.destroy();
+    });
+
+    it('TDP SubmitSolution: bitcoind ACCEPTS → blocksService.save + push notification BOTH fire', async () => {
+      const socket = new MockSocket();
+      const services = createMockServices();
+      services.stratumV2Service.getNoiseConfig.mockReturnValue(noiseConfig);
+      const blocksSave = jest.fn().mockResolvedValue(undefined);
+      services.blocksService = { save: blocksSave } as any;
+      services.notificationService.notifySubscribersBlockFound.mockClear();
+      services.addressSettingsService = {
+        resetBestDifficultyAndShares: jest.fn().mockResolvedValue(undefined),
+      } as any;
+
+      const { Subject } = require('rxjs');
+      const jobSubject = new Subject();
+      services.stratumV1JobsService.newMiningJob$ = jobSubject.asObservable();
+      services.stratumV1JobsService.newMiningJob$.subscribe = jest.fn((cb: any) => jobSubject.subscribe(cb));
+
+      const extranonceManager = new Sv2ExtranonceManager();
+      const mockTdpService = {
+        getLatestTemplate: jest.fn().mockReturnValue(undefined),
+        handleSubmitSolution: jest.fn().mockResolvedValue({
+          result: 'SUCCESS!',
+          blockHex: 'deadbeef',
+          height: 800000,
+          coinbasevalue: 312500000,
+        }),
+        newTemplate$: { subscribe: jest.fn() },
+        newPrevHash$: { subscribe: jest.fn() },
+      };
+
+      const initiator = new Sv2NoiseInitiator();
+      const act1 = await initiator.generateAct1();
+
+      const client = new StratumV2Client(
+        socket as any, act1,
+        { port: 3337, initialDifficulty: 16384, allowSuggestedDifficulty: true, targetSharesPerMinute: 6 },
+        services.stratumV2Service as any,
+        services.stratumV1JobsService as any,
+        services.bitcoinRpcService,
+        services.clientService as any,
+        services.clientStatisticsService as any,
+        services.notificationService as any,
+        services.blocksService,
+        services.configService as any,
+        services.addressSettingsService,
+        services.addressSettingsCacheService as any,
+        services.poolShareStatisticsService as any,
+        services.poolRejectedStatisticsService as any,
+        services.clientRejectedStatisticsService as any,
+        services.externalSharesService,
+        services.clientDifficultyStatisticsService,
+        services.shareTotalsCacheService as any,
+        extranonceManager,
+        mockTdpService as any,
+      );
+
+      (client as any).entity = {
+        sessionId: 'test-session', address: 'bcrt1qtest', clientName: 'worker1',
+        bestDifficulty: 0, updatedAt: null,
+      };
+      (client as any).address = 'bcrt1qtest';
+      (client as any).workerName = 'worker1';
+
+      await new Promise(resolve => setTimeout(resolve, 100));
+      const act2 = socket.drainWritten();
+      initiator.processAct2(act2);
+
+      const setupPayload = serializeSetupConnection({
+        protocol: 0, minVersion: 2, maxVersion: 2, flags: 0,
+        endpoint_host: 'localhost', endpoint_port: 3337,
+        vendor: 'TestMiner', hardwareVersion: '1.0', firmwareVersion: '2.0', deviceId: 'test-id',
+      });
+      sendEncryptedFrame(socket, initiator, Sv2MsgType.SETUP_CONNECTION, setupPayload);
+      await new Promise(resolve => setTimeout(resolve, 100));
+      readEncryptedFrames(socket.drainWritten(), initiator);
+
+      const solutionPayload = serializeTdpSubmitSolution({
+        templateId: 1n, version: 0x20000000,
+        headerTimestamp: 1700000000, headerNonce: 0x12345678,
+        coinbaseTx: Buffer.alloc(100, 0xcc),
+      });
+      sendEncryptedFrame(socket, initiator, Sv2MsgType.TDP_SUBMIT_SOLUTION, solutionPayload);
+      await new Promise(resolve => setTimeout(resolve, 150));
+
+      // GATING ASSERTIONS: bookkeeping must run on success.
+      expect(blocksSave).toHaveBeenCalledTimes(1);
+      expect(blocksSave).toHaveBeenCalledWith(
+        expect.objectContaining({
+          height: 800000,
+          minerAddress: 'bcrt1qtest',
+          worker: 'worker1',
+        }),
+      );
+      expect(services.notificationService.notifySubscribersBlockFound).toHaveBeenCalledTimes(1);
+      expect(services.addressSettingsService.resetBestDifficultyAndShares).toHaveBeenCalledTimes(1);
+
+      socket.destroy();
+    });
+
     it('should handle CloseChannel without destroying the connection (sv2-ui#143)', async () => {
       // Regression: the pool used to call destroySocket() when channels.size
       // hit 0, which broke tProxy in non-aggregated mode — every SV1 miner

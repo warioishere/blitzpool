@@ -1547,33 +1547,43 @@ export class StratumV2Client {
     // Accounting and block submission below — all fully awaited, nothing skipped
     await this.poolShareStatisticsService.addAcceptedShare(jobDifficulty);
 
-    // Check for block (only if we have template data and reconstructed block).
-    // Skip when this share was accepted under the stale-creditable path —
-    // the template's prev_hash points to the previous tip, so submitblock
-    // would be rejected as `bad-prevblk`. Work credit was already issued
-    // above (poolShareStatisticsService.addAcceptedShare) and the
-    // recordRejectedShare counter for stale events is separate, so the
-    // miner gets exactly the right accounting without a phantom
-    // submitblock attempt.
-    if (jobTemplate && updatedJobBlock && submissionDifficulty >= jobTemplate.blockData.networkDifficulty && !isStaleCreditable) {
+    // ckpool-style: a possible block-solve is ALWAYS submitted to bitcoind,
+    // even from the stale-creditable path (stratifier.c:6191-6195 "Make
+    // sure we always submit any possible block solve" — a stale-creditable
+    // hit during a reorg could still be a valid alternative tip). bitcoind
+    // authoritatively decides validity. Block-bookkeeping (`blocksService`,
+    // push notification, PPLNS/group-solo `onBlockFound`) is gated on
+    // `result === 'SUCCESS!'` so a rejected block leaves no artefact.
+    // The `isStaleCreditable` parameter is kept for future
+    // instrumentation / metrics distinguishing block-attempts from
+    // stale vs active jobs, but does NOT short-circuit submission.
+    void isStaleCreditable;
+    if (jobTemplate && updatedJobBlock && submissionDifficulty >= jobTemplate.blockData.networkDifficulty) {
       console.log(`[SV2 ${this.sessionId}] 🎉🎉🎉 BLOCK FOUND (Extended)!!! Height: ${jobTemplate.blockData.height}, Difficulty: ${submissionDifficulty.toFixed(2)}`);
       const blockHex = updatedJobBlock.toHex(false);
       const result = await this.bitcoinRpcService.SUBMIT_BLOCK(blockHex);
-      await this.blocksService.save({
-        height: jobTemplate.blockData.height,
-        minerAddress: this.address!,
-        worker: this.workerName,
-        sessionId: this.entity!.sessionId,
-        blockData: blockHex,
-      });
 
-      await this.notificationService.notifySubscribersBlockFound(
-        this.address!,
-        jobTemplate.blockData.height,
-        updatedJobBlock,
-        result,
-      );
-      if (result === 'SUCCESS!') {
+      if (result !== 'SUCCESS!') {
+        // bitcoind rejected (bad-prevblk for a stale tip, duplicate from
+        // a race, or RPC error). Skip all bookkeeping. The share itself
+        // already got work-credit above; only block-level state is gated.
+        console.warn(`[SV2 ${this.sessionId}] Block submit rejected at height ${jobTemplate.blockData.height}: ${result}`);
+      } else {
+        await this.blocksService.save({
+          height: jobTemplate.blockData.height,
+          minerAddress: this.address!,
+          worker: this.workerName,
+          sessionId: this.entity!.sessionId,
+          blockData: blockHex,
+        });
+
+        await this.notificationService.notifySubscribersBlockFound(
+          this.address!,
+          jobTemplate.blockData.height,
+          updatedJobBlock,
+          result,
+        );
+
         await this.addressSettingsService.resetBestDifficultyAndShares();
         await this.addressSettingsCacheService.clear();
 
@@ -1721,7 +1731,18 @@ export class StratumV2Client {
 
     const { result, blockHex, height, coinbasevalue } = response;
 
-    // Save block to DB and send notifications
+    // Gate ALL block-bookkeeping on bitcoind acceptance. Previously
+    // `blocksService.save` and the push notification ran unconditionally,
+    // which meant any rejection (bad-prevblk on a stale solve, duplicate
+    // from a race, RPC error) wrote a phantom row and pushed a "block
+    // found" notification to subscribers. Aligns with the V1 + SV2
+    // standard channel paths (and ckpool's `out_submit` semantics:
+    // submit always, record only on success).
+    if (result !== 'SUCCESS!') {
+      console.warn(`[SV2 ${this.sessionId}] SubmitSolution: rejected (${result}) — height ${height} bookkeeping skipped`);
+      return;
+    }
+
     await this.ensureEntity();
     await this.blocksService.save({
       height,
@@ -1737,26 +1758,22 @@ export class StratumV2Client {
       result,
     );
 
-    if (result === 'SUCCESS!') {
-      console.log(`[SV2 ${this.sessionId}] SubmitSolution: block accepted by network!`);
-      await this.addressSettingsService.resetBestDifficultyAndShares();
-      await this.addressSettingsCacheService.clear();
+    console.log(`[SV2 ${this.sessionId}] SubmitSolution: block accepted by network!`);
+    await this.addressSettingsService.resetBestDifficultyAndShares();
+    await this.addressSettingsCacheService.clear();
 
-      // K5: TDP block submission was missing the PPLNS / group-solo
-      // onBlockFound dispatch. Without this, a TDP-path miner that
-      // finds a block while on the PPLNS port (or in an active
-      // group) gets the block accepted on-chain but no payout
-      // snapshot is taken — the round / window is never reset and
-      // no one is credited. Mirror of the extended-channel routing
-      // (PPLNS port > group-membership > solo).
-      const foundGroupId = this.activeGroupId();
-      if (this.portConfig.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
-        await this.pplnsService.onBlockFound(height, coinbasevalue);
-      } else if (foundGroupId) {
-        await this.groupSoloService!.onBlockFound(height, coinbasevalue, this.address!);
-      }
-    } else {
-      console.warn(`[SV2 ${this.sessionId}] SubmitSolution: rejected (${result})`);
+    // K5: TDP block submission was missing the PPLNS / group-solo
+    // onBlockFound dispatch. Without this, a TDP-path miner that
+    // finds a block while on the PPLNS port (or in an active
+    // group) gets the block accepted on-chain but no payout
+    // snapshot is taken — the round / window is never reset and
+    // no one is credited. Mirror of the extended-channel routing
+    // (PPLNS port > group-membership > solo).
+    const foundGroupId = this.activeGroupId();
+    if (this.portConfig.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
+      await this.pplnsService.onBlockFound(height, coinbasevalue);
+    } else if (foundGroupId) {
+      await this.groupSoloService!.onBlockFound(height, coinbasevalue, this.address!);
     }
   }
 
