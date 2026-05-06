@@ -40,4 +40,12 @@ COPY --from=build /build/dist ./dist
 COPY --from=build /build/node_modules ./node_modules
 COPY --from=build /build/package*.json ./
 
-CMD ["/usr/local/bin/node", "--max-old-space-size=3072", "dist/main"]
+# `--inspect-port=0.0.0.0:9229` configures where the V8 inspector will
+# bind WHEN activated, but does NOT activate it. The inspector itself
+# stays off (no listening socket, zero overhead) until someone runs
+# `docker exec public-pool kill -USR1 1` against the running process —
+# Node's SIGUSR1 handler then opens the inspector on the configured
+# host:port. Pre-configuring the bind address means activation is
+# possible WITHOUT a container restart. Port 9229 is mapped to host
+# 127.0.0.1 only (compose); external access requires an SSH tunnel.
+CMD ["/usr/local/bin/node", "--max-old-space-size=3072", "--inspect-port=0.0.0.0:9229", "dist/main"]
