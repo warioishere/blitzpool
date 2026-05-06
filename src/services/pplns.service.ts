@@ -368,14 +368,39 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
             await this.redis.zRemRangeByRank(REDIS_KEY_SHARES, 0, oldest.length - 1);
             total -= removedDiff;
 
-            for (const [addr, d] of removedByAddr) {
-                await this.redis.hIncrByFloat(REDIS_KEY_WINDOW_BY_ADDRESS, addr, -d);
+            // Pipeline the per-address aggregate decrements: one round-trip
+            // per trim iteration instead of N (where N is the number of
+            // distinct addresses among the 100 oldest shares). Even with
+            // small N this matters because it runs on every accepted PPLNS
+            // share (recordShare → trimWindow → here) and the savings
+            // compound across share rate.
+            if (typeof this.redis.multi === 'function' && removedByAddr.size > 0) {
+                const pipeline = this.redis.multi();
+                for (const [addr, d] of removedByAddr) {
+                    pipeline.hIncrByFloat(REDIS_KEY_WINDOW_BY_ADDRESS, addr, -d);
+                }
+                await pipeline.exec();
+            } else {
+                for (const [addr, d] of removedByAddr) {
+                    await this.redis.hIncrByFloat(REDIS_KEY_WINDOW_BY_ADDRESS, addr, -d);
+                }
             }
         }
 
         this.trimCounter++;
 
-        if (this.trimCounter % 1000 === 0) {
+        // Periodic full-window recalc to defend against incremental-aggregate
+        // drift (real-float accumulator). The recalc reads the entire share
+        // zSet via `ZRANGE 0 -1` plus iterates it synchronously in JS — at
+        // production window sizes (~2.3M entries) that's ~300ms of Redis
+        // single-thread blocking per call. With the previous `% 1000` it
+        // fired every ~20s under steady load and dominated the redis
+        // SLOWLOG, blocking share-submit handlers and the coordinator-flush
+        // pipeline behind it. `% 100000` reduces firing to ~once per ~30
+        // minutes — drift between recalcs is on the order of single-share
+        // float-rounding × N shares (sub-percent), negligible for chart
+        // alignment and far below the cost of the recalc itself.
+        if (this.trimCounter % 100000 === 0) {
             total = await this.recalculateWindowTotal();
             await this.recalculateWindowByAddress();
         }

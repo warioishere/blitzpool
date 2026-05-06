@@ -63,6 +63,17 @@ function redisKeys(groupId: string) {
         // `${snapshotPrefix}:${finderAddress}`. snapshotPrefix is also used
         // as the SCAN match base for cleanup (resetRound, removeGroupState).
         snapshotPrefix: `groupsolo:${groupId}:snapshot`,
+        // Per-address aggregate of accepted shares in the current round
+        // (diff-1 weighted). Maintained lock-step with the `shares` zSet by
+        // recordShare/wipeRoundState/removeMemberState so the read paths
+        // (`getRoundStats`, `getPayoutDistribution`) can serve from a hash
+        // lookup of size O(distinct miners) instead of `ZRANGE 0 -1` over
+        // the full window — the latter dominated the Redis SLOWLOG under
+        // load (70-110ms each, 22+ calls/min) and blocked the single-
+        // threaded Redis for everyone else (stratum, coordinator). Mirrors
+        // PPLNS's `pplns:window:by-address` hash maintained alongside
+        // `pplns:shares`.
+        byAddress: `groupsolo:${groupId}:by-address`,
     };
 }
 
@@ -183,11 +194,30 @@ export class GroupSoloService implements OnModuleInit {
 
         const keys = redisKeys(entry.groupId);
         const now = Date.now();
+
+        // INCR has to land first because its return value becomes the zAdd
+        // score (deterministic ordering for any future trim path). The
+        // remaining four writes share one MULTI/EXEC: one round-trip
+        // instead of four. The `byAddress` hash is maintained lock-step
+        // with the zSet so the hot read paths (`getRoundStats`,
+        // `getPayoutDistribution`) can serve from a hash lookup of size
+        // O(distinct miners) instead of `ZRANGE 0 -1` over the full
+        // window. Pattern mirrors PPLNS's `recordShare`.
         const counter = await this.redis.incr(keys.counter);
         const payload = `${address}:${difficulty}:${now}`;
-        await this.redis.zAdd(keys.shares, { score: counter, value: payload });
-        await this.redis.incrByFloat(keys.total, difficulty);
-        await this.redis.hSet(keys.lastAcceptedShareAt, address, String(now));
+        if (typeof this.redis.multi === 'function') {
+            await this.redis.multi()
+                .zAdd(keys.shares, { score: counter, value: payload })
+                .incrByFloat(keys.total, difficulty)
+                .hSet(keys.lastAcceptedShareAt, address, String(now))
+                .hIncrByFloat(keys.byAddress, address, difficulty)
+                .exec();
+        } else {
+            await this.redis.zAdd(keys.shares, { score: counter, value: payload });
+            await this.redis.incrByFloat(keys.total, difficulty);
+            await this.redis.hSet(keys.lastAcceptedShareAt, address, String(now));
+            await this.redis.hIncrByFloat(keys.byAddress, address, difficulty);
+        }
 
         // Persist last-accepted-share timestamp on the balance row so the
         // dust-sweep cron can tell dormant dust from active dust. No-op
@@ -246,16 +276,15 @@ export class GroupSoloService implements OnModuleInit {
         if (!this.isEnabled()) return this.fallback(blockRewardSats);
 
         const keys = redisKeys(groupId);
-        const entries = await this.redis.zRange(keys.shares, 0, -1);
-        if (!entries || entries.length === 0) {
-            return this.fallback(blockRewardSats);
-        }
 
-        const addressShares = new Map<string, number>();
-        for (const e of entries) {
-            const [addr, diffStr] = e.split(':');
-            const diff = parseFloat(diffStr) || 0;
-            addressShares.set(addr, (addressShares.get(addr) ?? 0) + diff);
+        // Hot path: called per-miner-stratum-session on every job dispatch.
+        // Read the per-address aggregate hash instead of zRange-ing the
+        // raw zSet every time. Falls back to zSet on the first read after
+        // deploy (then backfills the hash). Same data semantics — the
+        // hash is maintained lock-step with the zSet by recordShare.
+        const addressShares = await this.readByAddress(keys);
+        if (addressShares.size === 0) {
+            return this.fallback(blockRewardSats);
         }
 
         const balanceEntities = await this.balanceRepo.find({ where: { groupId } });
@@ -788,6 +817,10 @@ export class GroupSoloService implements OnModuleInit {
         await this.redis.del(keys.counter);
         await this.redis.del(keys.total);
         await this.redis.del(keys.rejectedShares);
+        // Clear the per-address aggregate hash so it stays in sync with
+        // the empty zSet — otherwise the next round's getRoundStats would
+        // see stale per-address shares from the prior round.
+        await this.redis.del(keys.byAddress);
         // lastAcceptedShareAt is intentionally NOT cleared on round reset —
         // it survives across blocks so the inactivity gate measures actual
         // time since last work, not time since last round start.
@@ -894,6 +927,9 @@ export class GroupSoloService implements OnModuleInit {
             if (removedDiff > 0) {
                 await this.redis.incrByFloat(keys.total, -removedDiff);
             }
+            // Drop the kicked member's per-address aggregate so it stays
+            // in sync with the now-emptied zSet entries.
+            await this.redis.hDel(keys.byAddress, address);
             await this.redis.hDel(keys.rejectedShares, address);
             await this.redis.hDel(keys.lastAcceptedShareAt, address);
             // Drop the kicked member's per-finder snapshot. It would
@@ -1022,6 +1058,57 @@ export class GroupSoloService implements OnModuleInit {
 
     // ── Stats (for API) ──────────────────────────────────────────
 
+    /**
+     * Per-address share aggregate for the current round, read from the
+     * `byAddress` hash maintained by recordShare. Falls back to the raw
+     * zSet on first read after deploy if the hash is empty but the zSet
+     * isn't (legacy state). Backfills the hash on the way out so the next
+     * read goes the fast path.
+     *
+     * O(distinct miners) on hot path; O(window entries) only on first
+     * read post-deploy per group.
+     */
+    private async readByAddress(keys: ReturnType<typeof redisKeys>): Promise<Map<string, number>> {
+        const out = new Map<string, number>();
+
+        const hash = (await this.redis.hGetAll(keys.byAddress)) ?? {};
+        for (const [addr, diffStr] of Object.entries(hash)) {
+            const diff = parseFloat(diffStr as string) || 0;
+            if (diff > 0) out.set(addr, diff);
+        }
+        if (out.size > 0) return out;
+
+        // Cold-cache fallback: hash is empty. Recompute from the zSet and
+        // persist back into the hash so subsequent reads are fast. This
+        // also recovers from any (theoretical) drift between the two.
+        const entries = await this.redis.zRange(keys.shares, 0, -1);
+        if (!entries || entries.length === 0) return out;
+        for (const e of entries) {
+            const [addr, diffStr] = e.split(':');
+            const diff = parseFloat(diffStr) || 0;
+            if (!addr || diff <= 0) continue;
+            out.set(addr, (out.get(addr) ?? 0) + diff);
+        }
+
+        // Backfill the hash. Pipelined so it's a single round-trip even
+        // for groups with many distinct miners.
+        if (out.size > 0 && typeof this.redis.multi === 'function') {
+            const pipeline = this.redis.multi();
+            for (const [addr, diff] of out) {
+                pipeline.hIncrByFloat(keys.byAddress, addr, diff);
+            }
+            try {
+                await pipeline.exec();
+            } catch (err) {
+                console.warn(`[GroupSolo] Failed to backfill byAddress hash for ${keys.byAddress}:`, (err as Error).message);
+                // Non-fatal — read still returns correct data; next read
+                // will retry the backfill.
+            }
+        }
+
+        return out;
+    }
+
     async getRoundStats(groupId: string): Promise<{
         totalShares: number;
         totalRejected: number;
@@ -1040,16 +1127,18 @@ export class GroupSoloService implements OnModuleInit {
             };
         }
         const keys = redisKeys(groupId);
-        const entries = await this.redis.zRange(keys.shares, 0, -1);
-        const addressShares = new Map<string, number>();
+
+        // Read the per-address aggregate hash maintained lock-step with the
+        // zSet by recordShare/wipeRoundState/removeMemberState. Cost is
+        // O(distinct miners) — typically dozens — instead of `ZRANGE 0 -1`
+        // over potentially tens of thousands of share entries. Falls back
+        // to the raw zSet only when the hash is empty (first read after
+        // deploy on a group that already had a non-empty round window —
+        // happens once per group post-deploy, then the lock-step
+        // maintenance keeps the hash populated).
+        const addressShares = await this.readByAddress(keys);
         let totalShares = 0;
-        // All values are diff-1 weighted (real work units), not raw share counts.
-        for (const e of (entries ?? [])) {
-            const [addr, sharesStr] = e.split(':');
-            const shares = parseFloat(sharesStr) || 0;
-            addressShares.set(addr, (addressShares.get(addr) ?? 0) + shares);
-            totalShares += shares;
-        }
+        for (const v of addressShares.values()) totalShares += v;
 
         const rejectedSharesMap = (await this.redis.hGetAll(keys.rejectedShares)) ?? {};
         const addressRejected = new Map<string, number>();

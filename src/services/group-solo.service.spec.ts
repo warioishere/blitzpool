@@ -84,6 +84,47 @@ function createMockRedis() {
                 if (targetSet.has(z[i].value)) z.splice(i, 1);
             }
         }),
+        // Minimal node-redis v4 multi() shim. The real client batches the
+        // chained commands and sends them in one round-trip; for tests we
+        // just record calls and replay them sequentially against the same
+        // mock store on exec(). This is the path production uses for
+        // recordShare (4 chained writes) and the byAddress backfill.
+        multi: jest.fn(function multi(this: any) {
+            const ops: Array<() => Promise<unknown>> = [];
+            const self = this;
+            const chain = {
+                zAdd(key: string, entry: { score: number; value: string }) {
+                    ops.push(() => self.zAdd(key, entry));
+                    return chain;
+                },
+                incrByFloat(key: string, amount: number) {
+                    ops.push(() => self.incrByFloat(key, amount));
+                    return chain;
+                },
+                hSet(key: string, field: string, value: string) {
+                    ops.push(() => self.hSet(key, field, value));
+                    return chain;
+                },
+                hIncrByFloat(key: string, field: string, amount: number) {
+                    ops.push(() => self.hIncrByFloat(key, field, amount));
+                    return chain;
+                },
+                hDel(key: string, field: string) {
+                    ops.push(() => self.hDel(key, field));
+                    return chain;
+                },
+                del(key: string | string[]) {
+                    ops.push(() => self.del(key));
+                    return chain;
+                },
+                async exec() {
+                    const results: unknown[] = [];
+                    for (const op of ops) results.push(await op());
+                    return results;
+                },
+            };
+            return chain;
+        }),
         // node-redis v4 cursor-based SCAN. The mock returns ALL matching
         // keys in a single page since the in-memory store is small;
         // production code must still use a do/while loop because it
@@ -629,6 +670,103 @@ describe('GroupSoloService', () => {
         const best = await service.getRoundBestDifficulty('g1');
         expect(best.bestDifficulty).toBe(0);
         expect(best.address).toBeNull();
+    });
+
+    /**
+     * byAddress hash maintenance — the per-address aggregate that
+     * replaces full-window `ZRANGE 0 -1` scans on every read. Must
+     * stay in lock-step with the underlying zSet.
+     */
+    describe('byAddress aggregate hash', () => {
+        const KEY = 'groupsolo:g1:by-address';
+
+        it('recordShare populates the byAddress hash', async () => {
+            const { service, redis, groupService } = makeService();
+            groupService._setMembership('bc1qalice', 'g1', true);
+            await service.recordShare('bc1qalice', 100);
+
+            const h = redis._hashes.get(KEY);
+            expect(h).toBeDefined();
+            expect(parseFloat(h!.get('bc1qalice')!)).toBe(100);
+        });
+
+        it('recordShare accumulates per-address diff across calls', async () => {
+            const { service, redis, groupService } = makeService();
+            groupService._setMembership('bc1qalice', 'g1', true);
+            groupService._setMembership('bc1qbob', 'g1', true);
+            await service.recordShare('bc1qalice', 100);
+            await service.recordShare('bc1qalice', 250);
+            await service.recordShare('bc1qbob', 75);
+
+            const h = redis._hashes.get(KEY)!;
+            expect(parseFloat(h.get('bc1qalice')!)).toBe(350);
+            expect(parseFloat(h.get('bc1qbob')!)).toBe(75);
+        });
+
+        it('getRoundStats reads from byAddress hash without ZRANGE on the hot path', async () => {
+            const { service, redis, groupService } = makeService();
+            groupService._setMembership('bc1qalice', 'g1', true);
+            groupService._setMembership('bc1qbob', 'g1', true);
+            await service.recordShare('bc1qalice', 750);
+            await service.recordShare('bc1qbob', 250);
+
+            (redis.zRange as jest.Mock).mockClear();
+            const stats = await service.getRoundStats('g1');
+
+            expect(redis.zRange).not.toHaveBeenCalled();
+            expect(stats.totalShares).toBe(1000);
+            const alice = stats.perAddress.find(p => p.address === 'bc1qalice')!;
+            expect(alice.totalShares).toBe(750);
+            expect(alice.percent).toBeCloseTo(75, 5);
+        });
+
+        it('cold-cache fallback: empty hash + populated zSet → reads from zSet and backfills hash', async () => {
+            const { service, redis, groupService } = makeService();
+            groupService._setMembership('bc1qalice', 'g1', true);
+            await service.recordShare('bc1qalice', 100);
+            await service.recordShare('bc1qalice', 200);
+
+            // Simulate a pre-deploy round where the byAddress hash didn't
+            // exist yet — wipe just the hash, leave the zSet authoritative.
+            redis._hashes.delete(KEY);
+
+            const stats = await service.getRoundStats('g1');
+            expect(stats.totalShares).toBe(300);
+
+            // Backfill ran on the way out — second read must NOT need zRange.
+            (redis.zRange as jest.Mock).mockClear();
+            const second = await service.getRoundStats('g1');
+            expect(redis.zRange).not.toHaveBeenCalled();
+            expect(second.totalShares).toBe(300);
+        });
+
+        it('onBlockFound clears the byAddress hash with the rest of the round', async () => {
+            const { service, redis, groupService } = makeService();
+            groupService._setMembership('bc1qalice', 'g1', true);
+            await service.recordShare('bc1qalice', 100);
+            await service.getPayoutDistribution('g1', 100_000_000);
+            await service.onBlockFound(900_000, 100_000_000, 'bc1qalice');
+
+            const h = redis._hashes.get(KEY);
+            expect(!h || h.size === 0).toBe(true);
+        });
+
+        it('removeMemberState drops the kicked address from byAddress', async () => {
+            const { service, redis, groupService } = makeService();
+            groupService._setMembership('bc1qalice', 'g1', true);
+            groupService._setMembership('bc1qbob', 'g1', true);
+            groupService._setMembership('bc1qcharlie', 'g1', true);
+            await service.recordShare('bc1qalice', 100);
+            await service.recordShare('bc1qbob', 200);
+            await service.recordShare('bc1qcharlie', 300);
+
+            await service.removeMemberState('g1', 'bc1qbob', ['bc1qalice', 'bc1qcharlie']);
+
+            const h = redis._hashes.get(KEY)!;
+            expect(h.get('bc1qbob')).toBeUndefined();
+            expect(parseFloat(h.get('bc1qalice')!)).toBe(100);
+            expect(parseFloat(h.get('bc1qcharlie')!)).toBe(300);
+        });
     });
 
     /**
