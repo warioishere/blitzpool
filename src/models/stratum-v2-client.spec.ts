@@ -1160,10 +1160,16 @@ describe('StratumV2Client', () => {
       socket.destroy();
     });
 
-    it('should handle CloseChannel and destroy when all channels closed', async () => {
+    it('should handle CloseChannel without destroying the connection (sv2-ui#143)', async () => {
+      // Regression: the pool used to call destroySocket() when channels.size
+      // hit 0, which broke tProxy in non-aggregated mode — every SV1 miner
+      // disconnect would tear down the upstream connection, forcing a full
+      // Noise handshake + SetupConnection on the next SV1 attach. Per SV2
+      // spec §5.3.9 the server's only obligation is to stop sending messages
+      // for the closed channel; the connection MUST stay alive so the client
+      // can open new channels on it.
       const { socket, initiator, services, jobSubject, client } = await setupExtendedHandshakenClient();
 
-      // Setup connection
       const setupPayload = serializeSetupConnection({
         protocol: 0,
         minVersion: 2,
@@ -1180,7 +1186,6 @@ describe('StratumV2Client', () => {
       await new Promise(resolve => setTimeout(resolve, 100));
       readEncryptedFrames(socket.drainWritten(), initiator);
 
-      // Set channelId manually to simulate post-channel-open
       (client as any).channels.set(1, {
         channelId: 1,
         channelType: 'standard',
@@ -1199,14 +1204,18 @@ describe('StratumV2Client', () => {
 
       expect(client.getChannelCount()).toBe(1);
 
-      // Import CloseChannel serializer
       const { serializeCloseChannel } = require('./sv2/sv2-messages');
       const closePayload = serializeCloseChannel({ channelId: 1, reasonCode: 'client-disconnect' });
       sendEncryptedFrame(socket, initiator, Sv2MsgType.CLOSE_CHANNEL, closePayload);
       await new Promise(resolve => setTimeout(resolve, 100));
 
-      // All channels closed → socket should be destroyed
-      expect(socket.destroyed).toBe(true);
+      // Last channel closed: channel state cleaned up, but the socket
+      // stays open so the client can open a fresh channel on it.
+      expect(client.getChannelCount()).toBe(0);
+      expect((client as any).primaryChannelId).toBeNull();
+      expect(socket.destroyed).toBe(false);
+
+      socket.destroy();
     });
 
     it('should not destroy connection when only one of multiple channels is closed', async () => {

@@ -999,10 +999,27 @@ export class StratumV2Client {
       this.primaryChannelId = remaining.done ? null : remaining.value;
     }
 
-    // If all channels closed, destroy connection
-    if (this.channels.size === 0) {
-      this.destroySocket();
-    }
+    // Do NOT close the socket when channels.size === 0.
+    //
+    // SV2 spec §5.3.9: "The server MUST stop sending messages for the
+    // channel." That's it — no requirement to tear down the connection.
+    // Channel lifecycle is independent from connection lifecycle: a
+    // single SV2 connection (one SetupConnection handshake) is designed
+    // to host many open/close cycles of mining channels over time.
+    //
+    // Forcing a socket close here was a spec violation that broke
+    // tProxy in non-aggregated mode: when an SV1 miner attached to
+    // tProxy disconnects, tProxy correctly forwards CloseChannel
+    // upstream; if that was the last channel for that miner the
+    // pool used to drop the entire upstream connection, forcing
+    // tProxy through a fresh Noise handshake + SetupConnection
+    // before the next SV1 miner could connect.
+    //
+    // Reported by stratum-mining/sv2-ui#143. The connection now
+    // stays alive on an empty channel set; the client decides when
+    // to disconnect (TCP close, idle timeout on its side, or pool
+    // sending close-on-error). Resource cleanup for the closed
+    // channel itself (extranonce release above) already happened.
   }
 
   // ── CoinbaseOutputConstraints (0x70) ──────────────────────────────
