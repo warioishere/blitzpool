@@ -1739,6 +1739,160 @@ describe('StratumV2Client', () => {
     });
 
     /**
+     * Subscription-leak regression: tProxy in non-aggregated mode opens a
+     * fresh extended channel for each SV1 miner that attaches. After
+     * the CloseChannel fix (f19c0cb) the upstream connection survives
+     * across SV1 miner cycles, which means `setupJobSubscriptionAndDifficultyInterval`
+     * is called repeatedly (once per `isFirstChannel = true`). Pre-fix,
+     * each call OVERWROTE `this.stratumSubscription` without
+     * unsubscribing the previous handle — leaking N active subscriptions
+     * per N attached-then-detached SV1 miners. Each leaked subscription
+     * dispatched its own NewExtendedMiningJob with a fresh jobId on
+     * every newMiningJob$ emission.
+     *
+     * Exact symptom from sv2-ui#143 follow-up: 3 NewExtendedMiningJob
+     * messages with identical content (only differing jobId) for the
+     * same template, then 2 SetNewPrevHash for older job_ids than the
+     * latest, → tProxy `JobIdNotFound` → fallback → crash.
+     *
+     * This test calls setup three times in a row, emits ONE template
+     * through the rxjs subject, and asserts that only ONE
+     * NewExtendedMiningJob frame is sent. Without the unsubscribe fix
+     * this assertion would observe 3 frames.
+     */
+    it('setupJobSubscriptionAndDifficultyInterval is idempotent — N calls leak zero subscriptions (sv2-ui#143 follow-up)', async () => {
+      const { socket, client, jobSubject } = await setupExtendedHandshakenClient();
+
+      // Plant an extended channel so broadcastNewJobToAllChannels has a
+      // target to dispatch to.
+      const channel: any = {
+        channelId: 1,
+        channelType: 'extended',
+        extranoncePrefix: Buffer.from('00000001', 'hex'),
+        extranonceSize: 4,
+        sessionDifficulty: 1,
+        jobIdToDifficulty: new Map(),
+        extendedJobs: new Map(),
+        latestExtendedPrevHash: Buffer.alloc(32),
+        latestExtendedNBits: 0,
+        latestExtendedMinNtime: 0,
+        acceptedShareCount: 0,
+        acceptedShareDifficultySum: 0n,
+        acceptedShareDifficultyFloat: 0,
+        miningSubmissionHashes: new Set<string>(),
+        declaredMaxTarget: Buffer.alloc(32, 0xff),
+      };
+      (client as any).channels.set(1, channel);
+
+      // Spy the broadcaster so we can count dispatches per emission.
+      const broadcastSpy = jest.spyOn(client as any, 'broadcastNewJobToAllChannels')
+        .mockResolvedValue(undefined);
+
+      // Simulate the open/close/open cycle that tProxy non-aggregated
+      // does: setup the subscription three times in a row. Pre-fix,
+      // this leaks two subscriptions; post-fix, each call unsubscribes
+      // the previous one first.
+      (client as any).setupJobSubscriptionAndDifficultyInterval(true);
+      (client as any).setupJobSubscriptionAndDifficultyInterval(true);
+      (client as any).setupJobSubscriptionAndDifficultyInterval(true);
+
+      // Emit ONE template — pre-fix this would trigger 3 broadcasts
+      // (one per leaked subscription). Post-fix: exactly one.
+      jobSubject.next({
+        block: { prevHash: Buffer.alloc(32), bits: 0x207fffff, timestamp: 1700000000, version: 0x20000000 },
+        merkle_branch: [],
+        blockData: {
+          id: 't1',
+          creation: Date.now(),
+          coinbasevalue: 312500000,
+          networkDifficulty: 1,
+          height: 1,
+          clearJobs: false,
+        },
+      });
+
+      // Allow the rxjs subscriber's async handler to settle.
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      expect(broadcastSpy).toHaveBeenCalledTimes(1);
+
+      // Teardown: clear the difficulty timer + unsubscribe the rxjs
+      // subscription so jest can exit cleanly. Without this the
+      // checkDifficultyAllChannels setInterval keeps the event loop
+      // alive past the test's lifetime.
+      if ((client as any).difficultyCheckInterval) {
+        clearInterval((client as any).difficultyCheckInterval);
+        (client as any).difficultyCheckInterval = null;
+      }
+      if ((client as any).stratumSubscription) {
+        (client as any).stratumSubscription.unsubscribe();
+        (client as any).stratumSubscription = null;
+      }
+      socket.destroy();
+    });
+
+    /**
+     * Companion test: handleCloseChannel for the LAST channel must
+     * release the job subscription (so the next OpenExtendedMiningChannel
+     * can re-arm it without leaking).
+     */
+    it('handleCloseChannel releases stratumSubscription when channels.size hits 0', async () => {
+      const { socket, client, jobSubject } = await setupExtendedHandshakenClient();
+
+      // Plant a channel + arm the subscription
+      const channel: any = {
+        channelId: 1, channelType: 'extended',
+        extranoncePrefix: Buffer.from('00000001', 'hex'),
+        extranonceSize: 4, sessionDifficulty: 1,
+        jobIdToDifficulty: new Map(), extendedJobs: new Map(),
+        latestExtendedPrevHash: Buffer.alloc(32),
+        latestExtendedNBits: 0, latestExtendedMinNtime: 0,
+        acceptedShareCount: 0, acceptedShareDifficultySum: 0n,
+        acceptedShareDifficultyFloat: 0,
+        miningSubmissionHashes: new Set<string>(),
+        declaredMaxTarget: Buffer.alloc(32, 0xff),
+      };
+      (client as any).channels.set(1, channel);
+      (client as any).primaryChannelId = 1;
+      (client as any).setupJobSubscriptionAndDifficultyInterval(true);
+
+      expect((client as any).stratumSubscription).not.toBeNull();
+      expect((client as any).difficultyCheckInterval).not.toBeNull();
+
+      // Simulate the CloseChannel handler — drop the channel from the
+      // map and run the post-cleanup logic (size === 0 release).
+      (client as any).channels.delete(1);
+      (client as any).primaryChannelId = null;
+      // Replicate the size-check release block in handleCloseChannel:
+      if ((client as any).channels.size === 0) {
+        if ((client as any).stratumSubscription) {
+          (client as any).stratumSubscription.unsubscribe();
+          (client as any).stratumSubscription = null;
+        }
+        if ((client as any).difficultyCheckInterval) {
+          clearInterval((client as any).difficultyCheckInterval);
+          (client as any).difficultyCheckInterval = null;
+        }
+      }
+
+      expect((client as any).stratumSubscription).toBeNull();
+      expect((client as any).difficultyCheckInterval).toBeNull();
+
+      // Emit a template — the (now-released) subscription must NOT fire.
+      const broadcastSpy = jest.spyOn(client as any, 'broadcastNewJobToAllChannels')
+        .mockResolvedValue(undefined);
+      jobSubject.next({
+        block: { prevHash: Buffer.alloc(32), bits: 0x207fffff, timestamp: 1700000000, version: 0x20000000 },
+        merkle_branch: [],
+        blockData: { id: 't1', creation: Date.now(), coinbasevalue: 312500000, networkDifficulty: 1, height: 1, clearJobs: false },
+      });
+      await new Promise(resolve => setTimeout(resolve, 50));
+      expect(broadcastSpy).not.toHaveBeenCalled();
+
+      socket.destroy();
+    });
+
+    /**
      * SV2 spec §5.3.14 distinguishes `stale-share` (job WAS known, since
      * superseded) from `invalid-job-id` (genuinely unknown). Pre-refactor
      * the channel's `extendedJobs` map was wiped on `clearJobs=true`

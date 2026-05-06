@@ -1034,6 +1034,29 @@ export class StratumV2Client {
     // to disconnect (TCP close, idle timeout on its side, or pool
     // sending close-on-error). Resource cleanup for the closed
     // channel itself (extranonce release above) already happened.
+    //
+    // BUT: with no channels left, there is nothing to broadcast to,
+    // so RELEASE the job subscription and the difficulty timer.
+    // Without this, the next OpenExtendedMiningChannel from the
+    // surviving connection would call `setupJobSubscriptionAndDifficultyInterval`
+    // again — and (pre this fix) leak a second subscription on top
+    // of the existing one. Each subscription dispatches its own
+    // NewExtendedMiningJob with a fresh jobId on every block, which
+    // is exactly the symptom reported in sv2-ui#143 follow-up:
+    // "Blitzpool sent three NewExtendedMiningJob for identical
+    // template, then SetNewPrevHash referencing older job_ids,
+    // tProxy fallback on JobIdNotFound". Releasing here keeps the
+    // setup path idempotent across open/close cycles.
+    if (this.channels.size === 0) {
+      if (this.stratumSubscription) {
+        this.stratumSubscription.unsubscribe();
+        this.stratumSubscription = null;
+      }
+      if (this.difficultyCheckInterval) {
+        clearInterval(this.difficultyCheckInterval);
+        this.difficultyCheckInterval = null;
+      }
+    }
   }
 
   // ── CoinbaseOutputConstraints (0x70) ──────────────────────────────
@@ -2362,6 +2385,31 @@ export class StratumV2Client {
   // ── Job Subscription & Difficulty Interval ──────────────────────
 
   private setupJobSubscriptionAndDifficultyInterval(clearExtendedJobs: boolean): void {
+    // Defensive cleanup: tProxy in non-aggregated mode opens a fresh
+    // extended channel for every SV1 miner that attaches. Each first-
+    // channel-open flow lands on this method (`isFirstChannel = true` once
+    // the previous channels closed), and without my CloseChannel fix
+    // (f19c0cb) the connection died in between. With that fix the
+    // connection now survives, but THIS method just overwrote the
+    // `stratumSubscription` field without unsubscribing the previous
+    // handle — leaking subscriptions per SV1-miner-cycle. The leaked
+    // subscriptions all received `newMiningJob$` emissions and each
+    // dispatched its own NewExtendedMiningJob with a fresh jobId, which
+    // is exactly the symptom GitGab19 reported in sv2-ui#143
+    // (3 future jobs sent for the same template, then SetNewPrevHash
+    // referencing the older ones, tProxy fallback on JobIdNotFound).
+    //
+    // Same leak for `difficultyCheckInterval` — old timers continued to
+    // fire in addition to the new one. Both must be released here.
+    if (this.stratumSubscription) {
+      this.stratumSubscription.unsubscribe();
+      this.stratumSubscription = null;
+    }
+    if (this.difficultyCheckInterval) {
+      clearInterval(this.difficultyCheckInterval);
+      this.difficultyCheckInterval = null;
+    }
+
     this.stratumSubscription = this.stratumV1JobsService.newMiningJob$.subscribe(async (jt) => {
       try {
         if (jt.blockData.clearJobs) {
