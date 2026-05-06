@@ -153,8 +153,21 @@ services:
       - "./data/mainnet/public-pool/public-pool.sqlite:/public-pool/DB/public-pool.sqlite:ro"
     environment:
       - NODE_ENV=production
-      # glibc malloc tuning — reduce arena fragmentation under PG connection churn
-      - MALLOC_ARENA_MAX=2
+      # libuv I/O threadpool. Default is 4, which is shared by DNS,
+      # fs, crypto and zlib. With ~400 active stratum connections,
+      # an external bitcoin-RPC host (DNS resolution per call), SMTP
+      # for transactional email, FCM, and Telegram, 4 threads is too
+      # narrow — a single slow DNS lookup can stall a quarter of the
+      # pool's I/O capacity. 16 gives headroom; the cost is ~1MB of
+      # RSS per thread (12MB total) which is negligible against the
+      # 4GB container limit.
+      - UV_THREADPOOL_SIZE=16
+      # MALLOC_ARENA_MAX is a glibc-malloc tunable. The Dockerfile
+      # LD_PRELOADs jemalloc, which bypasses glibc allocation
+      # entirely — so this var has been a no-op since jemalloc was
+      # added. Kept here as a comment instead of removing silently
+      # so future readers see the explicit decision.
+      # - MALLOC_ARENA_MAX=2  # superseded by jemalloc
       # Database - PostgreSQL
       - DB_TYPE=postgres
       - PG_HOST=postgres
