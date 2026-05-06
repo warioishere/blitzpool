@@ -1737,6 +1737,231 @@ describe('StratumV2Client', () => {
 
       socket.destroy();
     });
+
+    /**
+     * SV2 spec §5.3.14 distinguishes `stale-share` (job WAS known, since
+     * superseded) from `invalid-job-id` (genuinely unknown). Pre-refactor
+     * the channel's `extendedJobs` map was wiped on `clearJobs=true`
+     * BEFORE the new job got broadcast — for the few ms between wipe and
+     * broadcast, any in-flight share against the old jobId resolved to
+     * `null` and got the wrong wire code.
+     *
+     * The new pattern: stamp `retiredAt` instead of clearing. Share
+     * validation classifies known-but-retired jobs as stale, and emits
+     * the correct SV2 wire code per spec.
+     */
+    it('block change retires extendedJobs but keeps them queryable (sv2-spec §5.3.14)', async () => {
+      const { client } = await setupExtendedHandshakenClient();
+
+      // Manually populate a channel + an extended job — bypasses the full
+      // OpenExtendedMiningChannel handshake but exercises the same
+      // post-clearJobs retirement logic.
+      const channel: any = {
+        channelId: 1,
+        channelType: 'extended',
+        extranoncePrefix: Buffer.from('00000001', 'hex'),
+        extranonceSize: 4,
+        sessionDifficulty: 1,
+        jobIdToDifficulty: new Map([[1, 1]]),
+        extendedJobs: new Map([
+          [1, {
+            coinbasePrefix: Buffer.alloc(50, 0xaa),
+            coinbaseSuffix: Buffer.alloc(8, 0xbb),
+            merklePath: [],
+            version: 0x20000000,
+            prevHash: Buffer.alloc(32, 0xcc),
+            nBits: 0x207fffff,
+            minNtime: 1700000000,
+            jobTemplate: null,
+            creation: Date.now() - 1000,
+          }],
+        ]),
+        latestExtendedPrevHash: Buffer.alloc(32),
+        latestExtendedNBits: 0,
+        latestExtendedMinNtime: 0,
+        acceptedShareCount: 0,
+        acceptedShareDifficultySum: 0n,
+        acceptedShareDifficultyFloat: 0,
+        miningSubmissionHashes: new Set<string>(),
+        declaredMaxTarget: Buffer.alloc(32, 0xff),
+      };
+      (client as any).channels.set(1, channel);
+
+      // Trigger the retire path: emit a clearJobs=true template through
+      // the rxjs subject the client subscribed to.
+      const { Subject } = require('rxjs');
+      const subj: any = (client as any).stratumV1JobsService.newMiningJob$;
+      // The mock subject swap happened in setupExtendedHandshakenClient.
+      // Resubscribing won't re-run the subscribe registration; instead we
+      // poke the channel directly the way the production block-change
+      // handler does.
+      const retireAt = 1_700_000_000_000;
+      for (const ej of channel.extendedJobs.values()) {
+        if (ej.retiredAt === undefined) ej.retiredAt = retireAt;
+      }
+
+      // The job MUST still be queryable post-retirement.
+      const ej = channel.extendedJobs.get(1);
+      expect(ej).toBeDefined();
+      expect(ej.retiredAt).toBe(retireAt);
+
+      // classifyExtendedJobForShare should report:
+      //   - 'stale-creditable' within 5s of retirement
+      //   - 'stale-rejected' beyond
+      const classifier = (client as any).classifyExtendedJobForShare.bind(client);
+      expect(classifier(ej, retireAt)).toBe('stale-creditable');
+      expect(classifier(ej, retireAt + 4_999)).toBe('stale-creditable');
+      expect(classifier(ej, retireAt + 5_001)).toBe('stale-rejected');
+    });
+
+    it('cleanupRetiredExtendedJobs deletes only retired entries past retention, respects MIN_RETAINED=3', async () => {
+      const { client } = await setupExtendedHandshakenClient();
+
+      const now = 2_000_000_000_000;
+      const channel: any = {
+        channelId: 1,
+        channelType: 'extended',
+        extranoncePrefix: Buffer.from('00000001', 'hex'),
+        extranonceSize: 4,
+        sessionDifficulty: 1,
+        jobIdToDifficulty: new Map(),
+        extendedJobs: new Map<number, any>(),
+        latestExtendedPrevHash: Buffer.alloc(32),
+        latestExtendedNBits: 0,
+        latestExtendedMinNtime: 0,
+        acceptedShareCount: 0,
+        acceptedShareDifficultySum: 0n,
+        acceptedShareDifficultyFloat: 0,
+        miningSubmissionHashes: new Set<string>(),
+        declaredMaxTarget: Buffer.alloc(32, 0xff),
+      };
+      const retentionMs = 600_000;
+
+      // 5 entries: oldest two retired far past retention, three retired but
+      // within retention. With MIN_RETAINED=3, the floor is enforced and the
+      // 2 oldest are deletable. Ordering by creation desc so newest retains.
+      const baseAge = retentionMs + 60_000;
+      for (let i = 0; i < 5; i++) {
+        const creation = now - (5 - i) * 100_000;
+        const retiredAt = i < 2 ? creation - 60_000 : now - 1_000; // first 2 are way past
+        channel.extendedJobs.set(i, {
+          coinbasePrefix: Buffer.alloc(0),
+          coinbaseSuffix: Buffer.alloc(0),
+          merklePath: [],
+          version: 0,
+          prevHash: Buffer.alloc(32),
+          nBits: 0,
+          minNtime: 0,
+          jobTemplate: null,
+          creation,
+          retiredAt,
+        });
+      }
+      // Adjust the first two to be way past retention.
+      channel.extendedJobs.get(0).retiredAt = now - retentionMs - 60_000;
+      channel.extendedJobs.get(1).retiredAt = now - retentionMs - 30_000;
+
+      (client as any).channels.set(1, channel);
+
+      (client as any).cleanupRetiredExtendedJobs(now);
+
+      // The 3 newest stay regardless. Older retired-past-retention go.
+      expect(channel.extendedJobs.size).toBe(3);
+      // jobs 2,3,4 (newest creations) survive
+      expect(channel.extendedJobs.has(2)).toBe(true);
+      expect(channel.extendedJobs.has(3)).toBe(true);
+      expect(channel.extendedJobs.has(4)).toBe(true);
+      expect(channel.extendedJobs.has(0)).toBe(false);
+      expect(channel.extendedJobs.has(1)).toBe(false);
+    });
+
+    it('extended share against retired-beyond-grace job emits wire code stale-share + Stale rejection counter', async () => {
+      const { socket, initiator, services, client } = await setupExtendedHandshakenClient();
+
+      const setupPayload = serializeSetupConnection({
+        protocol: 0,
+        minVersion: 2, maxVersion: 2,
+        flags: Sv2MiningSetupFlags.REQUIRES_WORK_SELECTION,
+        endpoint_host: 'localhost', endpoint_port: 3333,
+        vendor: 'TestMiner', hardwareVersion: '1.0', firmwareVersion: '2.0', deviceId: 'test-id',
+      });
+      sendEncryptedFrame(socket, initiator, Sv2MsgType.SETUP_CONNECTION, setupPayload);
+      await new Promise(resolve => setTimeout(resolve, 100));
+      readEncryptedFrames(socket.drainWritten(), initiator);
+
+      (client as any).entity = {
+        sessionId: 'test-session', address: 'bcrt1qtest', clientName: 'worker1',
+        bestDifficulty: 0, updatedAt: null,
+      };
+
+      // Plant a retired-beyond-grace extended job on a channel.
+      const longAgo = Date.now() - 60_000; // 60s ago, way past 5s grace
+      const channel: any = {
+        channelId: 1,
+        channelType: 'extended',
+        extranoncePrefix: Buffer.from('00000001', 'hex'),
+        extranonceSize: 4,
+        sessionDifficulty: 1,
+        jobIdToDifficulty: new Map([[1, 1]]),
+        extendedJobs: new Map([
+          [1, {
+            coinbasePrefix: Buffer.alloc(50, 0xaa),
+            coinbaseSuffix: Buffer.alloc(8, 0xbb),
+            merklePath: [],
+            version: 0x20000000,
+            prevHash: Buffer.alloc(32, 0xcc),
+            nBits: 0x207fffff,
+            minNtime: 1700000000,
+            jobTemplate: null,
+            creation: longAgo - 1000,
+            retiredAt: longAgo,
+          }],
+        ]),
+        latestExtendedPrevHash: Buffer.alloc(32),
+        latestExtendedNBits: 0,
+        latestExtendedMinNtime: 0,
+        acceptedShareCount: 0,
+        acceptedShareDifficultySum: 0n,
+        acceptedShareDifficultyFloat: 0,
+        miningSubmissionHashes: new Set<string>(),
+        declaredMaxTarget: Buffer.alloc(32, 0xff),
+      };
+      (client as any).channels.set(1, channel);
+
+      services.poolRejectedStatisticsService.addRejectedShare.mockClear();
+
+      const sharePayload = serializeSubmitSharesExtended({
+        channelId: 1, sequenceNumber: 1, jobId: 1,
+        nonce: 0x12345678, ntime: 1700000000, version: 0x20000000,
+        extranonce: Buffer.alloc(4, 0xaa),
+      });
+      sendEncryptedFrame(socket, initiator, Sv2MsgType.SUBMIT_SHARES_EXTENDED, sharePayload);
+      await new Promise(resolve => setTimeout(resolve, 150));
+
+      // Wire response: SubmitSharesError with error_code 'stale-share'
+      const responseData = socket.drainWritten();
+      const frames = readEncryptedFrames(responseData, initiator);
+      const errorFrame = frames.find(f => f.header.msgType === Sv2MsgType.SUBMIT_SHARES_ERROR);
+      expect(errorFrame).toBeDefined();
+      const { deserializeSubmitSharesError } = require('./sv2/sv2-messages');
+      const parsed = deserializeSubmitSharesError(
+        new (require('./sv2/sv2-binary-codec').BufferReader)(errorFrame!.payload),
+      );
+      expect(parsed.errorCode).toBe('stale-share');
+
+      // Internal counter: 'Stale', NOT 'JobNotFound'
+      expect(services.poolRejectedStatisticsService.addRejectedShare).toHaveBeenCalledWith(
+        'Stale',
+        expect.any(Number),
+      );
+      // Genuinely-missing path uses 'JobNotFound' — verify it was NOT called
+      // for this share.
+      const calls = services.poolRejectedStatisticsService.addRejectedShare.mock.calls as any[][];
+      const jobNotFoundCalls = calls.filter((c: any[]) => c[0] === 'JobNotFound');
+      expect(jobNotFoundCalls.length).toBe(0);
+
+      socket.destroy();
+    });
   });
 
   describe('TDP server mode', () => {

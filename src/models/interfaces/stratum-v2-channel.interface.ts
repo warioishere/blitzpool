@@ -11,6 +11,28 @@ export interface ExtendedJobData {
   minNtime: number;
   jobTemplate: IJobTemplate | null;
   miningJob?: MiningJob;
+
+  /**
+   * Wall-clock ms when this extended job was superseded by a newer block.
+   * Pre-refactor the channel's `extendedJobs` map was wiped via
+   * `extendedJobs.clear()` on every `clearJobs=true`, BEFORE the new job
+   * was broadcast — opening the same race window that the central service
+   * had (a miner submits a share against the just-cleared old job and
+   * gets `invalid-job-id`). The new pattern: stamp `retiredAt` on every
+   * existing entry; subscribers can still resolve their old jobId,
+   * classification distinguishes stale from genuinely-missing per SV2
+   * spec §5.3.14 (`stale-share` vs `invalid-job-id`).
+   *
+   * Aged out by `cleanupRetiredExtendedJobs()` after JOB_RETENTION_MS.
+   */
+  retiredAt?: number;
+
+  /**
+   * Wall-clock ms of original creation. Used by the aging path to
+   * defense-in-depth-evict any non-retired entries that pile up past
+   * 2× retention (clock-jump or missed retire signal).
+   */
+  creation: number;
 }
 
 export interface StratumV2ChannelState {

@@ -99,6 +99,20 @@ import {
 import { TemplateDistributionService } from '../services/template-distribution.service';
 import { merkleBranchToBuffers } from '../utils/merkle.utils';
 
+// ── Per-channel extended-job lifecycle constants ──────────────────────
+//
+// Mirrors `STALE_GRACE_MS` / `JOB_RETENTION_MS` in stratum-v1-jobs.service
+// but scoped per SV2 connection. Per-channel maps used to be wiped on
+// `clearJobs=true` BEFORE the new job got broadcast — opening the same
+// in-flight-share race the central service had. Now the maps retire
+// instead of wipe, and aging GCs entries past the retention window.
+//
+// SV2 spec §5.3.14 distinguishes `stale-share` from `invalid-job-id`,
+// so the wire response can be precise: stale-share for retired-but-known
+// jobs, invalid-job-id only when the entry has actually been GC'd.
+const SV2_STALE_GRACE_MS = parseInt(process.env.SV2_STALE_GRACE_MS) || 5000;
+const SV2_EXTENDED_JOB_RETENTION_MS = parseInt(process.env.SV2_EXTENDED_JOB_RETENTION_MS) || 600000;
+
 const SV2_MSG_TYPE_NAMES: Record<number, string> = {
   0x00: 'SetupConnection',
   0x01: 'SetupConnectionSuccess',
@@ -1250,6 +1264,7 @@ export class StratumV2Client {
           minNtime,
           jobTemplate,
           miningJob: job,
+          creation: Date.now(),
         });
 
         if (sendPrevHash) {
@@ -1343,6 +1358,7 @@ export class StratumV2Client {
       minNtime,
       jobTemplate,
       miningJob: job,
+      creation: Date.now(),
     });
 
     if (sendPrevHash) {
@@ -1394,12 +1410,30 @@ export class StratumV2Client {
     channel.miningSubmissionHashes.add(submissionHash);
     if (channel.miningSubmissionHashes.size > 10000) channel.miningSubmissionHashes.clear();
 
-    // Look up extended job data by job ID
+    // Look up extended job data by job ID. SV2 spec §5.3.14 distinguishes
+    // `invalid-job-id` (genuinely unknown) from `stale-share` (was known,
+    // since superseded). Pre-fix the channel's extendedJobs got wiped on
+    // every block change BEFORE the new job was broadcast, so any in-flight
+    // share resolved to `null` here and got the wrong code (`invalid-job-id`
+    // instead of `stale-share`).
     const extJob = channel.extendedJobs.get(submission.jobId);
     if (!extJob) {
       console.warn(`[SV2 ${this.sessionId}] ❌ Extended share rejected: invalid-job-id (jobId=${submission.jobId})`);
       await this.recordRejectedShare('JobNotFound', jobDifficulty);
       await this.sendShareError(submission.channelId, submission.sequenceNumber, 'invalid-job-id');
+      return;
+    }
+
+    // Classify against retirement state. A retired-but-known job emits the
+    // proper SV2 wire code `stale-share` (NOT `invalid-job-id`) and a
+    // distinct internal `Stale` rejection counter. Within STALE_GRACE_MS
+    // of retirement we accept the share as-if-current (network jitter
+    // absorption) — it falls through to the normal validation path below.
+    const extClassification = this.classifyExtendedJobForShare(extJob);
+    if (extClassification === 'stale-rejected') {
+      console.warn(`[SV2 ${this.sessionId}] ❌ Extended share rejected: stale-share (jobId=${submission.jobId}, retired ${Date.now() - (extJob.retiredAt ?? 0)}ms ago)`);
+      await this.recordRejectedShare('Stale', jobDifficulty);
+      await this.sendShareError(submission.channelId, submission.sequenceNumber, 'stale-share');
       return;
     }
 
@@ -1872,6 +1906,7 @@ export class StratumV2Client {
       nBits: msg.nBits,
       minNtime: msg.minNtime,
       jobTemplate: null, // Custom job, no template reference
+      creation: Date.now(),
     });
 
     console.log(`[SV2 ${this.sessionId}] ✅ SetCustomMiningJob accepted: assigned jobId=${jobId}, version=0x${msg.version.toString(16)}, merklePathLen=${msg.merklePath.length}`);
@@ -2330,13 +2365,36 @@ export class StratumV2Client {
     this.stratumSubscription = this.stratumV1JobsService.newMiningJob$.subscribe(async (jt) => {
       try {
         if (jt.blockData.clearJobs) {
+          // Per-channel race fix, mirrors the central jobs-service refactor.
+          // Pre-fix: `extendedJobs.clear()` ran synchronously BEFORE the new
+          // job got broadcast — for the few ms between clear and broadcast,
+          // any in-flight share against the old jobId resolved to `null` in
+          // `channel.extendedJobs.get()` and got rejected as
+          // `invalid-job-id`. Per SV2 spec §5.3.14 a share against a
+          // superseded but still-known job should be `stale-share`,
+          // distinct from `invalid-job-id`.
+          //
+          // New behaviour: stamp `retiredAt` on every existing extended job;
+          // keep them queryable until they age out via
+          // `cleanupRetiredExtendedJobs()`. Share validation classifies
+          // active vs stale-creditable vs stale-rejected against this
+          // retirement timestamp.
+          const retireAt = Date.now();
           for (const ch of this.channels.values()) {
             ch.miningSubmissionHashes.clear();
-            if (clearExtendedJobs) ch.extendedJobs.clear();
+            if (clearExtendedJobs) {
+              for (const ej of ch.extendedJobs.values()) {
+                if (ej.retiredAt === undefined) ej.retiredAt = retireAt;
+              }
+            }
             ch.jobIdToDifficulty.clear();
           }
         }
         await this.broadcastNewJobToAllChannels(jt, jt.blockData.clearJobs);
+        // After broadcast, run aging — any retired entries past the retention
+        // window AND beyond the floor get GC'd. Cheap (typical channel has
+        // <10 retired entries), runs at most once per block change.
+        this.cleanupRetiredExtendedJobs();
       } catch (e) {
         console.error(`[SV2 ${this.sessionId}] Job send error:`, (e as Error).message);
         this.destroySocket();
@@ -2346,6 +2404,58 @@ export class StratumV2Client {
     this.difficultyCheckInterval = setInterval(async () => {
       await this.checkDifficultyAllChannels();
     }, this.difficultyCheckIntervalMs);
+  }
+
+  /**
+   * Per-channel extended-jobs aging. Mirrors the central jobs-service
+   * `ageEntries` pattern: keep at least MIN_RETAINED entries newest-first
+   * regardless of age; delete only entries with `retiredAt` set AND past
+   * the retention window. Per-channel scope means each connection
+   * maintains its own bounded extended-jobs map. Cost is O(N log N) on
+   * sort but N is typically <30 (a few mins of jobs per channel).
+   */
+  private cleanupRetiredExtendedJobs(now: number = Date.now()): void {
+    const MIN_RETAINED = 3;
+    const retentionMs = SV2_EXTENDED_JOB_RETENTION_MS;
+    for (const ch of this.channels.values()) {
+      const entries = Array.from(ch.extendedJobs.entries());
+      if (entries.length <= MIN_RETAINED) continue;
+
+      const sortedNewestFirst = entries
+        .slice()
+        .sort(([, a], [, b]) => b.creation - a.creation);
+      const candidates = sortedNewestFirst.slice(MIN_RETAINED);
+
+      for (const [jobId, ej] of candidates) {
+        if (ej.retiredAt !== undefined && now - ej.retiredAt > retentionMs) {
+          ch.extendedJobs.delete(jobId);
+          continue;
+        }
+        // Defense-in-depth — non-retired pile-up past 2× retention.
+        if (now - ej.creation > retentionMs * 2) {
+          ch.extendedJobs.delete(jobId);
+        }
+      }
+    }
+  }
+
+  /**
+   * Classify an extended job for share validation, mirroring
+   * `StratumV1JobsService.classifyJobForShare`. Three outcomes per SV2
+   * spec §5.3.14:
+   *   - `'active'`            → never retired; normal validation
+   *   - `'stale-creditable'`  → retired ≤ STALE_GRACE_MS ago; accept as
+   *                             current (network-jitter absorption)
+   *   - `'stale-rejected'`    → retired > STALE_GRACE_MS ago; reject
+   *                             with wire `stale-share` (NOT
+   *                             `invalid-job-id` — the job *was* known)
+   *
+   * Caller handles `null`/`undefined` extJob lookup as `invalid-job-id`
+   * (genuinely missing — only reachable after retention GC).
+   */
+  private classifyExtendedJobForShare(ej: ExtendedJobData, now: number = Date.now()): 'active' | 'stale-creditable' | 'stale-rejected' {
+    if (ej.retiredAt === undefined) return 'active';
+    return (now - ej.retiredAt) <= SV2_STALE_GRACE_MS ? 'stale-creditable' : 'stale-rejected';
   }
 
   // ── Device Online Notification ───────────────────────────────────
@@ -2590,6 +2700,7 @@ export class StratumV2Client {
       nBits: templateData.prevHash.nBits,
       minNtime: templateData.prevHash.headerTimestamp,
       jobTemplate: null,
+      creation: Date.now(),
     });
 
     console.log(`[SV2 ${this.sessionId}] Sent SetCustomMiningJob (requestId=${requestId})`);
