@@ -1,7 +1,7 @@
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Inject, Injectable, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Cron, CronExpression } from '@nestjs/schedule';
+import { Cron } from '@nestjs/schedule';
 import { Cache } from 'cache-manager';
 import { firstValueFrom } from 'rxjs';
 
@@ -82,9 +82,18 @@ export class AggregationService implements OnModuleInit {
   }
 
   /**
-   * Pre-compute pool statistics (every 10 minutes)
+   * Pre-compute pool statistics (every 10 minutes).
+   *
+   * Cron offset (sec=17) is intentional: keeps this job AWAY from the
+   * `:x0:00` slot boundary where TimeSlotHelper rolls a new bucket and
+   * StratumV1/V2 share-write traffic peaks. Running heavy aggregation
+   * jobs at slot boundaries used to cluster four crons into the same
+   * event-loop tick, blocking it ~1-2s and dropping shares from the
+   * just-opened bucket. Each aggregation cron now has a distinct
+   * second-offset so they neither collide with the slot boundary nor
+   * with each other.
    */
-  @Cron(CronExpression.EVERY_10_MINUTES)
+  @Cron('17 */10 * * * *')
   async aggregatePoolStatistics(): Promise<void> {
     if (!this.enabled) return;
 
@@ -127,9 +136,10 @@ export class AggregationService implements OnModuleInit {
   }
 
   /**
-   * Pre-compute chart data for various ranges (every 5 minutes)
+   * Pre-compute chart data for various ranges (every 5 minutes).
+   * Sec-offset 37 — see `aggregatePoolStatistics` for rationale.
    */
-  @Cron(CronExpression.EVERY_5_MINUTES)
+  @Cron('37 */5 * * * *')
   async aggregateChartData(): Promise<void> {
     if (!this.enabled) return;
 
@@ -160,9 +170,10 @@ export class AggregationService implements OnModuleInit {
   }
 
   /**
-   * Pre-compute site info (every 5 minutes)
+   * Pre-compute site info (every 5 minutes).
+   * Sec-offset 52 — see `aggregatePoolStatistics` for rationale.
    */
-  @Cron(CronExpression.EVERY_5_MINUTES)
+  @Cron('52 */5 * * * *')
   async aggregateSiteInfo(): Promise<void> {
     if (!this.enabled) return;
 
@@ -193,9 +204,10 @@ export class AggregationService implements OnModuleInit {
   }
 
   /**
-   * Pre-compute share totals (every 10 minutes)
+   * Pre-compute share totals (every 10 minutes).
+   * Sec-offset 27 — see `aggregatePoolStatistics` for rationale.
    */
-  @Cron(CronExpression.EVERY_10_MINUTES)
+  @Cron('27 */10 * * * *')
   async aggregateShareTotals(): Promise<void> {
     if (!this.enabled) return;
 

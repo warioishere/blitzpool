@@ -219,10 +219,13 @@ export class PushNotificationService implements OnModuleInit {
     }
 
     /**
-     * Check best difficulty for all subscribed addresses
-     * Runs every 60 seconds
+     * Check best difficulty for all subscribed addresses.
+     * Runs every 60 seconds at sec=43 — offset away from `:x0:00`
+     * slot boundaries so the per-address PG fan-out doesn't pile
+     * onto the cron-storm that aggregation jobs used to create
+     * there.
      */
-    @Cron('*/60 * * * * *')
+    @Cron('43 * * * * *')
     async checkBestDifficulty(): Promise<void> {
 
         try {
@@ -592,10 +595,11 @@ export class PushNotificationService implements OnModuleInit {
     }
 
     /**
-     * Check network difficulty for changes (every 10 minutes)
-     * Bitcoin difficulty adjusts approximately every 2016 blocks (~14 days)
+     * Check network difficulty for changes (every 10 minutes).
+     * Bitcoin difficulty adjusts approximately every 2016 blocks (~14 days).
+     * Sec-offset 7 keeps this off the slot boundary.
      */
-    @Cron('0 */10 * * * *')
+    @Cron('7 */10 * * * *')
     async checkNetworkDifficulty(): Promise<void> {
 
         try {
