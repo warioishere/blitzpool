@@ -87,9 +87,23 @@ export class ClientStatisticsService implements OnModuleInit {
       this.redisClient.expire(key, REDIS_STATISTICS_TTL),
     ];
 
-    // Add reason-specific increments
+    // Add reason-specific increments. Per-worker counters use a fixed
+    // SQL schema (rejectedJobNotFoundCount, rejectedDuplicateShareCount,
+    // rejectedLowDifficultyShareCount) — no dedicated `rejectedStaleCount`
+    // column. Stale-rejected shares (introduced with the ckpool-style
+    // retire-then-age refactor) are conflated INTO the JobNotFound
+    // bucket on this per-worker counter so the UI's
+    // `entry?.rejectedJobNotFound` field continues to mean "share
+    // rejected with wire code 21" — both `JobNotFound` and `Stale`
+    // emit code 21 over SV1 (and `stale-share` vs `invalid-job-id`
+    // over SV2 — see SV2 spec §5.3.14). Operators who want to
+    // distinguish the two failure modes can read
+    // `pool_rejected_statistics` / `client_rejected_statistics`,
+    // both of which use a schemaless reason field and DO see
+    // `'Stale'` as a distinct counter.
     switch (reason) {
       case 'JobNotFound':
+      case 'Stale':
         promises.push(this.redisClient.hIncrBy(key, 'rejectedJobNotFoundCount', 1));
         promises.push(this.redisClient.hIncrByFloat(key, 'rejectedJobNotFoundDiff1', difficulty));
         break;
