@@ -18,8 +18,45 @@ export interface IJobTemplate {
         networkDifficulty: number;
         height: number;
         clearJobs: boolean;
+
+        /**
+         * Set when a newer block has been published and this template is no
+         * longer the active tip. Templates with `retiredAt` set are still
+         * resolvable via `getJobTemplateById` (so late shares can be validated
+         * against the work that was actually issued) until they're aged out
+         * after `JOB_RETENTION_MS`. See `cleanup()` for the lifecycle.
+         */
+        retiredAt?: number;
     };
 }
+
+// ── Lifecycle constants ──────────────────────────────────────────
+//
+// Pattern lifted from ckpool's `stratifier.c:1085-1111`. Three knobs:
+//
+//   STALE_GRACE_MS    — how long after retirement a share against a retired
+//                       job is still treated as if it were current (i.e.
+//                       fully credited). Absorbs cross-network jitter
+//                       between miner and pool. Default 5s — well above
+//                       typical network RTT, well below the operator's
+//                       perception of "this share isn't really for the
+//                       current block anymore".
+//
+//   JOB_RETENTION_MS  — how long after retirement (or after last write,
+//                       for non-retired entries) a job/template stays in
+//                       memory before GC. Late shares within this window
+//                       resolve to a real entry → rejection is "stale"
+//                       not "JobNotFound". Default 10min, plenty for
+//                       even the slowest miners' reconnect-then-submit
+//                       paths.
+//
+//   MIN_RETAINED      — never let the in-memory map drop below this many
+//                       entries, regardless of age. Defends against the
+//                       startup-window where everything is fresh and the
+//                       aging rule shouldn't fire yet.
+const STALE_GRACE_MS = parseInt(process.env.STRATUM_STALE_GRACE_MS) || 5000;
+const MIN_RETAINED = 3;
+export { STALE_GRACE_MS };
 
 @Injectable()
 export class StratumV1JobsService {
@@ -38,8 +75,16 @@ export class StratumV1JobsService {
     private block_template_interval: number =
       parseInt(process.env.BLOCK_TEMPLATE_INTERVAL) || 60000;
 
+    // Aging window: 10 minutes default. Was 90s under the old "delete on
+    // block change" model, where you only needed enough headroom for the
+    // periodic-refresh template churn within one block. Under the
+    // ckpool-style retire-then-age model (where the block-change retires
+    // jobs and keeps them queryable for late-share validation), 10 min
+    // is the comfortable budget — long enough that essentially every
+    // late share resolves to a real entry, short enough that GC keeps
+    // the maps bounded under sustained operation.
     private job_retention_ms: number =
-      parseInt(process.env.JOB_RETENTION_MS) || 90000;
+      parseInt(process.env.JOB_RETENTION_MS) || 600000;
 
     constructor(
         private readonly bitcoinRpcService: BitcoinRpcService
@@ -158,22 +203,107 @@ export class StratumV1JobsService {
         return bytes;
     }
 
+    /**
+     * ckpool-style workbase lifecycle.
+     *
+     * On block change (`clearJobs=true`) the old behaviour was to wipe the
+     * jobs+blocks maps entirely — but the wipe happens in-thread *before* the
+     * 400 stratum subscribers fan out the new `mining.notify`, so for the
+     * 0.1-2 seconds it takes to dispatch, the pool has no record of the jobs
+     * miners are still working against. Any share submitted against the prior
+     * block in that window resolves to `null` in `getJobById` and gets
+     * rejected as `JobNotFound` — which is both wrong (stale ≠ unknown) and
+     * inflates rejected statistics in proportion to pool size.
+     *
+     * The fix mirrors `ckpool/src/stratifier.c:1085-1111`:
+     *
+     *   1. Block change does NOT delete — it stamps `retiredAt` on every
+     *      currently-known template and job. They stay queryable.
+     *   2. Aging deletes ONLY entries whose `retiredAt` is older than the
+     *      retention window. A non-retired entry never ages out (the
+     *      block-change path will always retire it eventually).
+     *   3. Aging respects a floor: keep the newest `MIN_RETAINED` entries
+     *      regardless. Defends against startup races and pathological
+     *      no-block-for-an-hour scenarios.
+     *
+     * Validation downstream (in StratumV1Client.handleSubmit and
+     * StratumV2Client.handleSubmit) treats a found-but-retired job as:
+     *
+     *   - Within `STALE_GRACE_MS` of retirement: accept as if current
+     *     (network jitter absorption — the share *was* valid work
+     *     issued by us, it just took N ms to arrive).
+     *   - Beyond grace: reject with "stale" rejection counter (separate
+     *     from JobNotFound, so operators can see the two failure modes
+     *     distinctly).
+     *
+     * `JobNotFound` is reserved for the genuine failure: aging actually
+     * removed the job, ~10 minutes after the block it belonged to.
+     */
     public cleanup(clearJobs: boolean, now: number = Date.now()) {
         if (clearJobs) {
-            this.blocks = {};
-            this.jobs = {};
-            return;
-        }
-
-        for (const templateId in this.blocks) {
-            if (now - this.blocks[templateId].blockData.creation > this.job_retention_ms) {
-                delete this.blocks[templateId];
+            // Stamp retiredAt on everything currently active. Idempotent —
+            // already-retired entries keep their original timestamp.
+            for (const id in this.blocks) {
+                const t = this.blocks[id];
+                if (t.blockData.retiredAt === undefined) {
+                    t.blockData.retiredAt = now;
+                }
+            }
+            for (const jobId in this.jobs) {
+                const j = this.jobs[jobId];
+                if (j.retiredAt === undefined) {
+                    j.retiredAt = now;
+                }
             }
         }
 
-        for (const jobId in this.jobs) {
-            if (now - this.jobs[jobId].creation > this.job_retention_ms) {
-                delete this.jobs[jobId];
+        this.ageEntries(
+            this.blocks,
+            now,
+            (e) => e.blockData.creation,
+            (e) => e.blockData.retiredAt,
+        );
+        this.ageEntries(
+            this.jobs,
+            now,
+            (e) => e.creation,
+            (e) => e.retiredAt,
+        );
+    }
+
+    private ageEntries<T>(
+        map: Record<string, T>,
+        now: number,
+        getCreation: (entry: T) => number,
+        getRetiredAt: (entry: T) => number | undefined,
+    ): void {
+        const ids = Object.keys(map);
+        if (ids.length <= MIN_RETAINED) return;
+
+        // Sort by creation time descending so we never delete the newest
+        // MIN_RETAINED entries — they're our floor of "freshness".
+        const sortedByCreation = ids
+            .slice()
+            .sort((a, b) => getCreation(map[b]) - getCreation(map[a]));
+        const candidatesForGC = sortedByCreation.slice(MIN_RETAINED);
+
+        for (const id of candidatesForGC) {
+            const entry = map[id];
+            const retiredAt = getRetiredAt(entry);
+            // Only age entries that have been retired AND are past the
+            // retention window. Non-retired entries are still potentially
+            // active (the periodic 60s refresh creates fresh templates that
+            // are NOT retired until the next block change) — leave them be.
+            if (retiredAt !== undefined && now - retiredAt > this.job_retention_ms) {
+                delete map[id];
+                continue;
+            }
+            // Defense-in-depth: if a non-retired entry somehow piles up
+            // (e.g. clock jump, missed retire signal), age it by absolute
+            // creation time. Generous window so this almost never fires
+            // in normal operation.
+            if (now - getCreation(entry) > this.job_retention_ms * 2) {
+                delete map[id];
             }
         }
     }
@@ -189,6 +319,28 @@ export class StratumV1JobsService {
 
     public getJobById(jobId: string) {
         return this.jobs[jobId];
+    }
+
+    /**
+     * Classify a share-submit's age against retirement state.
+     *
+     * Three outcomes:
+     *   - `'active'`: job exists and is the current block's job → normal path
+     *   - `'stale-creditable'`: job exists, was retired ≤ STALE_GRACE_MS ago →
+     *     accept as if current (the work *was* valid; this is just network
+     *     jitter)
+     *   - `'stale-rejected'`: job exists, was retired > STALE_GRACE_MS ago →
+     *     reject with stale rejection counter (NOT JobNotFound — the job
+     *     is real, just too late to count)
+     *
+     * `null` from `getJobById` (i.e. job not in map at all) is the caller's
+     * problem to handle as JobNotFound — that's the genuine "this share
+     * references work I don't have any record of issuing" case, only
+     * reachable after the 10-min retention window has GC'd the entry.
+     */
+    public classifyJobForShare(job: MiningJob, now: number = Date.now()): 'active' | 'stale-creditable' | 'stale-rejected' {
+        if (job.retiredAt === undefined) return 'active';
+        return (now - job.retiredAt) <= STALE_GRACE_MS ? 'stale-creditable' : 'stale-rejected';
     }
 
     public getNextTemplateId() {

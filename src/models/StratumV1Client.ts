@@ -20,7 +20,7 @@ import { NotificationService } from '../services/notification.service';
 import { IJobTemplate, StratumV1JobsService } from '../services/stratum-v1-jobs.service';
 import { eRequestMethod } from './enums/eRequestMethod';
 import { eResponseMethod } from './enums/eResponseMethod';
-import { eStratumErrorCode } from './enums/eStratumErrorCode';
+import { eStratumErrorCode, STRATUM_REJECT_STALE } from './enums/eStratumErrorCode';
 import { MiningJob } from './MiningJob';
 import { AuthorizationMessage } from './stratum-messages/AuthorizationMessage';
 import { ConfigurationMessage } from './stratum-messages/ConfigurationMessage';
@@ -1020,7 +1020,13 @@ export class StratumV1Client {
 
         const job = this.stratumV1JobsService.getJobById(submission.jobId);
 
-        // a miner may submit a job that doesn't exist anymore if it was removed by a new block notification (or expired, 5 min)
+        // Genuine "no record at all" case: the entry has been GC'd, or the
+        // miner is sending garbage. After the ckpool-style retire-then-age
+        // refactor this should be ~zero in steady state — only reachable
+        // if the miner sat on a jobId for the full 10-minute retention
+        // window, or there's a real bug. The stale path below covers the
+        // common case of a miner submitting against a recently retired
+        // job during the new-block fan-out window.
         if (job == null) {
             await this.poolRejectedStatisticsService.addRejectedShare(
                 eStratumErrorCode[eStratumErrorCode.JobNotFound],
@@ -1050,6 +1056,47 @@ export class StratumV1Client {
             }
             return false;
         }
+
+        // ckpool-style stale classification. Three outcomes:
+        //   - active                 → fall through to normal validation
+        //   - stale-creditable       → fall through; the work was issued by
+        //                              us, the miner is just within the
+        //                              network-jitter grace window
+        //   - stale-rejected         → reject with STRATUM_REJECT_STALE
+        //                              counter (NOT JobNotFound). Wire
+        //                              code is still 21 because Stratum V1
+        //                              has no separate stale code, but
+        //                              internal stats see this as a
+        //                              distinct failure mode.
+        const classification = this.stratumV1JobsService.classifyJobForShare(job);
+        if (classification === 'stale-rejected') {
+            await this.poolRejectedStatisticsService.addRejectedShare(
+                STRATUM_REJECT_STALE,
+                this.sessionDifficulty
+            );
+            await this.poolShareStatisticsService.addRejectedShare(this.sessionDifficulty);
+            await this.clientRejectedStatisticsService.addRejectedShare(
+                this.clientAuthorization.address,
+                STRATUM_REJECT_STALE,
+                this.sessionDifficulty,
+            );
+            await this.clientStatisticsService.addRejectedShare(
+                this.entity,
+                STRATUM_REJECT_STALE,
+                this.sessionDifficulty,
+            );
+            await this.dispatchGroupReject();
+            const err = new StratumErrorMessage(
+                submission.id,
+                eStratumErrorCode.JobNotFound,  // wire code 21 — same code as before, miners agnostic
+                'stale').response();
+            const success = await this.write(err);
+            if (!success) {
+                return false;
+            }
+            return false;
+        }
+
         const jobTemplate = this.stratumV1JobsService.getJobTemplateById(job.jobTemplateId);
 
         if (jobTemplate == null) {
@@ -1118,7 +1165,18 @@ export class StratumV1Client {
             // Accounting and block submission below — all fully awaited, nothing skipped
             await this.poolShareStatisticsService.addAcceptedShare(effectiveDiff);
 
-            if (submissionDifficulty >= jobTemplate.blockData.networkDifficulty) {
+            // A `stale-creditable` share happened to also meet network
+            // difficulty: corner-of-corner case (≈ 1-in-2-billion shares
+            // × within STALE_GRACE_MS of a block change). The share's
+            // prev_hash points to the previous tip, so any submitblock
+            // call would be rejected by bitcoind as `bad-prevblk`. Skip
+            // the block-submit path entirely — the work credit above
+            // (poolShareStatisticsService.addAcceptedShare + the PPLNS /
+            // group-solo recordShare further down) honors the miner's
+            // valid work without writing a phantom row to the
+            // blocks table or wasting an RPC round-trip.
+            const isStaleCreditable = classification === 'stale-creditable';
+            if (submissionDifficulty >= jobTemplate.blockData.networkDifficulty && !isStaleCreditable) {
                 console.log('!!! BLOCK FOUND !!!');
                 const blockHex = updatedJobBlock.toHex(false);
                 const result = await this.bitcoinRpcService.SUBMIT_BLOCK(blockHex);

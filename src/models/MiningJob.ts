@@ -22,6 +22,17 @@ export class MiningJob {
     public networkDifficulty: number;
     public creation: number;
 
+    /**
+     * Set when a newer block has been published and this job is no longer
+     * the latest. Shares against retired jobs are still accepted as
+     * "stale-but-creditable" within `STALE_GRACE_MS` of retirement to
+     * absorb network jitter; afterwards they're rejected as stale (not
+     * JobNotFound). The job is only fully GC'd from the jobs map once
+     * `now - retiredAt > JOB_RETENTION_MS`. Pattern from ckpool's
+     * `stratifier.c` workbase lifecycle (current → retired → aged).
+     */
+    public retiredAt?: number;
+
     constructor(
         configService: ConfigService,
         private network: bitcoinjs.networks.Network,

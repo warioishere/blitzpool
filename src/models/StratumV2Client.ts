@@ -1526,6 +1526,7 @@ export class StratumV2Client {
     header: Buffer,
     channel: StratumV2ChannelState,
     jobDifficulty: number,
+    isStaleCreditable: boolean = false,
   ): Promise<void> {
     // Send success response immediately for minimum latency
     // SV2 spec: new_submits_accepted_count / new_shares_sum are per-batch, not cumulative
@@ -1546,8 +1547,15 @@ export class StratumV2Client {
     // Accounting and block submission below — all fully awaited, nothing skipped
     await this.poolShareStatisticsService.addAcceptedShare(jobDifficulty);
 
-    // Check for block (only if we have template data and reconstructed block)
-    if (jobTemplate && updatedJobBlock && submissionDifficulty >= jobTemplate.blockData.networkDifficulty) {
+    // Check for block (only if we have template data and reconstructed block).
+    // Skip when this share was accepted under the stale-creditable path —
+    // the template's prev_hash points to the previous tip, so submitblock
+    // would be rejected as `bad-prevblk`. Work credit was already issued
+    // above (poolShareStatisticsService.addAcceptedShare) and the
+    // recordRejectedShare counter for stale events is separate, so the
+    // miner gets exactly the right accounting without a phantom
+    // submitblock attempt.
+    if (jobTemplate && updatedJobBlock && submissionDifficulty >= jobTemplate.blockData.networkDifficulty && !isStaleCreditable) {
       console.log(`[SV2 ${this.sessionId}] 🎉🎉🎉 BLOCK FOUND (Extended)!!! Height: ${jobTemplate.blockData.height}, Difficulty: ${submissionDifficulty.toFixed(2)}`);
       const blockHex = updatedJobBlock.toHex(false);
       const result = await this.bitcoinRpcService.SUBMIT_BLOCK(blockHex);
@@ -2063,12 +2071,21 @@ export class StratumV2Client {
     channel.miningSubmissionHashes.add(submissionHash);
     if (channel.miningSubmissionHashes.size > 10000) channel.miningSubmissionHashes.clear();
 
-    // Lookup job
+    // Lookup job. Genuine miss = JobNotFound (job was GC'd after 10min);
+    // found-but-retired-beyond-grace = stale (separate counter, see
+    // classifyJobForShare in stratum-v1-jobs.service for the lifecycle).
     const jobIdHex = submission.jobId.toString(16);
     const job = this.stratumV1JobsService.getJobById(jobIdHex);
     if (!job) {
       await this.recordRejectedShare('JobNotFound', channel.sessionDifficulty);
       await this.sendShareError(submission.channelId, submission.sequenceNumber, 'invalid-job-id');
+      return;
+    }
+
+    const classification = this.stratumV1JobsService.classifyJobForShare(job);
+    if (classification === 'stale-rejected') {
+      await this.recordRejectedShare('Stale', channel.sessionDifficulty);
+      await this.sendShareError(submission.channelId, submission.sequenceNumber, 'stale-share');
       return;
     }
 
@@ -2104,7 +2121,16 @@ export class StratumV2Client {
     if (this.debugMessages) console.log(`[SV2 ${this.sessionId}] 🎯 Share difficulty: ${submissionDifficulty.toFixed(2)} (target: ${jobDifficulty.toFixed(2)})`);
 
     if (submissionDifficulty >= jobDifficulty) {
-      await this.handleValidShare(submission, submissionDifficulty, jobTemplate, updatedJobBlock, header, channel, jobDifficulty);
+      await this.handleValidShare(
+        submission,
+        submissionDifficulty,
+        jobTemplate,
+        updatedJobBlock,
+        header,
+        channel,
+        jobDifficulty,
+        classification === 'stale-creditable',
+      );
     } else {
       // Low difficulty
       console.warn(`[SV2 ${this.sessionId}] ❌ Share rejected: difficulty-too-low (${submissionDifficulty.toFixed(2)} < ${jobDifficulty.toFixed(2)})`);
