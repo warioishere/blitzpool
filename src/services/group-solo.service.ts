@@ -121,6 +121,42 @@ export class GroupSoloService implements OnModuleInit {
     /** Per-group block-found reentrancy guard. */
     private blockFoundLocks = new Set<string>();
 
+    /**
+     * Per-(group, finderAddress) distribution cache. Mirrors the pattern in
+     * PplnsService (single in-memory cache field with TTL): under a block-
+     * change fan-out, the new-job-broadcast iterates all 400 connected
+     * stratum sessions and each one calls `getPayoutDistribution` with the
+     * same group+reward+finder triple. Without a cache the inner
+     * `buildCoinbaseDistribution` plus the two PG round-trips (balanceRepo,
+     * groupRepo) ran 400× synchronously, adding ~50-200ms per call to the
+     * dispatch storm. With a cache: 1× compute, 399× O(1) hash lookup.
+     *
+     * The cache key is `${groupId}:${finderAddress ?? '__none__'}` and the
+     * value carries a `blockRewardSats` discriminator (the cache is invalid
+     * if the reward differs, e.g. a new template arrived for a different
+     * height). TTL is 30s — short enough that a within-window finder-bonus
+     * config change reflects quickly, long enough to absorb the dispatch
+     * fan-out window.
+     *
+     * Invalidated by `onBlockFound` and `wipeRoundState` (round reset
+     * means the in-flight distribution is no longer valid for any future
+     * job).
+     */
+    private cachedDistributions = new Map<string, {
+        payouts: GroupSoloPayoutEntry[];
+        blockRewardSats: number;
+        cachedAt: number;
+    }>();
+    private static readonly DISTRIBUTION_CACHE_TTL_MS = 30_000;
+
+    private invalidateDistributionCache(groupId: string): void {
+        for (const k of this.cachedDistributions.keys()) {
+            if (k.startsWith(`${groupId}:`)) {
+                this.cachedDistributions.delete(k);
+            }
+        }
+    }
+
     constructor(
         private readonly configService: ConfigService,
         @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
@@ -275,6 +311,25 @@ export class GroupSoloService implements OnModuleInit {
     ): Promise<GroupSoloPayoutEntry[]> {
         if (!this.isEnabled()) return this.fallback(blockRewardSats);
 
+        // ── Cache lookup (block-change fan-out optimisation) ─────────
+        // 400 stratum sessions × identical (group, reward, finder) triples
+        // would otherwise cost 400× the inner compute + 800 PG round-trips
+        // (balanceRepo + groupRepo). With cache: one compute, 399 hash
+        // lookups. TTL is 30s; cache invalidated by onBlockFound /
+        // wipeRoundState so a round-reset can never serve stale state.
+        const cacheKey = `${groupId}:${finderAddress ?? '__none__'}`;
+        const cached = this.cachedDistributions.get(cacheKey);
+        if (
+            cached &&
+            cached.blockRewardSats === blockRewardSats &&
+            Date.now() - cached.cachedAt < GroupSoloService.DISTRIBUTION_CACHE_TTL_MS
+        ) {
+            // The on-disk snapshot in Redis was already written on the
+            // computing path; subsequent cache hits don't need to re-write
+            // it (writeSnapshot is idempotent for the same payload).
+            return cached.payouts;
+        }
+
         const keys = redisKeys(groupId);
 
         // Hot path: called per-miner-stratum-session on every job dispatch.
@@ -325,6 +380,16 @@ export class GroupSoloService implements OnModuleInit {
         const payouts: GroupSoloPayoutEntry[] = result.payouts.length > 0
             ? result.payouts
             : this.fallback(blockRewardSats);
+
+        // Populate the in-memory dispatch-window cache before writing the
+        // on-disk snapshot. The cache lookup at function entry will serve
+        // every subsequent stratum session in the same fan-out from
+        // memory.
+        this.cachedDistributions.set(cacheKey, {
+            payouts,
+            blockRewardSats,
+            cachedAt: Date.now(),
+        });
 
         await this.writeSnapshot(groupId, finderAddress, {
             distribution: payouts,
@@ -824,6 +889,10 @@ export class GroupSoloService implements OnModuleInit {
         // lastAcceptedShareAt is intentionally NOT cleared on round reset —
         // it survives across blocks so the inactivity gate measures actual
         // time since last work, not time since last round start.
+        // Invalidate the dispatch-window distribution cache for this group:
+        // a round reset means any cached distribution is necessarily stale
+        // (the addressShares map it was built from has just been wiped).
+        this.invalidateDistributionCache(groupId);
     }
 
     /**

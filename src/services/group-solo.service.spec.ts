@@ -347,6 +347,106 @@ describe('GroupSoloService', () => {
         });
     });
 
+    /**
+     * Dispatch-window distribution cache: under the new-job fan-out, 400
+     * stratum sessions all call `getPayoutDistribution` with the same
+     * (groupId, blockRewardSats, finderAddress) triple. Pre-cache, this
+     * cost 400× the inner compute + 800 PG round-trips (balanceRepo +
+     * groupRepo). After: 1× compute, 399× hash lookup. Mirrors the
+     * existing PplnsService cache pattern (DISTRIBUTION_CACHE_TTL_MS = 30s).
+     */
+    describe('distribution cache (block-change fan-out optimization)', () => {
+        it('serves identical (groupId, reward, finder) repeats from cache after first compute', async () => {
+            const { service, balanceRepo, groupRepo, groupService } = makeService();
+            groupService._setMembership('bc1qalice', 'g1', true);
+            groupService._setMembership('bc1qbob', 'g1', true);
+            await service.recordShare('bc1qalice', 750);
+            await service.recordShare('bc1qbob', 250);
+
+            const balanceFindSpy = jest.spyOn(balanceRepo, 'find');
+            const groupFindOneSpy = jest.spyOn(groupRepo, 'findOneBy');
+
+            // First call: computes (PG hits)
+            const dist1 = await service.getPayoutDistribution('g1', 100_000_000);
+            const balanceCallsAfterFirst = balanceFindSpy.mock.calls.length;
+            const groupCallsAfterFirst = groupFindOneSpy.mock.calls.length;
+            expect(balanceCallsAfterFirst).toBeGreaterThanOrEqual(1);
+            expect(groupCallsAfterFirst).toBeGreaterThanOrEqual(1);
+
+            // Second + third call (same triple): served from cache, NO new PG hits.
+            const dist2 = await service.getPayoutDistribution('g1', 100_000_000);
+            const dist3 = await service.getPayoutDistribution('g1', 100_000_000);
+            expect(balanceFindSpy.mock.calls.length).toBe(balanceCallsAfterFirst);
+            expect(groupFindOneSpy.mock.calls.length).toBe(groupCallsAfterFirst);
+
+            // Cache returns the same payouts.
+            expect(dist2).toEqual(dist1);
+            expect(dist3).toEqual(dist1);
+        });
+
+        it('different finderAddress = separate cache entries (per-miner finder bonus)', async () => {
+            const { service, groupRepo, balanceRepo, groupService } = makeService();
+            groupService._setMembership('bc1qalice', 'g1', true);
+            groupService._setMembership('bc1qbob', 'g1', true);
+            await service.recordShare('bc1qalice', 500);
+            await service.recordShare('bc1qbob', 500);
+
+            const groupFindOneSpy = jest.spyOn(groupRepo, 'findOneBy');
+            const balanceFindSpy = jest.spyOn(balanceRepo, 'find');
+
+            // Each unique finder = separate compute (different cache key).
+            await service.getPayoutDistribution('g1', 100_000_000, 'bc1qalice');
+            const callsAfterAlice = groupFindOneSpy.mock.calls.length;
+
+            await service.getPayoutDistribution('g1', 100_000_000, 'bc1qbob');
+            const callsAfterBob = groupFindOneSpy.mock.calls.length;
+
+            // Bob's call computed → one MORE groupRepo hit than Alice alone.
+            expect(callsAfterBob).toBe(callsAfterAlice + 1);
+
+            // BUT a repeat of Alice → cache hit, no new PG.
+            const balanceCallsAfterBob = balanceFindSpy.mock.calls.length;
+            await service.getPayoutDistribution('g1', 100_000_000, 'bc1qalice');
+            expect(balanceFindSpy.mock.calls.length).toBe(balanceCallsAfterBob);
+        });
+
+        it('different blockRewardSats invalidates cached entry', async () => {
+            const { service, balanceRepo, groupService } = makeService();
+            groupService._setMembership('bc1qalice', 'g1', true);
+            await service.recordShare('bc1qalice', 100);
+
+            const balanceFindSpy = jest.spyOn(balanceRepo, 'find');
+
+            await service.getPayoutDistribution('g1', 100_000_000);
+            const callsAt100M = balanceFindSpy.mock.calls.length;
+
+            // Different reward = cache miss, recompute.
+            await service.getPayoutDistribution('g1', 200_000_000);
+            expect(balanceFindSpy.mock.calls.length).toBe(callsAt100M + 1);
+        });
+
+        it('round reset (resetRound via wipeRoundState) invalidates the cache', async () => {
+            const { service, balanceRepo, groupService } = makeService();
+            groupService._setMembership('bc1qalice', 'g1', true);
+            await service.recordShare('bc1qalice', 100);
+
+            const balanceFindSpy = jest.spyOn(balanceRepo, 'find');
+
+            await service.getPayoutDistribution('g1', 100_000_000);
+            const callsBeforeReset = balanceFindSpy.mock.calls.length;
+
+            // resetRound is private; trigger it indirectly via the public
+            // wipeRoundState path used by scheduledRoundReset.
+            await (service as any).resetRound('g1');
+
+            // Re-record shares so the post-reset compute has data
+            await service.recordShare('bc1qalice', 100);
+            await service.getPayoutDistribution('g1', 100_000_000);
+            // Cache was invalidated → recompute → balanceRepo.find got called again.
+            expect(balanceFindSpy.mock.calls.length).toBe(callsBeforeReset + 1);
+        });
+    });
+
     it('onBlockFound writes history rows and resets the round', async () => {
         const { service, redis, historyRepo, groupService } = makeService();
         groupService._setMembership('bc1qalice', 'g1', true);
