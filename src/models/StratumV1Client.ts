@@ -452,6 +452,35 @@ export class StratumV1Client {
                     this.clientSubscription = subscriptionMessage;
                     this.subscribeResponse = JSON.stringify(this.clientSubscription.response(this.sessionId, this.extraNonce)) + '\n';
                     await this.write(this.subscribeResponse);
+
+                    // ckpool-style: send mining.set_difficulty +
+                    // first mining.notify IMMEDIATELY after the
+                    // subscribe response. No 15 ms timer wait, no
+                    // gating on mining.extranonce.subscribe / authorize.
+                    //
+                    // Why we changed away from the deferred-init path:
+                    // commit 366f496 introduced the timer to give
+                    // mining.extranonce.subscribe a chance to land
+                    // before the first mining.notify, avoiding one
+                    // wasted job for miners that opt into XNSub. In
+                    // practice that optimisation breaks spec-compliant
+                    // probers (Braiins Hashpower marketplace upstream
+                    // check, stratum-speed-test, …) — they tear the
+                    // connection down on a tight deadline if they
+                    // don't see set_difficulty + notify quickly.
+                    //
+                    // ckpool — battle-tested reference SV1 pool —
+                    // sends both messages immediately after subscribe
+                    // and doesn't even support mining.extranonce.subscribe.
+                    // For miners that do send it, our existing
+                    // EXTRANONCE_SUBSCRIBE post-init handler re-sends
+                    // mining.set_extranonce and a fresh mining.notify
+                    // with clearJobs=true; the miner discards the
+                    // microseconds-old first job and mines on the
+                    // extranonce-aware one. SV1-compliant.
+                    if (!this.stratumInitialized) {
+                        await this.flushInit(this.extraNonceSubscribed && !!this.extranonceResponse);
+                    }
                 }
 
                 break;
