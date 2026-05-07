@@ -80,8 +80,8 @@ describe('ClientRejectedStatisticsService', () => {
       await service.clearRedisKeysForAddress('addr');
 
       expect(mockRedisClient.scan).toHaveBeenCalledTimes(2);
-      expect(mockRedisClient.scan).toHaveBeenCalledWith('0', { MATCH: 'client:rejected:addr:*', COUNT: 100 });
-      expect(mockRedisClient.scan).toHaveBeenCalledWith('5', { MATCH: 'client:rejected:addr:*', COUNT: 100 });
+      expect(mockRedisClient.scan).toHaveBeenCalledWith('0', { MATCH: 'client:rejected:addr:*', COUNT: 1000 });
+      expect(mockRedisClient.scan).toHaveBeenCalledWith('5', { MATCH: 'client:rejected:addr:*', COUNT: 1000 });
       expect(mockRedisClient.del).toHaveBeenCalledTimes(2);
       expect(mockRedisClient.del).toHaveBeenCalledWith(['client:rejected:addr:100', 'client:rejected:addr:200']);
       expect(mockRedisClient.del).toHaveBeenCalledWith(['client:rejected:addr:300']);

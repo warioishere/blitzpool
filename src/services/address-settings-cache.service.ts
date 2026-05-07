@@ -84,7 +84,7 @@ export class AddressSettingsCacheService implements OnModuleInit {
         const pattern = 'address:settings:*';
         let cursor = '0';
         do {
-          const result = await this.redisClient.scan(cursor, { MATCH: pattern, COUNT: 100 });
+          const result = await this.redisClient.scan(cursor, { MATCH: pattern, COUNT: 1000 });
           cursor = result.cursor.toString();
           if (result.keys.length > 0) {
             await this.redisClient.del(result.keys);

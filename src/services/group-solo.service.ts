@@ -437,7 +437,7 @@ export class GroupSoloService implements OnModuleInit {
         try {
             let cursor = 0;
             do {
-                const result = await this.redis.scan(cursor, { MATCH: pattern, COUNT: 100 });
+                const result = await this.redis.scan(cursor, { MATCH: pattern, COUNT: 1000 });
                 cursor = result.cursor;
                 if (result.keys && result.keys.length > 0) {
                     await this.redis.del(result.keys);

@@ -99,7 +99,7 @@ export async function _refreshBanCache(): Promise<void> {
     const keys: string[] = [];
     let cursor = '0';
     do {
-      const result = await redisClient.scan(cursor, { MATCH: 'failban:ban:*', COUNT: 100 });
+      const result = await redisClient.scan(cursor, { MATCH: 'failban:ban:*', COUNT: 1000 });
       cursor = result.cursor.toString();
       keys.push(...result.keys);
     } while (cursor !== '0');
