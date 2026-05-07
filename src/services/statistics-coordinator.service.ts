@@ -32,6 +32,37 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
   private currentTimeSlot: number | null = null;
   private isFlushing: boolean = false;
 
+  /**
+   * Per-flusher tracking of the most recently completed slot we already
+   * flushed to PG. The 5 slot-bound flushers below only have new data
+   * at slot transitions (every 10 min); on every other tick the SCAN
+   * + filter-out-current-slot work is wasted (returns zero records).
+   *
+   * Short-circuit pattern: at flush start, compare currentSlot to
+   * lastFlushedSlot[flusher]. If equal, no transition since last
+   * successful run → skip the entire flusher (no SCAN, no HGETALL,
+   * no PG write).
+   *
+   * State is in-memory; a restart sets all to -1 so the first tick
+   * after restart does a full SCAN regardless. From there the
+   * bookkeeping locks in. Self-healing — a missed slot would be
+   * picked up on the very next tick because the SCAN finds the
+   * straggler key.
+   */
+  private lastFlushedSlot: {
+    poolShares: number;
+    poolModeHashrate: number;
+    clientStatistics: number;
+    poolRejected: number;
+    clientRejected: number;
+  } = {
+    poolShares: -1,
+    poolModeHashrate: -1,
+    clientStatistics: -1,
+    poolRejected: -1,
+    clientRejected: -1,
+  };
+
   constructor(
     @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
     @InjectRepository(PoolShareStatisticsEntity)
@@ -255,12 +286,22 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
    * CRITICAL: Only flushes COMPLETE time slots (not current incomplete slot)
    */
   private async flushPoolShares(): Promise<void> {
+    const currentSlot = TimeSlotHelper.getCurrentSlot();
+
+    // Tier A short-circuit: no slot transition since last successful flush
+    // → no possibility of new completed-slot data to flush. Skip the SCAN.
+    if (this.lastFlushedSlot.poolShares === currentSlot) return;
+
     const pattern = 'pool:shares:*';
     const keys = await this.scanKeys(pattern);
 
-    if (keys.length === 0) return;
-
-    const currentSlot = TimeSlotHelper.getCurrentSlot();
+    if (keys.length === 0) {
+      // Nothing here, but still mark this slot as "looked at" so we
+      // don't re-scan every tick within this slot. Next slot transition
+      // will reset the gate naturally.
+      this.lastFlushedSlot.poolShares = currentSlot;
+      return;
+    }
     const records: Array<{ time: number; accepted: number; rejected: number }> = [];
     const keysToDelete: string[] = [];
 
@@ -292,12 +333,19 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
       }
     }
 
-    if (records.length === 0) return;
+    if (records.length === 0) {
+      // SCAN found only the current-slot key (or nothing) — still update
+      // lastFlushedSlot so we skip subsequent ticks until transition.
+      this.lastFlushedSlot.poolShares = currentSlot;
+      return;
+    }
 
     // Bulk upsert to database
     try {
       await this.bulkUpsertPoolShares(records);
       console.log(`[StatisticsCoordinator] Flushed ${records.length} complete pool share time slots`);
+      // Mark slot done — short-circuits subsequent ticks until next transition.
+      this.lastFlushedSlot.poolShares = currentSlot;
 
       // Delete Redis keys ONLY after successful database flush
       if (keysToDelete.length > 0) {
@@ -384,12 +432,16 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
    * race-safe pattern in `flushAddressTotals`.
    */
   private async flushPoolModeHashrate(): Promise<void> {
+    const currentSlot = TimeSlotHelper.getCurrentSlot();
+    if (this.lastFlushedSlot.poolModeHashrate === currentSlot) return;
+
     const pattern = 'pool:mode-hashrate:*';
     const keys = await this.scanKeys(pattern);
 
-    if (keys.length === 0) return;
-
-    const currentSlot = TimeSlotHelper.getCurrentSlot();
+    if (keys.length === 0) {
+      this.lastFlushedSlot.poolModeHashrate = currentSlot;
+      return;
+    }
     type Snapshot = { key: string; timeSlot: number; fields: Array<{ mode: string; diff: number }> };
     const snapshots: Snapshot[] = [];
 
@@ -404,7 +456,10 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
       eligibleTimes.push(timeSlot);
     }
 
-    if (eligibleKeys.length === 0) return;
+    if (eligibleKeys.length === 0) {
+      this.lastFlushedSlot.poolModeHashrate = currentSlot;
+      return;
+    }
 
     const hashResults = await this.pipelinedHGetAll(eligibleKeys);
 
@@ -427,7 +482,10 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
       }
     }
 
-    if (snapshots.length === 0) return;
+    if (snapshots.length === 0) {
+      this.lastFlushedSlot.poolModeHashrate = currentSlot;
+      return;
+    }
 
     // Pass 2: bulk-upsert to PG. ON CONFLICT (mode, time) means a slot
     // re-flushed (e.g. coordinator crash between PG write and Redis
@@ -444,6 +502,7 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
     try {
       await this.bulkUpsertPoolModeHashrate(records);
       console.log(`[StatisticsCoordinator] Flushed ${records.length} pool mode-hashrate records across ${snapshots.length} slots`);
+      this.lastFlushedSlot.poolModeHashrate = currentSlot;
     } catch (err) {
       console.error(
         `[StatisticsCoordinator] Bulk pool-mode-hashrate flush failed (${(err as Error).message}); deltas remain in Redis for retry`,
@@ -524,12 +583,16 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
    * CRITICAL: Only flushes COMPLETE time slots (not current incomplete slot)
    */
   private async flushClientStatistics(): Promise<void> {
+    const currentSlot = TimeSlotHelper.getCurrentSlot();
+    if (this.lastFlushedSlot.clientStatistics === currentSlot) return;
+
     const pattern = 'client:shares:*';
     const keys = await this.scanKeys(pattern);
 
-    if (keys.length === 0) return;
-
-    const currentSlot = TimeSlotHelper.getCurrentSlot();
+    if (keys.length === 0) {
+      this.lastFlushedSlot.clientStatistics = currentSlot;
+      return;
+    }
     const records: Array<Partial<ClientStatisticsEntity>> = [];
     const keysToDelete: string[] = [];
 
@@ -546,7 +609,10 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
       eligibleKeys.push(key);
     }
 
-    if (eligibleKeys.length === 0) return;
+    if (eligibleKeys.length === 0) {
+      this.lastFlushedSlot.clientStatistics = currentSlot;
+      return;
+    }
 
     // Pipelined HGETALL — one round-trip per 500 keys instead of N.
     const hashResults = await this.pipelinedHGetAll(eligibleKeys);
@@ -592,7 +658,10 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
       }
     }
 
-    if (records.length === 0) return;
+    if (records.length === 0) {
+      this.lastFlushedSlot.clientStatistics = currentSlot;
+      return;
+    }
 
     // Process in batches of 1000 to stay under parameter limits
     const BATCH_SIZE = 1000;
@@ -652,6 +721,11 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
     if (flushed > 0) {
       console.log(`[StatisticsCoordinator] Flushed ${flushed} client statistics records`);
     }
+    // Mark slot processed — even if some batches failed mid-loop, we got
+    // through the SCAN; subsequent ticks within this slot have no new
+    // data to find. Failed batches stay in Redis (we didn't add them to
+    // successfulKeys) and will be picked up on the next slot transition.
+    this.lastFlushedSlot.clientStatistics = currentSlot;
   }
 
   /**
@@ -659,12 +733,16 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
    * Pattern: pool:rejected:{timestamp} -> HASH {reason1: count1, reason2: count2, ...}
    */
   private async flushPoolRejectedStatistics(): Promise<void> {
+    const currentSlot = TimeSlotHelper.getCurrentSlot();
+    if (this.lastFlushedSlot.poolRejected === currentSlot) return;
+
     const pattern = 'pool:rejected:*';
     const keys = await this.scanKeys(pattern);
 
-    if (keys.length === 0) return;
-
-    const currentSlot = TimeSlotHelper.getCurrentSlot();
+    if (keys.length === 0) {
+      this.lastFlushedSlot.poolRejected = currentSlot;
+      return;
+    }
     const records: Array<Partial<PoolRejectedStatisticsEntity>> = [];
     const keysToDelete: string[] = [];
 
@@ -680,7 +758,10 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
       eligibleTimes.push(time);
     }
 
-    if (eligibleKeys.length === 0) return;
+    if (eligibleKeys.length === 0) {
+      this.lastFlushedSlot.poolRejected = currentSlot;
+      return;
+    }
 
     const hashResults = await this.pipelinedHGetAll(eligibleKeys);
 
@@ -704,12 +785,16 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
       }
     }
 
-    if (records.length === 0) return;
+    if (records.length === 0) {
+      this.lastFlushedSlot.poolRejected = currentSlot;
+      return;
+    }
 
     // Bulk upsert to database
     try {
       await this.bulkUpsertPoolRejectedStatistics(records);
       console.log(`[StatisticsCoordinator] Flushed ${records.length} pool rejected statistics records`);
+      this.lastFlushedSlot.poolRejected = currentSlot;
 
       // Delete Redis keys ONLY after successful database flush
       if (keysToDelete.length > 0) {
@@ -725,12 +810,16 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
    * Flush client rejected statistics from Redis to database
    */
   private async flushClientRejectedStatistics(): Promise<void> {
+    const currentSlot = TimeSlotHelper.getCurrentSlot();
+    if (this.lastFlushedSlot.clientRejected === currentSlot) return;
+
     const pattern = 'client:rejected:*';
     const keys = await this.scanKeys(pattern);
 
-    if (keys.length === 0) return;
-
-    const currentSlot = TimeSlotHelper.getCurrentSlot();
+    if (keys.length === 0) {
+      this.lastFlushedSlot.clientRejected = currentSlot;
+      return;
+    }
     const records: Array<Partial<ClientRejectedStatisticsEntity>> = [];
     const keysToDelete: string[] = [];
 
@@ -749,7 +838,10 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
       eligibleTimes.push(time);
     }
 
-    if (eligibleKeys.length === 0) return;
+    if (eligibleKeys.length === 0) {
+      this.lastFlushedSlot.clientRejected = currentSlot;
+      return;
+    }
 
     const hashResults = await this.pipelinedHGetAll(eligibleKeys);
 
@@ -795,12 +887,16 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
       }
     }
 
-    if (records.length === 0) return;
+    if (records.length === 0) {
+      this.lastFlushedSlot.clientRejected = currentSlot;
+      return;
+    }
 
     // Bulk upsert to database
     try {
       await this.bulkUpsertClientRejectedStatistics(records);
       console.log(`[StatisticsCoordinator] Flushed ${records.length} client rejected statistics records`);
+      this.lastFlushedSlot.clientRejected = currentSlot;
 
       // Delete Redis keys ONLY after successful database flush
       if (keysToDelete.length > 0) {
@@ -820,10 +916,19 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
    * This prevents race conditions where shares arriving during flush could be lost.
    */
   private async flushAddressTotals(): Promise<void> {
-    const pattern = 'shares:address:*';
-    const keys = await this.scanKeys(pattern);
+    // Tier B: read the dirty-set instead of SCAN. The dirty-set is
+    // maintained by `ShareTotalsCacheService.increment` (every share
+    // SADDs the address) and bootstrapped on init via a one-time SCAN.
+    // Costs O(active addresses) instead of O(total Redis keyspace).
+    const dirtyAddresses = await this.smembersOrFallbackScan(
+      'coord:dirty:addresses',
+      'shares:address:*',
+      (k) => k.startsWith('shares:address:'),
+    );
 
-    if (keys.length === 0) return;
+    if (dirtyAddresses.length === 0) return;
+
+    const keys = dirtyAddresses.map(addr => `shares:address:${addr}`);
 
     const updates: Array<{ address: string; key: string; shares: number }> = [];
 
@@ -900,15 +1005,40 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
    * Same approach as flushAddressTotals but per-worker.
    */
   private async flushWorkerTotals(): Promise<void> {
-    const pattern = 'shares:worker:*';
-    const keys = await this.scanKeys(pattern);
+    // Tier B: read the dirty-set instead of SCAN. Entries in the SET are
+    // "{address}|{workerName}" tuples (the SET stores them as opaque
+    // strings; we parse on read). Same rationale as flushAddressTotals.
+    const dirtyEntries = await this.smembersOrFallbackScan(
+      'coord:dirty:workers',
+      'shares:worker:*',
+      (k) => k.startsWith('shares:worker:') && !k.endsWith(':hydrated') && !k.endsWith(':lock'),
+      (k) => {
+        // Convert "shares:worker:{address}:{worker}" → "{address}|{worker}"
+        // for fallback bootstrap. Worker names may contain ':' so we use
+        // the first ':' after the address as the split.
+        const stripped = k.substring('shares:worker:'.length);
+        const colonIdx = stripped.indexOf(':');
+        if (colonIdx < 0) return null;
+        return `${stripped.slice(0, colonIdx)}|${stripped.slice(colonIdx + 1)}`;
+      },
+    );
 
-    if (keys.length === 0) return;
+    if (dirtyEntries.length === 0) return;
 
     const updates: Array<{ address: string; clientName: string; key: string; shares: number }> = [];
 
-    // Pre-filter non-data keys (hydrated / lock markers), then pipeline reads.
-    const dataKeys = keys.filter(k => !k.endsWith(':hydrated') && !k.endsWith(':lock'));
+    // Build the actual Redis keys from the dirty-set entries.
+    // The key parse-back below uses key.split(':') for consistency
+    // with the pre-Tier-B SCAN flow; the dirty-set is just the source
+    // of WHICH keys to load.
+    const dataKeys: string[] = [];
+    for (const entry of dirtyEntries) {
+      const sepIdx = entry.indexOf('|');
+      if (sepIdx < 0) continue;
+      const address = entry.substring(0, sepIdx);
+      const clientName = entry.substring(sepIdx + 1);
+      dataKeys.push(`shares:worker:${address}:${clientName}`);
+    }
     if (dataKeys.length === 0) return;
 
     const hashResults = await this.pipelinedHGetAll(dataKeys);
@@ -981,7 +1111,15 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
     do {
       const result = await this.redisClient.scan(cursor, {
         MATCH: pattern,
-        COUNT: 100,
+        // COUNT=1000 bumped from 100. Redis SCAN with MATCH iterates the
+        // entire keyspace regardless of pattern; with the pool's
+        // ~500k livehash keys plus per-slot stat keys, COUNT=100
+        // meant ~5000 round-trips per scanKeys call. The coordinator
+        // does 7 such scans per flush → that single knob accounted
+        // for ~1-2s of the observed wall-time. 1000 cuts it 10×
+        // without large per-call transfer (still well under
+        // a single-block scan budget).
+        COUNT: 1000,
       });
 
       cursor = result.cursor.toString();
@@ -992,6 +1130,56 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
     } while (cursor !== '0');
 
     return Array.from(keysSet);  // Convert Set back to array
+  }
+
+  /**
+   * Tier B helper: read a dirty-set via SMEMBERS, falling back to a
+   * one-time SCAN if the set is empty (bootstrap case after restart
+   * or first deploy).
+   *
+   * On bootstrap: SCANs the canonical pattern, builds the dirty-set
+   * via SADD so subsequent ticks use the fast path. The SCAN here
+   * fires AT MOST once per coordinator lifetime — every share-record
+   * after that maintains the SET incrementally.
+   *
+   * `entryFromKey` is required for fallback SCAN to translate
+   * canonical keys back into dirty-set entries (e.g. for the worker
+   * SET, "shares:worker:{addr}:{worker}" → "{addr}|{worker}").
+   * For the address SET it's a simple substring strip.
+   */
+  private async smembersOrFallbackScan(
+    setKey: string,
+    fallbackPattern: string,
+    keyPredicate: (k: string) => boolean,
+    entryFromKey: (k: string) => string | null = (k) => k.split(':').slice(2).join(':'),
+  ): Promise<string[]> {
+    const members = await this.redisClient.sMembers(setKey);
+    if (Array.isArray(members) && members.length > 0) {
+      return members;
+    }
+
+    // Fallback: bootstrap the dirty-set from a one-shot SCAN.
+    const scanned = await this.scanKeys(fallbackPattern);
+    const filtered = scanned.filter(keyPredicate);
+    const entries: string[] = [];
+    for (const k of filtered) {
+      const e = entryFromKey(k);
+      if (e) entries.push(e);
+    }
+    if (entries.length > 0) {
+      try {
+        // Backfill the dirty-set so the next tick uses the fast path.
+        // SADD with multiple args is atomic; node-redis maps the
+        // string[] to variadic SADD.
+        await this.redisClient.sAdd(setKey, entries);
+      } catch (err) {
+        console.warn(
+          `[StatisticsCoordinator] Failed to backfill dirty-set ${setKey} during bootstrap:`,
+          (err as Error).message,
+        );
+      }
+    }
+    return entries;
   }
 
   /**

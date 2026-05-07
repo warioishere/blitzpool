@@ -87,6 +87,11 @@ describe('ShareTotalsCacheService', () => {
         hSet: jest.fn().mockResolvedValue(undefined),
         scan: jest.fn().mockResolvedValue({ cursor: 0, keys: [] }),
         del: jest.fn().mockResolvedValue(undefined),
+        // Tier B dirty-set maintenance — coord uses SMEMBERS instead of
+        // SCAN; writers SADD on every increment, SREM on clearAddressData.
+        sAdd: jest.fn().mockResolvedValue(1),
+        sRem: jest.fn().mockResolvedValue(1),
+        sMembers: jest.fn().mockResolvedValue([]),
       };
 
       cacheManager = {
@@ -127,6 +132,54 @@ describe('ShareTotalsCacheService', () => {
         'shares:worker:addr1:worker-1',
         'delta',
         25,
+      );
+    });
+
+    /**
+     * Tier B: every increment also SADDs to the coord:dirty:* SET so
+     * the coordinator can read SMEMBERS instead of SCAN'ing the full
+     * keyspace. Without this, growing pool == growing coord-flush
+     * wall-time (the SCAN scales with total Redis keys, not with our
+     * patterns).
+     */
+    it("Tier B: increment SADDs the address to coord:dirty:addresses", () => {
+      service.increment('addrX', undefined, 10);
+
+      expect(mockRedisClient.sAdd).toHaveBeenCalledWith(
+        'coord:dirty:addresses',
+        'addrX',
+      );
+    });
+
+    it("Tier B: increment with worker SADDs both address + worker dirty-sets", () => {
+      service.increment('addrY', 'worker-7', 10);
+
+      expect(mockRedisClient.sAdd).toHaveBeenCalledWith(
+        'coord:dirty:addresses',
+        'addrY',
+      );
+      expect(mockRedisClient.sAdd).toHaveBeenCalledWith(
+        'coord:dirty:workers',
+        'addrY|worker-7',
+      );
+    });
+
+    it("Tier B: clearAddressData SREMs the dirty-set entries so coord doesn't keep retrying a deleted address", async () => {
+      // Arrange: pretend the worker keys exist for SCAN
+      mockRedisClient.scan.mockResolvedValueOnce({
+        cursor: 0,
+        keys: ['shares:worker:addrZ:rig-A', 'shares:worker:addrZ:rig-B'],
+      });
+
+      await service.clearAddressData('addrZ');
+
+      expect(mockRedisClient.sRem).toHaveBeenCalledWith(
+        'coord:dirty:addresses',
+        'addrZ',
+      );
+      expect(mockRedisClient.sRem).toHaveBeenCalledWith(
+        'coord:dirty:workers',
+        ['addrZ|rig-A', 'addrZ|rig-B'],
       );
     });
 
@@ -174,7 +227,7 @@ describe('ShareTotalsCacheService', () => {
 
       expect(mockRedisClient.scan).toHaveBeenCalledWith('0', {
         MATCH: 'shares:worker:addr1:*',
-        COUNT: 100,
+        COUNT: 1000,
       });
       expect(mockRedisClient).not.toHaveProperty('keys');
     });

@@ -56,6 +56,14 @@ function makeMockRedis() {
             hGetAll: jest.fn(),
             del: jest.fn().mockResolvedValue(undefined),
             multi,
+            // Tier B: coord uses SMEMBERS for running-total flushers. The
+            // existing tests below populate `scan` for the SCAN bootstrap
+            // fallback path; sMembers returning empty triggers that
+            // fallback, which then produces the same observable behaviour
+            // (SCAN runs, keys get processed). sAdd is fire-and-forget;
+            // we just need a working mock.
+            sMembers: jest.fn().mockResolvedValue([]),
+            sAdd: jest.fn().mockResolvedValue(1),
         },
         queueExec: (resp: Resp) => { queuedExecResponses.push(resp); },
         execCallLog,

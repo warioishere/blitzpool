@@ -54,6 +54,28 @@ export class ShareTotalsCacheService implements OnModuleInit {
   }
 
   /**
+   * Dirty-set keys — single Redis SET each, tracking which addresses /
+   * workers have at least one un-flushed delta. The coordinator's
+   * `flushAddressTotals` and `flushWorkerTotals` use SMEMBERS on these
+   * SETs instead of `SCAN MATCH shares:address:*` over the full
+   * keyspace; with the LiveHashrate service holding ~500k unrelated
+   * keys, the SCAN was iterating 5000+ Redis round-trips per flush
+   * (per service) just to find the few hundred keys we own. SMEMBERS
+   * returns the exact set in O(1) round-trips.
+   *
+   * The dirty-sets are MAINTAINED — never aggressively cleared. An
+   * inactive miner's address stays in the SET; the coord's HGETALL
+   * sees `delta=0`, skips, and the entry costs ~30 bytes of Redis
+   * memory until the periodic cleanup (or `clearAddressData`).
+   */
+  public static readonly DIRTY_ADDRESSES_KEY = 'coord:dirty:addresses';
+  public static readonly DIRTY_WORKERS_KEY = 'coord:dirty:workers';
+
+  private dirtyWorkerEntry(address: string, workerName: string): string {
+    return `${address}|${workerName}`;
+  }
+
+  /**
    * Increment share totals atomically in Redis.
    * StatisticsCoordinator will flush to database.
    */
@@ -71,17 +93,29 @@ export class ShareTotalsCacheService implements OnModuleInit {
       return;
     }
 
-    // Direct atomic Redis increments (fire-and-forget for performance)
+    // Direct atomic Redis increments (fire-and-forget for performance).
+    // SADD to the dirty-set is also fire-and-forget; the coord falls
+    // back to a one-time SCAN at module-init for any address that
+    // existed before this fire-and-forget could land.
     const addressKey = this.getAddressKey(address);
 
     this.redisClient.hIncrByFloat(addressKey, 'delta', difficulty).catch(err => {
       console.error(`[ShareTotalsCacheService] Failed to increment address ${address}:`, err);
+    });
+    this.redisClient.sAdd(ShareTotalsCacheService.DIRTY_ADDRESSES_KEY, address).catch(err => {
+      console.error(`[ShareTotalsCacheService] Failed to mark address ${address} dirty:`, err);
     });
 
     if (workerName) {
       const workerKey = this.getWorkerKey(address, workerName);
       this.redisClient.hIncrByFloat(workerKey, 'delta', difficulty).catch(err => {
         console.error(`[ShareTotalsCacheService] Failed to increment worker ${address}:${workerName}:`, err);
+      });
+      this.redisClient.sAdd(
+        ShareTotalsCacheService.DIRTY_WORKERS_KEY,
+        this.dirtyWorkerEntry(address, workerName),
+      ).catch(err => {
+        console.error(`[ShareTotalsCacheService] Failed to mark worker ${address}:${workerName} dirty:`, err);
       });
     }
   }
@@ -177,6 +211,20 @@ export class ShareTotalsCacheService implements OnModuleInit {
       if (workerKeys.length > 0) {
         await this.redisClient.del(workerKeys);
       }
+
+      // Drop dirty-set markers so the coord doesn't keep finding (and
+      // skipping) this address forever after deletion.
+      await this.redisClient.sRem(ShareTotalsCacheService.DIRTY_ADDRESSES_KEY, address).catch(() => {});
+      const dirtyWorkerEntries = workerKeys.map(k => {
+        // shares:worker:{address}:{workerName} → "address|workerName"
+        const worker = k.substring(`shares:worker:${address}:`.length);
+        return this.dirtyWorkerEntry(address, worker);
+      });
+      if (dirtyWorkerEntries.length > 0) {
+        await this.redisClient
+          .sRem(ShareTotalsCacheService.DIRTY_WORKERS_KEY, dirtyWorkerEntries)
+          .catch(() => {});
+      }
     } catch (error) {
       console.error(`[ShareTotalsCacheService] Failed to clear data for address ${address}:`, error);
     }
@@ -191,7 +239,7 @@ export class ShareTotalsCacheService implements OnModuleInit {
     const keys: string[] = [];
     let cursor = '0';
     do {
-      const result = await this.redisClient.scan(cursor, { MATCH: pattern, COUNT: 100 });
+      const result = await this.redisClient.scan(cursor, { MATCH: pattern, COUNT: 1000 });
       cursor = result.cursor.toString();
       if (result.keys?.length) {
         keys.push(...result.keys);
