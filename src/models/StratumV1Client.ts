@@ -348,10 +348,16 @@ export class StratumV1Client {
 
     // Fast validation functions (replacing class-validator for performance)
     private isValidSubscription(msg: any): boolean {
+        // SV1 spec: params is OPTIONAL. When present, params[0] is the
+        // user-agent string. Bare-minimum compliant clients (e.g. the
+        // Braiins Hashpower marketplace prober) send `params: []`.
+        // Requiring length >= 1 rejected those probes with
+        // "Subscription validation error", which Braiins surfaced as
+        // bid status PAUSED, last_pause_reason: "target does not
+        // accept hashing power or it is not compatible".
         return msg.id != null &&
                msg.method === 'mining.subscribe' &&
-               Array.isArray(msg.params) &&
-               msg.params.length >= 1;
+               Array.isArray(msg.params);
     }
 
     private isValidConfiguration(msg: any): boolean {
