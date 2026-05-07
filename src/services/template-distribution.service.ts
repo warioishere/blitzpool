@@ -67,8 +67,8 @@ export class TemplateDistributionService implements OnModuleInit {
         const scriptHex = inputScript.toString('hex');
         const serializedHex = serialized.toString('hex');
         const partOneIndex = serializedHex.indexOf(scriptHex) + scriptHex.length;
-        // Prefix includes everything up to (but not including) the extranonce space (last 8 bytes of script)
-        coinbasePrefix = Buffer.from(serializedHex.slice(0, partOneIndex - 16), 'hex');
+        // Prefix includes everything up to (but not including) the extranonce space (last 12 bytes of script: 4 enonce1 + 8 enonce2)
+        coinbasePrefix = Buffer.from(serializedHex.slice(0, partOneIndex - 24), 'hex');
 
         // Strip BIP141 witness marker/flag bytes if present (for extended channels)
         // Witness format: [version:4][MARKER:0x00][FLAG:0x01][inputs...]

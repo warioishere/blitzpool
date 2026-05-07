@@ -65,8 +65,13 @@ export class MiningJob {
         // Get the length of the block height encoding
         const blockHeightLengthByte = Buffer.from([blockHeightEncoded.length]);
 
-        // Generate padding and take length of encode blockHeight into account
-        const padding = Buffer.alloc(8 + (3 - blockHeightEncoded.length), 0)
+        // Generate padding and take length of encode blockHeight into account.
+        // 12 = 4-byte enonce1 + 8-byte enonce2 slot. The 8-byte enonce2 is
+        // required by the Braiins Hashpower marketplace (extranonce2_size >= 7
+        // per their compatibility spec) and matches ckpool's nonce2length=8
+        // default. Increasing from the previous 8-byte total (4+4) to 12-byte
+        // total adds 4 bytes of coinbase data per share — negligible overhead.
+        const padding = Buffer.alloc(12 + (3 - blockHeightEncoded.length), 0)
 
         // Build the script
         let script = Buffer.concat([blockHeightLengthByte, blockHeightEncoded, extra, padding]);
@@ -95,7 +100,8 @@ export class MiningJob {
 
         const partOneIndex = serializedCoinbaseTx.indexOf(inputScript) + inputScript.length;
 
-        this.coinbasePart1 = serializedCoinbaseTx.slice(0, partOneIndex - 16);
+        // 24 hex chars = 12 binary bytes (4 enonce1 + 8 enonce2 slot)
+        this.coinbasePart1 = serializedCoinbaseTx.slice(0, partOneIndex - 24);
         this.coinbasePart2 = serializedCoinbaseTx.slice(partOneIndex);
 
 
@@ -106,7 +112,7 @@ export class MiningJob {
         return this.coinbaseTransaction.__toBuffer().toString('hex');
     }
 
-    /** Non-witness coinbase prefix (everything before the 8-byte extranonce slot) */
+    /** Non-witness coinbase prefix (everything before the 12-byte extranonce slot: 4 enonce1 + 8 enonce2) */
     public getCoinbasePrefixBuffer(): Buffer {
         return Buffer.from(this.coinbasePart1, 'hex');
     }
@@ -140,7 +146,9 @@ export class MiningJob {
         // set the nonces
         const nonceScript = testBlock.transactions[0].ins[0].script.toString('hex');
 
-        testBlock.transactions[0].ins[0].script = Buffer.from(`${nonceScript.substring(0, nonceScript.length - 16)}${extraNonce}${extraNonce2}`, 'hex');
+        // Strip last 24 hex chars (12 bytes = 4 enonce1 + 8 enonce2 slot),
+        // append the actual nonces.
+        testBlock.transactions[0].ins[0].script = Buffer.from(`${nonceScript.substring(0, nonceScript.length - 24)}${extraNonce}${extraNonce2}`, 'hex');
 
         //recompute the root since we updated the coinbase script with the nonces
         testBlock.merkleRoot = this.calculateMerkleRootHash(testBlock.transactions[0].getHash(false), jobTemplate.merkle_branch);

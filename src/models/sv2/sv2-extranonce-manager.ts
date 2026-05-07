@@ -13,9 +13,13 @@ export class Sv2ExtranonceManager {
 
   /**
    * @param prefixSize Bytes used for pool-assigned prefix (default 4)
-   * @param totalExtranonceSize Total extranonce bytes (default 8: 4 prefix + 4 miner-controlled)
+   * @param totalExtranonceSize Total extranonce bytes (default 12: 4 prefix + 8 miner-controlled).
+   *        Must match MiningJob.ts's coinbase slot size (12 bytes) — both
+   *        protocols share the same coinbase template. Bumped from the
+   *        previous 8-byte total because the Braiins Hashpower marketplace
+   *        requires extranonce2_size >= 7 (compatibility spec).
    */
-  constructor(prefixSize = 4, totalExtranonceSize = 8) {
+  constructor(prefixSize = 4, totalExtranonceSize = 12) {
     this.prefixSize = prefixSize;
     this.totalExtranonceSize = totalExtranonceSize;
 

@@ -1550,12 +1550,12 @@ export class StratumV2Client {
     );
 
     // Deep-clone the MiningJob's coinbase (has proper outputs, witness, block height).
-    // The MiningJob's scriptSig ends with an 8-byte extranonce slot (all zeros).
+    // The MiningJob's scriptSig ends with a 12-byte extranonce slot (4 prefix + 8 miner-controlled, all zeros).
     // Replace it with the actual extranonce (pool prefix + miner portion).
     const coinbaseTx = extJob.miningJob!.cloneCoinbaseTransaction();
     const originalScript = coinbaseTx.ins[0].script;
     coinbaseTx.ins[0].script = Buffer.concat([
-      originalScript.subarray(0, originalScript.length - 8),
+      originalScript.subarray(0, originalScript.length - 12),
       extranoncePrefix || Buffer.alloc(0),
       submission.extranonce,
     ]);
