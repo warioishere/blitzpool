@@ -13,7 +13,7 @@ import { AddressEmailService } from '../../services/address-email.service';
 import { ClientService } from '../../ORM/client/client.service';
 import { ClientStatisticsService } from '../../ORM/client-statistics/client-statistics.service';
 import { ClientRejectedStatisticsService } from '../../ORM/client-rejected-statistics/client-rejected-statistics.service';
-import { eStratumErrorCode } from '../../models/enums/eStratumErrorCode';
+import { eStratumErrorCode, STRATUM_REJECT_STALE } from '../../models/enums/eStratumErrorCode';
 import { generateFormattedTimeSlots } from '../../utils/timeslot.utils';
 
 interface CreateGroupDto {
@@ -382,7 +382,12 @@ export class PplnsGroupController {
             }
         }
 
-        const allReasons = Object.keys(eStratumErrorCode).filter((k) => isNaN(Number(k)));
+        // See app.controller `infoRejected` for rationale — Stale is
+        // tracked alongside the wire-level rejection codes.
+        const allReasons = [
+            ...Object.keys(eStratumErrorCode).filter((k) => isNaN(Number(k))),
+            STRATUM_REJECT_STALE,
+        ];
         const slotData = generateFormattedTimeSlots(sinceTime, now, (t) => {
             const counts: Record<string, { count: number; diffMinusOne: number }> = {};
             for (const reason of allReasons) {

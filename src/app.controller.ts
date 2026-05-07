@@ -13,7 +13,7 @@ import { ClientStatisticsService } from './ORM/client-statistics/client-statisti
 import { ClientService } from './ORM/client/client.service';
 import { BitcoinRpcService } from './services/bitcoin-rpc.service';
 import { GeoIpService } from './services/geoip.service';
-import { eStratumErrorCode } from './models/enums/eStratumErrorCode';
+import { eStratumErrorCode, STRATUM_REJECT_STALE } from './models/enums/eStratumErrorCode';
 import { isIP } from 'net';
 import { ConfigService } from '@nestjs/config';
 import { StratumV1JobsService } from './services/stratum-v1-jobs.service';
@@ -521,7 +521,17 @@ export class AppController {
       r[entry.reason] = entry.count;
     }
 
-    const allReasons = Object.keys(eStratumErrorCode).filter(k => isNaN(Number(k)));
+    // `allReasons` is the union of the wire-level error-code names from
+    // `eStratumErrorCode` (JobNotFound, DuplicateShare, etc.) PLUS the
+    // internal-only `STRATUM_REJECT_STALE` ('Stale') counter introduced
+    // by the ckpool-style retire-then-age refactor. The Stale counter
+    // tracks shares against a retired-but-still-known job that arrived
+    // beyond the 5-second grace window — distinct from JobNotFound,
+    // which fires only when the job is genuinely GC'd from memory.
+    const allReasons = [
+      ...Object.keys(eStratumErrorCode).filter(k => isNaN(Number(k))),
+      STRATUM_REJECT_STALE,
+    ];
     const slotData = generateFormattedTimeSlots(sinceTime, now, (t) => {
       const counts: Record<string, number> = {};
       for (const reason of allReasons) {

@@ -9,7 +9,7 @@ import { ClientService } from '../../ORM/client/client.service';
 import { ClientRejectedStatisticsService } from '../../ORM/client-rejected-statistics/client-rejected-statistics.service';
 import { ClientDifficultyStatisticsService } from '../../ORM/client-difficulty-statistics/client-difficulty-statistics.service';
 import { BestDifficultyTrackerService } from '../../ORM/best-difficulty-tracker/best-difficulty-tracker.service';
-import { eStratumErrorCode } from '../../models/enums/eStratumErrorCode';
+import { eStratumErrorCode, STRATUM_REJECT_STALE } from '../../models/enums/eStratumErrorCode';
 import { StratumV1Service } from '../../services/stratum-v1.service';
 import { StratumV2Service } from '../../services/stratum-v2.service';
 import { ShareTotalsCacheService } from '../../services/share-totals-cache.service';
@@ -395,7 +395,12 @@ export class ClientController {
             r[entry.reason] = { count: entry.count, diffMinusOne: entry.shares };
         }
 
-        const allReasons = Object.keys(eStratumErrorCode).filter(k => isNaN(Number(k)));
+        // See app.controller `infoRejected` for rationale — Stale is
+        // tracked alongside the wire-level rejection codes.
+        const allReasons = [
+            ...Object.keys(eStratumErrorCode).filter(k => isNaN(Number(k))),
+            STRATUM_REJECT_STALE,
+        ];
         const slotData = generateFormattedTimeSlots(sinceTime, now, (t) => {
             const counts: Record<string, { count: number; diffMinusOne: number }> = {};
             for (const reason of allReasons) {
