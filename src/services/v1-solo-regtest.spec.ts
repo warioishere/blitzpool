@@ -148,7 +148,7 @@ describe('V1 Solo Regtest — MiningJob produces blocks Bitcoin Core accepts', (
 
     const prefix = miningJob.getCoinbasePrefixBuffer();
     const suffix = miningJob.getCoinbaseSuffixBuffer();
-    const extranonce = Buffer.alloc(8, 0); // V1 slot: extranonce1 (4 bytes) + extranonce2 (4 bytes)
+    const extranonce = Buffer.alloc(12, 0); // V1 slot: extranonce1 (4 bytes) + extranonce2 (8 bytes)
 
     // Reconstruct the non-witness coinbase from prefix + extranonce + suffix
     const reconstructed = Buffer.concat([prefix, extranonce, suffix]);

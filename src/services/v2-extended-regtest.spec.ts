@@ -142,7 +142,7 @@ describe('V2 Extended Channel Regtest — coinbase reconstruction produces valid
     // hashes for share validation.
     const realCoinbaseBytes = Buffer.concat([
       miningJob.getCoinbasePrefixBuffer(),
-      Buffer.alloc(8, 0),                     // 8-byte extranonce slot, filled with zeros
+      Buffer.alloc(12, 0),                    // 12-byte extranonce slot (4 enonce1 + 8 enonce2), filled with zeros
       miningJob.getCoinbaseSuffixBuffer(),
     ]);
     const coinbaseTxid = bitcoinjs.crypto.hash256(realCoinbaseBytes);

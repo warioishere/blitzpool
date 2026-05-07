@@ -783,7 +783,7 @@ export class StratumV2Client {
     // (12 − prefixLength) so total coinbase extranonce stays ≤ 12 bytes.
     const defaultRollable = this.extranonceManager
       ? this.extranonceManager.minerExtranonceSize
-      : Math.max(0, 8 - extranoncePrefix.length);
+      : Math.max(0, 12 - extranoncePrefix.length);
     const maxRollable = 12 - extranoncePrefix.length;
     const rollableExtranonceSize = msg.minExtranonceSize > 0
       ? Math.min(msg.minExtranonceSize, maxRollable)
@@ -1250,7 +1250,8 @@ export class StratumV2Client {
 
         // Extract non-witness coinbase prefix/suffix from MiningJob
         // Patch the scriptSig length varint if this channel's total extranonce
-        // size (prefix + rollable) != 8 bytes (the default MiningJob assumes).
+        // size (prefix + rollable) != 12 bytes (the default MiningJob assumes:
+        // 4 enonce1 + 8 enonce2, sized for Braiins Hashpower marketplace ≥7).
         const totalExtranonceBytes = (channel.extranoncePrefix?.length ?? 0) + channel.extranonceSize;
         const coinbasePrefix = patchCoinbasePrefixVarint(job.getCoinbasePrefixBuffer(), totalExtranonceBytes);
         const coinbaseSuffix = job.getCoinbaseSuffixBuffer();
@@ -1344,7 +1345,8 @@ export class StratumV2Client {
 
     // Extract non-witness coinbase prefix/suffix from MiningJob
     // Patch the scriptSig length varint if this channel's total extranonce
-    // size (prefix + rollable) != 8 bytes (the default MiningJob assumes).
+    // size (prefix + rollable) != 12 bytes (the default MiningJob assumes:
+    // 4 enonce1 + 8 enonce2, sized for Braiins Hashpower marketplace ≥7).
     const totalExtranonceBytes = (channel.extranoncePrefix?.length ?? 0) + channel.extranonceSize;
     const coinbasePrefix = patchCoinbasePrefixVarint(job.getCoinbasePrefixBuffer(), totalExtranonceBytes);
     const coinbaseSuffix = job.getCoinbaseSuffixBuffer();
@@ -2066,7 +2068,10 @@ export class StratumV2Client {
     // The miner receives this fixed merkle root and builds headers from it directly.
     // We compute it by patching the extranonce into the coinbase and recomputing the root.
     const extraNonce1 = channel.extranoncePrefix.toString('hex');
-    const extraNonce2 = '00000000';
+    // 8-byte zero-fill (16 hex chars) to match MiningJob's 12-byte coinbase slot
+    // (4-byte enonce1 + 8-byte enonce2). Standard channels don't put anything
+    // user-controlled here — only the channel's prefix differentiates merkle roots.
+    const extraNonce2 = '0000000000000000';
     const updatedBlock = job.copyAndUpdateBlock(
       jobTemplate,
       0,             // no version mask (doesn't affect merkle root)
@@ -2176,8 +2181,10 @@ export class StratumV2Client {
     // versionMask = submitted version XOR base version
     const versionMask = submission.version ^ jobTemplate.block.version;
     const extraNonce1 = channel.extranoncePrefix.toString('hex');
-    // Zero-pad extraNonce2 to fill remaining extranonce space (4 bytes for prefix, 4 remaining)
-    const extraNonce2 = '00000000';
+    // Zero-pad extraNonce2 to fill remaining extranonce space (12-byte slot:
+    // 4-byte prefix + 8-byte enonce2). Must match the value used in
+    // sendNewMiningJob to produce the same merkleRoot for share validation.
+    const extraNonce2 = '0000000000000000';
 
     const updatedJobBlock = job.copyAndUpdateBlock(
       jobTemplate,

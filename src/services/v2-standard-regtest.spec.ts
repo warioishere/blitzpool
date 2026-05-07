@@ -68,7 +68,8 @@ describe('V2 Standard Channel Regtest — fixed-coinbase path produces valid blo
     // Simulate Sv2ExtranonceManager — pool allocates a 4-byte extranonce prefix for this channel
     const extranoncePrefix = Buffer.from('deadbeef', 'hex').toString('hex'); // 4 bytes as hex string
     // V2 standard channel: miner has no extranonce rolling — extranonce2 is always zeros
-    const extranonce2 = '00000000';
+    // 8 bytes (16 hex chars) to match new 12-byte slot (4 prefix + 8 miner-controlled)
+    const extranonce2 = '0000000000000000';
 
     // ── Job-send path: compute the merkle root the miner will mine against ──
     const jobSideBlock = miningJob.copyAndUpdateBlock(
