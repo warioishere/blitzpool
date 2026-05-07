@@ -9,6 +9,19 @@ import { StratumV1Service } from './stratum-v1.service';
 import { StratumV2Service } from './stratum-v2.service';
 import { JobDeclarationService } from './job-declaration.service';
 
+// Per-connection debug logs (TCP-connect, first-chunk hex, close-
+// before-data, etc.) are gated on STRATUM_PROTOCOL_DEBUG. Default
+// off — production logs stay clean. Errors / warnings + one-shot
+// startup logs are always visible. Set the env to "true" / "1" /
+// "yes" to enable verbose tracing during a debugging session.
+const PROTOCOL_DEBUG = (() => {
+  const raw = process.env.STRATUM_PROTOCOL_DEBUG?.trim().toLowerCase();
+  return raw === 'true' || raw === '1' || raw === 'yes';
+})();
+function pdebug(msg: string): void {
+  if (PROTOCOL_DEBUG) console.log(msg);
+}
+
 // Shared fail-ban state — Redis-backed, with in-memory fallback
 let redisClient: any = null;
 let banConfig = { maxFailures: 10, banDurationMs: 60 * 60 * 1000 };
@@ -286,7 +299,7 @@ export class ProtocolDetectorService implements OnModuleInit {
         return;
       }
 
-      console.log(`[ProtocolDetector] TCP connection from ${ip} on port ${portConfig.port}`);
+      pdebug(`[ProtocolDetector] TCP connection from ${ip} on port ${portConfig.port}`);
       socket.setNoDelay(true);
 
       // Set a short timeout for protocol detection (30 seconds)
@@ -294,7 +307,7 @@ export class ProtocolDetectorService implements OnModuleInit {
       socket.setTimeout(30000);
 
       const onTimeout = () => {
-        console.warn(`[ProtocolDetector] No data received from ${socket.remoteAddress} on port ${portConfig.port}, closing`);
+        pdebug(`[ProtocolDetector] No data received from ${socket.remoteAddress} on port ${portConfig.port}, closing`);
         socket.destroy();
       };
 
@@ -306,7 +319,7 @@ export class ProtocolDetectorService implements OnModuleInit {
       };
 
       const onClose = () => {
-        console.warn(`[ProtocolDetector] Socket from ${socket.remoteAddress} closed before sending data`);
+        pdebug(`[ProtocolDetector] Socket from ${socket.remoteAddress} closed before sending data`);
       };
 
       socket.on('timeout', onTimeout);
@@ -321,7 +334,7 @@ export class ProtocolDetectorService implements OnModuleInit {
         socket.removeListener('close', onClose);
         socket.setTimeout(0); // Clear detection timeout; handler sets real timeout
 
-        console.log(`[ProtocolDetector] First chunk from ${socket.remoteAddress}: ${firstChunk.length} bytes, hex=${firstChunk.toString('hex')}`);
+        pdebug(`[ProtocolDetector] First chunk from ${socket.remoteAddress}: ${firstChunk.length} bytes, hex=${firstChunk.toString('hex')}`);
         this.routeConnection(socket, firstChunk, portConfig);
       });
     });
