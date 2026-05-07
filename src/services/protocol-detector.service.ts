@@ -11,13 +11,9 @@ import { JobDeclarationService } from './job-declaration.service';
 
 // Per-connection debug logs (TCP-connect, first-chunk hex, close-
 // before-data, etc.) are gated on STRATUM_PROTOCOL_DEBUG. Default
-// off — production logs stay clean. Errors / warnings + one-shot
-// startup logs are always visible. Set the env to "true" / "1" /
-// "yes" to enable verbose tracing during a debugging session.
-const PROTOCOL_DEBUG = (() => {
-  const raw = process.env.STRATUM_PROTOCOL_DEBUG?.trim().toLowerCase();
-  return raw === 'true' || raw === '1' || raw === 'yes';
-})();
+// false — production logs stay clean. Set to "true" to enable
+// verbose tracing during a debugging session.
+const PROTOCOL_DEBUG = process.env.STRATUM_PROTOCOL_DEBUG?.trim().toLowerCase() === 'true';
 function pdebug(msg: string): void {
   if (PROTOCOL_DEBUG) console.log(msg);
 }
