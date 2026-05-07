@@ -28,7 +28,6 @@ import { MiningSubmitMessage } from './stratum-messages/MiningSubmitMessage';
 import { StratumErrorMessage } from './stratum-messages/StratumErrorMessage';
 import { SubscriptionMessage } from './stratum-messages/SubscriptionMessage';
 import { SuggestDifficulty } from './stratum-messages/SuggestDifficultyMessage';
-import { ExtraNonceSubscribeMessage } from './stratum-messages/ExtraNonceSubscribeMessage';
 import { StratumV1ClientStatistics } from './StratumV1ClientStatistics';
 import { ExternalSharesService } from '../services/external-shares.service';
 import { DifficultyUtils } from '../utils/difficulty.utils';
@@ -118,15 +117,11 @@ export class StratumV1Client {
     private buffer: string = '';
 
     private miningSubmissionHashes = new Set<string>()
-    private extraNonceSubscribed: boolean = false;
-    private sentExtraNonce: boolean = false;
 
     private network: bitcoinjs.networks.Network;
 
     private subscribeResponse?: string;
     private authorizeResponse?: string;
-    private extranonceResponse?: string;
-    private initTimer?: NodeJS.Timeout;
     private difficultyCheckIntervalMs: number;
     private lastDifficultyCheck = 0;
 
@@ -300,10 +295,6 @@ export class StratumV1Client {
             clearInterval(work);
         });
 
-        if (this.initTimer) {
-            clearTimeout(this.initTimer);
-        }
-
         // Remove all socket listeners to prevent memory leaks —
         // closures capture `this` and keep the entire client object alive
         this.socket.removeAllListeners();
@@ -372,11 +363,6 @@ export class StratumV1Client {
                Array.isArray(msg.params) &&
                msg.params.length >= 2 &&
                typeof msg.params[0] === 'string'; // address.worker format
-    }
-
-    private isValidExtraNonceSubscribe(msg: any): boolean {
-        return msg.id != null &&
-               msg.method === 'mining.extranonce.subscribe';
     }
 
     private isValidSuggestDifficulty(msg: any): boolean {
@@ -479,7 +465,7 @@ export class StratumV1Client {
                     // microseconds-old first job and mines on the
                     // extranonce-aware one. SV1-compliant.
                     if (!this.stratumInitialized) {
-                        await this.flushInit(this.extraNonceSubscribed && !!this.extranonceResponse);
+                        await this.flushInit();
                     }
                 }
 
@@ -600,38 +586,13 @@ export class StratumV1Client {
 
                 break;
             }
-            case eRequestMethod.EXTRANONCE_SUBSCRIBE: {
-                // Use fast validation instead of class-validator
-                if (!this.isValidExtraNonceSubscribe(parsedMessage)) {
-                    console.error('Extranonce subscribe validation error');
-                    const err = new StratumErrorMessage(
-                        parsedMessage.id,
-                        eStratumErrorCode.OtherUnknown,
-                        'Invalid extranonce subscribe message').response();
-                    await this.write(err);
-                    break;
-                }
-
-                const extraNonceMessage = plainToInstance(
-                    ExtraNonceSubscribeMessage,
-                    parsedMessage,
-                );
-
-                {
-                    this.extraNonceSubscribed = true;
-                    this.extranonceResponse = JSON.stringify(extraNonceMessage.response()) + '\n';
-
-                    if (this.stratumInitialized) {
-                        await this.write(this.extranonceResponse);
-                        await this.sendSetExtraNonce();
-                        const jobTemplate = await firstValueFrom(this.stratumV1JobsService.newMiningJob$);
-                        jobTemplate.blockData.clearJobs = true;
-                        await this.sendNewMiningJob(jobTemplate);
-                    }
-                }
-
-                break;
-            }
+            // mining.extranonce.subscribe: dropped, ckpool-style.
+            // We assign a fixed extranonce-1 in the subscribe response
+            // and never change it — the dynamic-extranonce protocol
+            // adds complexity without practical benefit at our scale.
+            // Clients that send it get no reply (their request id is
+            // dropped); standard ASIC firmware tolerates this and
+            // continues mining on the static extranonce-1.
             case eRequestMethod.SUGGEST_DIFFICULTY: {
                 // Use fast validation instead of class-validator
                 if (!this.isValidSuggestDifficulty(parsedMessage)) {
@@ -730,46 +691,18 @@ export class StratumV1Client {
         }
 
 
-        this.checkInit();
     }
 
-    private checkInit() {
+    /**
+     * ckpool-style init: send mining.set_difficulty + first
+     * mining.notify immediately. Idempotent — early-returns if
+     * already initialised. Called from the SUBSCRIBE handler after
+     * we've written the subscribe response.
+     */
+    private async flushInit() {
         if (this.stratumInitialized) {
             return;
         }
-
-        if (this.clientSubscription) {
-            if (this.extraNonceSubscribed && this.extranonceResponse) {
-                if (this.initTimer) {
-                    clearTimeout(this.initTimer);
-                    this.initTimer = undefined;
-                }
-                this.flushInit(true);
-            } else if (!this.initTimer) {
-                this.initTimer = setTimeout(() => {
-                    this.flushInit(false);
-                }, 15);
-            }
-        }
-    }
-
-    private async flushInit(withXNSub: boolean) {
-        if (this.stratumInitialized) {
-            return;
-        }
-
-        if (this.initTimer) {
-            clearTimeout(this.initTimer);
-            this.initTimer = undefined;
-        }
-
-        if (withXNSub && this.extranonceResponse) {
-            await this.write(this.extranonceResponse);
-            if (!this.sentExtraNonce) {
-                await this.sendSetExtraNonce();
-            }
-        }
-
         await this.initStratum();
     }
 
@@ -866,10 +799,12 @@ export class StratumV1Client {
     private async sendNewMiningJob(jobTemplate: IJobTemplate) {
         const jobStartTime = Date.now();
 
-        if (jobTemplate.blockData.clearJobs && this.extraNonceSubscribed) {
-            this.extraNonce = this.getRandomHexString();
-            await this.sendSetExtraNonce();
-        }
+        // Block-change clearJobs used to also rotate the extranonce
+        // and re-broadcast via mining.set_extranonce when the client
+        // had subscribed to dynamic extranonce. We dropped that whole
+        // branch (ckpool-style: static extranonce-1 from subscribe
+        // response, no dynamic changes), so nothing extra to do here
+        // — the next mining.notify with clearJobs=true is enough.
 
         let payoutInformation;
 
@@ -1448,16 +1383,6 @@ export class StratumV1Client {
             await this.sendNewMiningJob(jobTemplate);
 
         }
-    }
-
-    private async sendSetExtraNonce() {
-        const data = JSON.stringify({
-            id: null,
-            method: eResponseMethod.SET_EXTRANONCE,
-            params: [this.extraNonce, 4]
-        }) + '\n';
-        await this.write(data);
-        this.sentExtraNonce = true;
     }
 
     private async write(message: string): Promise<boolean> {
