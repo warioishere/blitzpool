@@ -1109,7 +1109,7 @@ export class StratumV1Client {
             parseInt(submission.ntime, 16)
         );
         const header = updatedJobBlock.toBuffer(true);
-        const { submissionDifficulty } = DifficultyUtils.calculateDifficulty(header);
+        const { submissionDifficulty, hashBuffer } = DifficultyUtils.calculateDifficulty(header);
 
         // ckpool-style per-job clamp: a share for a job that predates the
         // most recent vardiff ratchet is evaluated against MIN(current,
@@ -1127,8 +1127,14 @@ export class StratumV1Client {
 
         //console.log(`DIFF: ${submissionDifficulty} of ${effectiveDiff} from ${this.clientAuthorization.worker + '.' + this.sessionId}`);
 
-
-        if (submissionDifficulty >= effectiveDiff) {
+        // Exact accept/reject: compare the share's hash directly against the
+        // target the miner was given. Avoids the float-precision boundary
+        // where a share hitting target T round-trips to a recomputed
+        // difficulty marginally below the assigned diff. submissionDifficulty
+        // is still used below for block-detection (network-diff is far above
+        // the boundary so float is fine there).
+        const effectiveTarget = DifficultyUtils.difficultyToTarget(effectiveDiff);
+        if (DifficultyUtils.meetsTarget(hashBuffer, effectiveTarget)) {
             // Send success response immediately for minimum latency
             this.write(JSON.stringify(submission.response()) + '\n');
 

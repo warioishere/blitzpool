@@ -102,6 +102,49 @@ describe('DifficultyUtils port-floor invariants (SV2)', () => {
         }
     });
 
+    it('meetsTarget: hash strictly less than target accepted, strictly greater rejected', () => {
+        const target = DifficultyUtils.difficultyToTarget(1000);
+        // Hash one less than target (LE) → meets
+        const easy = Buffer.from(target);
+        for (let i = 0; i < 32; i++) {
+            if (easy[i] > 0) { easy[i]--; break; }
+        }
+        expect(DifficultyUtils.meetsTarget(easy, target)).toBe(true);
+        // Hash one greater than target → fails
+        const hard = Buffer.from(target);
+        for (let i = 0; i < 32; i++) {
+            if (hard[i] < 0xff) { hard[i]++; break; }
+        }
+        expect(DifficultyUtils.meetsTarget(hard, target)).toBe(false);
+    });
+
+    it('meetsTarget: hash equal to target accepted (boundary)', () => {
+        const target = DifficultyUtils.difficultyToTarget(1000);
+        expect(DifficultyUtils.meetsTarget(target, target)).toBe(true);
+    });
+
+    it('meetsTarget closes the float-precision gap that calculateDifficulty would miss', () => {
+        // Repro of the production bug: a hash exactly at the assigned
+        // target. difficultyToTarget(D) uses floor() → target is rounded
+        // DOWN, slightly easier than ideal. A hash hitting this target
+        // recomputes via TRUE_DIFF_ONE / hashAsBigInt to a difficulty
+        // marginally BELOW D. The old `submissionDifficulty >= D` test
+        // would reject the share (`difficulty-too-low`); meetsTarget
+        // accepts it because hash ≤ target by construction.
+        for (const diff of [931.31, 1024.0, 65536.5, 1_000_000]) {
+            const target = DifficultyUtils.difficultyToTarget(diff);
+            // Hash AT target → must accept
+            expect(DifficultyUtils.meetsTarget(target, target)).toBe(true);
+            // Recomputed difficulty round-trips slightly low (regression
+            // guard: if this assertion ever changes, it means the float
+            // boundary case can no longer occur and meetsTarget would be
+            // unnecessary — both would still be a valid pool, but worth
+            // re-evaluating the design then).
+            const recomputed = DifficultyUtils.targetToDifficulty(target);
+            expect(recomputed).toBeLessThanOrEqual(diff);
+        }
+    });
+
     it('spec respected: floor is ≥ portMin even when floor > maxTarget-equivalent', () => {
         // Miner on PPLNS port declares an "easier than floor" maxTarget.
         // The assigned difficulty is clamped UP to portMin (breaking the

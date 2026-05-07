@@ -1505,12 +1505,14 @@ export class StratumV2Client {
     header.writeUInt32LE(extJob.nBits, 72);
     header.writeUInt32LE(submission.nonce, 76);
 
-    // 5. Calculate difficulty
-    const { submissionDifficulty } = DifficultyUtils.calculateDifficulty(header);
+    // 5. Calculate difficulty (for logging + block-detection only)
+    const { submissionDifficulty, hashBuffer } = DifficultyUtils.calculateDifficulty(header);
 
     if (this.debugMessages) console.log(`[SV2 ${this.sessionId}] 🎯 Extended share difficulty: ${submissionDifficulty.toFixed(2)} (target: ${jobDifficulty.toFixed(2)})`);
 
-    if (submissionDifficulty >= jobDifficulty) {
+    // Exact accept/reject via direct hash≤target compare — see meetsTarget().
+    const jobTarget = DifficultyUtils.difficultyToTarget(jobDifficulty);
+    if (DifficultyUtils.meetsTarget(hashBuffer, jobTarget)) {
       // Only reconstruct full block when the share actually meets network difficulty
       let updatedJobBlock: bitcoinjs.Block | null = null;
       const networkDifficulty = extJob.jobTemplate?.blockData.networkDifficulty;
@@ -2195,14 +2197,16 @@ export class StratumV2Client {
       submission.ntime,
     );
     const header = updatedJobBlock.toBuffer(true);
-    const { submissionDifficulty } = DifficultyUtils.calculateDifficulty(header);
+    const { submissionDifficulty, hashBuffer } = DifficultyUtils.calculateDifficulty(header);
 
     // Look up job-specific difficulty (SV2 spec: validate against target from when job was sent)
     const jobDifficulty = channel.jobIdToDifficulty.get(submission.jobId) ?? channel.sessionDifficulty;
 
     if (this.debugMessages) console.log(`[SV2 ${this.sessionId}] 🎯 Share difficulty: ${submissionDifficulty.toFixed(2)} (target: ${jobDifficulty.toFixed(2)})`);
 
-    if (submissionDifficulty >= jobDifficulty) {
+    // Exact accept/reject via direct hash≤target compare — see meetsTarget().
+    const jobTarget = DifficultyUtils.difficultyToTarget(jobDifficulty);
+    if (DifficultyUtils.meetsTarget(hashBuffer, jobTarget)) {
       await this.handleValidShare(
         submission,
         submissionDifficulty,

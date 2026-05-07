@@ -13,15 +13,32 @@ const TRUE_DIFF_ONE_BIGINT = BigInt(
 const TWO_TO_256 = 1n << 256n;
 
 export class DifficultyUtils {
-  static calculateDifficulty(header: Buffer): { submissionDifficulty: number; submissionHash: string } {
+  static calculateDifficulty(header: Buffer): { submissionDifficulty: number; submissionHash: string; hashBuffer: Buffer } {
     const hashResult = bitcoinjs.crypto.hash256(Buffer.isBuffer(header) ? header : Buffer.from(header, 'hex'));
     const s64 = DifficultyUtils.le256todouble(hashResult);
     const difficulty = TRUE_DIFF_ONE.div(s64.toString());
 
     return {
       submissionDifficulty: difficulty.toNumber(),
-      submissionHash: hashResult.toString('hex')
+      submissionHash: hashResult.toString('hex'),
+      hashBuffer: hashResult,
     };
+  }
+
+  /**
+   * Exact share-validity check: compare the share's header-hash against the
+   * target the pool assigned at job-send. Both are 32-byte LE U256.
+   *
+   * Why not `submissionDifficulty >= jobDifficulty`? Because difficultyToTarget
+   * uses `floor(TRUE_DIFF_ONE / D)` — the resulting target is rounded DOWN
+   * (made a hair easier). A hash hitting that target round-trips through
+   * targetToDifficulty back to a difficulty marginally BELOW D, which would
+   * spuriously reject a share that genuinely met the target the miner was
+   * given. ckpool's stratifier compares `hash ≤ target` directly for the
+   * accept/reject decision (binary, exact) — this is the same approach.
+   */
+  static meetsTarget(hashBuffer: Buffer, target: Buffer): boolean {
+    return DifficultyUtils.le256todouble(hashBuffer) <= DifficultyUtils.le256todouble(target);
   }
 
   /**
