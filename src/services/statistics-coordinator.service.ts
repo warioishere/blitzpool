@@ -1112,13 +1112,12 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
       const result = await this.redisClient.scan(cursor, {
         MATCH: pattern,
         // COUNT=1000 bumped from 100. Redis SCAN with MATCH iterates the
-        // entire keyspace regardless of pattern; with the pool's
-        // ~500k livehash keys plus per-slot stat keys, COUNT=100
-        // meant ~5000 round-trips per scanKeys call. The coordinator
-        // does 7 such scans per flush → that single knob accounted
-        // for ~1-2s of the observed wall-time. 1000 cuts it 10×
-        // without large per-call transfer (still well under
-        // a single-block scan budget).
+        // entire keyspace regardless of pattern; with per-slot stat
+        // keys plus PPLNS / Group-Solo state, COUNT=100 meant many
+        // round-trips per scanKeys call. The coordinator does 7 such
+        // scans per flush — 1000 cuts the round-trip count 10× without
+        // large per-call transfer (still well under a single-block
+        // scan budget).
         COUNT: 1000,
       });
 

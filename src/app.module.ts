@@ -44,7 +44,6 @@ import { AggregationService } from './services/aggregation.service';
 import { MetricsService } from './services/metrics.service';
 import { WorkerPoolService } from './services/worker-pool.service';
 import { TimeslotMigrationService } from './services/timeslot-migration.service';
-import { LiveHashrateService } from './services/live-hashrate.service';
 import { DifficultyScoresCacheService } from './services/difficulty-scores-cache.service';
 import { PushNotificationService } from './services/push-notification.service';
 import { FcmService } from './services/fcm.service';
@@ -211,7 +210,6 @@ const ORMModules = [
         AggregationService,
         MetricsService,
         WorkerPoolService,
-        LiveHashrateService,
         DifficultyScoresCacheService,
         DownstreamReportService,
         ProtocolDetectorService,

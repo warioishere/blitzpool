@@ -14,7 +14,6 @@ import { StratumV1Service } from '../../services/stratum-v1.service';
 import { StratumV2Service } from '../../services/stratum-v2.service';
 import { ShareTotalsCacheService } from '../../services/share-totals-cache.service';
 import { WorkerSharesService } from '../../ORM/worker-shares/worker-shares.service';
-import { LiveHashrateService } from '../../services/live-hashrate.service';
 import { DifficultyScoresCacheService } from '../../services/difficulty-scores-cache.service';
 import { generateFormattedTimeSlots } from '../../utils/timeslot.utils';
 
@@ -26,7 +25,6 @@ export class ClientController {
     private readonly cacheTTL = {
         clientInfo: parseInt(this.configService.get('API_CACHE_TTL_CLIENT_INFO') ?? '10'),        // Live data (workers, hashrate, difficulty)
         clientChart: parseInt(this.configService.get('API_CACHE_TTL_CLIENT_CHART') ?? '60'),      // Historical chart data
-        clientChartLive: parseInt(this.configService.get('API_CACHE_TTL_CLIENT_CHART_LIVE') ?? '10'), // Live hashrate chart
         clientWorkerShares: parseInt(this.configService.get('API_CACHE_TTL_CLIENT_WORKER_SHARES') ?? '15'), // Worker share totals
         clientWorkers: parseInt(this.configService.get('API_CACHE_TTL_CLIENT_WORKERS') ?? '60'),  // Historical worker counts
         clientAccepted: parseInt(this.configService.get('API_CACHE_TTL_CLIENT_ACCEPTED') ?? '60'), // Historical accepted shares
@@ -47,7 +45,6 @@ export class ClientController {
         private readonly stratumV1Service: StratumV1Service,
         private readonly stratumV2Service: StratumV2Service,
         private readonly shareTotalsCacheService: ShareTotalsCacheService,
-        private readonly liveHashrateService: LiveHashrateService,
         private readonly difficultyScoresCacheService: DifficultyScoresCacheService,
         private readonly trackerService: BestDifficultyTrackerService,
         private readonly workerSharesService: WorkerSharesService,
@@ -255,25 +252,6 @@ export class ClientController {
 
         const chartData = await this.clientStatisticsService.getChartDataForAddress(address, range);
         await this.cacheManager.set(CACHE_KEY, chartData, this.cacheTTL.clientChart * 1000);
-        return chartData;
-    }
-
-    @Get(':address/chart/live')
-    async getClientInfoChartLive(
-        @Param('address') address: string,
-        @Query('range') range: '1h' | '6h' | '12h' | '24h' = '1h'
-    ) {
-        const CACHE_KEY = `CLIENT_CHART_LIVE_${address}_${range}`;
-        const cachedResult = await this.cacheManager.get(CACHE_KEY);
-
-        if (cachedResult != null) {
-            return cachedResult;
-        }
-
-        // Parse range to hours
-        const hours = range === '24h' ? 24 : range === '12h' ? 12 : range === '6h' ? 6 : 1;
-        const chartData = await this.liveHashrateService.getAddressLiveHashrate(address, hours);
-        await this.cacheManager.set(CACHE_KEY, chartData, this.cacheTTL.clientChartLive * 1000);
         return chartData;
     }
 

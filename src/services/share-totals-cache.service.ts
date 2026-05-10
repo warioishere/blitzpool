@@ -57,11 +57,9 @@ export class ShareTotalsCacheService implements OnModuleInit {
    * Dirty-set keys — single Redis SET each, tracking which addresses /
    * workers have at least one un-flushed delta. The coordinator's
    * `flushAddressTotals` and `flushWorkerTotals` use SMEMBERS on these
-   * SETs instead of `SCAN MATCH shares:address:*` over the full
-   * keyspace; with the LiveHashrate service holding ~500k unrelated
-   * keys, the SCAN was iterating 5000+ Redis round-trips per flush
-   * (per service) just to find the few hundred keys we own. SMEMBERS
-   * returns the exact set in O(1) round-trips.
+   * SETs instead of `SCAN MATCH shares:address:*`, which would have to
+   * iterate the entire keyspace to find the few hundred entries owned
+   * by this cache. SMEMBERS returns the exact set in O(1) round-trips.
    *
    * The dirty-sets are MAINTAINED — never aggressively cleared. An
    * inactive miner's address stays in the SET; the coord's HGETALL
