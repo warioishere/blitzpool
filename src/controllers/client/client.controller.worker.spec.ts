@@ -14,7 +14,6 @@ import { StratumV1Service } from '../../services/stratum-v1.service';
 import { StratumV2Service } from '../../services/stratum-v2.service';
 import { ClientDifficultyStatisticsService } from '../../ORM/client-difficulty-statistics/client-difficulty-statistics.service';
 import { ShareTotalsCacheService } from '../../services/share-totals-cache.service';
-import { LiveHashrateService } from '../../services/live-hashrate.service';
 import { DifficultyScoresCacheService } from '../../services/difficulty-scores-cache.service';
 import { BestDifficultyTrackerService } from '../../ORM/best-difficulty-tracker/best-difficulty-tracker.service';
 import { WorkerSharesService } from '../../ORM/worker-shares/worker-shares.service';
@@ -59,7 +58,6 @@ describe('ClientController worker chart data', () => {
         { provide: StratumV1Service, useValue: {} },
         { provide: StratumV2Service, useValue: {} },
         { provide: ShareTotalsCacheService, useValue: {} },
-        { provide: LiveHashrateService, useValue: {} },
         { provide: DifficultyScoresCacheService, useValue: {} },
         { provide: BestDifficultyTrackerService, useValue: {} },
         { provide: WorkerSharesService, useValue: {} },

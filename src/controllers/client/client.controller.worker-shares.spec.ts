@@ -16,7 +16,6 @@ import { StratumV1Service } from '../../services/stratum-v1.service';
 import { StratumV2Service } from '../../services/stratum-v2.service';
 import { ShareTotalsCacheService } from '../../services/share-totals-cache.service';
 import { WorkerSharesService } from '../../ORM/worker-shares/worker-shares.service';
-import { LiveHashrateService } from '../../services/live-hashrate.service';
 import { DifficultyScoresCacheService } from '../../services/difficulty-scores-cache.service';
 
 describe('ClientController GET :address/worker-shares', () => {
@@ -52,7 +51,6 @@ describe('ClientController GET :address/worker-shares', () => {
                 { provide: StratumV2Service, useValue: {} },
                 { provide: ShareTotalsCacheService, useValue: shareTotalsCacheService },
                 { provide: WorkerSharesService, useValue: workerSharesService },
-                { provide: LiveHashrateService, useValue: {} },
                 { provide: DifficultyScoresCacheService, useValue: {} },
             ],
         }).compile();

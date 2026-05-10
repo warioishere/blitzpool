@@ -22,7 +22,6 @@ import { MiningJob } from './models/MiningJob';
 import * as bitcoinjs from 'bitcoinjs-lib';
 import { generateFormattedTimeSlots } from './utils/timeslot.utils';
 
-import { LiveHashrateService } from './services/live-hashrate.service';
 import { MiningModeService } from './services/mining-mode.service';
 import { PplnsService } from './services/pplns.service';
 import { GroupSoloService } from './services/group-solo.service';
@@ -70,7 +69,6 @@ export class AppController {
     coreInfo: parseInt(this.configService.get('API_CACHE_TTL_CORE_INFO') ?? '60') * 1000,
     peerInfo: parseInt(this.configService.get('API_CACHE_TTL_PEER_INFO') ?? '60') * 1000,
     chart: parseInt(this.configService.get('API_CACHE_TTL_CHART') ?? '60') * 1000,
-    liveChart: parseInt(this.configService.get('API_CACHE_TTL_LIVE_CHART') ?? '15') * 1000,
     shares: parseInt(this.configService.get('API_CACHE_TTL_SHARES') ?? '60') * 1000,
     workers: parseInt(this.configService.get('API_CACHE_TTL_WORKERS') ?? '60') * 1000,
     accepted: parseInt(this.configService.get('API_CACHE_TTL_ACCEPTED') ?? '60') * 1000,
@@ -90,7 +88,6 @@ export class AppController {
     private readonly configService: ConfigService,
     private readonly stratumV1JobsService: StratumV1JobsService,
     private readonly metricsService: MetricsService,
-    private readonly liveHashrateService: LiveHashrateService,
     private readonly miningModeService: MiningModeService,
     private readonly pplnsService: PplnsService,
     private readonly groupSoloService: GroupSoloService,
@@ -368,24 +365,6 @@ export class AppController {
     const validRange: '1d' | '3d' | '7d' =
       range === '3d' ? '3d' : range === '7d' ? '7d' : '1d';
     return this.poolModeHashrateService.getChart(mode as MiningMode, validRange);
-  }
-
-  @Get('info/chart/live')
-  public async infoChartLive(@Query('range') range: '1h' | '6h' | '12h' | '24h' = '1h') {
-    const CACHE_KEY = `POOL_LIVE_HASHRATE_${range}`;
-    const cachedResult = await this.cacheManager.get(CACHE_KEY);
-
-    if (cachedResult != null) {
-      return cachedResult;
-    }
-
-    // Parse range to hours
-    const hours = range === '24h' ? 24 : range === '12h' ? 12 : range === '6h' ? 6 : 1;
-    const chartData = await this.liveHashrateService.getPoolLiveHashrate(hours);
-
-    await this.cacheManager.set(CACHE_KEY, chartData, this.cacheTTL.liveChart);
-
-    return chartData;
   }
 
   @Get('info/shares')
