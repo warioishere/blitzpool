@@ -250,7 +250,12 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
    */
   @Interval(60000)
   async flushAllStatistics(): Promise<void> {
-    if (!this.redisClient) return;
+    // Note: we used to gate this on `!this.redisClient` because every flusher
+    // needed Redis. After Phase B, only PPLNS/Group-Solo money-state flushers
+    // (handled in their own services elsewhere) still need Redis; the 5 stat
+    // flushers below are pure in-memory + PG. So a Redis outage must NOT stop
+    // the coordinator — that would silently let in-memory deltas accumulate
+    // until OOM.
 
     // Prevent concurrent flushes (race condition protection)
     if (this.isFlushing) {
@@ -315,6 +320,7 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
     try {
       await this.bulkUpsertPoolShares(records);
       this.poolShareStatisticsService.confirmFlush(drained);
+      console.log(`[StatisticsCoordinator] Flushed ${records.length} pool share time slots`);
     } catch (error) {
       console.error(
         `[StatisticsCoordinator] Bulk pool-shares flush failed (${(error as Error).message}); deltas remain in cache for retry`,
@@ -353,6 +359,7 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
     try {
       await this.bulkUpsertPoolModeHashrate(records);
       this.poolModeHashrateService.confirmFlush(drained);
+      console.log(`[StatisticsCoordinator] Flushed ${records.length} pool mode-hashrate records across ${drained.size} slots`);
     } catch (err) {
       console.error(
         `[StatisticsCoordinator] Bulk pool-mode-hashrate flush failed (${(err as Error).message}); deltas remain in cache for retry`,
@@ -415,18 +422,6 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
     const drained = this.clientStatisticsService.drainDeltas();
     if (drained.length === 0) return;
 
-    // Per-worker rejected-diff totals (for worker_shares_entity).
-    const rejectedByWorker = new Map<string, { address: string; clientName: string; rejectedShares: number }>();
-    for (const r of drained) {
-      const mapKey = `${r.address}|${r.clientName}`;
-      const entry = rejectedByWorker.get(mapKey) ?? { address: r.address, clientName: r.clientName, rejectedShares: 0 };
-      entry.rejectedShares +=
-        (r.rejectedJobNotFoundDiff1 || 0) +
-        (r.rejectedDuplicateShareDiff1 || 0) +
-        (r.rejectedLowDifficultyShareDiff1 || 0);
-      rejectedByWorker.set(mapKey, entry);
-    }
-
     // Process in batches of 1000 to stay under PG parameter limits.
     const BATCH_SIZE = 1000;
     const successfullyFlushed: typeof drained = [];
@@ -442,8 +437,27 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
       }
     }
 
-    if (successfullyFlushed.length > 0) {
-      this.clientStatisticsService.confirmFlush(successfullyFlushed);
+    if (successfullyFlushed.length === 0) return;
+
+    this.clientStatisticsService.confirmFlush(successfullyFlushed);
+    console.log(`[StatisticsCoordinator] Flushed ${successfullyFlushed.length} client statistics records`);
+
+    // Per-worker rejected-diff totals (for worker_shares_entity), built ONLY
+    // from records that actually landed in PG. Building this from `drained`
+    // would double-count on the next flush retry: failed batches stay in the
+    // in-memory cache and get re-drained, but their rejected fan-out would
+    // already have been bulk-applied to worker_shares_entity (which is
+    // INCREMENT-on-conflict). Compute from `successfullyFlushed` so the
+    // fan-out is once-per-flushed-row.
+    const rejectedByWorker = new Map<string, { address: string; clientName: string; rejectedShares: number }>();
+    for (const r of successfullyFlushed) {
+      const mapKey = `${r.address}|${r.clientName}`;
+      const entry = rejectedByWorker.get(mapKey) ?? { address: r.address, clientName: r.clientName, rejectedShares: 0 };
+      entry.rejectedShares +=
+        (r.rejectedJobNotFoundDiff1 || 0) +
+        (r.rejectedDuplicateShareDiff1 || 0) +
+        (r.rejectedLowDifficultyShareDiff1 || 0);
+      rejectedByWorker.set(mapKey, entry);
     }
 
     const rejectedUpdates = [...rejectedByWorker.values()].filter(u => u.rejectedShares > 0);
@@ -474,6 +488,7 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
     try {
       await this.bulkUpsertPoolRejectedStatistics(records);
       this.poolRejectedStatisticsService.confirmFlush(drained);
+      console.log(`[StatisticsCoordinator] Flushed ${records.length} pool rejected statistics records`);
     } catch (error) {
       console.error('[StatisticsCoordinator] Failed to flush pool rejected statistics to database:', error);
       // Snapshot stays in the cache; next flush retries automatically.
@@ -491,6 +506,7 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
     try {
       await this.bulkUpsertClientRejectedStatistics(drained);
       this.clientRejectedStatisticsService.confirmFlush(drained);
+      console.log(`[StatisticsCoordinator] Flushed ${drained.length} client rejected statistics records`);
     } catch (error) {
       console.error('[StatisticsCoordinator] Failed to flush client rejected statistics to database:', error);
       // Snapshot stays in the cache; next flush retries automatically.

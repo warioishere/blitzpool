@@ -5,7 +5,7 @@ import { Repository } from 'typeorm';
 import { ClientStatisticsEntity } from './client-statistics.entity';
 import { ClientEntity } from '../client/client.entity';
 import { PoolShareStatisticsEntity } from '../pool-share-statistics/pool-share-statistics.entity';
-import { DIFFICULTY_1 } from '../../constants/mining.constants';
+import { DIFFICULTY_1, MAX_REASONABLE_DIFFICULTY } from '../../constants/mining.constants';
 import { TimeSlotHelper } from '../../utils/time-slot.helper';
 
 /**
@@ -73,6 +73,19 @@ export class ClientStatisticsService {
       console.warn(`[ClientStatisticsService] Discarded non-finite share: difficulty=${difficulty}`);
       return;
     }
+    // Defense-in-depth ceiling. `client_statistics_entity.shares` and the
+    // four rejected*Diff1 columns are PG `real` (max ~3.4e38). The upstream
+    // stratum channel-diff clamp normally prevents per-share values from
+    // exceeding ~3× netdiff, but a misconfigured SV2 client opening a channel
+    // with absurdly small maxTarget could slip through. Discard at write
+    // time so the bucket stays flushable. Mirrors the guard in
+    // PoolShareStatistics/PoolModeHashrate.
+    if (difficulty > MAX_REASONABLE_DIFFICULTY) {
+      console.warn(
+        `[ClientStatisticsService] Discarded out-of-range accepted share: difficulty=${difficulty} (limit ${MAX_REASONABLE_DIFFICULTY})`,
+      );
+      return;
+    }
     const slot = TimeSlotHelper.getCurrentSlot();
     const k = this.keyOf(client.address, client.clientName, client.sessionId, slot);
     let entry = this.deltas.get(k);
@@ -97,6 +110,13 @@ export class ClientStatisticsService {
    */
   public async addRejectedShare(client: ClientEntity, reason: string, difficulty: number): Promise<void> {
     if (!Number.isFinite(difficulty)) difficulty = 0;
+    // Same `real`-column ceiling as the accepted path.
+    if (difficulty > MAX_REASONABLE_DIFFICULTY) {
+      console.warn(
+        `[ClientStatisticsService] Discarded out-of-range rejected share (${reason}): difficulty=${difficulty} (limit ${MAX_REASONABLE_DIFFICULTY})`,
+      );
+      return;
+    }
 
     const slot = TimeSlotHelper.getCurrentSlot();
     const k = this.keyOf(client.address, client.clientName, client.sessionId, slot);
