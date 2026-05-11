@@ -1,42 +1,46 @@
-import { Injectable, Inject, OnModuleInit } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, MoreThan } from 'typeorm';
-import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import { Cache } from 'cache-manager';
 
 import { PoolShareStatisticsEntity } from './pool-share-statistics.entity';
 import {
-  DIFFICULTY_1,
   MAX_REASONABLE_DIFFICULTY,
-  REDIS_STATISTICS_TTL,
 } from '../../constants/mining.constants';
 import { TimeSlotHelper } from '../../utils/time-slot.helper';
 
+/**
+ * Pool-wide accepted / rejected share counters keyed on 10-min end-time
+ * slots. Writes accumulate in process memory; coordinator drains/flushes
+ * to PG every 60s with INCREMENT-style upsert (so partial-slot flushes
+ * are idempotent). Reads keep querying the same table as before.
+ *
+ * History: previously Redis-buffered (HINCRBYFLOAT `pool:shares:<slot>`)
+ * which generated meaningful per-share Redis traffic + EXPIRE refresh
+ * storm. Moving to in-process state eliminates both. The chart-visibility
+ * cutoff in `TimeSlotHelper.getChartVisibilityCutoffSlot()` keeps just-ended
+ * slots off the chart until the flush has committed them.
+ */
+type SlotBucket = { accepted: number; rejected: number };
+
 @Injectable()
-export class PoolShareStatisticsService implements OnModuleInit {
+export class PoolShareStatisticsService {
+  private readonly slotDeltas = new Map<number, SlotBucket>();
+
   constructor(
     @InjectRepository(PoolShareStatisticsEntity)
     private poolShareStatisticsRepository: Repository<PoolShareStatisticsEntity>,
-    @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
   ) {}
 
-  private redisClient: any = null;
-
-  async onModuleInit(): Promise<void> {
-    try {
-      const store: any = this.cacheManager.store;
-      if (store && store.client) {
-        this.redisClient = store.client;
-        console.log('[PoolShareStatisticsService] Using Redis for atomic share increments');
-      } else {
-        console.error('[PoolShareStatisticsService] Redis not available - shares will not be tracked!');
-      }
-    } catch (error) {
-      console.error('[PoolShareStatisticsService] Failed to access Redis client:', error);
-    }
+  /** Synchronous hot-path entry. Non-throwing. */
+  public addAcceptedShare(difficulty: number): void {
+    this.handleShare(difficulty, 0);
   }
 
-  private async handleShare(accepted: number, rejected: number) {
+  public addRejectedShare(difficulty: number): void {
+    this.handleShare(0, difficulty);
+  }
+
+  private handleShare(accepted: number, rejected: number): void {
     if (!Number.isFinite(accepted) || !Number.isFinite(rejected)) {
       console.warn(
         `discarded non-finite share stats: accepted=${accepted}, rejected=${rejected}`,
@@ -47,12 +51,10 @@ export class PoolShareStatisticsService implements OnModuleInit {
     // Defense-in-depth ceiling. The pool's Postgres `pool_share_statistics`
     // accepted/rejected columns are `real` (max ~3.4e38). If even a single
     // share (or accumulated bucket) exceeds the column range, the bulk
-    // upsert fails and the flusher gets stuck on the bad bucket forever —
-    // every subsequent share for that 10-min window then hangs in Redis.
+    // upsert fails and the flusher gets stuck on the bad bucket forever.
     // Real miners never legitimately submit shares above MAX_REASONABLE_
     // DIFFICULTY (~3x network). Anything bigger is a misconfigured SV2
     // client, a probing tool, or a corruption bug somewhere upstream.
-    // Discard with a loud warning rather than poison the bucket.
     if (accepted > MAX_REASONABLE_DIFFICULTY || rejected > MAX_REASONABLE_DIFFICULTY) {
       console.warn(
         `[PoolShareStatisticsService] Discarded out-of-range share: accepted=${accepted}, rejected=${rejected} (limit ${MAX_REASONABLE_DIFFICULTY})`,
@@ -60,37 +62,49 @@ export class PoolShareStatisticsService implements OnModuleInit {
       return;
     }
 
-    if (!this.redisClient) {
-      console.error('[PoolShareStatisticsService] Cannot track share - Redis not available');
-      return;
-    }
+    if (accepted <= 0 && rejected <= 0) return;
 
     const timeSlot = TimeSlotHelper.getCurrentSlot();
-    const key = `pool:shares:${timeSlot}`;
-
-    // Atomically increment accepted/rejected shares
-    const promises: Promise<any>[] = [];
-    if (accepted > 0) {
-      promises.push(this.redisClient.hIncrByFloat(key, 'accepted', accepted));
+    let bucket = this.slotDeltas.get(timeSlot);
+    if (!bucket) {
+      bucket = { accepted: 0, rejected: 0 };
+      this.slotDeltas.set(timeSlot, bucket);
     }
-    if (rejected > 0) {
-      promises.push(this.redisClient.hIncrByFloat(key, 'rejected', rejected));
+    if (accepted > 0) bucket.accepted += accepted;
+    if (rejected > 0) bucket.rejected += rejected;
+  }
+
+  /**
+   * Coordinator API — snapshot of pending slot deltas. Internal state NOT
+   * cleared until `confirmFlush()` is called after PG upsert succeeds.
+   */
+  public drainSlotDeltas(): Map<number, SlotBucket> {
+    const snapshot = new Map<number, SlotBucket>();
+    for (const [slot, bucket] of this.slotDeltas) {
+      if (bucket.accepted > 0 || bucket.rejected > 0) {
+        snapshot.set(slot, { accepted: bucket.accepted, rejected: bucket.rejected });
+      }
     }
-    promises.push(this.redisClient.expire(key, REDIS_STATISTICS_TTL));
-    await Promise.all(promises);
+    return snapshot;
   }
 
-  private async addShares(accepted: number, rejected: number) {
-    await this.handleShare(accepted, rejected);
+  /**
+   * Coordinator API — subtract a previously-drained snapshot. Residuals
+   * (concurrent increments during the await) remain.
+   */
+  public confirmFlush(flushed: Map<number, SlotBucket>): void {
+    for (const [slot, flushedBucket] of flushed) {
+      const current = this.slotDeltas.get(slot);
+      if (!current) continue;
+      current.accepted -= flushedBucket.accepted;
+      current.rejected -= flushedBucket.rejected;
+      if (current.accepted <= 0 && current.rejected <= 0) {
+        this.slotDeltas.delete(slot);
+      }
+    }
   }
 
-  public async addAcceptedShare(difficulty: number) {
-    await this.addShares(difficulty, 0);
-  }
-
-  public async addRejectedShare(difficulty: number) {
-    await this.addShares(0, difficulty);
-  }
+  // ─── PG-direct API used by some legacy paths and the public chart API ───
 
   public async insert(stat: Partial<PoolShareStatisticsEntity>) {
     await this.poolShareStatisticsRepository.insert(stat);

@@ -13,6 +13,7 @@ import { ClientRejectedStatisticsEntity } from '../ORM/client-rejected-statistic
 import { AddressSettingsService } from '../ORM/address-settings/address-settings.service';
 import { WorkerSharesService } from '../ORM/worker-shares/worker-shares.service';
 import { PoolModeHashrateService } from '../ORM/pool-mode-hashrate/pool-mode-hashrate.service';
+import { PoolShareStatisticsService } from '../ORM/pool-share-statistics/pool-share-statistics.service';
 import { ShareTotalsCacheService } from './share-totals-cache.service';
 import { TimeSlotHelper } from '../utils/time-slot.helper';
 
@@ -83,6 +84,7 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
     private readonly workerSharesService: WorkerSharesService,
     private readonly shareTotalsCache: ShareTotalsCacheService,
     private readonly poolModeHashrateService: PoolModeHashrateService,
+    private readonly poolShareStatisticsService: PoolShareStatisticsService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -284,138 +286,35 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
   }
 
   /**
-   * Flush pool shares from Redis to database
-   * Pattern: pool:shares:{timestamp} -> HASH {accepted, rejected}
+   * Flush pool-wide accepted / rejected share counts from the in-memory
+   * accumulator to PG. Drain captures all slot buckets currently in memory;
+   * the bulk upsert is INCREMENT-style (`accepted = accepted + EXCLUDED.accepted`)
+   * so partial-slot flushes are idempotent. Confirm subtracts the snapshot
+   * from the in-memory state, leaving residuals from concurrent writes.
    *
-   * CRITICAL: Only flushes COMPLETE time slots (not current incomplete slot)
+   * The MAX_REASONABLE_DIFFICULTY guard runs on the write side
+   * (`PoolShareStatisticsService.handleShare`) so out-of-range values never
+   * reach the map — no per-bucket quarantine fallback needed.
    */
   private async flushPoolShares(): Promise<void> {
-    const currentSlot = TimeSlotHelper.getCurrentSlot();
+    const drained = this.poolShareStatisticsService.drainSlotDeltas();
+    if (drained.size === 0) return;
 
-    // Tier A short-circuit: no slot transition since last successful flush
-    // → no possibility of new completed-slot data to flush. Skip the SCAN.
-    if (this.lastFlushedSlot.poolShares === currentSlot) return;
+    const records = Array.from(drained.entries()).map(([time, b]) => ({
+      time,
+      accepted: b.accepted,
+      rejected: b.rejected,
+    }));
 
-    const pattern = 'pool:shares:*';
-    const keys = await this.scanKeys(pattern);
-
-    if (keys.length === 0) {
-      // Nothing here, but still mark this slot as "looked at" so we
-      // don't re-scan every tick within this slot. Next slot transition
-      // will reset the gate naturally.
-      this.lastFlushedSlot.poolShares = currentSlot;
-      return;
-    }
-    const records: Array<{ time: number; accepted: number; rejected: number }> = [];
-    const keysToDelete: string[] = [];
-
-    for (const key of keys) {
-      try {
-        // Extract timestamp from key (pool:shares:1234567890)
-        const timeSlot = parseInt(key.split(':')[2]);
-
-        // CRITICAL FIX: Skip current incomplete slot - only flush complete slots
-        if (timeSlot === currentSlot) {
-          continue;
-        }
-
-        const data = await this.redisClient.hGetAll(key);
-
-        if (!data || (!data.accepted && !data.rejected)) continue;
-
-        const accepted = parseFloat(data.accepted) || 0;
-        const rejected = parseFloat(data.rejected) || 0;
-
-        if (accepted === 0 && rejected === 0) continue;
-
-        records.push({ time: timeSlot, accepted, rejected });
-
-        // Track key for deletion AFTER successful database flush
-        keysToDelete.push(key);
-      } catch (error) {
-        console.error(`[StatisticsCoordinator] Failed to extract pool shares from ${key}:`, error);
-      }
-    }
-
-    if (records.length === 0) {
-      // SCAN found only the current-slot key (or nothing) — still update
-      // lastFlushedSlot so we skip subsequent ticks until transition.
-      this.lastFlushedSlot.poolShares = currentSlot;
-      return;
-    }
-
-    // Bulk upsert to database
     try {
       await this.bulkUpsertPoolShares(records);
-      console.log(`[StatisticsCoordinator] Flushed ${records.length} complete pool share time slots`);
-      // Mark slot done — short-circuits subsequent ticks until next transition.
-      this.lastFlushedSlot.poolShares = currentSlot;
-
-      // Delete Redis keys ONLY after successful database flush
-      if (keysToDelete.length > 0) {
-        await this.redisClient.del(keysToDelete);
-      }
+      this.poolShareStatisticsService.confirmFlush(drained);
     } catch (error) {
-      // Bulk insert is all-or-nothing under Postgres transactions. A single
-      // out-of-range value (e.g. accepted/rejected > 3.4e38 from a corrupt
-      // Redis bucket) poisons the entire batch and every subsequent flush
-      // tick, freezing pool-wide chart/share/accepted endpoints.
-      //
-      // Fall back to per-bucket inserts so good buckets land in Postgres
-      // and only the offending key is quarantined (deleted from Redis with
-      // a warning, preserving accepted/rejected for the non-corrupt slots).
       console.error(
-        `[StatisticsCoordinator] Bulk pool-shares flush failed (${(error as Error).message}); falling back to per-bucket inserts`,
+        `[StatisticsCoordinator] Bulk pool-shares flush failed (${(error as Error).message}); deltas remain in cache for retry`,
       );
-      await this.flushPoolSharesIndividually(records, keysToDelete);
+      // Snapshot stays in the cache; next flush retries automatically.
     }
-  }
-
-  /**
-   * Per-bucket fallback for `flushPoolShares()` when the bulk upsert is
-   * rejected by Postgres. Inserts each bucket in its own statement so good
-   * data still flows; for bad buckets, deletes the Redis key with a loud
-   * warning so the flusher doesn't get stuck on the same poisoned bucket
-   * forever. Lossy by design — but losing one corrupt 10-min bucket beats
-   * losing all subsequent pool-wide stats indefinitely.
-   */
-  private async flushPoolSharesIndividually(
-    records: Array<{ time: number; accepted: number; rejected: number }>,
-    keys: string[],
-  ): Promise<void> {
-    let goodBuckets = 0;
-    const goodKeys: string[] = [];
-    const quarantineKeys: string[] = [];
-
-    for (let i = 0; i < records.length; i++) {
-      const record = records[i];
-      const key = keys[i];
-      try {
-        await this.bulkUpsertPoolShares([record]);
-        goodBuckets++;
-        goodKeys.push(key);
-      } catch (error) {
-        console.error(
-          `[StatisticsCoordinator] Quarantining corrupt pool-shares bucket ${key} (time=${record.time}, accepted=${record.accepted}, rejected=${record.rejected}): ${(error as Error).message}`,
-        );
-        quarantineKeys.push(key);
-      }
-    }
-
-    const keysToDel = [...goodKeys, ...quarantineKeys];
-    if (keysToDel.length > 0) {
-      try {
-        await this.redisClient.del(keysToDel);
-      } catch (error) {
-        console.error(
-          `[StatisticsCoordinator] Failed to delete pool-shares keys after fallback flush: ${(error as Error).message}`,
-        );
-      }
-    }
-
-    console.log(
-      `[StatisticsCoordinator] Per-bucket flush complete: ${goodBuckets} flushed, ${quarantineKeys.length} quarantined`,
-    );
   }
 
   /**

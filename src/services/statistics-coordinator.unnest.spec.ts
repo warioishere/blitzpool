@@ -47,6 +47,10 @@ function buildService(repos: Record<string, { query: jest.Mock }>) {
             drainSlotDeltas: jest.fn().mockReturnValue(new Map()),
             confirmFlush: jest.fn(),
         } as any,                            // poolModeHashrateService
+        {
+            drainSlotDeltas: jest.fn().mockReturnValue(new Map()),
+            confirmFlush: jest.fn(),
+        } as any,                            // poolShareStatisticsService
     );
     return service;
 }

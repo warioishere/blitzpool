@@ -30,6 +30,10 @@ function buildService(mockRedis: any, mockWorkerShares: Partial<WorkerSharesServ
             drainSlotDeltas: jest.fn().mockReturnValue(new Map()),
             confirmFlush: jest.fn(),
         } as any,                            // poolModeHashrateService
+        {
+            drainSlotDeltas: jest.fn().mockReturnValue(new Map()),
+            confirmFlush: jest.fn(),
+        } as any,                            // poolShareStatisticsService
     );
     // Inject Redis directly, bypassing onModuleInit
     (service as any).redisClient = mockRedis;
