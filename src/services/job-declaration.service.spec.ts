@@ -65,6 +65,18 @@ function createService(envOverrides: Record<string, string> = {}) {
   const blocksService = { save: jest.fn().mockResolvedValue(undefined) };
   const notificationService = { notifySubscribersBlockFound: jest.fn().mockResolvedValue(undefined) };
 
+  const miningModeService = {
+    getMode: jest.fn().mockResolvedValue({ mode: 'solo' }),
+  };
+  const pplnsService = {
+    isEnabled: jest.fn().mockReturnValue(false),
+    getPayoutDistribution: jest.fn().mockResolvedValue([]),
+  };
+  const groupSoloService = {
+    isEnabled: jest.fn().mockReturnValue(false),
+    getPayoutDistribution: jest.fn().mockResolvedValue([]),
+  };
+
   const service = new JobDeclarationService(
     configService as any,
     bitcoinRpcService as any,
@@ -72,9 +84,21 @@ function createService(envOverrides: Record<string, string> = {}) {
     templateDistributionService as any,
     blocksService as any,
     notificationService as any,
+    miningModeService as any,
+    pplnsService as any,
+    groupSoloService as any,
   );
 
-  return { service, configService, bitcoinRpcService, stratumV2Service };
+  return {
+    service,
+    configService,
+    bitcoinRpcService,
+    stratumV2Service,
+    templateDistributionService,
+    miningModeService,
+    pplnsService,
+    groupSoloService,
+  };
 }
 
 describe('JobDeclarationService', () => {
@@ -287,29 +311,134 @@ describe('JobDeclarationService', () => {
     });
   });
 
-  describe('getCoinbaseOutputsForToken', () => {
-    it('should return valid Bitcoin consensus-encoded Vec<TxOut> with p2wpkh script', () => {
+  describe('encodeCoinbaseOutputs', () => {
+    it('should encode a single p2wpkh address as a 1-output Vec<TxOut>', () => {
       const { service } = createService({ NETWORK: 'mainnet' });
-      const result = service.getCoinbaseOutputsForToken('bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4');
+      const result = service.encodeCoinbaseOutputs(['bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4']);
 
-      // varint(1) + u64_le(0) + varint(22) + p2wpkh_script(22)
-      expect(result.length).toBe(1 + 8 + 1 + 22); // 32 bytes
-      expect(result[0]).toBe(0x01);           // 1 output
-      expect(result.readBigUInt64LE(1)).toBe(0n); // value = 0
-      expect(result[9]).toBe(22);             // script length = 22
-      expect(result[10]).toBe(0x00);          // OP_0 (witness version 0)
-      expect(result[11]).toBe(0x14);          // push 20 bytes
-    });
-
-    it('should encode different p2wpkh addresses correctly', () => {
-      const { service } = createService({ NETWORK: 'mainnet' });
-      const result = service.getCoinbaseOutputsForToken('bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq');
-
-      // varint(1) + u64_le(0) + varint(22) + p2wpkh_script(22)
+      // varint(1) + u64_le(0) + varint(22) + p2wpkh_script(22) = 32 bytes
       expect(result.length).toBe(32);
       expect(result[0]).toBe(0x01);
       expect(result.readBigUInt64LE(1)).toBe(0n);
       expect(result[9]).toBe(22);
+      expect(result[10]).toBe(0x00);
+      expect(result[11]).toBe(0x14);
+    });
+
+    it('should encode a multi-output (3-address) Vec<TxOut>', () => {
+      const { service } = createService({ NETWORK: 'mainnet' });
+      // All three are valid P2WPKH (BIP173) → 22-byte scriptPubKey each.
+      const result = service.encodeCoinbaseOutputs([
+        'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4',
+        'bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq',
+        'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4',
+      ]);
+
+      // varint(3) + 3 × (u64_le + varint(22) + p2wpkh_script(22)) = 1 + 3*31 = 94
+      expect(result.length).toBe(94);
+      expect(result[0]).toBe(0x03);
+    });
+
+    it('should encode empty address list as zero-count buffer', () => {
+      const { service } = createService({ NETWORK: 'mainnet' });
+      const result = service.encodeCoinbaseOutputs([]);
+      expect(result.length).toBe(1);
+      expect(result[0]).toBe(0x00);
+    });
+  });
+
+  describe('resolveCoinbasePayout', () => {
+    const SV2_EXT_0x0003 = 0x0003;
+
+    it('should return single-output (no weights) when ext 0x0003 not negotiated', async () => {
+      const { service } = createService();
+      const result = await service.resolveCoinbasePayout(
+        'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4',
+        new Set(),
+      );
+      expect(result.addresses).toEqual(['bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4']);
+      expect(result.weights).toBeNull();
+    });
+
+    it('should ignore PPLNS distribution when ext 0x0003 not negotiated (spec-purity)', async () => {
+      const { service, pplnsService, miningModeService } = createService();
+      miningModeService.getMode.mockResolvedValue({ mode: 'pplns' });
+      pplnsService.isEnabled.mockReturnValue(true);
+      pplnsService.getPayoutDistribution.mockResolvedValue([
+        { address: 'bc1qfee', percent: 0.01, sats: 3_125_000 },
+        { address: 'bc1qminer1', percent: 0.99, sats: 309_375_000 },
+      ]);
+
+      const result = await service.resolveCoinbasePayout(
+        'bc1qminer1',
+        new Set(), // no extensions negotiated
+      );
+
+      // Spec compliance: base JDP MUST stay single-output.
+      expect(result.addresses).toEqual(['bc1qminer1']);
+      expect(result.weights).toBeNull();
+      expect(pplnsService.getPayoutDistribution).not.toHaveBeenCalled();
+    });
+
+    it('should emit multi-output + weights for PPLNS when ext 0x0003 negotiated', async () => {
+      const { service, pplnsService, miningModeService } = createService();
+      miningModeService.getMode.mockResolvedValue({ mode: 'pplns' });
+      pplnsService.isEnabled.mockReturnValue(true);
+      pplnsService.getPayoutDistribution.mockResolvedValue([
+        { address: 'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4', percent: 0.01, sats: 3_125_000 },
+        { address: 'bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq', percent: 0.99, sats: 309_375_000 },
+      ]);
+
+      const result = await service.resolveCoinbasePayout(
+        'bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq',
+        new Set([SV2_EXT_0x0003]),
+      );
+
+      expect(result.addresses).toEqual([
+        'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4',
+        'bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq',
+      ]);
+      expect(result.weights).toEqual([3_125_000, 309_375_000]);
+    });
+
+    it('should emit multi-output + weights for Group-Solo with finder bonus', async () => {
+      const { service, groupSoloService, miningModeService } = createService();
+      miningModeService.getMode.mockResolvedValue({ mode: 'group-solo', groupId: 'g42' });
+      groupSoloService.isEnabled.mockReturnValue(true);
+      groupSoloService.getPayoutDistribution.mockResolvedValue([
+        { address: 'bc1qfee',     percent: 0.01, sats: 3_125_000 },
+        { address: 'bc1qfinder',  percent: 0.40, sats: 125_000_000 }, // higher because finder bonus
+        { address: 'bc1qmember2', percent: 0.59, sats: 184_375_000 },
+      ]);
+
+      const result = await service.resolveCoinbasePayout(
+        'bc1qfinder',
+        new Set([SV2_EXT_0x0003]),
+      );
+
+      expect(result.addresses).toEqual(['bc1qfee', 'bc1qfinder', 'bc1qmember2']);
+      expect(result.weights).toEqual([3_125_000, 125_000_000, 184_375_000]);
+      // Finder address MUST be passed through so finder-bonus output is included.
+      expect(groupSoloService.getPayoutDistribution).toHaveBeenCalledWith(
+        'g42',
+        expect.any(Number),
+        'bc1qfinder',
+      );
+    });
+
+    it('should fall back to solo when PPLNS distribution fetch throws', async () => {
+      const { service, pplnsService, miningModeService } = createService();
+      miningModeService.getMode.mockResolvedValue({ mode: 'pplns' });
+      pplnsService.isEnabled.mockReturnValue(true);
+      pplnsService.getPayoutDistribution.mockRejectedValue(new Error('redis down'));
+
+      const result = await service.resolveCoinbasePayout(
+        'bc1qminer',
+        new Set([SV2_EXT_0x0003]),
+      );
+
+      expect(result.addresses).toEqual(['bc1qminer']);
+      expect(result.weights).toBeNull();
     });
   });
 

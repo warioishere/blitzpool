@@ -24,6 +24,19 @@ export const SV2_CHANNEL_MSG_FLAG = 0x8000;
 /** Protocol identifier string used in SetupConnection */
 export const SV2_PROTOCOL_NAME = 'MiningProtocol';
 
+// ── Extension Type Identifiers (sv2-spec §3.4.1) ───────────────────
+// Each extension owns a 16-bit ID. The frame header's `extension_type`
+// field carries it for messages introduced by that extension.
+
+/** Extension 0x0001 — Extensions Negotiation (defines RequestExtensions et al.) */
+export const SV2_EXTENSION_TYPE_NEGOTIATION = 0x0001;
+
+/** Extension 0x0003 — Coinbase Output Weights (TLV on AllocateMiningJobToken.Success) */
+export const SV2_EXTENSION_TYPE_COINBASE_OUTPUT_WEIGHTS = 0x0003;
+
+/** Field type ID inside the 0x0003 TLV (only field currently defined). */
+export const SV2_FIELD_TYPE_COINBASE_TX_OUTPUT_WEIGHTS = 0x01;
+
 // ── Noise NX Handshake Constants ────────────────────────────────────
 
 /** Noise NX protocol name used to initialize h (ChaCha20-Poly1305) */
@@ -87,6 +100,13 @@ export enum Sv2MsgType {
 
   // Reconnect
   RECONNECT = 0x04,
+
+  // Extensions Negotiation (sv2-spec extension 0x0001)
+  // Messages carry extension_type = SV2_EXTENSION_TYPE_NEGOTIATION
+  // in the frame header (NOT extension_type = 0x0000).
+  EXT_REQUEST_EXTENSIONS = 0x00,
+  EXT_REQUEST_EXTENSIONS_SUCCESS = 0x01,
+  EXT_REQUEST_EXTENSIONS_ERROR = 0x02,
 
   // Job Declaration Protocol
   JDP_ALLOCATE_MINING_JOB_TOKEN = 0x50,

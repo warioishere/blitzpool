@@ -13,6 +13,8 @@ import {
   Sv2MsgType,
   SV2_NOISE_ACT1_SIZE,
   Sv2Protocol,
+  SV2_EXTENSION_TYPE_NEGOTIATION,
+  SV2_EXTENSION_TYPE_COINBASE_OUTPUT_WEIGHTS,
 } from './sv2/sv2-constants';
 import {
   deserializeSetupConnection,
@@ -30,7 +32,34 @@ import {
   deserializePushSolution,
   Sv2DeclareMiningJob,
 } from './sv2/sv2-jdp-messages';
+import {
+  deserializeRequestExtensions,
+  serializeRequestExtensionsSuccess,
+  serializeRequestExtensionsError,
+  encodeCoinbaseOutputWeightsTlv,
+} from './sv2/sv2-extensions-messages';
 import { DifficultyUtils } from '../utils/difficulty.utils';
+
+/** Set of extensions this JDS is willing to negotiate. */
+const SUPPORTED_EXTENSIONS = new Set<number>([
+  SV2_EXTENSION_TYPE_COINBASE_OUTPUT_WEIGHTS,
+]);
+
+/**
+ * Pool-side payout description for a JDP token. The base-spec single-output
+ * case is `{ addresses: [miner], weights: null }`; ext 0x0003 produces
+ * `{ addresses: [fee, miner1, miner2, …], weights: [w0, w1, w2, …] }`.
+ */
+export interface Sv2PoolPayout {
+  /** BTC addresses (network-validated) in coinbase output order. */
+  addresses: string[];
+  /**
+   * Per-output integer weights to advertise via the ext 0x0003 TLV.
+   * `null` ⇒ no TLV is emitted (base-spec single-output behaviour).
+   * When non-null, length MUST equal `addresses.length`.
+   */
+  weights: number[] | null;
+}
 
 export interface JobDeclarationServiceRef {
   getNoiseConfig(): any;
@@ -40,7 +69,15 @@ export interface JobDeclarationServiceRef {
   getMinerAddressByIp(remoteIp: string): string | null;
   getMinerInfoByIp(remoteIp: string): { address: string; worker: string; sessionId: string } | null;
   getBlockHeight(): number;
-  getCoinbaseOutputsForToken(minerAddress: string): Buffer;
+  /**
+   * Resolve the coinbase payout for a JDP token. Receives the set of
+   * extensions the JDC has negotiated so the JDS can decide whether to
+   * emit multi-output (ext 0x0003 active) or stay single-output (base
+   * spec). The JDS encodes the actual Vec<TxOut> Buffer; the caller
+   * only ever holds the descriptor plus a pre-encoded outputs buffer.
+   */
+  resolveCoinbasePayout(minerAddress: string, negotiatedExtensions: ReadonlySet<number>): Promise<Sv2PoolPayout>;
+  encodeCoinbaseOutputs(addresses: string[]): Buffer;
   getTemplateTransactions(): Map<string, Buffer>;
   getCurrentPrevHash(): Buffer | null;
   getRawTransaction(txid: string): Promise<Buffer | null>;
@@ -62,11 +99,25 @@ export class JobDeclarationClient {
     token: Buffer;
     expiresAt: number;
     coinbaseOutputs: Buffer; // Pool payout outputs sent with this token
+    /**
+     * Per-output weights advertised via the ext 0x0003 TLV, or null if
+     * the base-spec single-output rule applies. Retained alongside the
+     * outputs buffer so DeclareMiningJob validation can re-derive the
+     * exact pool-output amounts the JDC must have allocated.
+     */
+    weights: number[] | null;
   }>();
 
   // Connection state: tracks SetupConnection negotiation (spec 6.4.1/6.4.2)
   private setupComplete = false;
   private fullTemplateMode = false; // true when DECLARE_TX_DATA flag (bit 0) negotiated
+
+  /**
+   * Extensions the JDC has negotiated via ext 0x0001 (RequestExtensions).
+   * Populated in handleRequestExtensions. Empty until the JDC sends
+   * RequestExtensions — base-spec behaviour (no extensions) until then.
+   */
+  private negotiatedExtensions = new Set<number>();
 
   // Rate limiting for AllocateMiningJobToken (spec 6.4.2: "rate limited to a rather slow rate")
   private lastTokenAllocAt = 0;
@@ -137,7 +188,7 @@ export class JobDeclarationClient {
       try {
         const frames = this.frameReader.feed(data);
         for (const frame of frames) {
-          this.handleFrame(frame.header.msgType, frame.payload).catch((err) => {
+          this.handleFrame(frame.header.extensionType, frame.header.msgType, frame.payload).catch((err) => {
             console.error(`[JDP ${this.clientId}] Frame handling error:`, err.message);
             this.destroySocket();
           });
@@ -151,14 +202,30 @@ export class JobDeclarationClient {
     if (remainder.length > 0) {
       const frames = this.frameReader.feed(remainder);
       for (const frame of frames) {
-        await this.handleFrame(frame.header.msgType, frame.payload);
+        await this.handleFrame(frame.header.extensionType, frame.header.msgType, frame.payload);
       }
     }
 
     console.log(`[JDP ${this.clientId}] ✅ Noise handshake complete, transport encrypted`);
   }
 
-  private async handleFrame(msgType: number, payload: Buffer): Promise<void> {
+  private async handleFrame(extensionType: number, msgType: number, payload: Buffer): Promise<void> {
+    // Strip the channel-msg bit (top of U16) for dispatch comparison.
+    const ext = extensionType & 0x7fff;
+
+    // ext 0x0001 — extensions negotiation. Owns msgType 0x00–0x02.
+    if (ext === SV2_EXTENSION_TYPE_NEGOTIATION) {
+      switch (msgType) {
+        case Sv2MsgType.EXT_REQUEST_EXTENSIONS:
+          await this.handleRequestExtensions(payload);
+          return;
+        default:
+          console.warn(`[JDP ${this.clientId}] Unknown ext 0x0001 message type: 0x${msgType.toString(16)}`);
+          return;
+      }
+    }
+
+    // ext 0x0000 — base protocol (incl. SetupConnection and all JDP messages).
     switch (msgType) {
       case Sv2MsgType.SETUP_CONNECTION:
         await this.handleSetupConnection(payload);
@@ -226,6 +293,63 @@ export class JobDeclarationClient {
     console.log(`[JDP ${this.clientId}] ✅ SetupConnectionSuccess: version=2, flags=${negotiatedFlags} (${this.fullTemplateMode ? 'Full-Template' : 'Coinbase-only'})`);
   }
 
+  /**
+   * Extensions Negotiation handler (sv2-spec ext 0x0001).
+   *
+   * Per spec ext 0x0001 §4.2, RequestExtensions MUST arrive after
+   * SetupConnection.Success and before any protocol-specific message.
+   * Servers that don't support an extension simply omit it from the
+   * returned `supported_extensions` list; servers that don't support
+   * the negotiation extension at all would silently ignore the frame
+   * (spec §4.3 backward-compat). This pool supports it, so we always
+   * respond.
+   *
+   * Note on error semantics: spec §4.1 says the server MUST respond
+   * with .Error if *none* of the requested extensions are supported.
+   * If at least one is supported, .Success carries that subset.
+   */
+  private async handleRequestExtensions(payload: Buffer): Promise<void> {
+    const reader = new BufferReader(payload);
+    const msg = deserializeRequestExtensions(reader);
+
+    const supported: number[] = [];
+    const unsupported: number[] = [];
+    for (const ext of msg.requestedExtensions) {
+      if (SUPPORTED_EXTENSIONS.has(ext)) {
+        supported.push(ext);
+        this.negotiatedExtensions.add(ext);
+      } else {
+        unsupported.push(ext);
+      }
+    }
+
+    console.log(`[JDP ${this.clientId}] 📋 RequestExtensions: requested=[${msg.requestedExtensions.map((e) => '0x' + e.toString(16).padStart(4, '0')).join(',')}], supported=[${supported.map((e) => '0x' + e.toString(16).padStart(4, '0')).join(',')}]`);
+
+    if (supported.length === 0 && msg.requestedExtensions.length > 0) {
+      const errorPayload = serializeRequestExtensionsError({
+        requestId: msg.requestId,
+        unsupportedExtensions: unsupported,
+        requiredExtensions: [],
+      });
+      await this.sendFrame(
+        Sv2MsgType.EXT_REQUEST_EXTENSIONS_ERROR,
+        errorPayload,
+        SV2_EXTENSION_TYPE_NEGOTIATION,
+      );
+      return;
+    }
+
+    const successPayload = serializeRequestExtensionsSuccess({
+      requestId: msg.requestId,
+      supportedExtensions: supported,
+    });
+    await this.sendFrame(
+      Sv2MsgType.EXT_REQUEST_EXTENSIONS_SUCCESS,
+      successPayload,
+      SV2_EXTENSION_TYPE_NEGOTIATION,
+    );
+  }
+
   private async handleAllocateToken(payload: Buffer): Promise<void> {
     const reader = new BufferReader(payload);
     const msg = deserializeAllocateMiningJobToken(reader);
@@ -273,25 +397,45 @@ export class JobDeclarationClient {
     // Generate unique opaque token
     const token = this.generateToken();
 
-    // Build coinbase outputs with the miner's address (solo pool: miner gets block reward)
-    const coinbaseOutputs = this.service.getCoinbaseOutputsForToken(minerAddress);
+    // Resolve the pool's payout for this miner. JDS picks single- vs
+    // multi-output based on the miner's mining mode AND on whether
+    // the JDC negotiated ext 0x0003. Without 0x0003 we MUST stay
+    // single-output (base spec §6.4.3).
+    const payout = await this.service.resolveCoinbasePayout(minerAddress, this.negotiatedExtensions);
+    const coinbaseOutputs = this.service.encodeCoinbaseOutputs(payout.addresses);
 
-    // Store with 1-hour expiry, including the coinbase outputs for later validation
+    // Build the per-token weights TLV when the extension is active.
+    // Spec §1.3: "If the extension is not negotiated, the TLV MUST
+    // NOT be included." Also skip the TLV when there's only one
+    // pool output — the implicit [1, 0, …, 0] rule is equivalent
+    // and saves a few bytes.
+    const wantsWeightsTlv =
+      this.negotiatedExtensions.has(SV2_EXTENSION_TYPE_COINBASE_OUTPUT_WEIGHTS) &&
+      payout.weights !== null &&
+      payout.weights.length > 1;
+    const weightsTlv = wantsWeightsTlv
+      ? encodeCoinbaseOutputWeightsTlv(payout.weights!)
+      : null;
+
     const tokenHex = token.toString('hex');
     this.allocatedTokens.set(tokenHex, {
       token,
       expiresAt: Date.now() + 3600000,
       coinbaseOutputs,
+      weights: wantsWeightsTlv ? payout.weights : null,
     });
 
-    const successPayload = serializeAllocateMiningJobTokenSuccess({
+    const baseSuccessPayload = serializeAllocateMiningJobTokenSuccess({
       requestId: msg.requestId,
       miningJobToken: token,
       coinbaseOutputs,
     });
+    const successPayload = weightsTlv
+      ? Buffer.concat([baseSuccessPayload, weightsTlv])
+      : baseSuccessPayload;
     await this.sendFrame(Sv2MsgType.JDP_ALLOCATE_MINING_JOB_TOKEN_SUCCESS, successPayload);
 
-    console.log(`[JDP ${this.clientId}] ✅ AllocateMiningJobTokenSuccess: token=${tokenHex.substring(0, 16)}..., minerAddress=${minerAddress}, coinbaseOutputsLen=${coinbaseOutputs.length}`);
+    console.log(`[JDP ${this.clientId}] ✅ AllocateMiningJobTokenSuccess: token=${tokenHex.substring(0, 16)}..., minerAddress=${minerAddress}, outputs=${payout.addresses.length}, weightsTlv=${weightsTlv ? 'yes' : 'no'}`);
   }
 
   private async handleDeclareMiningJob(payload: Buffer): Promise<void> {
@@ -610,57 +754,86 @@ export class JobDeclarationClient {
    * Returns error message if invalid, null if valid.
    */
   private validateCoinbaseOutputs(job: Sv2DeclareMiningJob, tokenHex: string): string | null {
-    // Basic validation: ensure coinbase prefix and suffix are non-empty
     if (job.coinbaseTxPrefix.length === 0 && job.coinbaseTxSuffix.length === 0) {
       return 'Empty coinbase transaction';
     }
 
-    // Retrieve the coinbase outputs we sent with the token
     const tokenEntry = this.allocatedTokens.get(tokenHex);
     if (!tokenEntry || !tokenEntry.coinbaseOutputs || tokenEntry.coinbaseOutputs.length === 0) {
-      return null; // No outputs to validate against
-    }
-
-    // Parse the pool payout script from the first output in coinbaseOutputs.
-    // Format: varint(count) || TxOut(value u64_le || varint(scriptLen) || scriptBytes) ...
-    // We only need the first output's script (the pool payout output).
-    const poolOutputs = tokenEntry.coinbaseOutputs;
-    try {
-      let offset = 0;
-      // Read varint count
-      const count = poolOutputs[offset];
-      offset += (count < 0xfd) ? 1 : (count === 0xfd ? 3 : (count === 0xfe ? 5 : 9));
-      if (count === 0) return null; // No outputs to validate
-
-      // Skip value (8 bytes)
-      offset += 8;
-
-      // Read script length (varint)
-      let scriptLen = poolOutputs[offset];
-      if (scriptLen < 0xfd) {
-        offset += 1;
-      } else if (scriptLen === 0xfd) {
-        scriptLen = poolOutputs.readUInt16LE(offset + 1);
-        offset += 3;
-      } else {
-        return null; // Unusual script length encoding, skip validation
-      }
-
-      // Extract pool payout script
-      const poolPayoutScript = poolOutputs.subarray(offset, offset + scriptLen);
-
-      // Verify the pool payout script appears somewhere in coinbaseTxSuffix.
-      // The suffix contains the serialized outputs, so the script bytes must be present.
-      if (job.coinbaseTxSuffix.indexOf(poolPayoutScript) === -1) {
-        return 'Pool payout output script not found in coinbase — JDC must include the pool payout output';
-      }
-    } catch {
-      // If parsing fails, skip validation rather than blocking the miner
-      console.warn(`[JDP ${this.clientId}] ⚠️  Could not parse pool payout outputs for validation, skipping`);
       return null;
     }
 
-    return null; // Valid
+    let scripts: Buffer[];
+    try {
+      scripts = JobDeclarationClient.extractPoolOutputScripts(tokenEntry.coinbaseOutputs);
+    } catch {
+      console.warn(`[JDP ${this.clientId}] ⚠️  Could not parse pool payout outputs for validation, skipping`);
+      return null;
+    }
+    if (scripts.length === 0) return null;
+
+    // Spec §6.4.3 (base) + ext 0x0003 §2.1: every JDS-provided pool
+    // output script MUST appear in the declared coinbase. Strict
+    // amount validation per the weighted formula (Section 2) is out
+    // of scope here — we'd need to know J (JDC's own outputs), which
+    // the JDS can't determine without fully parsing the declared
+    // coinbase outputs against `template_revenue`. Presence-check is
+    // the minimum spec-required validation; amount-validation is
+    // tracked as a follow-up.
+    for (const script of scripts) {
+      if (job.coinbaseTxSuffix.indexOf(script) === -1) {
+        return 'Pool payout output script(s) not found in coinbase — JDC must include all pool payout outputs';
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Parse a Bitcoin consensus-encoded Vec<TxOut> buffer (as produced by
+   * JobDeclarationService.encodeCoinbaseOutputs) and return the locking
+   * scripts in original output order.
+   *
+   * Exposed as static so tests can exercise the parser directly.
+   */
+  static extractPoolOutputScripts(buf: Buffer): Buffer[] {
+    let offset = 0;
+    let count: number;
+    const first = buf[offset];
+    if (first < 0xfd) {
+      count = first;
+      offset += 1;
+    } else if (first === 0xfd) {
+      count = buf.readUInt16LE(offset + 1);
+      offset += 3;
+    } else if (first === 0xfe) {
+      count = buf.readUInt32LE(offset + 1);
+      offset += 5;
+    } else {
+      throw new Error('unsupported VarInt length encoding');
+    }
+    if (count === 0) return [];
+
+    const out: Buffer[] = [];
+    for (let i = 0; i < count; i++) {
+      offset += 8; // value u64 LE
+
+      let scriptLen: number;
+      const sl = buf[offset];
+      if (sl < 0xfd) {
+        scriptLen = sl;
+        offset += 1;
+      } else if (sl === 0xfd) {
+        scriptLen = buf.readUInt16LE(offset + 1);
+        offset += 3;
+      } else {
+        throw new Error('script length VarInt too large');
+      }
+
+      out.push(buf.subarray(offset, offset + scriptLen));
+      offset += scriptLen;
+    }
+    return out;
   }
 
   /**
@@ -679,11 +852,11 @@ export class JobDeclarationClient {
     return buf;
   }
 
-  private async sendFrame(msgType: number, payload: Buffer): Promise<void> {
+  private async sendFrame(msgType: number, payload: Buffer, extensionType: number = 0): Promise<void> {
     if (this.destroyed) return;
 
     const frame = this.frameWriter.writeFrame(
-      { extensionType: 0, msgType, msgLength: payload.length },
+      { extensionType, msgType, msgLength: payload.length },
       payload,
     );
     await this.writeRaw(frame);
