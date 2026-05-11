@@ -1,5 +1,5 @@
 import { Injectable, Inject, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
-import { Interval } from '@nestjs/schedule';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
@@ -37,6 +37,40 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
   private redisClient: any = null;
   private currentTimeSlot: number | null = null;
   private isFlushing: boolean = false;
+
+  /**
+   * Per-flusher consecutive-failure counter. Reset on every successful flush.
+   * Once a flusher reaches FLUSH_FAILURE_WARN_THRESHOLD failures in a row,
+   * the coordinator logs a WARN so an operator watching `docker logs` sees
+   * that in-memory backlog is building up. Each tick is 1 minute, so the
+   * warning fires after ~3 min of sustained PG inaccessibility — enough
+   * slack that one slow query doesn't spam the log, but quick enough that
+   * a sustained outage is visible long before OOM.
+   */
+  private static readonly FLUSH_FAILURE_WARN_THRESHOLD = 3;
+  private flushFailures: Record<
+    'poolShares' | 'poolModeHashrate' | 'clientStatistics' | 'poolRejected' | 'clientRejected'
+    | 'addressTotals' | 'workerTotals',
+    number
+  > = {
+    poolShares: 0, poolModeHashrate: 0, clientStatistics: 0,
+    poolRejected: 0, clientRejected: 0,
+    addressTotals: 0, workerTotals: 0,
+  };
+
+  private noteFlushSuccess(name: keyof typeof this.flushFailures): void {
+    this.flushFailures[name] = 0;
+  }
+
+  private noteFlushFailure(name: keyof typeof this.flushFailures): void {
+    this.flushFailures[name]++;
+    if (this.flushFailures[name] >= StatisticsCoordinatorService.FLUSH_FAILURE_WARN_THRESHOLD) {
+      console.warn(
+        `[StatisticsCoordinator] ${name} flush has failed ${this.flushFailures[name]} consecutive times; ` +
+        `in-memory backlog is growing — investigate PG connectivity`,
+      );
+    }
+  }
 
   /**
    * Per-flusher tracking of the most recently completed slot we already
@@ -228,27 +262,36 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
   }
 
   /**
-   * Check for time slot transition and trigger immediate flush if needed
+   * Detect 10-min slot transitions. Returns true on the first call after a
+   * transition (i.e., the previous tick was in the OLD slot, this tick in
+   * the NEW slot). The caller can use this to fire an additional flush right
+   * at the boundary so the just-ended slot's residual lands in PG within
+   * microseconds of slot-end — long before the chart-visibility cutoff
+   * (`now - 60s`) starts including it.
+   *
+   * On startup (`currentTimeSlot === null`) we seed without claiming a
+   * transition so we don't waste the first tick on a phantom flush.
    */
-  private checkSlotTransition(): void {
+  private checkSlotTransition(): boolean {
     const currentSlot = this.getTimeSlot();
 
     if (this.currentTimeSlot === null) {
       this.currentTimeSlot = currentSlot;
-      return;
+      return false;
     }
 
     if (this.currentTimeSlot !== currentSlot) {
       console.log(`[StatisticsCoordinator] Slot transition detected (${this.currentTimeSlot} -> ${currentSlot})`);
       this.currentTimeSlot = currentSlot;
-      // Note: No need to trigger another flush - we're already flushing
+      return true;
     }
+    return false;
   }
 
   /**
    * Main periodic flush - runs every 60 seconds
    */
-  @Interval(60000)
+  @Cron(CronExpression.EVERY_MINUTE)
   async flushAllStatistics(): Promise<void> {
     // Note: we used to gate this on `!this.redisClient` because every flusher
     // needed Redis. After Phase B, only PPLNS/Group-Solo money-state flushers
@@ -321,10 +364,12 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
       await this.bulkUpsertPoolShares(records);
       this.poolShareStatisticsService.confirmFlush(drained);
       console.log(`[StatisticsCoordinator] Flushed ${records.length} pool share time slots`);
+      this.noteFlushSuccess('poolShares');
     } catch (error) {
       console.error(
         `[StatisticsCoordinator] Bulk pool-shares flush failed (${(error as Error).message}); deltas remain in cache for retry`,
       );
+      this.noteFlushFailure('poolShares');
       // Snapshot stays in the cache; next flush retries automatically.
     }
   }
@@ -360,10 +405,12 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
       await this.bulkUpsertPoolModeHashrate(records);
       this.poolModeHashrateService.confirmFlush(drained);
       console.log(`[StatisticsCoordinator] Flushed ${records.length} pool mode-hashrate records across ${drained.size} slots`);
+      this.noteFlushSuccess('poolModeHashrate');
     } catch (err) {
       console.error(
         `[StatisticsCoordinator] Bulk pool-mode-hashrate flush failed (${(err as Error).message}); deltas remain in cache for retry`,
       );
+      this.noteFlushFailure('poolModeHashrate');
       // Snapshot stays in the cache; next flush retries automatically.
     }
   }
@@ -437,10 +484,17 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
       }
     }
 
-    if (successfullyFlushed.length === 0) return;
+    if (successfullyFlushed.length === 0) {
+      this.noteFlushFailure('clientStatistics');
+      return;
+    }
 
     this.clientStatisticsService.confirmFlush(successfullyFlushed);
     console.log(`[StatisticsCoordinator] Flushed ${successfullyFlushed.length} client statistics records`);
+    // Partial success (some batches failed but at least one succeeded) still
+    // counts as a successful tick — backlog isn't strictly growing on the
+    // flushed portion. If ALL batches failed we'd have returned above.
+    this.noteFlushSuccess('clientStatistics');
 
     // Per-worker rejected-diff totals (for worker_shares_entity), built ONLY
     // from records that actually landed in PG. Building this from `drained`
@@ -489,8 +543,10 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
       await this.bulkUpsertPoolRejectedStatistics(records);
       this.poolRejectedStatisticsService.confirmFlush(drained);
       console.log(`[StatisticsCoordinator] Flushed ${records.length} pool rejected statistics records`);
+      this.noteFlushSuccess('poolRejected');
     } catch (error) {
       console.error('[StatisticsCoordinator] Failed to flush pool rejected statistics to database:', error);
+      this.noteFlushFailure('poolRejected');
       // Snapshot stays in the cache; next flush retries automatically.
     }
   }
@@ -507,8 +563,10 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
       await this.bulkUpsertClientRejectedStatistics(drained);
       this.clientRejectedStatisticsService.confirmFlush(drained);
       console.log(`[StatisticsCoordinator] Flushed ${drained.length} client rejected statistics records`);
+      this.noteFlushSuccess('clientRejected');
     } catch (error) {
       console.error('[StatisticsCoordinator] Failed to flush client rejected statistics to database:', error);
+      this.noteFlushFailure('clientRejected');
       // Snapshot stays in the cache; next flush retries automatically.
     }
   }
@@ -532,8 +590,10 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
       await this.addressSettingsService.addSharesBulk(updates);
       this.shareTotalsCache.confirmAddressFlush(deltas);
       console.log(`[StatisticsCoordinator] Flushed ${updates.length} address total updates`);
+      this.noteFlushSuccess('addressTotals');
     } catch (error) {
       console.error('[StatisticsCoordinator] Failed to flush address totals to database:', error);
+      this.noteFlushFailure('addressTotals');
       // Snapshot remains in the cache; next flush retries automatically.
     }
   }
@@ -549,8 +609,10 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
     try {
       await this.workerSharesService.addSharesBulk(drained);
       this.shareTotalsCache.confirmWorkerFlush(drained);
+      this.noteFlushSuccess('workerTotals');
     } catch (error) {
       console.error('[StatisticsCoordinator] Failed to flush worker totals to database:', error);
+      this.noteFlushFailure('workerTotals');
       // Snapshot remains in the cache; next flush retries automatically.
     }
   }
