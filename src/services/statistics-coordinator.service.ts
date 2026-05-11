@@ -12,6 +12,7 @@ import { ClientStatisticsEntity } from '../ORM/client-statistics/client-statisti
 import { ClientRejectedStatisticsEntity } from '../ORM/client-rejected-statistics/client-rejected-statistics.entity';
 import { AddressSettingsService } from '../ORM/address-settings/address-settings.service';
 import { WorkerSharesService } from '../ORM/worker-shares/worker-shares.service';
+import { ShareTotalsCacheService } from './share-totals-cache.service';
 import { TimeSlotHelper } from '../utils/time-slot.helper';
 
 /**
@@ -79,6 +80,7 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
     private readonly dataSource: DataSource,
     private readonly addressSettingsService: AddressSettingsService,
     private readonly workerSharesService: WorkerSharesService,
+    private readonly shareTotalsCache: ShareTotalsCacheService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -909,194 +911,44 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
   }
 
   /**
-   * Flush address totals from Redis to database
-   * Pattern: shares:address:{address} -> HASH {baseline, delta}
+   * Flush per-address lifetime share totals from the in-memory cache to PG.
    *
-   * CRITICAL: Atomically flushes delta to database, then decrements delta.
-   * This prevents race conditions where shares arriving during flush could be lost.
+   * The drain/confirm pattern preserves shares that arrive between
+   * `drainAddressDeltas()` and `confirmAddressFlush()` — any increment
+   * during the await falls through to the residual of the next flush.
+   * If the PG upsert fails, `confirmAddressFlush` is never called and the
+   * full delta remains in the cache for the next flush cycle.
    */
   private async flushAddressTotals(): Promise<void> {
-    // Tier B: read the dirty-set instead of SCAN. The dirty-set is
-    // maintained by `ShareTotalsCacheService.increment` (every share
-    // SADDs the address) and bootstrapped on init via a one-time SCAN.
-    // Costs O(active addresses) instead of O(total Redis keyspace).
-    const dirtyAddresses = await this.smembersOrFallbackScan(
-      'coord:dirty:addresses',
-      'shares:address:*',
-      (k) => k.startsWith('shares:address:'),
-    );
+    const deltas = this.shareTotalsCache.drainAddressDeltas();
+    if (deltas.size === 0) return;
 
-    if (dirtyAddresses.length === 0) return;
+    const updates = Array.from(deltas.entries()).map(([address, shares]) => ({ address, shares }));
 
-    const keys = dirtyAddresses.map(addr => `shares:address:${addr}`);
-
-    const updates: Array<{ address: string; key: string; shares: number }> = [];
-
-    // Step 1: Pipelined read of all deltas (one round-trip per 500 keys)
-    const hashResults = await this.pipelinedHGetAll(keys);
-
-    for (let i = 0; i < keys.length; i++) {
-      const key = keys[i];
-      const data = hashResults[i];
-      try {
-        if (!data || !data.delta) continue;
-
-        const delta = parseFloat(data.delta);
-        if (delta <= 0) continue;
-
-        // Parse key: shares:address:{address}
-        const address = key.split(':')[2];
-
-        updates.push({ address, key, shares: delta });
-      } catch (error) {
-        console.error(`[StatisticsCoordinator] Failed to parse address total from ${key}:`, error);
-      }
-    }
-
-    if (updates.length === 0) return;
-
-    // Step 2: Update database FIRST (before modifying Redis)
     try {
-      await this.addressSettingsService.addSharesBulk(
-        updates.map(u => ({ address: u.address, shares: u.shares }))
-      );
+      await this.addressSettingsService.addSharesBulk(updates);
+      this.shareTotalsCache.confirmAddressFlush(deltas);
       console.log(`[StatisticsCoordinator] Flushed ${updates.length} address total updates`);
-
-      // Step 3: ONLY if database succeeds, atomically decrement deltas
-      // CRITICAL: We decrement by the exact amount we flushed, preserving any shares that arrived during flush
-      // Uses pipelined Redis calls (3 passes) instead of sequential per-key roundtrips
-      try {
-        // Pass 1: Read all baselines in one pipeline
-        const getBaselines = this.redisClient.multi();
-        for (const update of updates) {
-          getBaselines.hGetAll(update.key);
-        }
-        const baselineResults = await getBaselines.exec();
-
-        // Pass 2: Decrement all deltas in one pipeline
-        const decrementDeltas = this.redisClient.multi();
-        for (const update of updates) {
-          decrementDeltas.hIncrByFloat(update.key, 'delta', -update.shares);
-        }
-        await decrementDeltas.exec();
-
-        // Pass 3: Update all baselines in one pipeline
-        const updateBaselines = this.redisClient.multi();
-        for (let i = 0; i < updates.length; i++) {
-          const data = baselineResults[i] as Record<string, string> | null;
-          const currentBaseline = parseFloat(data?.baseline ?? '0') || 0;
-          updateBaselines.hSet(updates[i].key, 'baseline', (currentBaseline + updates[i].shares).toString());
-        }
-        await updateBaselines.exec();
-      } catch (error) {
-        console.error(`[StatisticsCoordinator] Failed to update Redis after successful DB flush:`, error);
-        // Database has the data, so this is not critical - just log it
-      }
     } catch (error) {
       console.error('[StatisticsCoordinator] Failed to flush address totals to database:', error);
-      // DO NOT modify Redis - deltas remain intact for retry on next flush
-      // This prevents share loss: any shares that arrived during this attempt are preserved
+      // Snapshot remains in the cache; next flush retries automatically.
     }
   }
 
   /**
-   * Flush worker totals from Redis to database
-   * Pattern: shares:worker:{address}:{clientName} -> HASH {baseline, delta}
-   * Same approach as flushAddressTotals but per-worker.
+   * Flush per-worker lifetime share totals from the in-memory cache to PG.
+   * Same drain/confirm semantics as `flushAddressTotals`.
    */
   private async flushWorkerTotals(): Promise<void> {
-    // Tier B: read the dirty-set instead of SCAN. Entries in the SET are
-    // "{address}|{workerName}" tuples (the SET stores them as opaque
-    // strings; we parse on read). Same rationale as flushAddressTotals.
-    const dirtyEntries = await this.smembersOrFallbackScan(
-      'coord:dirty:workers',
-      'shares:worker:*',
-      (k) => k.startsWith('shares:worker:') && !k.endsWith(':hydrated') && !k.endsWith(':lock'),
-      (k) => {
-        // Convert "shares:worker:{address}:{worker}" → "{address}|{worker}"
-        // for fallback bootstrap. Worker names may contain ':' so we use
-        // the first ':' after the address as the split.
-        const stripped = k.substring('shares:worker:'.length);
-        const colonIdx = stripped.indexOf(':');
-        if (colonIdx < 0) return null;
-        return `${stripped.slice(0, colonIdx)}|${stripped.slice(colonIdx + 1)}`;
-      },
-    );
-
-    if (dirtyEntries.length === 0) return;
-
-    const updates: Array<{ address: string; clientName: string; key: string; shares: number }> = [];
-
-    // Build the actual Redis keys from the dirty-set entries.
-    // The key parse-back below uses key.split(':') for consistency
-    // with the pre-Tier-B SCAN flow; the dirty-set is just the source
-    // of WHICH keys to load.
-    const dataKeys: string[] = [];
-    for (const entry of dirtyEntries) {
-      const sepIdx = entry.indexOf('|');
-      if (sepIdx < 0) continue;
-      const address = entry.substring(0, sepIdx);
-      const clientName = entry.substring(sepIdx + 1);
-      dataKeys.push(`shares:worker:${address}:${clientName}`);
-    }
-    if (dataKeys.length === 0) return;
-
-    const hashResults = await this.pipelinedHGetAll(dataKeys);
-
-    for (let i = 0; i < dataKeys.length; i++) {
-      const key = dataKeys[i];
-      const data = hashResults[i];
-      try {
-        if (!data || !data.delta) continue;
-
-        const delta = parseFloat(data.delta);
-        if (delta <= 0) continue;
-
-        // Parse key: shares:worker:{address}:{clientName}
-        const parts = key.split(':');
-        if (parts.length < 4) continue;
-        const address = parts[2];
-        const clientName = parts.slice(3).join(':');
-
-        updates.push({ address, clientName, key, shares: delta });
-      } catch (error) {
-        console.error(`[StatisticsCoordinator] Failed to parse worker total from ${key}:`, error);
-      }
-    }
-
-    if (updates.length === 0) return;
+    const drained = this.shareTotalsCache.drainWorkerDeltas();
+    if (drained.length === 0) return;
 
     try {
-      await this.workerSharesService.addSharesBulk(
-        updates.map(u => ({ address: u.address, clientName: u.clientName, shares: u.shares }))
-      );
-
-      // Decrement deltas and update baselines (pipelined)
-      try {
-        const getBaselines = this.redisClient.multi();
-        for (const update of updates) {
-          getBaselines.hGetAll(update.key);
-        }
-        const baselineResults = await getBaselines.exec();
-
-        const decrementDeltas = this.redisClient.multi();
-        for (const update of updates) {
-          decrementDeltas.hIncrByFloat(update.key, 'delta', -update.shares);
-        }
-        await decrementDeltas.exec();
-
-        const updateBaselines = this.redisClient.multi();
-        for (let i = 0; i < updates.length; i++) {
-          const data = baselineResults[i] as Record<string, string> | null;
-          const currentBaseline = parseFloat(data?.baseline ?? '0') || 0;
-          updateBaselines.hSet(updates[i].key, 'baseline', (currentBaseline + updates[i].shares).toString());
-        }
-        await updateBaselines.exec();
-      } catch (error) {
-        console.error('[StatisticsCoordinator] Failed to update Redis after worker totals flush:', error);
-      }
+      await this.workerSharesService.addSharesBulk(drained);
+      this.shareTotalsCache.confirmWorkerFlush(drained);
     } catch (error) {
       console.error('[StatisticsCoordinator] Failed to flush worker totals to database:', error);
+      // Snapshot remains in the cache; next flush retries automatically.
     }
   }
 

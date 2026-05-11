@@ -81,6 +81,12 @@ function buildService(mockRedis: any, mockWorkerShares: Partial<WorkerSharesServ
         { options: { type: 'postgres' }, query: jest.fn() } as unknown as DataSource,
         {} as any,                       // addressSettingsService
         mockWorkerShares as WorkerSharesService,
+        {
+            drainAddressDeltas: jest.fn().mockReturnValue(new Map()),
+            drainWorkerDeltas: jest.fn().mockReturnValue([]),
+            confirmAddressFlush: jest.fn(),
+            confirmWorkerFlush: jest.fn(),
+        } as any,                        // shareTotalsCache
     );
     (service as any).redisClient = mockRedis;
     return service;
@@ -186,143 +192,7 @@ describe('StatisticsCoordinatorService – pipelinedHGetAll helper', () => {
 });
 
 
-describe('StatisticsCoordinatorService – flushWorkerTotals end-to-end (pipelined)', () => {
-    let mockRedis: any;
-    let queueExec: (resp: any[]) => void;
-    let mockWorkerShares: { addSharesBulk: jest.Mock };
-    let service: any;
-
-    beforeEach(() => {
-        const m = makeMockRedis();
-        mockRedis = m.client;
-        queueExec = m.queueExec;
-        mockWorkerShares = { addSharesBulk: jest.fn().mockResolvedValue(undefined) };
-        service = buildService(mockRedis, mockWorkerShares);
-    });
-
-    function setupScan(keys: string[]) {
-        // scanKeys cursors '0' → keys → '0' to terminate.
-        mockRedis.scan.mockResolvedValueOnce({ cursor: 0, keys });
-    }
-
-    it('filters :hydrated / :lock markers before pipelining the read', async () => {
-        setupScan([
-            'shares:worker:bc1qa:rig1:hydrated',
-            'shares:worker:bc1qa:rig1',
-            'shares:worker:bc1qb:rig2:lock',
-            'shares:worker:bc1qb:rig2',
-        ]);
-
-        // Read pass: 2 data keys → expect ONE multi() call with 2 hGetAll
-        queueExec([
-            { delta: '50', baseline: '100' },
-            { delta: '30', baseline: '200' },
-        ]);
-        // Baseline-read pass after DB success: same 2 keys
-        queueExec([
-            { delta: '50', baseline: '100' },
-            { delta: '30', baseline: '200' },
-        ]);
-        // Decrement-deltas pass: returns ignored
-        queueExec([{}, {}]);
-        // Update-baselines pass: returns ignored
-        queueExec([{}, {}]);
-
-        await (service as any).flushWorkerTotals();
-
-        // The read pass must NOT have been a sequential per-key hGetAll.
-        // (mockRedis.hGetAll is only used in the spec's mock if NOT called
-        // through multi(). The flushers always use the helper now.)
-        expect(mockRedis.hGetAll).not.toHaveBeenCalled();
-        // multi() called: 1 read + 3 baseline/delta passes = 4
-        expect(mockRedis.multi).toHaveBeenCalledTimes(4);
-
-        // addSharesBulk got the correct deltas, :hydrated/:lock keys were
-        // filtered out.
-        expect(mockWorkerShares.addSharesBulk).toHaveBeenCalledTimes(1);
-        const args = mockWorkerShares.addSharesBulk.mock.calls[0][0];
-        expect(args).toEqual([
-            { address: 'bc1qa', clientName: 'rig1', shares: 50 },
-            { address: 'bc1qb', clientName: 'rig2', shares: 30 },
-        ]);
-    });
-
-    it('skips keys with delta=0 and keys missing the delta field', async () => {
-        setupScan([
-            'shares:worker:bc1qa:rig1',
-            'shares:worker:bc1qb:rig2',
-            'shares:worker:bc1qc:rig3',
-        ]);
-
-        queueExec([
-            { delta: '50', baseline: '100' },     // include
-            { baseline: '200' },                   // no delta → skip
-            { delta: '0', baseline: '300' },       // delta == 0 → skip
-        ]);
-        // No baseline-update passes expected because 0 deltas would skip
-        // the entire DB write — but with 1 valid update, those passes run.
-        queueExec([{ delta: '50', baseline: '100' }]);
-        queueExec([{}]);
-        queueExec([{}]);
-
-        await (service as any).flushWorkerTotals();
-
-        expect(mockWorkerShares.addSharesBulk).toHaveBeenCalledWith([
-            { address: 'bc1qa', clientName: 'rig1', shares: 50 },
-        ]);
-    });
-
-    it('returns early without DB write if all data keys have zero/missing delta', async () => {
-        setupScan([
-            'shares:worker:bc1qa:rig1',
-            'shares:worker:bc1qb:rig2',
-        ]);
-
-        queueExec([
-            { baseline: '100' },                   // no delta
-            { delta: '0', baseline: '200' },       // zero delta
-        ]);
-
-        await (service as any).flushWorkerTotals();
-
-        expect(mockWorkerShares.addSharesBulk).not.toHaveBeenCalled();
-        // Only the read pass should have run; no baseline-update passes.
-        expect(mockRedis.multi).toHaveBeenCalledTimes(1);
-    });
-
-    it('preserves clientName containing colons (slice(3).join)', async () => {
-        // Worker names can contain colons — the parser slices off the
-        // first three :-separated parts (shares:worker:{address}) and
-        // re-joins the rest. Pipelining mustn't break this.
-        setupScan(['shares:worker:bc1qa:rig:with:colons']);
-
-        queueExec([{ delta: '10', baseline: '0' }]);
-        queueExec([{ delta: '10', baseline: '0' }]);
-        queueExec([{}]);
-        queueExec([{}]);
-
-        await (service as any).flushWorkerTotals();
-
-        expect(mockWorkerShares.addSharesBulk).toHaveBeenCalledWith([
-            { address: 'bc1qa', clientName: 'rig:with:colons', shares: 10 },
-        ]);
-    });
-
-    it('does NOT decrement deltas if DB write fails (data preserved for retry)', async () => {
-        setupScan(['shares:worker:bc1qa:rig1']);
-        queueExec([{ delta: '50', baseline: '100' }]);
-
-        mockWorkerShares.addSharesBulk.mockRejectedValueOnce(new Error('DB down'));
-
-        const consoleSpy = jest.spyOn(console, 'error').mockImplementation();
-        try {
-            await (service as any).flushWorkerTotals();
-        } finally {
-            consoleSpy.mockRestore();
-        }
-
-        // Read pass ran, but no baseline/decrement passes — they're behind
-        // the DB-success guard.
-        expect(mockRedis.multi).toHaveBeenCalledTimes(1);
-    });
-});
+// NOTE: The Redis-backed flushWorkerTotals end-to-end tests were removed
+// when the per-address / per-worker share-totals cache moved to in-process
+// Maps. The new flush path is covered in statistics-coordinator.short-circuit.spec.ts
+// (`StatisticsCoordinator — in-memory address/worker total flush`).

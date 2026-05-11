@@ -37,6 +37,12 @@ function buildService(repos: Record<string, { query: jest.Mock }>) {
         { options: { type: 'postgres' }, query: jest.fn() } as unknown as DataSource,
         {} as any,                                          // addressSettingsService
         {} as any,                                          // workerSharesService
+        {
+            drainAddressDeltas: jest.fn().mockReturnValue(new Map()),
+            drainWorkerDeltas: jest.fn().mockReturnValue([]),
+            confirmAddressFlush: jest.fn(),
+            confirmWorkerFlush: jest.fn(),
+        } as any,                                            // shareTotalsCache
     );
     return service;
 }

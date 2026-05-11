@@ -20,6 +20,12 @@ function buildService(mockRedis: any, mockWorkerShares: Partial<WorkerSharesServ
         { options: { type: 'postgres' }, query: jest.fn() } as unknown as DataSource,
         {} as any,                       // addressSettingsService
         mockWorkerShares as WorkerSharesService,
+        {
+            drainAddressDeltas: jest.fn().mockReturnValue(new Map()),
+            drainWorkerDeltas: jest.fn().mockReturnValue([]),
+            confirmAddressFlush: jest.fn(),
+            confirmWorkerFlush: jest.fn(),
+        } as any,                        // shareTotalsCache
     );
     // Inject Redis directly, bypassing onModuleInit
     (service as any).redisClient = mockRedis;

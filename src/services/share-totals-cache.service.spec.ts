@@ -1,35 +1,20 @@
-import { ClientStatisticsService } from '../ORM/client-statistics/client-statistics.service';
 import { AddressSettingsService } from '../ORM/address-settings/address-settings.service';
 import { WorkerSharesService } from '../ORM/worker-shares/worker-shares.service';
 import { ShareTotalsCacheService } from './share-totals-cache.service';
 
 describe('ShareTotalsCacheService', () => {
-  let clientStatisticsService: {
-    getTotalSharesForAddress: jest.Mock;
-    getTotalSharesForWorkers: jest.Mock;
-  };
   let addressSettingsService: {
     getSettings: jest.Mock;
   };
   let workerSharesService: {
     getWorkerTotals: jest.Mock;
   };
-  let cacheManager: any;
   let service: ShareTotalsCacheService;
 
   beforeEach(() => {
-    clientStatisticsService = {
-      getTotalSharesForAddress: jest.fn().mockResolvedValue(100),
-      getTotalSharesForWorkers: jest.fn().mockResolvedValue([
-        { clientName: 'worker-1', total: 60 },
-        { clientName: 'worker-2', total: 40 },
-      ]),
-    };
-
     addressSettingsService = {
       getSettings: jest.fn().mockResolvedValue({ shares: 100 }),
     };
-
     workerSharesService = {
       getWorkerTotals: jest.fn().mockResolvedValue([
         { clientName: 'worker-1', shares: 60 },
@@ -37,241 +22,178 @@ describe('ShareTotalsCacheService', () => {
       ]),
     };
 
-    // Mock cache manager without Redis (fallback mode)
-    cacheManager = {
-      store: {},
-    };
-
     service = new ShareTotalsCacheService(
-      cacheManager,
-      clientStatisticsService as unknown as ClientStatisticsService,
       addressSettingsService as unknown as AddressSettingsService,
       workerSharesService as unknown as WorkerSharesService,
     );
   });
 
-  describe('without Redis (fallback mode)', () => {
-    beforeEach(async () => {
-      await service.onModuleInit();
+  describe('increment', () => {
+    it('accumulates per-address deltas for subsequent flushes', () => {
+      service.increment('addr1', 'worker-1', 10);
+      service.increment('addr1', 'worker-1', 5);
+      service.increment('addr1', 'worker-2', 7);
+
+      const drained = service.drainAddressDeltas();
+      expect(drained.get('addr1')).toBe(22);
     });
 
-    it('falls back to address_settings when Redis is not available', async () => {
-      const total = await service.getAddressTotal('addr1');
-      expect(total).toBe(100);
-      expect(addressSettingsService.getSettings).toHaveBeenCalledWith('addr1', false);
+    it('records per-worker deltas alongside the per-address delta', () => {
+      service.increment('addr1', 'worker-1', 10);
+      service.increment('addr1', 'worker-2', 5);
+      service.increment('addr2', 'worker-1', 8);
+
+      const drained = service.drainWorkerDeltas();
+      expect(drained).toEqual(expect.arrayContaining([
+        { address: 'addr1', clientName: 'worker-1', shares: 10 },
+        { address: 'addr1', clientName: 'worker-2', shares: 5 },
+        { address: 'addr2', clientName: 'worker-1', shares: 8 },
+      ]));
+      expect(drained.length).toBe(3);
     });
 
-    it('returns worker totals from worker_shares_entity when Redis is not available', async () => {
-      const workerTotals = await service.getWorkerTotals('addr1');
-      expect(workerTotals).toEqual([
-        { workerName: 'worker-1', total: 60 },
-        { workerName: 'worker-2', total: 40 },
-      ]);
-      expect(workerSharesService.getWorkerTotals).toHaveBeenCalledWith('addr1');
+    it('ignores empty addresses, zero difficulty and non-finite values', () => {
+      service.increment('', 'worker-1', 10);
+      service.increment('addr1', 'worker-1', 0);
+      service.increment('addr1', 'worker-1', -5);
+      service.increment('addr1', 'worker-1', Number.NaN);
+      service.increment('addr1', 'worker-1', Number.POSITIVE_INFINITY);
+
+      expect(service.drainAddressDeltas().size).toBe(0);
+      expect(service.drainWorkerDeltas().length).toBe(0);
     });
 
-    it('silently skips increment when Redis is not available', () => {
-      // Should not throw
-      service.increment('addr1', 'worker-1', 25);
-      expect(true).toBe(true);
+    it('handles undefined workerName by only recording the address delta', () => {
+      service.increment('addr1', undefined, 10);
+
+      expect(service.drainAddressDeltas().get('addr1')).toBe(10);
+      expect(service.drainWorkerDeltas().length).toBe(0);
+    });
+
+    it('keeps worker keys safe when worker names contain colons', () => {
+      service.increment('addr1', 'rig:1', 10);
+      service.increment('addr1', 'rig:2', 5);
+
+      const drained = service.drainWorkerDeltas();
+      expect(drained).toEqual(expect.arrayContaining([
+        { address: 'addr1', clientName: 'rig:1', shares: 10 },
+        { address: 'addr1', clientName: 'rig:2', shares: 5 },
+      ]));
     });
   });
 
-  describe('with Redis', () => {
-    let mockRedisClient: any;
-
-    beforeEach(async () => {
-      mockRedisClient = {
-        hIncrByFloat: jest.fn().mockResolvedValue(undefined),
-        hGetAll: jest.fn().mockResolvedValue({}),
-        hSet: jest.fn().mockResolvedValue(undefined),
-        scan: jest.fn().mockResolvedValue({ cursor: 0, keys: [] }),
-        del: jest.fn().mockResolvedValue(undefined),
-        // Tier B dirty-set maintenance — coord uses SMEMBERS instead of
-        // SCAN; writers SADD on every increment, SREM on clearAddressData.
-        sAdd: jest.fn().mockResolvedValue(1),
-        sRem: jest.fn().mockResolvedValue(1),
-        sMembers: jest.fn().mockResolvedValue([]),
-      };
-
-      cacheManager = {
-        store: {
-          client: mockRedisClient,
-        },
-      };
-
-      service = new ShareTotalsCacheService(
-        cacheManager,
-        clientStatisticsService as unknown as ClientStatisticsService,
-        addressSettingsService as unknown as AddressSettingsService,
-        workerSharesService as unknown as WorkerSharesService,
-      );
-
-      await service.onModuleInit();
-    });
-
-    it('increments address total atomically in Redis', () => {
-      service.increment('addr1', undefined, 25);
-
-      expect(mockRedisClient.hIncrByFloat).toHaveBeenCalledWith(
-        'shares:address:addr1',
-        'delta',
-        25,
-      );
-    });
-
-    it('increments worker total atomically in Redis', () => {
+  describe('getAddressTotal', () => {
+    it('returns PG total plus in-memory pending delta', async () => {
       service.increment('addr1', 'worker-1', 25);
-
-      expect(mockRedisClient.hIncrByFloat).toHaveBeenCalledWith(
-        'shares:address:addr1',
-        'delta',
-        25,
-      );
-      expect(mockRedisClient.hIncrByFloat).toHaveBeenCalledWith(
-        'shares:worker:addr1:worker-1',
-        'delta',
-        25,
-      );
-    });
-
-    /**
-     * Tier B: every increment also SADDs to the coord:dirty:* SET so
-     * the coordinator can read SMEMBERS instead of SCAN'ing the full
-     * keyspace. Without this, growing pool == growing coord-flush
-     * wall-time (the SCAN scales with total Redis keys, not with our
-     * patterns).
-     */
-    it("Tier B: increment SADDs the address to coord:dirty:addresses", () => {
-      service.increment('addrX', undefined, 10);
-
-      expect(mockRedisClient.sAdd).toHaveBeenCalledWith(
-        'coord:dirty:addresses',
-        'addrX',
-      );
-    });
-
-    it("Tier B: increment with worker SADDs both address + worker dirty-sets", () => {
-      service.increment('addrY', 'worker-7', 10);
-
-      expect(mockRedisClient.sAdd).toHaveBeenCalledWith(
-        'coord:dirty:addresses',
-        'addrY',
-      );
-      expect(mockRedisClient.sAdd).toHaveBeenCalledWith(
-        'coord:dirty:workers',
-        'addrY|worker-7',
-      );
-    });
-
-    it("Tier B: clearAddressData SREMs the dirty-set entries so coord doesn't keep retrying a deleted address", async () => {
-      // Arrange: pretend the worker keys exist for SCAN
-      mockRedisClient.scan.mockResolvedValueOnce({
-        cursor: 0,
-        keys: ['shares:worker:addrZ:rig-A', 'shares:worker:addrZ:rig-B'],
-      });
-
-      await service.clearAddressData('addrZ');
-
-      expect(mockRedisClient.sRem).toHaveBeenCalledWith(
-        'coord:dirty:addresses',
-        'addrZ',
-      );
-      expect(mockRedisClient.sRem).toHaveBeenCalledWith(
-        'coord:dirty:workers',
-        ['addrZ|rig-A', 'addrZ|rig-B'],
-      );
-    });
-
-    it('returns total from Redis baseline + delta', async () => {
-      mockRedisClient.hGetAll.mockResolvedValue({
-        baseline: '100',
-        delta: '25',
-      });
-
       const total = await service.getAddressTotal('addr1');
-      expect(total).toBe(125);
-      expect(mockRedisClient.hGetAll).toHaveBeenCalledWith('shares:address:addr1');
+      expect(total).toBe(125); // 100 (PG) + 25 (pending)
     });
 
-    it('returns 0 when address not found in Redis and database is empty', async () => {
-      mockRedisClient.hGetAll.mockResolvedValue({});
+    it('returns 0 if neither PG nor cache has data', async () => {
       addressSettingsService.getSettings.mockResolvedValueOnce(null);
-
-      const total = await service.getAddressTotal('addr1');
+      const total = await service.getAddressTotal('unknown');
       expect(total).toBe(0);
     });
 
-    it('returns worker totals from DB + unflushed Redis deltas', async () => {
-      mockRedisClient.scan.mockResolvedValueOnce({
-        cursor: 0,
-        keys: ['shares:worker:addr1:worker-1', 'shares:worker:addr1:worker-2'],
-      });
-
-      mockRedisClient.hGetAll
-        .mockResolvedValueOnce({ delta: '5' })
-        .mockResolvedValueOnce({ delta: '10' });
-
-      const workerTotals = await service.getWorkerTotals('addr1');
-      // DB has worker-1=60, worker-2=40 + Redis deltas 5, 10
-      expect(workerTotals).toEqual(expect.arrayContaining([
-        { workerName: 'worker-1', total: 65 },
-        { workerName: 'worker-2', total: 50 },
-      ]));
+    it('returns just the PG total when no pending delta exists', async () => {
+      const total = await service.getAddressTotal('addr1');
+      expect(total).toBe(100);
     });
+  });
 
-    it('uses SCAN instead of KEYS to find worker keys', async () => {
-      mockRedisClient.scan.mockResolvedValueOnce({ cursor: 0, keys: [] });
+  describe('getWorkerTotals', () => {
+    it('merges PG worker totals with in-memory deltas', async () => {
+      service.increment('addr1', 'worker-1', 5);
+      service.increment('addr1', 'worker-3', 12); // not in PG
 
-      await service.getWorkerTotals('addr1');
+      const totals = await service.getWorkerTotals('addr1');
 
-      expect(mockRedisClient.scan).toHaveBeenCalledWith('0', {
-        MATCH: 'shares:worker:addr1:*',
-        COUNT: 1000,
-      });
-      expect(mockRedisClient).not.toHaveProperty('keys');
-    });
-
-    it('returns empty array when no workers in DB and no Redis deltas', async () => {
-      mockRedisClient.scan.mockResolvedValueOnce({ cursor: 0, keys: [] });
-      workerSharesService.getWorkerTotals.mockResolvedValueOnce([]);
-
-      const workerTotals = await service.getWorkerTotals('addr1');
-      expect(workerTotals).toEqual([]);
-    });
-
-    it('filters out hydration markers and lock keys from Redis', async () => {
-      mockRedisClient.scan.mockResolvedValueOnce({
-        cursor: 0,
-        keys: [
-          'shares:worker:addr1:worker-1',
-          'shares:worker:addr1:worker-2:hydrated',
-          'shares:worker:addr1:worker-3:lock',
-        ],
-      });
-
-      mockRedisClient.hGetAll.mockResolvedValueOnce({ delta: '5' });
-
-      const workerTotals = await service.getWorkerTotals('addr1');
-      // DB has worker-1=60 + delta 5 = 65, worker-2=40 (no delta)
-      expect(workerTotals).toEqual(expect.arrayContaining([
+      expect(totals).toEqual(expect.arrayContaining([
         { workerName: 'worker-1', total: 65 },
         { workerName: 'worker-2', total: 40 },
+        { workerName: 'worker-3', total: 12 },
       ]));
     });
 
-    it('skips increment when difficulty is invalid', () => {
-      service.increment('addr1', 'worker-1', 0);
-      service.increment('addr1', 'worker-1', -5);
-      service.increment('addr1', 'worker-1', NaN);
-
-      expect(mockRedisClient.hIncrByFloat).not.toHaveBeenCalled();
+    it('filters out workers with zero total', async () => {
+      workerSharesService.getWorkerTotals.mockResolvedValueOnce([
+        { clientName: 'worker-1', shares: 0 },
+      ]);
+      const totals = await service.getWorkerTotals('addr1');
+      expect(totals.find(t => t.workerName === 'worker-1')).toBeUndefined();
     });
 
-    it('skips increment when address is empty', () => {
-      service.increment('', 'worker-1', 25);
+    it('only counts worker deltas owned by the requested address', async () => {
+      service.increment('addr1', 'worker-1', 5);
+      service.increment('addr2', 'worker-1', 100);
+      workerSharesService.getWorkerTotals.mockResolvedValueOnce([]);
 
-      expect(mockRedisClient.hIncrByFloat).not.toHaveBeenCalled();
+      const totals = await service.getWorkerTotals('addr1');
+      expect(totals).toEqual([{ workerName: 'worker-1', total: 5 }]);
+    });
+  });
+
+  describe('drain / confirm', () => {
+    it('confirmAddressFlush removes the flushed delta but preserves residuals', () => {
+      service.increment('addr1', 'worker-1', 10);
+      const snapshot = service.drainAddressDeltas();
+      expect(snapshot.get('addr1')).toBe(10);
+
+      // A new share arrives during the simulated PG await:
+      service.increment('addr1', 'worker-1', 4);
+
+      service.confirmAddressFlush(snapshot);
+
+      // The flush removed 10; the 4 that arrived after is preserved:
+      const after = service.drainAddressDeltas();
+      expect(after.get('addr1')).toBe(4);
+    });
+
+    it('confirmWorkerFlush removes flushed worker amounts and preserves residuals', () => {
+      service.increment('addr1', 'worker-1', 10);
+      const drained = service.drainWorkerDeltas();
+      expect(drained).toEqual([{ address: 'addr1', clientName: 'worker-1', shares: 10 }]);
+
+      service.increment('addr1', 'worker-1', 3);
+      service.confirmWorkerFlush(drained);
+
+      const after = service.drainWorkerDeltas();
+      expect(after).toEqual([{ address: 'addr1', clientName: 'worker-1', shares: 3 }]);
+    });
+
+    it('drainAddressDeltas does NOT clear state on its own — confirm is required', () => {
+      service.increment('addr1', 'worker-1', 10);
+      service.drainAddressDeltas(); // discard return value
+
+      // Still pending until confirm:
+      const drainedAgain = service.drainAddressDeltas();
+      expect(drainedAgain.get('addr1')).toBe(10);
+    });
+
+    it('skips zero and negative deltas from the drain output', () => {
+      service.increment('addr1', 'worker-1', 0);
+      service.increment('addr2', 'worker-2', 5);
+
+      const drained = service.drainAddressDeltas();
+      expect(drained.has('addr1')).toBe(false);
+      expect(drained.get('addr2')).toBe(5);
+    });
+  });
+
+  describe('clearAddressData', () => {
+    it('removes the address delta and all of its worker deltas', () => {
+      service.increment('addr1', 'worker-1', 10);
+      service.increment('addr1', 'worker-2', 5);
+      service.increment('addr2', 'worker-1', 8);
+
+      service.clearAddressData('addr1');
+
+      expect(service.drainAddressDeltas().has('addr1')).toBe(false);
+      expect(service.drainAddressDeltas().get('addr2')).toBe(8);
+
+      const workers = service.drainWorkerDeltas();
+      expect(workers.find(w => w.address === 'addr1')).toBeUndefined();
+      expect(workers).toEqual([{ address: 'addr2', clientName: 'worker-1', shares: 8 }]);
     });
   });
 });

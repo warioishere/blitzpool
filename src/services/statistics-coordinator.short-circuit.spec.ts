@@ -35,6 +35,12 @@ function buildService(mockRedis: any) {
     { options: { type: 'postgres' }, query: jest.fn() } as unknown as DataSource,
     { addSharesBulk: jest.fn().mockResolvedValue(undefined) } as any,
     { addSharesBulk: jest.fn().mockResolvedValue(undefined), addRejectedBulk: jest.fn().mockResolvedValue(undefined) } as any,
+    {
+      drainAddressDeltas: jest.fn().mockReturnValue(new Map()),
+      drainWorkerDeltas: jest.fn().mockReturnValue([]),
+      confirmAddressFlush: jest.fn(),
+      confirmWorkerFlush: jest.fn(),
+    } as any,
   );
   (service as any).redisClient = mockRedis;
   return service;
@@ -172,83 +178,119 @@ describe('StatisticsCoordinator — Tier A: slot-aware short-circuit', () => {
   });
 });
 
-describe('StatisticsCoordinator — Tier B: dirty-set for running totals', () => {
-  it('flushAddressTotals: uses SMEMBERS instead of SCAN when dirty-set is populated', async () => {
-    const mockRedis = makeMockRedis();
-    mockRedis.sMembers.mockResolvedValue(['addr1', 'addr2', 'addr3']);
-    // hGetAll returns 0-delta for all so we don't trip into the writeback path
-    mockRedis.multi = jest.fn(function (this: any) {
-      const ops: any[] = [];
-      const chain: any = {
-        hGetAll: (k: string) => { ops.push(k); return chain; },
-        hIncrByFloat: () => chain,
-        hSet: () => chain,
-        // Return one entry per queued hGetAll, all empty
-        exec: jest.fn().mockImplementation(async () => ops.map(() => ({}))),
-      };
-      return chain;
-    });
-
-    const service = buildService(mockRedis);
-    await (service as any).flushAddressTotals();
-
-    // SMEMBERS was called for the dirty-set
-    expect(mockRedis.sMembers).toHaveBeenCalledWith('coord:dirty:addresses');
-    // SCAN was NOT used as the fallback (set was non-empty)
-    expect(mockRedis.scan).not.toHaveBeenCalled();
-  });
-
-  it('flushAddressTotals: bootstrap fallback SCANs when dirty-set is empty + populates the set', async () => {
-    const mockRedis = makeMockRedis();
-    // First sMembers returns empty, simulating fresh restart with no dirty-set yet
-    mockRedis.sMembers.mockResolvedValue([]);
-    // SCAN returns existing legacy address keys
-    mockRedis.scan
-      .mockResolvedValueOnce({ cursor: '0', keys: ['shares:address:legacy1', 'shares:address:legacy2'] });
-
-    const service = buildService(mockRedis);
-    await (service as any).flushAddressTotals();
-
-    // SMEMBERS first
-    expect(mockRedis.sMembers).toHaveBeenCalledWith('coord:dirty:addresses');
-    // Fallback SCAN
-    expect(mockRedis.scan).toHaveBeenCalled();
-    // Dirty-set backfilled with the canonical entries
-    expect(mockRedis.sAdd).toHaveBeenCalledWith(
-      'coord:dirty:addresses',
-      ['legacy1', 'legacy2'],
+describe('StatisticsCoordinator — in-memory address/worker total flush', () => {
+  function buildServiceWithCache(cache: any, addressSettings: any, workerShares: any) {
+    const service = new StatisticsCoordinatorService(
+      { store: {} } as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      { options: { type: 'postgres' }, query: jest.fn() } as unknown as DataSource,
+      addressSettings,
+      workerShares,
+      cache,
     );
+    (service as any).redisClient = makeMockRedis();
+    return service;
+  }
+
+  it('flushAddressTotals: drains cache, bulk-upserts to PG, then confirms', async () => {
+    const drained = new Map<string, number>([
+      ['addr1', 10],
+      ['addr2', 25],
+    ]);
+    const cache = {
+      drainAddressDeltas: jest.fn().mockReturnValue(drained),
+      drainWorkerDeltas: jest.fn().mockReturnValue([]),
+      confirmAddressFlush: jest.fn(),
+      confirmWorkerFlush: jest.fn(),
+    };
+    const addressSettings = { addSharesBulk: jest.fn().mockResolvedValue(undefined) };
+    const workerShares = { addSharesBulk: jest.fn().mockResolvedValue(undefined) };
+
+    const service = buildServiceWithCache(cache, addressSettings, workerShares);
+    await (service as any).flushAddressTotals();
+
+    expect(cache.drainAddressDeltas).toHaveBeenCalledTimes(1);
+    expect(addressSettings.addSharesBulk).toHaveBeenCalledWith(expect.arrayContaining([
+      { address: 'addr1', shares: 10 },
+      { address: 'addr2', shares: 25 },
+    ]));
+    expect(cache.confirmAddressFlush).toHaveBeenCalledWith(drained);
   });
 
-  it('flushWorkerTotals: SMEMBERS returns "{addr}|{worker}" entries, parses to data keys', async () => {
-    const mockRedis = makeMockRedis();
-    mockRedis.sMembers.mockResolvedValue(['addrA|rig1', 'addrB|rig2']);
-    mockRedis.multi = jest.fn(function (this: any) {
-      const ops: any[] = [];
-      const chain: any = {
-        hGetAll: (k: string) => { ops.push(k); return chain; },
-        hIncrByFloat: () => chain,
-        hSet: () => chain,
-        exec: jest.fn().mockImplementation(async () => ops.map(() => ({}))),
-      };
-      return chain;
-    });
+  it('flushAddressTotals: empty cache returns without touching PG', async () => {
+    const cache = {
+      drainAddressDeltas: jest.fn().mockReturnValue(new Map()),
+      drainWorkerDeltas: jest.fn().mockReturnValue([]),
+      confirmAddressFlush: jest.fn(),
+      confirmWorkerFlush: jest.fn(),
+    };
+    const addressSettings = { addSharesBulk: jest.fn().mockResolvedValue(undefined) };
+    const workerShares = { addSharesBulk: jest.fn().mockResolvedValue(undefined) };
 
-    const service = buildService(mockRedis);
+    const service = buildServiceWithCache(cache, addressSettings, workerShares);
+    await (service as any).flushAddressTotals();
+
+    expect(addressSettings.addSharesBulk).not.toHaveBeenCalled();
+    expect(cache.confirmAddressFlush).not.toHaveBeenCalled();
+  });
+
+  it('flushAddressTotals: PG failure does NOT confirm — residual stays in cache', async () => {
+    const drained = new Map<string, number>([['addr1', 10]]);
+    const cache = {
+      drainAddressDeltas: jest.fn().mockReturnValue(drained),
+      drainWorkerDeltas: jest.fn().mockReturnValue([]),
+      confirmAddressFlush: jest.fn(),
+      confirmWorkerFlush: jest.fn(),
+    };
+    const addressSettings = { addSharesBulk: jest.fn().mockRejectedValue(new Error('PG down')) };
+    const workerShares = { addSharesBulk: jest.fn().mockResolvedValue(undefined) };
+
+    const service = buildServiceWithCache(cache, addressSettings, workerShares);
+    await (service as any).flushAddressTotals();
+
+    expect(addressSettings.addSharesBulk).toHaveBeenCalled();
+    expect(cache.confirmAddressFlush).not.toHaveBeenCalled();
+  });
+
+  it('flushWorkerTotals: drains worker deltas, bulk-upserts, then confirms', async () => {
+    const drained = [
+      { address: 'addrA', clientName: 'rig1', shares: 12 },
+      { address: 'addrB', clientName: 'rig2', shares: 7 },
+    ];
+    const cache = {
+      drainAddressDeltas: jest.fn().mockReturnValue(new Map()),
+      drainWorkerDeltas: jest.fn().mockReturnValue(drained),
+      confirmAddressFlush: jest.fn(),
+      confirmWorkerFlush: jest.fn(),
+    };
+    const addressSettings = { addSharesBulk: jest.fn().mockResolvedValue(undefined) };
+    const workerShares = { addSharesBulk: jest.fn().mockResolvedValue(undefined) };
+
+    const service = buildServiceWithCache(cache, addressSettings, workerShares);
     await (service as any).flushWorkerTotals();
 
-    expect(mockRedis.sMembers).toHaveBeenCalledWith('coord:dirty:workers');
-    // No fallback SCAN — set was non-empty
-    expect(mockRedis.scan).not.toHaveBeenCalled();
+    expect(workerShares.addSharesBulk).toHaveBeenCalledWith(drained);
+    expect(cache.confirmWorkerFlush).toHaveBeenCalledWith(drained);
   });
 
-  it('empty dirty-set + empty SCAN: flushers return immediately without errors', async () => {
-    const mockRedis = makeMockRedis();
-    mockRedis.sMembers.mockResolvedValue([]);
-    mockRedis.scan.mockResolvedValue({ cursor: '0', keys: [] });
+  it('flushWorkerTotals: PG failure does NOT confirm', async () => {
+    const drained = [{ address: 'addrA', clientName: 'rig1', shares: 12 }];
+    const cache = {
+      drainAddressDeltas: jest.fn().mockReturnValue(new Map()),
+      drainWorkerDeltas: jest.fn().mockReturnValue(drained),
+      confirmAddressFlush: jest.fn(),
+      confirmWorkerFlush: jest.fn(),
+    };
+    const addressSettings = { addSharesBulk: jest.fn().mockResolvedValue(undefined) };
+    const workerShares = { addSharesBulk: jest.fn().mockRejectedValue(new Error('PG down')) };
 
-    const service = buildService(mockRedis);
-    await expect((service as any).flushAddressTotals()).resolves.not.toThrow();
-    await expect((service as any).flushWorkerTotals()).resolves.not.toThrow();
+    const service = buildServiceWithCache(cache, addressSettings, workerShares);
+    await (service as any).flushWorkerTotals();
+
+    expect(cache.confirmWorkerFlush).not.toHaveBeenCalled();
   });
 });
