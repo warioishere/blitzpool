@@ -178,7 +178,7 @@ describe('PoolModeHashrateService', () => {
     });
 
     describe('getChart (read path unchanged)', () => {
-        it('uses TimeSlotHelper.getCurrentSlot() and excludes the current incomplete slot', async () => {
+        it('uses TimeSlotHelper.getChartVisibilityCutoffSlot() so just-ended slots stay hidden until flushed', async () => {
             const repo = makeRepo([]);
             const mockRedis = { hIncrByFloat: jest.fn(), expire: jest.fn() };
             const service = new PoolModeHashrateService(repo as any, makeCacheManager(mockRedis) as any);
@@ -199,10 +199,12 @@ describe('PoolModeHashrateService', () => {
             await service.getChart('pplns', '1d');
 
             expect(captured.mode).toBe('pplns');
-            // currentSlot MUST come from TimeSlotHelper (end-time). If a
-            // future refactor inlines Math.floor(now/BUCKET)*BUCKET here,
-            // this assertion breaks — which is the regression we want.
-            expect(captured.currentSlot).toBe(TimeSlotHelper.getCurrentSlot());
+            // currentSlot MUST come from TimeSlotHelper.getChartVisibilityCutoffSlot()
+            // (which subtracts the visibility buffer from now before computing
+            // the slot). If a future refactor reverts to getCurrentSlot() the
+            // chart starts showing not-yet-fully-flushed slots — this
+            // assertion is the canary.
+            expect(captured.currentSlot).toBe(TimeSlotHelper.getChartVisibilityCutoffSlot());
             expect(captured.since).toBeLessThan(captured.currentSlot);
         });
 

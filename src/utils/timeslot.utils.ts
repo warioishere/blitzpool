@@ -11,8 +11,11 @@
 /**
  * Generate array of complete time slot timestamps
  *
- * Returns only complete time slots, excluding the current incomplete slot.
- * All slots use end-time labeling (e.g., slot 20:50 = data from 20:40-20:50).
+ * Returns only slots that are complete AND fully persisted to PG. The
+ * just-ended slot stays hidden for `CHART_VISIBILITY_BUFFER_MS` after it
+ * ended (default 60 s) so the chart never shows a rising/partial datapoint
+ * while the coordinator is still committing the slot's residual to PG.
+ * All slots use end-time labeling (e.g. slot 20:50 = data from 20:40-20:50).
  *
  * @param sinceTime - Start of time range (milliseconds since epoch)
  * @param now - Current time (milliseconds since epoch)
@@ -24,16 +27,26 @@
  * const now = Date.now(); // 20:45
  * const yesterday = now - 24 * 60 * 60 * 1000;
  * const slots = generateCompleteTimeSlots(yesterday, now);
- * // Returns: [..., 20:10, 20:20, 20:30, 20:40]
- * // Note: 20:50 excluded (current incomplete slot)
+ * // Returns: [..., 20:10, 20:20, 20:30]
+ * // Slot 20:40 hidden until 20:51 (60 s after its 20:50 end? — wait,
+ * //   20:40-end is 20:40 itself in end-time labelling; visible at 20:41).
+ * // 20:50 (current) is hidden anyway.
  */
+import { CHART_VISIBILITY_BUFFER_MS } from './time-slot.helper';
+
 export function generateCompleteTimeSlots(
   sinceTime: number,
   now: number,
   slotDurationMs: number = 10 * 60 * 1000, // 10 minutes default
 ): number[] {
-  // Calculate current incomplete slot (end-time labeled)
-  const currentSlot = Math.floor(now / slotDurationMs) * slotDurationMs + slotDurationMs;
+  // Shift `now` back by the visibility buffer so the slot that ended in the
+  // last `CHART_VISIBILITY_BUFFER_MS` is treated as not-yet-visible. This
+  // matches the chart-side filter in TimeSlotHelper.getChartVisibilityCutoffSlot().
+  const visibleNow = now - CHART_VISIBILITY_BUFFER_MS;
+
+  // Calculate cutoff slot (end-time labeled). Slots with end-time < cutoff
+  // are eligible for display.
+  const currentSlot = Math.floor(visibleNow / slotDurationMs) * slotDurationMs + slotDurationMs;
 
   // Calculate first complete slot in range (end-time labeled)
   const startSlot = Math.floor(sinceTime / slotDurationMs) * slotDurationMs + slotDurationMs;

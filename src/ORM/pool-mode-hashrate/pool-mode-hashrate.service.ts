@@ -108,7 +108,9 @@ export class PoolModeHashrateService implements OnModuleInit {
      */
     async getChart(mode: MiningMode, range: '1d' | '3d' | '7d' = '1d'): Promise<{ label: string; data: number }[]> {
         const diffDays = range === '7d' ? 7 : range === '3d' ? 3 : 1;
-        const currentSlot = TimeSlotHelper.getCurrentSlot();
+        // Hide both the current in-progress slot AND the just-ended slot
+        // until our flush mechanism has had a chance to fully commit it.
+        const currentSlot = TimeSlotHelper.getChartVisibilityCutoffSlot();
         const since = Date.now() - diffDays * 24 * 60 * 60 * 1000;
         const limit = diffDays * 144;
 

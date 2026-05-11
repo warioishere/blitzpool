@@ -479,8 +479,7 @@ export class ClientStatisticsService implements OnModuleInit {
     }
 
     const now = Date.now();
-    const coeff = 1000 * 60 * 10; // 10-minute slots
-    const currentSlot = Math.floor(now / coeff) * coeff + coeff; // Current incomplete slot (end-time labeled)
+    const currentSlot = TimeSlotHelper.getChartVisibilityCutoffSlot(); // Chart-visible cutoff: hides slot until flush has committed
 
     const since = new Date(now - diffDays * 24 * 60 * 60 * 1000);
     const limit = diffDays * 144;
@@ -539,8 +538,7 @@ export class ClientStatisticsService implements OnModuleInit {
     }
 
     const now = Date.now();
-    const coeff = 1000 * 60 * 10; // 10-minute slots
-    const currentSlot = Math.floor(now / coeff) * coeff + coeff; // Current incomplete slot (end-time labeled)
+    const currentSlot = TimeSlotHelper.getChartVisibilityCutoffSlot(); // Chart-visible cutoff: hides slot until flush has committed
 
     const since = new Date(now - diffDays * 24 * 60 * 60 * 1000);
     const limit = diffDays * 144;
@@ -601,8 +599,7 @@ export class ClientStatisticsService implements OnModuleInit {
     }
 
     const now = Date.now();
-    const coeff = 1000 * 60 * 10; // 10-minute slots
-    const currentSlot = Math.floor(now / coeff) * coeff + coeff; // Current incomplete slot (end-time labeled)
+    const currentSlot = TimeSlotHelper.getChartVisibilityCutoffSlot(); // Chart-visible cutoff: hides slot until flush has committed
 
     const since = new Date(now - diffDays * 24 * 60 * 60 * 1000);
     const limit = diffDays * 144;
@@ -684,8 +681,7 @@ export class ClientStatisticsService implements OnModuleInit {
     sessionId: string,
   ) {
     const now = Date.now();
-    const coeff = 1000 * 60 * 10; // 10-minute slots
-    const currentSlot = Math.floor(now / coeff) * coeff + coeff; // Current incomplete slot (end-time labeled)
+    const currentSlot = TimeSlotHelper.getChartVisibilityCutoffSlot(); // Chart-visible cutoff: hides slot until flush has committed
     const yesterday = new Date(now - 24 * 60 * 60 * 1000);
 
     const result = await this.clientStatisticsRepository
@@ -716,8 +712,7 @@ export class ClientStatisticsService implements OnModuleInit {
     }>
   > {
     const now = Date.now();
-    const coeff = 1000 * 60 * 10; // 10-minute slots
-    const currentSlot = Math.floor(now / coeff) * coeff + coeff; // Current incomplete slot (end-time labeled)
+    const currentSlot = TimeSlotHelper.getChartVisibilityCutoffSlot(); // Chart-visible cutoff: hides slot until flush has committed
 
     const query = this.clientStatisticsRepository
       .createQueryBuilder('stat')
@@ -753,8 +748,7 @@ export class ClientStatisticsService implements OnModuleInit {
     }>
   > {
     const now = Date.now();
-    const coeff = 1000 * 60 * 10; // 10-minute slots
-    const currentSlot = Math.floor(now / coeff) * coeff + coeff; // Current incomplete slot (end-time labeled)
+    const currentSlot = TimeSlotHelper.getChartVisibilityCutoffSlot(); // Chart-visible cutoff: hides slot until flush has committed
 
     const query = this.clientStatisticsRepository
       .createQueryBuilder('stat')
