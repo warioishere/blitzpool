@@ -43,6 +43,10 @@ function buildService(repos: Record<string, { query: jest.Mock }>) {
             confirmAddressFlush: jest.fn(),
             confirmWorkerFlush: jest.fn(),
         } as any,                                            // shareTotalsCache
+        {
+            drainSlotDeltas: jest.fn().mockReturnValue(new Map()),
+            confirmFlush: jest.fn(),
+        } as any,                            // poolModeHashrateService
     );
     return service;
 }

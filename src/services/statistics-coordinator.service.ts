@@ -12,6 +12,7 @@ import { ClientStatisticsEntity } from '../ORM/client-statistics/client-statisti
 import { ClientRejectedStatisticsEntity } from '../ORM/client-rejected-statistics/client-rejected-statistics.entity';
 import { AddressSettingsService } from '../ORM/address-settings/address-settings.service';
 import { WorkerSharesService } from '../ORM/worker-shares/worker-shares.service';
+import { PoolModeHashrateService } from '../ORM/pool-mode-hashrate/pool-mode-hashrate.service';
 import { ShareTotalsCacheService } from './share-totals-cache.service';
 import { TimeSlotHelper } from '../utils/time-slot.helper';
 
@@ -81,6 +82,7 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
     private readonly addressSettingsService: AddressSettingsService,
     private readonly workerSharesService: WorkerSharesService,
     private readonly shareTotalsCache: ShareTotalsCacheService,
+    private readonly poolModeHashrateService: PoolModeHashrateService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -417,126 +419,40 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
   }
 
   /**
-   * Flush per-mode pool hashrate from Redis to database.
-   * Pattern: pool:mode-hashrate:{timestamp} -> HASH {solo, pplns, group-solo}
+   * Flush per-mode pool hashrate from the in-memory accumulator to PG.
    *
-   * Replaces the previous direct-PG-per-share write path that hammered the
-   * 3 hot rows of `pool_mode_hashrate` for the current slot under load
-   * (~250 shares/s × 3 rows starved the 10-conn PG pool with row locks
-   * and bled into other coordinator flushes — see incident 2026-05-05).
+   * The in-memory `PoolModeHashrateService` Map holds all un-flushed deltas
+   * across all slots. Drain captures a snapshot of every slot's mode→diff
+   * deltas; the bulk upsert uses `ON CONFLICT (mode, time) DO UPDATE
+   * SET diff = diff + EXCLUDED.diff` so incremental partial flushes
+   * accumulate the slot's data into PG. Confirm subtracts the snapshot
+   * amounts from the cache, leaving any shares that arrived during the
+   * await as residuals for the next flush.
    *
-   * Atomicity: read snapshot via HGETALL, upsert to PG, then atomically
-   * `HINCRBYFLOAT(-delta)` exactly what we flushed. Any straggler share
-   * that wrote into the same key field between HGETALL and the decrement
-   * is preserved — its increment stays in Redis for the next flush. We
-   * intentionally do NOT DEL the key after flush; the writer's
-   * REDIS_STATISTICS_TTL reaps stale zero hashes after 24h. Mirrors the
-   * race-safe pattern in `flushAddressTotals`.
+   * Crash recovery: in-memory state is lost on a hard crash. Up to ~60s
+   * of unflushed slot data is gone. The `getChartVisibilityCutoffSlot()`
+   * filter holds new slots back by the same 60s so a partial slot
+   * never appears on a chart between crash and next flush.
    */
   private async flushPoolModeHashrate(): Promise<void> {
-    const currentSlot = TimeSlotHelper.getCurrentSlot();
-    if (this.lastFlushedSlot.poolModeHashrate === currentSlot) return;
+    const drained = this.poolModeHashrateService.drainSlotDeltas();
+    if (drained.size === 0) return;
 
-    const pattern = 'pool:mode-hashrate:*';
-    const keys = await this.scanKeys(pattern);
-
-    if (keys.length === 0) {
-      this.lastFlushedSlot.poolModeHashrate = currentSlot;
-      return;
-    }
-    type Snapshot = { key: string; timeSlot: number; fields: Array<{ mode: string; diff: number }> };
-    const snapshots: Snapshot[] = [];
-
-    // Pre-filter current slot, then pipeline the HGETALL reads. Same shape
-    // as the other flushers — sequential awaits across many keys add up.
-    const eligibleKeys: string[] = [];
-    const eligibleTimes: number[] = [];
-    for (const key of keys) {
-      const timeSlot = parseInt(key.split(':')[2], 10);
-      if (!Number.isFinite(timeSlot) || timeSlot === currentSlot) continue;
-      eligibleKeys.push(key);
-      eligibleTimes.push(timeSlot);
-    }
-
-    if (eligibleKeys.length === 0) {
-      this.lastFlushedSlot.poolModeHashrate = currentSlot;
-      return;
-    }
-
-    const hashResults = await this.pipelinedHGetAll(eligibleKeys);
-
-    for (let i = 0; i < eligibleKeys.length; i++) {
-      const key = eligibleKeys[i];
-      const timeSlot = eligibleTimes[i];
-      const data = hashResults[i];
-      try {
-        if (!data || Object.keys(data).length === 0) continue;
-
-        const fields: Array<{ mode: string; diff: number }> = [];
-        for (const [mode, value] of Object.entries(data)) {
-          const diff = parseFloat(value as string) || 0;
-          if (diff > 0) fields.push({ mode, diff });
-        }
-
-        if (fields.length > 0) snapshots.push({ key, timeSlot, fields });
-      } catch (err) {
-        console.error(`[StatisticsCoordinator] Failed to parse pool-mode-hashrate snapshot from ${key}:`, err);
-      }
-    }
-
-    if (snapshots.length === 0) {
-      this.lastFlushedSlot.poolModeHashrate = currentSlot;
-      return;
-    }
-
-    // Pass 2: bulk-upsert to PG. ON CONFLICT (mode, time) means a slot
-    // re-flushed (e.g. coordinator crash between PG write and Redis
-    // decrement) would double-count — but the Redis decrement covers
-    // exactly what was flushed, so re-entry only re-flushes whatever
-    // wasn't decremented yet.
     const records: Array<{ mode: string; time: number; diff: number }> = [];
-    for (const snap of snapshots) {
-      for (const f of snap.fields) {
-        records.push({ mode: f.mode, time: snap.timeSlot, diff: f.diff });
+    for (const [time, modeMap] of drained) {
+      for (const [mode, diff] of modeMap) {
+        records.push({ mode, time, diff });
       }
     }
 
     try {
       await this.bulkUpsertPoolModeHashrate(records);
-      console.log(`[StatisticsCoordinator] Flushed ${records.length} pool mode-hashrate records across ${snapshots.length} slots`);
-      this.lastFlushedSlot.poolModeHashrate = currentSlot;
+      this.poolModeHashrateService.confirmFlush(drained);
     } catch (err) {
       console.error(
-        `[StatisticsCoordinator] Bulk pool-mode-hashrate flush failed (${(err as Error).message}); deltas remain in Redis for retry`,
+        `[StatisticsCoordinator] Bulk pool-mode-hashrate flush failed (${(err as Error).message}); deltas remain in cache for retry`,
       );
-      return;  // do NOT decrement — the data is still in Redis, retry next tick
-    }
-
-    // Pass 3: atomically decrement the exact deltas we just persisted.
-    // Stragglers that fired during pass 2 stay in Redis and get flushed
-    // on the next tick. Pipelined to avoid 3 × N round-trips.
-    try {
-      const pipeline = this.redisClient.multi();
-      for (const snap of snapshots) {
-        for (const f of snap.fields) {
-          pipeline.hIncrByFloat(snap.key, f.mode, -f.diff);
-        }
-      }
-      await pipeline.exec();
-    } catch (err) {
-      console.error(
-        `[StatisticsCoordinator] Failed to decrement pool-mode-hashrate Redis keys after successful PG flush:`,
-        err,
-      );
-      // Database has the data — next coordinator tick will see the same
-      // (un-decremented) values and ON CONFLICT add them again. To prevent
-      // double-count on re-entry, we ALSO need to retry the decrement on
-      // the next tick; the easiest way is to leave the keys as-is and
-      // accept that the same values will get re-flushed and the
-      // ON-CONFLICT delta will absorb them. Better yet — we treat this
-      // log as the alarm and let an operator look. With pipelining it
-      // failing means Redis is unhealthy; bigger problems than double-
-      // count.
+      // Snapshot stays in the cache; next flush retries automatically.
     }
   }
 

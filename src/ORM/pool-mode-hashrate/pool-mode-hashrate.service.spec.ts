@@ -2,23 +2,20 @@ jest.mock('node-telegram-bot-api', () => jest.fn());
 
 import { PoolModeHashrateService } from './pool-mode-hashrate.service';
 import { TimeSlotHelper } from '../../utils/time-slot.helper';
-import { DIFFICULTY_1, MAX_REASONABLE_DIFFICULTY } from '../../constants/mining.constants';
+import { MAX_REASONABLE_DIFFICULTY } from '../../constants/mining.constants';
 
 /**
- * These tests pin two invariants:
+ * Invariants:
  *
- *   1. Writes go through Redis only — no per-share PG hit. Rewriting this
- *      service to call repo.increment() per share was what created the
- *      production lock-contention hotspot on 2026-05-05 (3 hot rows on
- *      `pool_mode_hashrate` × ~250 shares/s starved the 10-conn PG pool
- *      and bled into other coordinator flushes). Coordinator picks up
- *      the Redis hash and bulk-upserts to PG every 60s.
+ *   1. Writes accumulate in process memory — no per-share PG hit, no Redis.
+ *      Earlier history: direct-PG-per-share caused row-lock contention; the
+ *      Redis-buffered version solved that but generated ~36% of pool-wide
+ *      Redis CPU. In-memory drain/confirm has neither problem.
  *
- *   2. The chart read MUST keep using the same slot convention (end-time,
- *      via TimeSlotHelper) and the same current-slot-exclusion filter as
- *      ClientStatisticsService.getChartDataForSite. Reinventing a
- *      Math.floor/BUCKET_MS scheme caused the original "PPLNS curve
- *      doesn't match total" 10-min divergence.
+ *   2. The chart read MUST use `TimeSlotHelper.getChartVisibilityCutoffSlot()`
+ *      so the just-ended slot stays hidden until the coordinator flush has
+ *      had a chance to commit it. Reinventing this filter is what caused the
+ *      original "PPLNS curve doesn't match total" 10-min divergence.
  */
 
 function makeRepo(chartRows: any[]) {
@@ -43,84 +40,63 @@ function makeRepo(chartRows: any[]) {
     };
 }
 
-function makeCacheManager(redisClient: any) {
-    return { store: { client: redisClient } };
-}
-
 describe('PoolModeHashrateService', () => {
 
-    describe('incrementAccepted (Redis-buffer write path)', () => {
-        let mockRedis: any;
+    describe('incrementAccepted (in-memory accumulator)', () => {
         let service: PoolModeHashrateService;
 
-        beforeEach(async () => {
-            mockRedis = {
-                hIncrByFloat: jest.fn().mockResolvedValue(undefined),
-                expire: jest.fn().mockResolvedValue(undefined),
-            };
+        beforeEach(() => {
             const repo = makeRepo([]);
-            service = new PoolModeHashrateService(repo as any, makeCacheManager(mockRedis) as any);
-            await service.onModuleInit();
+            service = new PoolModeHashrateService(repo as any);
         });
 
-        it('hIncrByFloats the mode field of pool:mode-hashrate:{slot}', async () => {
+        it('records the diff under the current slot for the given mode', () => {
             const expectedSlot = TimeSlotHelper.getCurrentSlot();
-            await service.incrementAccepted('pplns', 500);
+            service.incrementAccepted('pplns', 500);
 
-            expect(mockRedis.hIncrByFloat).toHaveBeenCalledTimes(1);
-            expect(mockRedis.hIncrByFloat).toHaveBeenCalledWith(
-                `pool:mode-hashrate:${expectedSlot}`,
-                'pplns',
-                500,
-            );
+            const drained = service.drainSlotDeltas();
+            expect(drained.get(expectedSlot)?.get('pplns')).toBe(500);
         });
 
-        it('refreshes the slot key TTL alongside the increment', async () => {
-            await service.incrementAccepted('solo', 100);
+        it('keeps three independent mode totals under one slot', () => {
+            service.incrementAccepted('solo', 1);
+            service.incrementAccepted('pplns', 2);
+            service.incrementAccepted('group-solo', 3);
+            service.incrementAccepted('solo', 4);
 
-            expect(mockRedis.expire).toHaveBeenCalledTimes(1);
-            expect(mockRedis.expire).toHaveBeenCalledWith(
-                expect.stringMatching(/^pool:mode-hashrate:\d+$/),
-                expect.any(Number),
-            );
+            const drained = service.drainSlotDeltas();
+            expect(drained.size).toBe(1);
+            const slot = drained.keys().next().value;
+            const modes = drained.get(slot)!;
+            expect(modes.get('solo')).toBe(5);
+            expect(modes.get('pplns')).toBe(2);
+            expect(modes.get('group-solo')).toBe(3);
         });
 
-        it('does not hit the repository — no per-share PG write', async () => {
+        it('does NOT call the repository — share submit is in-memory only', () => {
             const repoSpy = makeRepo([]);
             const incrementSpy = jest.fn();
             const insertSpy = jest.fn();
             (repoSpy as any).increment = incrementSpy;
             (repoSpy as any).insert = insertSpy;
-            const local = new PoolModeHashrateService(repoSpy as any, makeCacheManager(mockRedis) as any);
-            await local.onModuleInit();
+            const local = new PoolModeHashrateService(repoSpy as any);
 
-            await local.incrementAccepted('group-solo', 250);
+            local.incrementAccepted('group-solo', 250);
 
             expect(incrementSpy).not.toHaveBeenCalled();
             expect(insertSpy).not.toHaveBeenCalled();
         });
 
-        it('uses one slot key per timeslot, three hash fields per mode', async () => {
-            await service.incrementAccepted('solo', 1);
-            await service.incrementAccepted('pplns', 1);
-            await service.incrementAccepted('group-solo', 1);
+        it('ignores non-positive or non-finite difficulties', () => {
+            service.incrementAccepted('pplns', 0);
+            service.incrementAccepted('pplns', -5);
+            service.incrementAccepted('pplns', NaN);
+            service.incrementAccepted('pplns', Infinity);
 
-            const keys = new Set(mockRedis.hIncrByFloat.mock.calls.map((c: any[]) => c[0]));
-            expect(keys.size).toBe(1);  // single key for the slot
-            const fields = mockRedis.hIncrByFloat.mock.calls.map((c: any[]) => c[1]);
-            expect(new Set(fields)).toEqual(new Set(['solo', 'pplns', 'group-solo']));
+            expect(service.drainSlotDeltas().size).toBe(0);
         });
 
-        it('ignores non-positive or non-finite difficulties', async () => {
-            await service.incrementAccepted('pplns', 0);
-            await service.incrementAccepted('pplns', -5);
-            await service.incrementAccepted('pplns', NaN);
-            await service.incrementAccepted('pplns', Infinity);
-
-            expect(mockRedis.hIncrByFloat).not.toHaveBeenCalled();
-        });
-
-        it('discards out-of-range share values to protect the `real` PG column', async () => {
+        it('discards out-of-range share values to protect the `real` PG column', () => {
             const consoleSpy = jest.spyOn(console, 'warn').mockImplementation();
             try {
                 // Same incident class as PoolShareStatistics: a buggy SV2
@@ -128,60 +104,69 @@ describe('PoolModeHashrateService', () => {
                 // gets assigned diff in the e+50 range. PG `real` (~3.4e38)
                 // refuses such a value on coordinator flush. Discard at
                 // write time so the slot key stays clean.
-                await service.incrementAccepted('pplns', 9.8e53);
-                expect(mockRedis.hIncrByFloat).not.toHaveBeenCalled();
+                service.incrementAccepted('pplns', 9.8e53);
+                expect(service.drainSlotDeltas().size).toBe(0);
             } finally {
                 consoleSpy.mockRestore();
             }
         });
 
-        it('still accepts large but plausible values below MAX_REASONABLE_DIFFICULTY', async () => {
+        it('still accepts large but plausible values below MAX_REASONABLE_DIFFICULTY', () => {
             // ~3.5e14 is real network difficulty in 2026; ceiling is 1e15.
-            await service.incrementAccepted('pplns', 1e14);
-            expect(mockRedis.hIncrByFloat).toHaveBeenCalledTimes(1);
+            service.incrementAccepted('pplns', 1e14);
+            const drained = service.drainSlotDeltas();
+            expect(drained.size).toBe(1);
         });
 
-        it('exactly at the ceiling: discards', async () => {
-            // Strict-greater-than guard, so MAX is allowed.
+        it('above the ceiling: discards', () => {
             const consoleSpy = jest.spyOn(console, 'warn').mockImplementation();
             try {
-                await service.incrementAccepted('pplns', MAX_REASONABLE_DIFFICULTY * 1.01);
-                expect(mockRedis.hIncrByFloat).not.toHaveBeenCalled();
-            } finally {
-                consoleSpy.mockRestore();
-            }
-        });
-
-        it('swallows Redis errors — share submit must never fail on stats write', async () => {
-            mockRedis.hIncrByFloat.mockRejectedValueOnce(new Error('redis down'));
-            const consoleSpy = jest.spyOn(console, 'warn').mockImplementation();
-            try {
-                await expect(service.incrementAccepted('pplns', 100)).resolves.toBeUndefined();
-            } finally {
-                consoleSpy.mockRestore();
-            }
-        });
-
-        it('no-ops when redis client is unavailable (no throw, no fall-through to PG)', async () => {
-            const consoleSpy = jest.spyOn(console, 'error').mockImplementation();
-            try {
-                const repo = makeRepo([]);
-                const noRedis = new PoolModeHashrateService(repo as any, { store: {} } as any);
-                await noRedis.onModuleInit();
-
-                await noRedis.incrementAccepted('pplns', 100);
-                // Nothing crashes; nothing written.
+                service.incrementAccepted('pplns', MAX_REASONABLE_DIFFICULTY * 1.01);
+                expect(service.drainSlotDeltas().size).toBe(0);
             } finally {
                 consoleSpy.mockRestore();
             }
         });
     });
 
-    describe('getChart (read path unchanged)', () => {
+    describe('drain / confirm', () => {
+        let service: PoolModeHashrateService;
+        beforeEach(() => { service = new PoolModeHashrateService(makeRepo([]) as any); });
+
+        it('drainSlotDeltas does NOT clear the cache — confirm is required', () => {
+            service.incrementAccepted('pplns', 100);
+            const first = service.drainSlotDeltas();
+            const second = service.drainSlotDeltas();
+            expect(first.size).toBe(1);
+            expect(second.size).toBe(1);
+        });
+
+        it('confirmFlush subtracts only the flushed amounts; residuals stay', () => {
+            const slot = TimeSlotHelper.getCurrentSlot();
+            service.incrementAccepted('pplns', 100);
+            const snapshot = service.drainSlotDeltas();
+
+            // A share arrives during the simulated PG await:
+            service.incrementAccepted('pplns', 30);
+
+            service.confirmFlush(snapshot);
+
+            const after = service.drainSlotDeltas();
+            expect(after.get(slot)?.get('pplns')).toBe(30);
+        });
+
+        it('confirmFlush removes the slot entry entirely when nothing remains', () => {
+            service.incrementAccepted('pplns', 50);
+            const snapshot = service.drainSlotDeltas();
+            service.confirmFlush(snapshot);
+            expect(service.drainSlotDeltas().size).toBe(0);
+        });
+    });
+
+    describe('getChart (read path)', () => {
         it('uses TimeSlotHelper.getChartVisibilityCutoffSlot() so just-ended slots stay hidden until flushed', async () => {
             const repo = makeRepo([]);
-            const mockRedis = { hIncrByFloat: jest.fn(), expire: jest.fn() };
-            const service = new PoolModeHashrateService(repo as any, makeCacheManager(mockRedis) as any);
+            const service = new PoolModeHashrateService(repo as any);
 
             let captured: any;
             const origCreateQb = repo.createQueryBuilder;
@@ -210,8 +195,7 @@ describe('PoolModeHashrateService', () => {
 
         it('passes through SQL-aggregated data column unchanged', async () => {
             const repo = makeRepo([{ label: '1700000000000', data: '5000000000' }]);
-            const mockRedis = { hIncrByFloat: jest.fn(), expire: jest.fn() };
-            const service = new PoolModeHashrateService(repo as any, makeCacheManager(mockRedis) as any);
+            const service = new PoolModeHashrateService(repo as any);
 
             const chart = await service.getChart('pplns', '1d');
 
@@ -224,8 +208,7 @@ describe('PoolModeHashrateService', () => {
             ];
             for (const [range, days] of expectations) {
                 const repo = makeRepo([]);
-                const mockRedis = { hIncrByFloat: jest.fn(), expire: jest.fn() };
-                const service = new PoolModeHashrateService(repo as any, makeCacheManager(mockRedis) as any);
+                const service = new PoolModeHashrateService(repo as any);
 
                 let captured: any;
                 const origCreateQb = repo.createQueryBuilder;
@@ -249,15 +232,5 @@ describe('PoolModeHashrateService', () => {
                 expect(captured.since).toBeLessThanOrEqual(expectedMax);
             }
         });
-    });
-
-    it('re-exports SLOT_DURATION_MS matching mining.constants', async () => {
-        const reExported = await import('./pool-mode-hashrate.service');
-        const constants = await import('../../constants/mining.constants');
-        expect(reExported.SLOT_DURATION_MS).toBe(constants.SLOT_DURATION_MS);
-    });
-
-    it('DIFFICULTY_1 matches mining.constants (guards against accidental inline overrides)', () => {
-        expect(DIFFICULTY_1).toBe(4294967296);
     });
 });

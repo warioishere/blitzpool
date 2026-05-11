@@ -1,8 +1,6 @@
-import { Injectable, Inject, OnModuleInit } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import { Cache } from 'cache-manager';
 
 import { PoolModeHashrateEntity } from './pool-mode-hashrate.entity';
 import type { MiningMode } from '../../services/mining-mode.service';
@@ -10,62 +8,46 @@ import { TimeSlotHelper } from '../../utils/time-slot.helper';
 import {
     DIFFICULTY_1,
     MAX_REASONABLE_DIFFICULTY,
-    REDIS_STATISTICS_TTL,
     SLOT_DURATION_MS,
 } from '../../constants/mining.constants';
 
 /**
- * Per-mode pool-wide hashrate stats, keyed on the same 10-min end-time slots
- * as `client_statistics` (see TimeSlotHelper). Driven by every accepted share
- * after the stratum layer's routing decision; queried by /api/info/chart/mode
- * and /api/pplns/chart. Same slot convention + same hashrate formula as
- * ClientStatisticsService so splash curves align to one x-axis.
+ * Per-mode pool-wide hashrate stats, keyed on 10-min end-time slots.
  *
- * Writes go through Redis — `HINCRBYFLOAT pool:mode-hashrate:{slot} {mode}` —
- * and StatisticsCoordinatorService bulk-flushes to Postgres every 60s. The
- * previous implementation wrote directly to Postgres on every share, which
- * created a row-lock hotspot on the 3 mode rows of the current slot under
- * sustained load (~250 shares/s pool-wide → 250 UPDATEs/s on 3 rows). That
- * starved the 10-connection PG pool and bled into `pool_share_statistics`
- * coordinator flushes (which then dropped slots on /api/info/chart). Moving
- * the writer onto the Redis-buffer pattern shared by every other per-share
- * counter eliminates the contention; reads keep querying the same table
- * unchanged.
+ * Writes accumulate in process memory (`Map<slot, Map<mode, diff>>`) and the
+ * coordinator drains/flushes to Postgres every 60s. Reads keep querying the
+ * same table as before. The chart-visibility cutoff in
+ * `TimeSlotHelper.getChartVisibilityCutoffSlot()` guarantees the most
+ * recent visible datapoint is fully flushed before it becomes chart-eligible.
+ *
+ * History: Originally direct PG per share — created row-lock hotspots on
+ * the 3 current-slot rows. Was moved to Redis HINCRBYFLOAT to break the
+ * lock contention, but the Redis SCAN/HGETALL/HINCRBYFLOAT-back dance
+ * became its own perf problem (~36 % of total Redis CPU pool-wide).
+ * Now lives in process memory: ~0 Redis ops on the hot path, single-threaded
+ * Node guarantees atomicity without locks.
  */
 @Injectable()
-export class PoolModeHashrateService implements OnModuleInit {
+export class PoolModeHashrateService {
+
+    /**
+     * In-memory accumulator. `slotDeltas.get(slot).get(mode)` is the
+     * un-flushed delta for that mode in that slot. Coordinator drains all
+     * slots on its 60s tick, including the current in-progress slot
+     * (which the chart filter hides until 60s after it ends anyway).
+     */
+    private readonly slotDeltas = new Map<number, Map<MiningMode, number>>();
 
     constructor(
         @InjectRepository(PoolModeHashrateEntity)
         private readonly repo: Repository<PoolModeHashrateEntity>,
-        @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
     ) {}
 
-    private redisClient: any = null;
-
-    async onModuleInit(): Promise<void> {
-        try {
-            const store: any = this.cacheManager.store;
-            if (store && store.client) {
-                this.redisClient = store.client;
-                console.log('[PoolModeHashrate] Using Redis for atomic per-share increments; coordinator flushes to Postgres every 60s');
-            } else {
-                console.error('[PoolModeHashrate] Redis not available — per-share mode-hashrate writes will be silently dropped');
-            }
-        } catch (err) {
-            console.error('[PoolModeHashrate] Failed to access Redis client:', err);
-        }
-    }
-
     /**
-     * Add `difficulty` to the current end-time slot for `mode`. Atomic
-     * Redis hincrby; coordinator picks up the slot once it's complete and
-     * bulk-upserts into `pool_mode_hashrate`.
-     *
-     * Errors are swallowed so a failed stats write never blocks a share
-     * submit — same behaviour as before, just on a different storage.
+     * Add `difficulty` to the current end-time slot for `mode`. Synchronous,
+     * non-throwing — failed stats writes must never block share submission.
      */
-    async incrementAccepted(mode: MiningMode, difficulty: number): Promise<void> {
+    incrementAccepted(mode: MiningMode, difficulty: number): void {
         if (!Number.isFinite(difficulty) || difficulty <= 0) return;
 
         // Defense-in-depth ceiling. The PG `pool_mode_hashrate.diff` column
@@ -80,31 +62,61 @@ export class PoolModeHashrateService implements OnModuleInit {
             return;
         }
 
-        if (!this.redisClient) return;
-
         const slot = TimeSlotHelper.getCurrentSlot();
-        const key = `pool:mode-hashrate:${slot}`;
+        let modeMap = this.slotDeltas.get(slot);
+        if (!modeMap) {
+            modeMap = new Map();
+            this.slotDeltas.set(slot, modeMap);
+        }
+        modeMap.set(mode, (modeMap.get(mode) ?? 0) + difficulty);
+    }
 
-        try {
-            // hash field per mode so all 3 modes for the same slot share
-            // one Redis key — coordinator can flush them in a single
-            // hGetAll round-trip per slot.
-            await Promise.all([
-                this.redisClient.hIncrByFloat(key, mode, difficulty),
-                this.redisClient.expire(key, REDIS_STATISTICS_TTL),
-            ]);
-        } catch (err) {
-            console.warn(`[PoolModeHashrate] Redis increment failed for ${mode}:`, (err as Error).message);
+    /**
+     * Coordinator API — return a snapshot of all currently-pending slot
+     * deltas. Internal map is NOT cleared; `confirmFlush()` must be called
+     * after the PG upsert succeeds. Any shares that arrive between drain
+     * and confirm are preserved as residuals.
+     */
+    drainSlotDeltas(): Map<number, Map<MiningMode, number>> {
+        const snapshot = new Map<number, Map<MiningMode, number>>();
+        for (const [slot, modeMap] of this.slotDeltas) {
+            const copy = new Map<MiningMode, number>();
+            for (const [mode, diff] of modeMap) {
+                if (diff > 0) copy.set(mode, diff);
+            }
+            if (copy.size > 0) snapshot.set(slot, copy);
+        }
+        return snapshot;
+    }
+
+    /**
+     * Coordinator API — subtract a previously-drained snapshot. Residuals
+     * (concurrent increments that happened during the await) remain.
+     */
+    confirmFlush(flushed: Map<number, Map<MiningMode, number>>): void {
+        for (const [slot, modeMap] of flushed) {
+            const current = this.slotDeltas.get(slot);
+            if (!current) continue;
+            for (const [mode, flushedAmount] of modeMap) {
+                const have = current.get(mode) ?? 0;
+                const residual = have - flushedAmount;
+                if (residual <= 0) {
+                    current.delete(mode);
+                } else {
+                    current.set(mode, residual);
+                }
+            }
+            if (current.size === 0) {
+                this.slotDeltas.delete(slot);
+            }
         }
     }
 
     /**
      * Chart data for a single mode over the given range in the shape
      * [{ label, data }]. Mirrors ClientStatisticsService.getChartDataForSite
-     * exactly: end-time-labeled 10-min slots, current incomplete slot
-     * excluded, hashrate = shares × DIFFICULTY_1 / 600s. Reading the same
-     * way it's read elsewhere means splash sees new data points on all
-     * curves at the same moment instead of one jumping ahead.
+     * exactly: end-time-labeled 10-min slots; just-ended / in-progress slots
+     * hidden via `getChartVisibilityCutoffSlot()`; hashrate = shares × DIFFICULTY_1 / 600s.
      */
     async getChart(mode: MiningMode, range: '1d' | '3d' | '7d' = '1d'): Promise<{ label: string; data: number }[]> {
         const diffDays = range === '7d' ? 7 : range === '3d' ? 3 : 1;
