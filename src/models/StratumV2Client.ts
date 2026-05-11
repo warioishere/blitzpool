@@ -69,6 +69,8 @@ import {
   serializeRequestExtensionsError,
   SV2_EXTENSION_NEGOTIATION_ID,
 } from './sv2/sv2-messages';
+import { resolveShareWorkerNameFromTlv } from './sv2/sv2-extensions-messages';
+import { SV2_EXTENSION_TYPE_WORKER_ID } from './sv2/sv2-constants';
 import {
   deserializeOpenExtendedMiningChannel,
   serializeOpenExtendedMiningChannelSuccess,
@@ -157,6 +159,11 @@ const SV2_MSG_TYPE_NAMES: Record<number, string> = {
   0x76: 'TDP_SubmitSolution',
 };
 
+/** SV2 mining extensions the pool advertises support for. */
+const SUPPORTED_MINING_EXTENSIONS = new Set<number>([
+  SV2_EXTENSION_TYPE_WORKER_ID,
+]);
+
 export class StratumV2Client {
   // Connection state
   private noiseSession: Sv2NoiseSession;
@@ -183,6 +190,14 @@ export class StratumV2Client {
   private vendorInfo: string = '';
   public sessionId: string;
   private sessionStart: Date;
+
+  /**
+   * SV2 extensions the JDC/miner negotiated via ext 0x0001 RequestExtensions.
+   * Empty until a RequestExtensions message lists at least one supported
+   * extension. Currently we only advertise 0x0002 (Worker-ID TLV on
+   * SubmitSharesExtended) — see SUPPORTED_MINING_EXTENSIONS below.
+   */
+  private negotiatedExtensions = new Set<number>();
 
   // Mining state
   private sessionDifficulty: number;
@@ -380,27 +395,36 @@ export class StratumV2Client {
 
     // Extension 1: Extensions Negotiation (0x0001)
     // Spec: after SetupConnection.Success, client may send RequestExtensions.
-    // The SV2 mining server currently supports NO extensions — so per ext
-    // 0x0001 §4.1 ("Servers MUST respond with RequestExtensions.Error if
-    // none of the requested extensions are supported") we respond with
-    // .Error listing every requested extension as unsupported, NOT with
-    // .Success + empty list (which would be a spec violation).
+    // Per ext 0x0001 §4.1: server MUST respond .Error if none of the
+    // requested extensions are supported, .Success with the supported
+    // subset otherwise.
     if (extensionId === SV2_EXTENSION_NEGOTIATION_ID) {
       if (msgType === 0x00) {
         const reader = new BufferReader(payload);
         const msg = deserializeRequestExtensions(reader);
-        console.log(`[SV2 ${this.sessionId}] RequestExtensions: requested=[${msg.requestedExtensions.map(e => `0x${e.toString(16)}`).join(', ')}]`);
-        if (msg.requestedExtensions.length === 0) {
-          // No extensions requested — .Success with empty list is fine.
-          const responsePayload = serializeRequestExtensionsSuccess({ requestId: msg.requestId, supportedExtensions: [] });
-          await this.sendFrameWithExtension(0x01, responsePayload, SV2_EXTENSION_NEGOTIATION_ID);
-        } else {
+
+        const supported: number[] = [];
+        const unsupported: number[] = [];
+        for (const ext of msg.requestedExtensions) {
+          if (SUPPORTED_MINING_EXTENSIONS.has(ext)) {
+            supported.push(ext);
+            this.negotiatedExtensions.add(ext);
+          } else {
+            unsupported.push(ext);
+          }
+        }
+        console.log(`[SV2 ${this.sessionId}] RequestExtensions: requested=[${msg.requestedExtensions.map(e => `0x${e.toString(16).padStart(4, '0')}`).join(', ')}], supported=[${supported.map(e => `0x${e.toString(16).padStart(4, '0')}`).join(', ')}]`);
+
+        if (supported.length === 0 && msg.requestedExtensions.length > 0) {
           const errorPayload = serializeRequestExtensionsError({
             requestId: msg.requestId,
-            unsupportedExtensions: msg.requestedExtensions,
+            unsupportedExtensions: unsupported,
             requiredExtensions: [],
           });
           await this.sendFrameWithExtension(0x02, errorPayload, SV2_EXTENSION_NEGOTIATION_ID);
+        } else {
+          const responsePayload = serializeRequestExtensionsSuccess({ requestId: msg.requestId, supportedExtensions: supported });
+          await this.sendFrameWithExtension(0x01, responsePayload, SV2_EXTENSION_NEGOTIATION_ID);
         }
       } else {
         console.warn(`[SV2 ${this.sessionId}] Unknown Extension 1 msgType: 0x${msgType.toString(16)}, ignoring`);
@@ -1433,6 +1457,15 @@ export class StratumV2Client {
       return;
     }
 
+    // Resolve the worker name to attribute THIS share to. Default is the
+    // channel-locked worker (set at OpenExtendedMiningChannel time). If
+    // the JDC/miner negotiated ext 0x0002 (Worker-ID TLV), we parse the
+    // trailing TLV and let it override the worker name — but ONLY the
+    // worker part. The address stays channel-bound: a TLV pointing at a
+    // different address is dropped silently (cross-account attribution
+    // attempts shouldn't appear under another miner's stats).
+    const effectiveWorkerName = this.resolveShareWorkerName(payload, reader.position);
+
     // Ensure entity exists
     await this.ensureEntity();
 
@@ -1539,7 +1572,17 @@ export class StratumV2Client {
         }
       }
 
-      await this.handleValidShare(submission, submissionDifficulty, extJob.jobTemplate, updatedJobBlock, header, channel, jobDifficulty);
+      await this.handleValidShare(
+        submission,
+        submissionDifficulty,
+        extJob.jobTemplate,
+        updatedJobBlock,
+        header,
+        channel,
+        jobDifficulty,
+        false,
+        effectiveWorkerName,
+      );
     } else {
       console.warn(`[SV2 ${this.sessionId}] ❌ Extended share rejected: difficulty-too-low (${submissionDifficulty.toFixed(2)} < ${jobDifficulty.toFixed(2)})`);
       await this.recordRejectedShare('LowDifficultyShare', jobDifficulty);
@@ -1594,6 +1637,15 @@ export class StratumV2Client {
     return `${submission.jobId}:${submission.nonce}:${submission.ntime}:${submission.version}:${submission.extranonce.toString('hex')}`;
   }
 
+  private resolveShareWorkerName(payload: Buffer, baseStructEnd: number): string {
+    return resolveShareWorkerNameFromTlv({
+      tail: payload.subarray(baseStructEnd),
+      channelAddress: this.address,
+      channelWorker: this.workerName,
+      ext0x0002Negotiated: this.negotiatedExtensions.has(SV2_EXTENSION_TYPE_WORKER_ID),
+    });
+  }
+
   private async handleValidShare(
     submission: { channelId: number; sequenceNumber: number },
     submissionDifficulty: number,
@@ -1603,6 +1655,11 @@ export class StratumV2Client {
     channel: StratumV2ChannelState,
     jobDifficulty: number,
     isStaleCreditable: boolean = false,
+    /**
+     * Per-share worker override. Defaults to the channel-locked
+     * `this.workerName` when no ext 0x0002 TLV was attached.
+     */
+    shareWorkerName: string = this.workerName,
   ): Promise<void> {
     // Send success response immediately for minimum latency
     // SV2 spec: new_submits_accepted_count / new_shares_sum are per-batch, not cumulative
@@ -1716,7 +1773,7 @@ export class StratumV2Client {
 
       this.shareTotalsCacheService.increment(
         this.address!,
-        this.workerName,
+        shareWorkerName,
         jobDifficulty,
       );
 
@@ -1735,7 +1792,7 @@ export class StratumV2Client {
 
       await this.clientDifficultyStatisticsService.recordShareDifficulty({
         address: this.address!,
-        clientName: this.workerName,
+        clientName: shareWorkerName,
         timestamp: now.getTime(),
         difficulty: submissionDifficulty,
       });

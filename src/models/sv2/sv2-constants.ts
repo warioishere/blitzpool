@@ -31,6 +31,15 @@ export const SV2_PROTOCOL_NAME = 'MiningProtocol';
 /** Extension 0x0001 — Extensions Negotiation (defines RequestExtensions et al.) */
 export const SV2_EXTENSION_TYPE_NEGOTIATION = 0x0001;
 
+/** Extension 0x0002 — Worker-Specific Hashrate Tracking (TLV on SubmitSharesExtended) */
+export const SV2_EXTENSION_TYPE_WORKER_ID = 0x0002;
+
+/** Field type ID inside the 0x0002 TLV (only field currently defined). */
+export const SV2_FIELD_TYPE_USER_IDENTITY = 0x01;
+
+/** Max bytes for the 0x0002 user_identity TLV value (spec §1.1). */
+export const SV2_USER_IDENTITY_MAX_BYTES = 32;
+
 /** Extension 0x0003 — Coinbase Output Weights (TLV on AllocateMiningJobToken.Success) */
 export const SV2_EXTENSION_TYPE_COINBASE_OUTPUT_WEIGHTS = 0x0003;
 
