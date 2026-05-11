@@ -14,6 +14,9 @@ import { AddressSettingsService } from '../ORM/address-settings/address-settings
 import { WorkerSharesService } from '../ORM/worker-shares/worker-shares.service';
 import { PoolModeHashrateService } from '../ORM/pool-mode-hashrate/pool-mode-hashrate.service';
 import { PoolShareStatisticsService } from '../ORM/pool-share-statistics/pool-share-statistics.service';
+import { PoolRejectedStatisticsService } from '../ORM/pool-rejected-statistics/pool-rejected-statistics.service';
+import { ClientStatisticsService } from '../ORM/client-statistics/client-statistics.service';
+import { ClientRejectedStatisticsService } from '../ORM/client-rejected-statistics/client-rejected-statistics.service';
 import { ShareTotalsCacheService } from './share-totals-cache.service';
 import { TimeSlotHelper } from '../utils/time-slot.helper';
 
@@ -85,6 +88,9 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
     private readonly shareTotalsCache: ShareTotalsCacheService,
     private readonly poolModeHashrateService: PoolModeHashrateService,
     private readonly poolShareStatisticsService: PoolShareStatisticsService,
+    private readonly poolRejectedStatisticsService: PoolRejectedStatisticsService,
+    private readonly clientStatisticsService: ClientStatisticsService,
+    private readonly clientRejectedStatisticsService: ClientRejectedStatisticsService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -394,138 +400,52 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
   }
 
   /**
-   * Flush client statistics from Redis to database
-   * Pattern: client:shares:{address}:{worker}:{session}:{timestamp} -> HASH {shares, acceptedCount, ...}
+   * Flush per-client per-slot statistics from the in-memory accumulator to PG.
    *
-   * CRITICAL: Only flushes COMPLETE time slots (not current incomplete slot)
+   * Bulk-upsert is INCREMENT-style (the existing `bulkUpsertClientStatistics`
+   * uses `ON CONFLICT … DO UPDATE SET shares = shares + EXCLUDED.shares,
+   * acceptedCount = acceptedCount + EXCLUDED.acceptedCount, …`) so partial-slot
+   * flushes are idempotent.
+   *
+   * Also fans rejected-difficulty totals into worker_shares_entity via
+   * workerSharesService.addRejectedBulk, preserving the per-worker rejected
+   * totals on the dashboard.
    */
   private async flushClientStatistics(): Promise<void> {
-    const currentSlot = TimeSlotHelper.getCurrentSlot();
-    if (this.lastFlushedSlot.clientStatistics === currentSlot) return;
+    const drained = this.clientStatisticsService.drainDeltas();
+    if (drained.length === 0) return;
 
-    const pattern = 'client:shares:*';
-    const keys = await this.scanKeys(pattern);
-
-    if (keys.length === 0) {
-      this.lastFlushedSlot.clientStatistics = currentSlot;
-      return;
-    }
-    const records: Array<Partial<ClientStatisticsEntity>> = [];
-    const keysToDelete: string[] = [];
-
-    // Pre-filter: drop the current incomplete slot before pipelining HGETALLs.
-    // Saves N network round-trips for slot keys we'd skip anyway.
-    const eligibleKeys: string[] = [];
-    for (const key of keys) {
-      const parts = key.split(':');
-      if (parts.length < 6) {
-        console.warn(`[StatisticsCoordinator] Invalid client shares key format: ${key}`);
-        continue;
-      }
-      if (parseInt(parts[5]) === currentSlot) continue;
-      eligibleKeys.push(key);
-    }
-
-    if (eligibleKeys.length === 0) {
-      this.lastFlushedSlot.clientStatistics = currentSlot;
-      return;
-    }
-
-    // Pipelined HGETALL — one round-trip per 500 keys instead of N.
-    const hashResults = await this.pipelinedHGetAll(eligibleKeys);
-
-    for (let i = 0; i < eligibleKeys.length; i++) {
-      const key = eligibleKeys[i];
-      const data = hashResults[i];
-      try {
-        if (!data || !data.shares) continue;
-
-        const parts = key.split(':');
-        const address = parts[2];
-        const clientName = parts[3];
-        const sessionId = parts[4];
-        const time = parseInt(parts[5]);
-
-        // Validate required fields
-        if (!address || !clientName || !sessionId || !time) {
-          console.warn(`[StatisticsCoordinator] Skipping invalid client statistics (missing required fields)`);
-          await this.redisClient.del(key);
-          continue;
-        }
-
-        records.push({
-          address,
-          clientName,
-          sessionId,
-          time,
-          shares: parseFloat(data.shares) || 0,
-          acceptedCount: parseInt(data.acceptedCount) || 0,
-          rejectedCount: parseInt(data.rejectedCount) || 0,
-          rejectedJobNotFoundCount: parseInt(data.rejectedJobNotFoundCount) || 0,
-          rejectedJobNotFoundDiff1: parseFloat(data.rejectedJobNotFoundDiff1) || 0,
-          rejectedDuplicateShareCount: parseInt(data.rejectedDuplicateShareCount) || 0,
-          rejectedDuplicateShareDiff1: parseFloat(data.rejectedDuplicateShareDiff1) || 0,
-          rejectedLowDifficultyShareCount: parseInt(data.rejectedLowDifficultyShareCount) || 0,
-          rejectedLowDifficultyShareDiff1: parseFloat(data.rejectedLowDifficultyShareDiff1) || 0,
-        });
-
-        keysToDelete.push(key);
-      } catch (error) {
-        console.error(`[StatisticsCoordinator] Failed to parse client statistics from ${key}:`, error);
-      }
-    }
-
-    if (records.length === 0) {
-      this.lastFlushedSlot.clientStatistics = currentSlot;
-      return;
-    }
-
-    // Process in batches of 1000 to stay under parameter limits
-    const BATCH_SIZE = 1000;
-    let flushed = 0;
-    const successfulKeys: string[] = [];
+    // Per-worker rejected-diff totals (for worker_shares_entity).
     const rejectedByWorker = new Map<string, { address: string; clientName: string; rejectedShares: number }>();
+    for (const r of drained) {
+      const mapKey = `${r.address}|${r.clientName}`;
+      const entry = rejectedByWorker.get(mapKey) ?? { address: r.address, clientName: r.clientName, rejectedShares: 0 };
+      entry.rejectedShares +=
+        (r.rejectedJobNotFoundDiff1 || 0) +
+        (r.rejectedDuplicateShareDiff1 || 0) +
+        (r.rejectedLowDifficultyShareDiff1 || 0);
+      rejectedByWorker.set(mapKey, entry);
+    }
 
-    for (let i = 0; i < records.length; i += BATCH_SIZE) {
-      const batch = records.slice(i, i + BATCH_SIZE);
-      const batchKeys = keysToDelete.slice(i, i + BATCH_SIZE);
+    // Process in batches of 1000 to stay under PG parameter limits.
+    const BATCH_SIZE = 1000;
+    const successfullyFlushed: typeof drained = [];
 
+    for (let i = 0; i < drained.length; i += BATCH_SIZE) {
+      const batch = drained.slice(i, i + BATCH_SIZE);
       try {
         await this.bulkUpsertClientStatistics(batch);
-        flushed += batch.length;
-        // Track successfully flushed keys
-        successfulKeys.push(...batchKeys);
-
-        // Accumulate per-worker rejected totals for successfully persisted records
-        for (const record of batch) {
-          const mapKey = `${record.address}|${record.clientName}`;
-          const entry = rejectedByWorker.get(mapKey) ?? {
-            address: record.address as string,
-            clientName: record.clientName as string,
-            rejectedShares: 0,
-          };
-          entry.rejectedShares +=
-            (record.rejectedJobNotFoundDiff1 as number || 0) +
-            (record.rejectedDuplicateShareDiff1 as number || 0) +
-            (record.rejectedLowDifficultyShareDiff1 as number || 0);
-          rejectedByWorker.set(mapKey, entry);
-        }
+        successfullyFlushed.push(...batch);
       } catch (error) {
         console.error(`[StatisticsCoordinator] Failed to flush client statistics batch:`, error);
-        // Don't add to successfulKeys - these will remain in Redis for retry
+        // Failed batch stays in the cache (we'll only confirm successful ones below).
       }
     }
 
-    // Delete Redis keys ONLY after successful database flush
-    if (successfulKeys.length > 0) {
-      try {
-        await this.redisClient.del(successfulKeys);
-      } catch (error) {
-        console.error(`[StatisticsCoordinator] Failed to delete Redis keys:`, error);
-      }
+    if (successfullyFlushed.length > 0) {
+      this.clientStatisticsService.confirmFlush(successfullyFlushed);
     }
 
-    // Persist rejected totals into worker_shares_entity (running totals, PK lookup)
     const rejectedUpdates = [...rejectedByWorker.values()].filter(u => u.rejectedShares > 0);
     if (rejectedUpdates.length > 0) {
       try {
@@ -534,194 +454,46 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
         console.error('[StatisticsCoordinator] Failed to flush rejected worker totals:', error);
       }
     }
-
-    if (flushed > 0) {
-      console.log(`[StatisticsCoordinator] Flushed ${flushed} client statistics records`);
-    }
-    // Mark slot processed — even if some batches failed mid-loop, we got
-    // through the SCAN; subsequent ticks within this slot have no new
-    // data to find. Failed batches stay in Redis (we didn't add them to
-    // successfulKeys) and will be picked up on the next slot transition.
-    this.lastFlushedSlot.clientStatistics = currentSlot;
   }
 
   /**
-   * Flush pool rejected statistics from Redis to database
-   * Pattern: pool:rejected:{timestamp} -> HASH {reason1: count1, reason2: count2, ...}
+   * Flush pool-wide rejected-share counts (per reason × slot) from the
+   * in-memory accumulator to PG. INCREMENT-style upsert keyed on (reason, time).
    */
   private async flushPoolRejectedStatistics(): Promise<void> {
-    const currentSlot = TimeSlotHelper.getCurrentSlot();
-    if (this.lastFlushedSlot.poolRejected === currentSlot) return;
+    const drained = this.poolRejectedStatisticsService.drainSlotDeltas();
+    if (drained.size === 0) return;
 
-    const pattern = 'pool:rejected:*';
-    const keys = await this.scanKeys(pattern);
-
-    if (keys.length === 0) {
-      this.lastFlushedSlot.poolRejected = currentSlot;
-      return;
-    }
-    const records: Array<Partial<PoolRejectedStatisticsEntity>> = [];
-    const keysToDelete: string[] = [];
-
-    // Pre-filter current slot, then pipeline the HGETALL reads.
-    const eligibleKeys: string[] = [];
-    const eligibleTimes: number[] = [];
-    for (const key of keys) {
-      const parts = key.split(':');
-      if (parts.length < 3) continue;
-      const time = parseInt(parts[2]);
-      if (time === currentSlot) continue;
-      eligibleKeys.push(key);
-      eligibleTimes.push(time);
-    }
-
-    if (eligibleKeys.length === 0) {
-      this.lastFlushedSlot.poolRejected = currentSlot;
-      return;
-    }
-
-    const hashResults = await this.pipelinedHGetAll(eligibleKeys);
-
-    for (let i = 0; i < eligibleKeys.length; i++) {
-      const key = eligibleKeys[i];
-      const time = eligibleTimes[i];
-      const data = hashResults[i];
-      try {
-        if (!data || Object.keys(data).length === 0) continue;
-
-        for (const [reason, count] of Object.entries(data)) {
-          const countValue = parseFloat(count as string) || 0;
-          if (countValue > 0) {
-            records.push({ time, reason, count: countValue });
-          }
-        }
-
-        keysToDelete.push(key);
-      } catch (error) {
-        console.error(`[StatisticsCoordinator] Failed to parse pool rejected statistics from ${key}:`, error);
+    const records: Array<{ time: number; reason: string; count: number }> = [];
+    for (const [time, reasons] of drained) {
+      for (const [reason, count] of reasons) {
+        records.push({ time, reason, count });
       }
     }
 
-    if (records.length === 0) {
-      this.lastFlushedSlot.poolRejected = currentSlot;
-      return;
-    }
-
-    // Bulk upsert to database
     try {
       await this.bulkUpsertPoolRejectedStatistics(records);
-      console.log(`[StatisticsCoordinator] Flushed ${records.length} pool rejected statistics records`);
-      this.lastFlushedSlot.poolRejected = currentSlot;
-
-      // Delete Redis keys ONLY after successful database flush
-      if (keysToDelete.length > 0) {
-        await this.redisClient.del(keysToDelete);
-      }
+      this.poolRejectedStatisticsService.confirmFlush(drained);
     } catch (error) {
       console.error('[StatisticsCoordinator] Failed to flush pool rejected statistics to database:', error);
-      // Keys remain in Redis for retry on next flush
+      // Snapshot stays in the cache; next flush retries automatically.
     }
   }
 
   /**
-   * Flush client rejected statistics from Redis to database
+   * Flush per-client rejected-share counts (per address × slot × reason)
+   * from the in-memory accumulator to PG.
    */
   private async flushClientRejectedStatistics(): Promise<void> {
-    const currentSlot = TimeSlotHelper.getCurrentSlot();
-    if (this.lastFlushedSlot.clientRejected === currentSlot) return;
+    const drained = this.clientRejectedStatisticsService.drainDeltas();
+    if (drained.length === 0) return;
 
-    const pattern = 'client:rejected:*';
-    const keys = await this.scanKeys(pattern);
-
-    if (keys.length === 0) {
-      this.lastFlushedSlot.clientRejected = currentSlot;
-      return;
-    }
-    const records: Array<Partial<ClientRejectedStatisticsEntity>> = [];
-    const keysToDelete: string[] = [];
-
-    // Pre-filter current slot, then pipeline the HGETALL reads.
-    const eligibleKeys: string[] = [];
-    const eligibleAddrs: string[] = [];
-    const eligibleTimes: number[] = [];
-    for (const key of keys) {
-      const parts = key.split(':');
-      if (parts.length < 4) continue;
-      const address = parts[2];
-      const time = parseInt(parts[3]);
-      if (time === currentSlot) continue;
-      eligibleKeys.push(key);
-      eligibleAddrs.push(address);
-      eligibleTimes.push(time);
-    }
-
-    if (eligibleKeys.length === 0) {
-      this.lastFlushedSlot.clientRejected = currentSlot;
-      return;
-    }
-
-    const hashResults = await this.pipelinedHGetAll(eligibleKeys);
-
-    for (let i = 0; i < eligibleKeys.length; i++) {
-      const key = eligibleKeys[i];
-      const address = eligibleAddrs[i];
-      const time = eligibleTimes[i];
-      const data = hashResults[i];
-      try {
-        if (!data || Object.keys(data).length === 0) continue;
-
-        // Hash fields are: {reason}:count and {reason}:shares — group by reason.
-        const reasonStats = new Map<string, { count: number; shares: number }>();
-
-        for (const [field, value] of Object.entries(data)) {
-          const fieldParts = field.split(':');
-          if (fieldParts.length < 2) continue;
-
-          const reason = fieldParts[0];
-          const type = fieldParts[1]; // 'count' or 'shares'
-
-          if (!reasonStats.has(reason)) {
-            reasonStats.set(reason, { count: 0, shares: 0 });
-          }
-
-          const stats = reasonStats.get(reason);
-          if (type === 'count') {
-            stats.count = parseFloat(value as string) || 0;
-          } else if (type === 'shares') {
-            stats.shares = parseFloat(value as string) || 0;
-          }
-        }
-
-        for (const [reason, stats] of reasonStats.entries()) {
-          if (stats.count > 0 || stats.shares > 0) {
-            records.push({ address, time, reason, count: stats.count, shares: stats.shares });
-          }
-        }
-
-        keysToDelete.push(key);
-      } catch (error) {
-        console.error(`[StatisticsCoordinator] Failed to parse client rejected statistics from ${key}:`, error);
-      }
-    }
-
-    if (records.length === 0) {
-      this.lastFlushedSlot.clientRejected = currentSlot;
-      return;
-    }
-
-    // Bulk upsert to database
     try {
-      await this.bulkUpsertClientRejectedStatistics(records);
-      console.log(`[StatisticsCoordinator] Flushed ${records.length} client rejected statistics records`);
-      this.lastFlushedSlot.clientRejected = currentSlot;
-
-      // Delete Redis keys ONLY after successful database flush
-      if (keysToDelete.length > 0) {
-        await this.redisClient.del(keysToDelete);
-      }
+      await this.bulkUpsertClientRejectedStatistics(drained);
+      this.clientRejectedStatisticsService.confirmFlush(drained);
     } catch (error) {
       console.error('[StatisticsCoordinator] Failed to flush client rejected statistics to database:', error);
-      // Keys remain in Redis for retry on next flush
+      // Snapshot stays in the cache; next flush retries automatically.
     }
   }
 

@@ -49,6 +49,18 @@ function buildService(mockRedis: any) {
             drainSlotDeltas: jest.fn().mockReturnValue(new Map()),
             confirmFlush: jest.fn(),
         } as any,                            // poolShareStatisticsService
+        {
+            drainSlotDeltas: jest.fn().mockReturnValue(new Map()),
+            confirmFlush: jest.fn(),
+        } as any,                            // poolRejectedStatisticsService
+        {
+            drainDeltas: jest.fn().mockReturnValue([]),
+            confirmFlush: jest.fn(),
+        } as any,                            // clientStatisticsService
+        {
+            drainDeltas: jest.fn().mockReturnValue([]),
+            confirmFlush: jest.fn(),
+        } as any,                            // clientRejectedStatisticsService
   );
   (service as any).redisClient = mockRedis;
   return service;
@@ -79,110 +91,36 @@ function makeMockRedis(overrides: any = {}) {
   };
 }
 
-describe('StatisticsCoordinator — Tier A: slot-aware short-circuit (Redis-flushers only)', () => {
-  // pool-mode-hashrate and pool-share-statistics moved to in-memory accumulators
-  // (Phase B). The remaining three Redis-backed flushers (clientStatistics,
-  // poolRejectedStatistics, clientRejectedStatistics) still use the SCAN+HGETALL
-  // pattern and respect the slot-short-circuit. Tests here pin that behaviour
-  // for those flushers using flushClientStatistics as the representative.
-  let originalSlotFn: any;
-  let mockSlot: number;
+describe('StatisticsCoordinator — slot-bucketed flushers (in-memory)', () => {
+  // After Phase B, ALL 5 slot-bucketed flushers (poolShares, poolModeHashrate,
+  // clientStatistics, poolRejected, clientRejected) buffer in process memory
+  // and never call Redis SCAN. The slot-short-circuit pattern is obsolete —
+  // the drain/confirm flow uses the empty-snapshot fast path instead.
 
-  beforeEach(() => {
-    mockSlot = 1700000000000;
-    originalSlotFn = TimeSlotHelper.getCurrentSlot;
-    (TimeSlotHelper as any).getCurrentSlot = () => mockSlot;
-  });
-
-  afterEach(() => {
-    (TimeSlotHelper as any).getCurrentSlot = originalSlotFn;
-  });
-
-  it('flushClientStatistics: first call does SCAN, subsequent calls within same slot do NOT', async () => {
+  it('none of the 5 flushers call Redis SCAN', async () => {
     const mockRedis = makeMockRedis();
     const service = buildService(mockRedis);
 
-    await (service as any).flushClientStatistics();
-    expect(mockRedis.scan).toHaveBeenCalledTimes(1);
-
-    await (service as any).flushClientStatistics();
-    await (service as any).flushClientStatistics();
-    expect(mockRedis.scan).toHaveBeenCalledTimes(1);
-  });
-
-  it('flushClientStatistics: slot transition triggers scan again', async () => {
-    const mockRedis = makeMockRedis();
-    const service = buildService(mockRedis);
-
-    await (service as any).flushClientStatistics();
-    expect(mockRedis.scan).toHaveBeenCalledTimes(1);
-
-    mockSlot += 600_000;
-    await (service as any).flushClientStatistics();
-    expect(mockRedis.scan).toHaveBeenCalledTimes(2);
-  });
-
-  it('the 3 still-Redis flushers short-circuit independently after their own first tick', async () => {
-    // pool-mode-hashrate and pool-share-statistics moved off Redis (Phase B).
-    // The remaining three respect the slot-short-circuit.
-    const mockRedis = makeMockRedis();
-    const service = buildService(mockRedis);
-
-    await (service as any).flushPoolShares();          // in-memory, no scan
-    await (service as any).flushPoolModeHashrate();    // in-memory, no scan
-    await (service as any).flushClientStatistics();
-    await (service as any).flushPoolRejectedStatistics();
-    await (service as any).flushClientRejectedStatistics();
-    expect(mockRedis.scan).toHaveBeenCalledTimes(3);
-
-    // Same slot: ALL skip SCAN.
     await (service as any).flushPoolShares();
     await (service as any).flushPoolModeHashrate();
     await (service as any).flushClientStatistics();
     await (service as any).flushPoolRejectedStatistics();
     await (service as any).flushClientRejectedStatistics();
-    expect(mockRedis.scan).toHaveBeenCalledTimes(3);
 
-    mockSlot += 600_000;
-    await (service as any).flushPoolShares();
-    await (service as any).flushPoolModeHashrate();
-    await (service as any).flushClientStatistics();
-    await (service as any).flushPoolRejectedStatistics();
-    await (service as any).flushClientRejectedStatistics();
-    expect(mockRedis.scan).toHaveBeenCalledTimes(6);  // 3 → 6
+    expect(mockRedis.scan).not.toHaveBeenCalled();
   });
 
-  it('lastFlushedSlot is updated even when SCAN returns ZERO keys (no work case)', async () => {
-    const mockRedis = makeMockRedis();
-    mockRedis.scan.mockResolvedValue({ cursor: '0', keys: [] });
-    const service = buildService(mockRedis);
-
-    await (service as any).flushClientStatistics();
-    expect((service as any).lastFlushedSlot.clientStatistics).toBe(mockSlot);
-
-    await (service as any).flushClientStatistics();
-    expect(mockRedis.scan).toHaveBeenCalledTimes(1);
-  });
-
-  it('post-restart: lastFlushedSlot starts at -1, first call always scans', async () => {
+  it('repeated flush ticks with empty caches stay a no-op (fast path on empty drain)', async () => {
     const mockRedis = makeMockRedis();
     const service = buildService(mockRedis);
 
-    expect((service as any).lastFlushedSlot.clientStatistics).toBe(-1);
-
-    await (service as any).flushClientStatistics();
-    expect(mockRedis.scan).toHaveBeenCalledTimes(1);
-    expect((service as any).lastFlushedSlot.clientStatistics).toBe(mockSlot);
-  });
-
-  it('flushPoolShares / flushPoolModeHashrate: in-memory paths never scan Redis', async () => {
-    const mockRedis = makeMockRedis();
-    const service = buildService(mockRedis);
-
-    await (service as any).flushPoolShares();
-    await (service as any).flushPoolShares();
-    await (service as any).flushPoolModeHashrate();
-    await (service as any).flushPoolModeHashrate();
+    for (let i = 0; i < 5; i++) {
+      await (service as any).flushPoolShares();
+      await (service as any).flushPoolModeHashrate();
+      await (service as any).flushClientStatistics();
+      await (service as any).flushPoolRejectedStatistics();
+      await (service as any).flushClientRejectedStatistics();
+    }
 
     expect(mockRedis.scan).not.toHaveBeenCalled();
   });
@@ -209,6 +147,18 @@ describe('StatisticsCoordinator — in-memory address/worker total flush', () =>
             drainSlotDeltas: jest.fn().mockReturnValue(new Map()),
             confirmFlush: jest.fn(),
         } as any,                            // poolShareStatisticsService
+        {
+            drainSlotDeltas: jest.fn().mockReturnValue(new Map()),
+            confirmFlush: jest.fn(),
+        } as any,                            // poolRejectedStatisticsService
+        {
+            drainDeltas: jest.fn().mockReturnValue([]),
+            confirmFlush: jest.fn(),
+        } as any,                            // clientStatisticsService
+        {
+            drainDeltas: jest.fn().mockReturnValue([]),
+            confirmFlush: jest.fn(),
+        } as any,                            // clientRejectedStatisticsService
     );
     (service as any).redisClient = makeMockRedis();
     return service;

@@ -1,58 +1,90 @@
-import { Injectable, Inject, OnModuleInit } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, MoreThan, LessThan } from 'typeorm';
-import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import { Cache } from 'cache-manager';
 
 import { ClientRejectedStatisticsEntity } from './client-rejected-statistics.entity';
+import { TimeSlotHelper } from '../../utils/time-slot.helper';
+
+/**
+ * Per-address rejected-share counts bucketed per 10-min slot per reason.
+ * Writes accumulate in process memory; coordinator drains/flushes to PG
+ * every 60s via INCREMENT upsert so partial-slot flushes are idempotent.
+ *
+ * Shape: for each (address, slot, reason) we track both `count` (number
+ * of rejects) and `shares` (sum of diff-1 values — the difficulty
+ * "wasted" on the reject). PG schema is unchanged.
+ */
+type ReasonBucket = { count: number; shares: number };
 
 @Injectable()
-export class ClientRejectedStatisticsService implements OnModuleInit {
+export class ClientRejectedStatisticsService {
+  // key: `${address}|${slot}|${reason}` — slot in keys to keep flush
+  // grouping cheap. Could nest, but this flat shape is friendlier for
+  // drain to record arrays.
+  private readonly deltas = new Map<string, { address: string; slot: number; reason: string; bucket: ReasonBucket }>();
+
   constructor(
     @InjectRepository(ClientRejectedStatisticsEntity)
     private clientRejectedStatisticsRepository: Repository<ClientRejectedStatisticsEntity>,
-    @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
   ) {}
 
-  private redisClient: any = null;
+  private keyOf(address: string, slot: number, reason: string): string {
+    return `${address}|${slot}|${reason}`;
+  }
 
-  async onModuleInit(): Promise<void> {
-    try {
-      const store: any = this.cacheManager.store;
-      if (store && store.client) {
-        this.redisClient = store.client;
-        console.log('[ClientRejectedStatisticsService] Using Redis for atomic increments');
-      } else {
-        console.error('[ClientRejectedStatisticsService] Redis not available - client rejected statistics will not be tracked!');
+  /** Synchronous hot-path entry. Non-throwing. */
+  public addRejectedShare(address: string, reason: string, diff: number): void {
+    if (!address || !reason || !Number.isFinite(diff)) return;
+
+    const slot = TimeSlotHelper.getCurrentSlot();
+    const k = this.keyOf(address, slot, reason);
+    let entry = this.deltas.get(k);
+    if (!entry) {
+      entry = { address, slot, reason, bucket: { count: 0, shares: 0 } };
+      this.deltas.set(k, entry);
+    }
+    entry.bucket.count += 1;
+    entry.bucket.shares += Math.max(0, diff - 1);
+  }
+
+  /** Coordinator API — snapshot of pending deltas, in record shape. */
+  public drainDeltas(): Array<{ address: string; time: number; reason: string; count: number; shares: number }> {
+    const out: Array<{ address: string; time: number; reason: string; count: number; shares: number }> = [];
+    for (const { address, slot, reason, bucket } of this.deltas.values()) {
+      if (bucket.count > 0 || bucket.shares > 0) {
+        out.push({ address, time: slot, reason, count: bucket.count, shares: bucket.shares });
       }
-    } catch (error) {
-      console.error('[ClientRejectedStatisticsService] Failed to access Redis client:', error);
+    }
+    return out;
+  }
+
+  /** Coordinator API — subtract a previously-drained snapshot. */
+  public confirmFlush(flushed: Array<{ address: string; time: number; reason: string; count: number; shares: number }>): void {
+    for (const { address, time, reason, count, shares } of flushed) {
+      const k = this.keyOf(address, time, reason);
+      const entry = this.deltas.get(k);
+      if (!entry) continue;
+      entry.bucket.count -= count;
+      entry.bucket.shares -= shares;
+      if (entry.bucket.count <= 0 && entry.bucket.shares <= 0) {
+        this.deltas.delete(k);
+      }
     }
   }
 
-  private getTimeSlot(): number {
-    const coeff = 1000 * 60 * 10;
-    // Time slot labeled by END time (e.g., slot "20:50" contains data from 20:40-20:50)
-    return Math.floor(Date.now() / coeff) * coeff + coeff;
-  }
-
-  public async addRejectedShare(address: string, reason: string, diff: number) {
-    if (!this.redisClient) {
-      console.error('[ClientRejectedStatisticsService] Cannot track reject - Redis not available');
-      return;
+  /**
+   * Drop all in-memory state for an address (called on account deletion).
+   * Method kept under its legacy `clearRedisKeysForAddress` name + async
+   * signature so callers in the controllers don't need to change.
+   */
+  public async clearRedisKeysForAddress(address: string): Promise<void> {
+    const prefix = `${address}|`;
+    for (const k of this.deltas.keys()) {
+      if (k.startsWith(prefix)) this.deltas.delete(k);
     }
-
-    const timeSlot = this.getTimeSlot();
-    const key = `client:rejected:${address}:${timeSlot}`;
-
-    // Atomically increment count and shares for this reason
-    // shares = sum of (diff - 1) values
-    await Promise.all([
-      this.redisClient.hIncrBy(key, `${reason}:count`, 1),
-      this.redisClient.hIncrByFloat(key, `${reason}:shares`, Math.max(0, diff - 1)),
-      this.redisClient.expire(key, 86400),
-    ]);
   }
+
+  // ─── PG-direct API used by API endpoints ───
 
   public async getTotalsSince(
     address: string,
@@ -91,29 +123,5 @@ export class ClientRejectedStatisticsService implements OnModuleInit {
 
   public async deleteForAddress(address: string) {
     return await this.clientRejectedStatisticsRepository.delete({ address });
-  }
-
-  /**
-   * Clear all Redis cache keys for an address (used for delete operations)
-   */
-  public async clearRedisKeysForAddress(address: string): Promise<void> {
-    if (!this.redisClient) {
-      return;
-    }
-
-    try {
-      // Delete all client rejected share keys for this address
-      const pattern = `client:rejected:${address}:*`;
-      let cursor = '0';
-      do {
-        const result = await this.redisClient.scan(cursor, { MATCH: pattern, COUNT: 1000 });
-        cursor = result.cursor.toString();
-        if (result.keys.length > 0) {
-          await this.redisClient.del(result.keys);
-        }
-      } while (cursor !== '0');
-    } catch (error) {
-      console.error(`[ClientRejectedStatisticsService] Failed to clear Redis keys for address ${address}:`, error);
-    }
   }
 }

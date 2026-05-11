@@ -1,123 +1,190 @@
-import { Injectable, Inject, OnModuleInit } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import { Cache } from 'cache-manager';
 
 import { ClientStatisticsEntity } from './client-statistics.entity';
 import { ClientEntity } from '../client/client.entity';
 import { PoolShareStatisticsEntity } from '../pool-share-statistics/pool-share-statistics.entity';
-import { DIFFICULTY_1, REDIS_STATISTICS_TTL } from '../../constants/mining.constants';
+import { DIFFICULTY_1 } from '../../constants/mining.constants';
 import { TimeSlotHelper } from '../../utils/time-slot.helper';
 
+/**
+ * In-memory bucket for an (address, clientName, sessionId, slot) tuple.
+ * Mirrors the field set of the PG `client_statistics_entity` row.
+ */
+interface ClientSlotBucket {
+  shares: number;
+  acceptedCount: number;
+  rejectedCount: number;
+  rejectedJobNotFoundCount: number;
+  rejectedJobNotFoundDiff1: number;
+  rejectedDuplicateShareCount: number;
+  rejectedDuplicateShareDiff1: number;
+  rejectedLowDifficultyShareCount: number;
+  rejectedLowDifficultyShareDiff1: number;
+}
+
+interface ClientSlotEntry {
+  address: string;
+  clientName: string;
+  sessionId: string;
+  time: number;
+  bucket: ClientSlotBucket;
+}
+
+function emptyBucket(): ClientSlotBucket {
+  return {
+    shares: 0, acceptedCount: 0, rejectedCount: 0,
+    rejectedJobNotFoundCount: 0, rejectedJobNotFoundDiff1: 0,
+    rejectedDuplicateShareCount: 0, rejectedDuplicateShareDiff1: 0,
+    rejectedLowDifficultyShareCount: 0, rejectedLowDifficultyShareDiff1: 0,
+  };
+}
+
 @Injectable()
-export class ClientStatisticsService implements OnModuleInit {
+export class ClientStatisticsService {
+
   constructor(
     @InjectRepository(ClientStatisticsEntity)
     private clientStatisticsRepository: Repository<ClientStatisticsEntity>,
     @InjectRepository(PoolShareStatisticsEntity)
     private poolShareStatisticsRepository: Repository<PoolShareStatisticsEntity>,
-    @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
   ) {}
 
-  private redisClient: any = null;
+  /**
+   * Per-client per-slot bucket store. Key encoding `${addr}|${worker}|${session}|${slot}`
+   * is fine because addresses are base58/bech32 (no `|`), worker / session strings
+   * are user-controlled but `|` is almost never used in mining client names.
+   * The bucket carries a copy of the key components so drain can produce flat
+   * records without re-parsing.
+   */
+  private readonly deltas = new Map<string, ClientSlotEntry>();
 
-  async onModuleInit(): Promise<void> {
-    try {
-      const store: any = this.cacheManager.store;
-      if (store && store.client) {
-        this.redisClient = store.client;
-        console.log('[ClientStatisticsService] Using Redis for atomic share increments');
-      } else {
-        console.error('[ClientStatisticsService] Redis not available - shares will not be tracked!');
-      }
-    } catch (error) {
-      console.error('[ClientStatisticsService] Failed to access Redis client:', error);
-    }
+  private keyOf(address: string, clientName: string, sessionId: string, slot: number): string {
+    return `${address}|${clientName}|${sessionId}|${slot}`;
   }
 
   /**
-   * Add an accepted share - writes directly to Redis atomically
-   * Stateless - no in-memory accumulation
-   * Mirrors PoolShareStatisticsService pattern
+   * Add an accepted share. Synchronous in-memory increment; returns a
+   * resolved Promise so existing `await` call sites don't break.
    */
-  public async addAcceptedShare(client: ClientEntity, difficulty: number) {
+  public async addAcceptedShare(client: ClientEntity, difficulty: number): Promise<void> {
     if (!Number.isFinite(difficulty)) {
       console.warn(`[ClientStatisticsService] Discarded non-finite share: difficulty=${difficulty}`);
       return;
     }
-
-    if (!this.redisClient) {
-      console.error('[ClientStatisticsService] Cannot track share - Redis not available');
-      return;
+    const slot = TimeSlotHelper.getCurrentSlot();
+    const k = this.keyOf(client.address, client.clientName, client.sessionId, slot);
+    let entry = this.deltas.get(k);
+    if (!entry) {
+      entry = { address: client.address, clientName: client.clientName, sessionId: client.sessionId, time: slot, bucket: emptyBucket() };
+      this.deltas.set(k, entry);
     }
-
-    const timeSlot = TimeSlotHelper.getCurrentSlot();
-    const key = `client:shares:${client.address}:${client.clientName}:${client.sessionId}:${timeSlot}`;
-
-    // Atomically increment accepted shares - INCREMENTAL, not accumulated!
-    await Promise.all([
-      this.redisClient.hIncrByFloat(key, 'shares', difficulty),
-      this.redisClient.hIncrBy(key, 'acceptedCount', 1),
-      this.redisClient.expire(key, REDIS_STATISTICS_TTL),
-    ]);
+    entry.bucket.shares += difficulty;
+    entry.bucket.acceptedCount += 1;
   }
 
   /**
-   * Add a rejected share - writes directly to Redis atomically
-   * Stateless - no in-memory accumulation
-   * Mirrors PoolShareStatisticsService pattern
+   * Add a rejected share. The per-worker counters use a fixed SQL schema
+   * (rejectedJobNotFoundCount, rejectedDuplicateShareCount, rejectedLowDifficultyShareCount).
+   * Stale-rejected shares are conflated into the JobNotFound bucket on this
+   * per-worker counter so the UI's `entry?.rejectedJobNotFound` field continues
+   * to mean "share rejected with wire code 21" — both JobNotFound and Stale
+   * emit code 21 over SV1 (and `stale-share` vs `invalid-job-id` over SV2).
+   * Operators who want to distinguish the two failure modes can read
+   * `pool_rejected_statistics` / `client_rejected_statistics`, both of which
+   * use a schemaless reason field and see 'Stale' as a distinct counter.
    */
-  public async addRejectedShare(client: ClientEntity, reason: string, difficulty: number) {
-    if (!Number.isFinite(difficulty)) {
-      difficulty = 0;
+  public async addRejectedShare(client: ClientEntity, reason: string, difficulty: number): Promise<void> {
+    if (!Number.isFinite(difficulty)) difficulty = 0;
+
+    const slot = TimeSlotHelper.getCurrentSlot();
+    const k = this.keyOf(client.address, client.clientName, client.sessionId, slot);
+    let entry = this.deltas.get(k);
+    if (!entry) {
+      entry = { address: client.address, clientName: client.clientName, sessionId: client.sessionId, time: slot, bucket: emptyBucket() };
+      this.deltas.set(k, entry);
     }
-
-    if (!this.redisClient) {
-      console.error('[ClientStatisticsService] Cannot track rejected share - Redis not available');
-      return;
-    }
-
-    const timeSlot = TimeSlotHelper.getCurrentSlot();
-    const key = `client:shares:${client.address}:${client.clientName}:${client.sessionId}:${timeSlot}`;
-
-    // Base rejected count increment
-    const promises = [
-      this.redisClient.hIncrBy(key, 'rejectedCount', 1),
-      this.redisClient.expire(key, REDIS_STATISTICS_TTL),
-    ];
-
-    // Add reason-specific increments. Per-worker counters use a fixed
-    // SQL schema (rejectedJobNotFoundCount, rejectedDuplicateShareCount,
-    // rejectedLowDifficultyShareCount) — no dedicated `rejectedStaleCount`
-    // column. Stale-rejected shares (introduced with the ckpool-style
-    // retire-then-age refactor) are conflated INTO the JobNotFound
-    // bucket on this per-worker counter so the UI's
-    // `entry?.rejectedJobNotFound` field continues to mean "share
-    // rejected with wire code 21" — both `JobNotFound` and `Stale`
-    // emit code 21 over SV1 (and `stale-share` vs `invalid-job-id`
-    // over SV2 — see SV2 spec §5.3.14). Operators who want to
-    // distinguish the two failure modes can read
-    // `pool_rejected_statistics` / `client_rejected_statistics`,
-    // both of which use a schemaless reason field and DO see
-    // `'Stale'` as a distinct counter.
+    const b = entry.bucket;
+    b.rejectedCount += 1;
     switch (reason) {
       case 'JobNotFound':
       case 'Stale':
-        promises.push(this.redisClient.hIncrBy(key, 'rejectedJobNotFoundCount', 1));
-        promises.push(this.redisClient.hIncrByFloat(key, 'rejectedJobNotFoundDiff1', difficulty));
+        b.rejectedJobNotFoundCount += 1;
+        b.rejectedJobNotFoundDiff1 += difficulty;
         break;
       case 'DuplicateShare':
-        promises.push(this.redisClient.hIncrBy(key, 'rejectedDuplicateShareCount', 1));
-        promises.push(this.redisClient.hIncrByFloat(key, 'rejectedDuplicateShareDiff1', difficulty));
+        b.rejectedDuplicateShareCount += 1;
+        b.rejectedDuplicateShareDiff1 += difficulty;
         break;
       case 'LowDifficultyShare':
-        promises.push(this.redisClient.hIncrBy(key, 'rejectedLowDifficultyShareCount', 1));
-        promises.push(this.redisClient.hIncrByFloat(key, 'rejectedLowDifficultyShareDiff1', difficulty));
+        b.rejectedLowDifficultyShareCount += 1;
+        b.rejectedLowDifficultyShareDiff1 += difficulty;
         break;
     }
+  }
 
-    await Promise.all(promises);
+  /**
+   * Coordinator API — snapshot of pending bucket deltas in record shape
+   * compatible with the existing `bulkUpsertClientStatistics` UNNEST upsert.
+   */
+  public drainDeltas(): Array<{
+    address: string; clientName: string; sessionId: string; time: number;
+    shares: number; acceptedCount: number; rejectedCount: number;
+    rejectedJobNotFoundCount: number; rejectedJobNotFoundDiff1: number;
+    rejectedDuplicateShareCount: number; rejectedDuplicateShareDiff1: number;
+    rejectedLowDifficultyShareCount: number; rejectedLowDifficultyShareDiff1: number;
+  }> {
+    const out: Array<any> = [];
+    for (const { address, clientName, sessionId, time, bucket: b } of this.deltas.values()) {
+      // Skip buckets that have nothing pending.
+      if (b.shares === 0 && b.acceptedCount === 0 && b.rejectedCount === 0) continue;
+      out.push({
+        address, clientName, sessionId, time,
+        shares: b.shares,
+        acceptedCount: b.acceptedCount,
+        rejectedCount: b.rejectedCount,
+        rejectedJobNotFoundCount: b.rejectedJobNotFoundCount,
+        rejectedJobNotFoundDiff1: b.rejectedJobNotFoundDiff1,
+        rejectedDuplicateShareCount: b.rejectedDuplicateShareCount,
+        rejectedDuplicateShareDiff1: b.rejectedDuplicateShareDiff1,
+        rejectedLowDifficultyShareCount: b.rejectedLowDifficultyShareCount,
+        rejectedLowDifficultyShareDiff1: b.rejectedLowDifficultyShareDiff1,
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Coordinator API — subtract a previously-drained snapshot. Buckets that
+   * end up fully empty are removed from the map.
+   */
+  public confirmFlush(flushed: Array<{ address: string; clientName: string; sessionId: string; time: number;
+    shares: number; acceptedCount: number; rejectedCount: number;
+    rejectedJobNotFoundCount: number; rejectedJobNotFoundDiff1: number;
+    rejectedDuplicateShareCount: number; rejectedDuplicateShareDiff1: number;
+    rejectedLowDifficultyShareCount: number; rejectedLowDifficultyShareDiff1: number;
+  }>): void {
+    for (const f of flushed) {
+      const k = this.keyOf(f.address, f.clientName, f.sessionId, f.time);
+      const entry = this.deltas.get(k);
+      if (!entry) continue;
+      const b = entry.bucket;
+      b.shares -= f.shares;
+      b.acceptedCount -= f.acceptedCount;
+      b.rejectedCount -= f.rejectedCount;
+      b.rejectedJobNotFoundCount -= f.rejectedJobNotFoundCount;
+      b.rejectedJobNotFoundDiff1 -= f.rejectedJobNotFoundDiff1;
+      b.rejectedDuplicateShareCount -= f.rejectedDuplicateShareCount;
+      b.rejectedDuplicateShareDiff1 -= f.rejectedDuplicateShareDiff1;
+      b.rejectedLowDifficultyShareCount -= f.rejectedLowDifficultyShareCount;
+      b.rejectedLowDifficultyShareDiff1 -= f.rejectedLowDifficultyShareDiff1;
+      if (b.shares <= 0 && b.acceptedCount <= 0 && b.rejectedCount <= 0
+          && b.rejectedJobNotFoundCount <= 0 && b.rejectedDuplicateShareCount <= 0
+          && b.rejectedLowDifficultyShareCount <= 0) {
+        this.deltas.delete(k);
+      }
+    }
   }
 
   private calcHashRate(shares: number) {
@@ -857,26 +924,15 @@ export class ClientStatisticsService implements OnModuleInit {
   }
 
   /**
-   * Clear all Redis cache keys for an address (used for delete operations)
+   * Drop all in-memory pending deltas for an address (called on account
+   * deletion). Method kept under its legacy `clearRedisKeysForAddress`
+   * name + async signature so callers in the controllers don't need to
+   * change.
    */
   public async clearRedisKeysForAddress(address: string): Promise<void> {
-    if (!this.redisClient) {
-      return;
-    }
-
-    try {
-      // Delete all client share keys for this address
-      const pattern = `client:shares:${address}:*`;
-      let cursor = '0';
-      do {
-        const result = await this.redisClient.scan(cursor, { MATCH: pattern, COUNT: 1000 });
-        cursor = result.cursor.toString();
-        if (result.keys.length > 0) {
-          await this.redisClient.del(result.keys);
-        }
-      } while (cursor !== '0');
-    } catch (error) {
-      console.error(`[ClientStatisticsService] Failed to clear Redis keys for address ${address}:`, error);
+    const prefix = `${address}|`;
+    for (const k of this.deltas.keys()) {
+      if (k.startsWith(prefix)) this.deltas.delete(k);
     }
   }
 }

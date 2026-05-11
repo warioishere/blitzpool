@@ -57,7 +57,6 @@ describe.each(['sqlite', 'postgres'] as const)(
       service = new ClientStatisticsService(
         dataSource.getRepository(ClientStatisticsEntity),
         {} as any,
-        { store: {} } as any,
       );
     });
 
@@ -264,20 +263,9 @@ describe.each(['sqlite', 'postgres'] as const)(
  * distinct (those use a schemaless reason field).
  */
 describe('ClientStatisticsService — addRejectedShare per-worker reason buckets (Stale conflation)', () => {
-  function makeServiceWithMockRedis() {
-    const hIncrBy = jest.fn().mockResolvedValue(1);
-    const hIncrByFloat = jest.fn().mockResolvedValue(0);
-    const expire = jest.fn().mockResolvedValue(1);
-    const redisClient = { hIncrBy, hIncrByFloat, expire };
-
+  function makeService() {
     const repo = { update: jest.fn() } as any;
-    const service = new ClientStatisticsService(
-      repo,
-      {} as any,
-      { store: {} } as any,
-    );
-    (service as any).redisClient = redisClient;
-    return { service, redisClient, hIncrBy, hIncrByFloat };
+    return new ClientStatisticsService(repo, {} as any);
   }
 
   const dummyClient = {
@@ -286,54 +274,52 @@ describe('ClientStatisticsService — addRejectedShare per-worker reason buckets
     sessionId: 'session-1',
   } as any;
 
-  it("'JobNotFound' reason increments the rejectedJobNotFoundCount + Diff1 buckets", async () => {
-    const { service, hIncrBy, hIncrByFloat } = makeServiceWithMockRedis();
-    await service.addRejectedShare(dummyClient, 'JobNotFound', 16384);
+  function bucketOf(svc: ClientStatisticsService) {
+    const out = svc.drainDeltas();
+    expect(out.length).toBe(1);
+    return out[0];
+  }
 
-    // hIncrBy was called for: rejectedCount (total) + rejectedJobNotFoundCount (bucket)
-    const buckets = hIncrBy.mock.calls.map((c: any[]) => c[1]);
-    expect(buckets).toContain('rejectedCount');
-    expect(buckets).toContain('rejectedJobNotFoundCount');
-    // hIncrByFloat was called for: rejectedJobNotFoundDiff1
-    const diffBuckets = hIncrByFloat.mock.calls.map((c: any[]) => c[1]);
-    expect(diffBuckets).toContain('rejectedJobNotFoundDiff1');
+  it("'JobNotFound' reason increments the rejectedJobNotFoundCount + Diff1 fields", async () => {
+    const svc = makeService();
+    await svc.addRejectedShare(dummyClient, 'JobNotFound', 16384);
+    const b = bucketOf(svc);
+    expect(b.rejectedCount).toBe(1);
+    expect(b.rejectedJobNotFoundCount).toBe(1);
+    expect(b.rejectedJobNotFoundDiff1).toBe(16384);
   });
 
-  it("'Stale' reason ALSO increments the rejectedJobNotFoundCount + Diff1 buckets (conflation)", async () => {
-    const { service, hIncrBy, hIncrByFloat } = makeServiceWithMockRedis();
-    await service.addRejectedShare(dummyClient, 'Stale', 16384);
-
-    const buckets = hIncrBy.mock.calls.map((c: any[]) => c[1]);
-    expect(buckets).toContain('rejectedCount');
+  it("'Stale' reason ALSO increments the rejectedJobNotFoundCount + Diff1 fields (conflation)", async () => {
+    const svc = makeService();
+    await svc.addRejectedShare(dummyClient, 'Stale', 16384);
+    const b = bucketOf(svc);
+    expect(b.rejectedCount).toBe(1);
     // CRITICAL: 'Stale' lands in the JobNotFound per-worker bucket so the
     // UI continues to display "code 21" rejections under one header.
-    expect(buckets).toContain('rejectedJobNotFoundCount');
-    const diffBuckets = hIncrByFloat.mock.calls.map((c: any[]) => c[1]);
-    expect(diffBuckets).toContain('rejectedJobNotFoundDiff1');
+    expect(b.rejectedJobNotFoundCount).toBe(1);
+    expect(b.rejectedJobNotFoundDiff1).toBe(16384);
   });
 
   it("'DuplicateShare' / 'LowDifficultyShare' route to their dedicated buckets", async () => {
-    const { service, hIncrBy } = makeServiceWithMockRedis();
-    await service.addRejectedShare(dummyClient, 'DuplicateShare', 16384);
-    await service.addRejectedShare(dummyClient, 'LowDifficultyShare', 16384);
-
-    const buckets = hIncrBy.mock.calls.map((c: any[]) => c[1]);
-    expect(buckets).toContain('rejectedDuplicateShareCount');
-    expect(buckets).toContain('rejectedLowDifficultyShareCount');
+    const svc = makeService();
+    await svc.addRejectedShare(dummyClient, 'DuplicateShare', 16384);
+    await svc.addRejectedShare(dummyClient, 'LowDifficultyShare', 16384);
+    const b = bucketOf(svc);
+    expect(b.rejectedDuplicateShareCount).toBe(1);
+    expect(b.rejectedDuplicateShareDiff1).toBe(16384);
+    expect(b.rejectedLowDifficultyShareCount).toBe(1);
+    expect(b.rejectedLowDifficultyShareDiff1).toBe(16384);
     // And NOT into JobNotFound (no cross-pollination from the Stale fix)
-    const jobNotFoundCalls = buckets.filter((b: string) => b === 'rejectedJobNotFoundCount');
-    expect(jobNotFoundCalls.length).toBe(0);
+    expect(b.rejectedJobNotFoundCount).toBe(0);
   });
 
   it("unknown reason falls through: only rejectedCount (total) increments, no per-reason bucket", async () => {
-    const { service, hIncrBy, hIncrByFloat } = makeServiceWithMockRedis();
-    await service.addRejectedShare(dummyClient, 'OtherUnknown', 16384);
-
-    const buckets = hIncrBy.mock.calls.map((c: any[]) => c[1]);
-    expect(buckets).toContain('rejectedCount');
-    expect(buckets).not.toContain('rejectedJobNotFoundCount');
-    expect(buckets).not.toContain('rejectedDuplicateShareCount');
-    expect(buckets).not.toContain('rejectedLowDifficultyShareCount');
-    expect(hIncrByFloat).not.toHaveBeenCalled();
+    const svc = makeService();
+    await svc.addRejectedShare(dummyClient, 'OtherUnknown', 16384);
+    const b = bucketOf(svc);
+    expect(b.rejectedCount).toBe(1);
+    expect(b.rejectedJobNotFoundCount).toBe(0);
+    expect(b.rejectedDuplicateShareCount).toBe(0);
+    expect(b.rejectedLowDifficultyShareCount).toBe(0);
   });
 });

@@ -1,100 +1,94 @@
 import { ClientRejectedStatisticsService } from './client-rejected-statistics.service';
+import { TimeSlotHelper } from '../../utils/time-slot.helper';
 
-describe('ClientRejectedStatisticsService', () => {
-  let mockRedisClient: any;
-  let cacheManager: any;
+describe('ClientRejectedStatisticsService (in-memory)', () => {
   let service: ClientRejectedStatisticsService;
 
-  beforeEach(async () => {
-    mockRedisClient = {
-      hIncrBy: jest.fn().mockResolvedValue(undefined),
-      hIncrByFloat: jest.fn().mockResolvedValue(undefined),
-      expire: jest.fn().mockResolvedValue(undefined),
-      keys: jest.fn().mockResolvedValue([]),
-      del: jest.fn().mockResolvedValue(undefined),
-    };
-
-    cacheManager = {
-      store: {
-        client: mockRedisClient,
-      },
-    };
-
-    service = new ClientRejectedStatisticsService({} as any, cacheManager as any);
-    await service.onModuleInit();
+  beforeEach(() => {
+    service = new ClientRejectedStatisticsService({} as any);
   });
 
-  it('atomically increments count and shares in Redis', async () => {
-    const tenMinutes = 1000 * 60 * 10;
-    const now = 1700000000000;
-    const timeSlot = Math.floor(now / tenMinutes) * tenMinutes + tenMinutes;
-    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(now);
+  describe('addRejectedShare', () => {
+    it('records count and shares per (address, slot, reason)', () => {
+      const slot = TimeSlotHelper.getCurrentSlot();
+      service.addRejectedShare('addr', 'duplicate', 5);
 
-    try {
-      await service.addRejectedShare('addr', 'duplicate', 5);
-
-      const expectedKey = `client:rejected:addr:${timeSlot}`;
-      expect(mockRedisClient.hIncrBy).toHaveBeenCalledWith(expectedKey, 'duplicate:count', 1);
-      expect(mockRedisClient.hIncrByFloat).toHaveBeenCalledWith(expectedKey, 'duplicate:shares', 4);
-      expect(mockRedisClient.expire).toHaveBeenCalledWith(expectedKey, 86400);
-    } finally {
-      nowSpy.mockRestore();
-    }
-  });
-
-  it('sends all Redis commands in parallel via Promise.all', async () => {
-    const callOrder: string[] = [];
-    mockRedisClient.hIncrBy.mockImplementation(() => { callOrder.push('hIncrBy'); return Promise.resolve(); });
-    mockRedisClient.hIncrByFloat.mockImplementation(() => { callOrder.push('hIncrByFloat'); return Promise.resolve(); });
-    mockRedisClient.expire.mockImplementation(() => { callOrder.push('expire'); return Promise.resolve(); });
-
-    await service.addRejectedShare('addr', 'duplicate', 5);
-
-    // All three should have been called (order doesn't matter with Promise.all)
-    expect(callOrder).toHaveLength(3);
-    expect(callOrder).toContain('hIncrBy');
-    expect(callOrder).toContain('hIncrByFloat');
-    expect(callOrder).toContain('expire');
-  });
-
-  it('does not track when Redis is not available', async () => {
-    const serviceNoRedis = new ClientRejectedStatisticsService({} as any, { store: {} } as any);
-    await serviceNoRedis.onModuleInit();
-
-    const consoleSpy = jest.spyOn(console, 'error').mockImplementation();
-
-    try {
-      await serviceNoRedis.addRejectedShare('addr', 'duplicate', 5);
-      expect(mockRedisClient.hIncrBy).not.toHaveBeenCalled();
-    } finally {
-      consoleSpy.mockRestore();
-    }
-  });
-
-  describe('clearRedisKeysForAddress', () => {
-    it('uses SCAN instead of KEYS to find matching keys', async () => {
-      mockRedisClient.scan = jest.fn()
-        .mockResolvedValueOnce({ cursor: '5', keys: ['client:rejected:addr:100', 'client:rejected:addr:200'] })
-        .mockResolvedValueOnce({ cursor: '0', keys: ['client:rejected:addr:300'] });
-
-      await service.clearRedisKeysForAddress('addr');
-
-      expect(mockRedisClient.scan).toHaveBeenCalledTimes(2);
-      expect(mockRedisClient.scan).toHaveBeenCalledWith('0', { MATCH: 'client:rejected:addr:*', COUNT: 1000 });
-      expect(mockRedisClient.scan).toHaveBeenCalledWith('5', { MATCH: 'client:rejected:addr:*', COUNT: 1000 });
-      expect(mockRedisClient.del).toHaveBeenCalledTimes(2);
-      expect(mockRedisClient.del).toHaveBeenCalledWith(['client:rejected:addr:100', 'client:rejected:addr:200']);
-      expect(mockRedisClient.del).toHaveBeenCalledWith(['client:rejected:addr:300']);
+      const drained = service.drainDeltas();
+      expect(drained).toEqual([
+        { address: 'addr', time: slot, reason: 'duplicate', count: 1, shares: 4 },
+      ]);
     });
 
-    it('handles no matching keys gracefully', async () => {
-      mockRedisClient.scan = jest.fn()
-        .mockResolvedValueOnce({ cursor: '0', keys: [] });
+    it('accumulates across multiple calls with the same (addr, slot, reason)', () => {
+      service.addRejectedShare('addr', 'duplicate', 5);
+      service.addRejectedShare('addr', 'duplicate', 3);
 
-      await service.clearRedisKeysForAddress('addr');
+      const drained = service.drainDeltas();
+      expect(drained).toEqual([
+        expect.objectContaining({ address: 'addr', reason: 'duplicate', count: 2, shares: 6 }),
+      ]);
+    });
 
-      expect(mockRedisClient.scan).toHaveBeenCalledTimes(1);
-      expect(mockRedisClient.del).not.toHaveBeenCalled();
+    it('keeps reasons separate within the same address+slot', () => {
+      service.addRejectedShare('addr', 'duplicate', 5);
+      service.addRejectedShare('addr', 'low-diff', 3);
+
+      const drained = service.drainDeltas();
+      expect(drained).toEqual(expect.arrayContaining([
+        expect.objectContaining({ reason: 'duplicate', count: 1, shares: 4 }),
+        expect.objectContaining({ reason: 'low-diff', count: 1, shares: 2 }),
+      ]));
+    });
+
+    it('discards calls with empty address or reason or non-finite diff', () => {
+      service.addRejectedShare('', 'duplicate', 5);
+      service.addRejectedShare('addr', '', 5);
+      service.addRejectedShare('addr', 'duplicate', NaN);
+      service.addRejectedShare('addr', 'duplicate', Infinity);
+
+      expect(service.drainDeltas()).toEqual([]);
+    });
+  });
+
+  describe('drain / confirm', () => {
+    it('confirmFlush subtracts only the flushed amounts; residuals stay', () => {
+      service.addRejectedShare('addr', 'duplicate', 5);
+      const snapshot = service.drainDeltas();
+      // A reject arrives during the simulated PG await:
+      service.addRejectedShare('addr', 'duplicate', 3);
+
+      service.confirmFlush(snapshot);
+
+      const after = service.drainDeltas();
+      expect(after).toEqual([
+        expect.objectContaining({ address: 'addr', reason: 'duplicate', count: 1, shares: 2 }),
+      ]);
+    });
+
+    it('confirmFlush removes the entry when both count and shares hit 0', () => {
+      service.addRejectedShare('addr', 'duplicate', 5);
+      const snapshot = service.drainDeltas();
+      service.confirmFlush(snapshot);
+      expect(service.drainDeltas()).toEqual([]);
+    });
+  });
+
+  describe('clearRedisKeysForAddress (legacy name; now in-memory)', () => {
+    it('drops all entries for the given address', async () => {
+      service.addRejectedShare('addr1', 'duplicate', 5);
+      service.addRejectedShare('addr2', 'duplicate', 5);
+
+      await service.clearRedisKeysForAddress('addr1');
+
+      const drained = service.drainDeltas();
+      expect(drained).toEqual([
+        expect.objectContaining({ address: 'addr2' }),
+      ]);
+    });
+
+    it('is a no-op when there is nothing to drop', async () => {
+      await service.clearRedisKeysForAddress('nonexistent');
+      expect(service.drainDeltas()).toEqual([]);
     });
   });
 });

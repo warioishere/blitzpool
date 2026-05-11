@@ -1,49 +1,74 @@
-import { Injectable, Inject, OnModuleInit } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, MoreThan } from 'typeorm';
-import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import { Cache } from 'cache-manager';
 
 import { PoolRejectedStatisticsEntity } from './pool-rejected-statistics.entity';
+import { TimeSlotHelper } from '../../utils/time-slot.helper';
+
+/**
+ * Pool-wide rejected-share counts bucketed per 10-min slot per reason
+ * (JobNotFound, DuplicateShare, LowDifficultyShare, Stale, …). Writes
+ * accumulate in process memory; coordinator drains/flushes to PG every
+ * 60s via INCREMENT upsert so partial-slot flushes are idempotent.
+ *
+ * Previously Redis-buffered as `pool:rejected:<slot>` HASH with EXPIRE
+ * refreshed on every accepted share. The EXPIRE storm was real and that's
+ * now gone — flush mechanism handles slot lifetime via the same
+ * `getChartVisibilityCutoffSlot()` filter used by every other chart endpoint.
+ */
+type SlotReasonMap = Map<string, number>;
 
 @Injectable()
-export class PoolRejectedStatisticsService implements OnModuleInit {
+export class PoolRejectedStatisticsService {
+  private readonly slotDeltas = new Map<number, SlotReasonMap>();
+
   constructor(
     @InjectRepository(PoolRejectedStatisticsEntity)
     private poolRejectedStatisticsRepository: Repository<PoolRejectedStatisticsEntity>,
-    @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
   ) {}
 
-  private redisClient: any = null;
+  /** Synchronous hot-path entry. Non-throwing. */
+  public addRejectedShare(reason: string, diff: number): void {
+    if (!reason || !Number.isFinite(diff) || diff <= 0) return;
 
-  async onModuleInit(): Promise<void> {
-    try {
-      const store: any = this.cacheManager.store;
-      if (store && store.client) {
-        this.redisClient = store.client;
-        console.log('[PoolRejectedStatisticsService] Using Redis for atomic share increments');
-      } else {
-        throw new Error('Redis not available - required for pool rejected statistics');
+    const timeSlot = TimeSlotHelper.getCurrentSlot();
+    let reasonMap = this.slotDeltas.get(timeSlot);
+    if (!reasonMap) {
+      reasonMap = new Map();
+      this.slotDeltas.set(timeSlot, reasonMap);
+    }
+    reasonMap.set(reason, (reasonMap.get(reason) ?? 0) + diff);
+  }
+
+  /** Coordinator API — snapshot of pending slot×reason deltas. */
+  public drainSlotDeltas(): Map<number, SlotReasonMap> {
+    const snapshot = new Map<number, SlotReasonMap>();
+    for (const [slot, reasonMap] of this.slotDeltas) {
+      const copy: SlotReasonMap = new Map();
+      for (const [reason, count] of reasonMap) {
+        if (count > 0) copy.set(reason, count);
       }
-    } catch (error) {
-      console.error('[PoolRejectedStatisticsService] Failed to access Redis client:', error);
-      throw error;
+      if (copy.size > 0) snapshot.set(slot, copy);
+    }
+    return snapshot;
+  }
+
+  /** Coordinator API — subtract a previously-drained snapshot. */
+  public confirmFlush(flushed: Map<number, SlotReasonMap>): void {
+    for (const [slot, flushedReasons] of flushed) {
+      const current = this.slotDeltas.get(slot);
+      if (!current) continue;
+      for (const [reason, amount] of flushedReasons) {
+        const have = current.get(reason) ?? 0;
+        const residual = have - amount;
+        if (residual <= 0) current.delete(reason);
+        else current.set(reason, residual);
+      }
+      if (current.size === 0) this.slotDeltas.delete(slot);
     }
   }
 
-  public async addRejectedShare(reason: string, diff: number): Promise<void> {
-    const coeff = 1000 * 60 * 10;
-    const now = Date.now();
-    // Time slot labeled by END time (e.g., slot "20:50" contains data from 20:40-20:50)
-    const timeSlot = Math.floor(now / coeff) * coeff + coeff;
-
-    // Atomically increment count for this reason in Redis
-    const key = `pool:rejected:${timeSlot}`;
-    await Promise.all([
-      this.redisClient.hIncrByFloat(key, reason, diff),
-      this.redisClient.expire(key, 86400),
-    ]);
-  }
+  // ─── PG-direct API used by the public API endpoints ───
 
   public async getTotalsSince(time: number): Promise<Record<string, number>> {
     const result = await this.poolRejectedStatisticsRepository

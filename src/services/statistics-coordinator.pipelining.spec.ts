@@ -95,6 +95,18 @@ function buildService(mockRedis: any, mockWorkerShares: Partial<WorkerSharesServ
             drainSlotDeltas: jest.fn().mockReturnValue(new Map()),
             confirmFlush: jest.fn(),
         } as any,                            // poolShareStatisticsService
+        {
+            drainSlotDeltas: jest.fn().mockReturnValue(new Map()),
+            confirmFlush: jest.fn(),
+        } as any,                            // poolRejectedStatisticsService
+        {
+            drainDeltas: jest.fn().mockReturnValue([]),
+            confirmFlush: jest.fn(),
+        } as any,                            // clientStatisticsService
+        {
+            drainDeltas: jest.fn().mockReturnValue([]),
+            confirmFlush: jest.fn(),
+        } as any,                            // clientRejectedStatisticsService
     );
     (service as any).redisClient = mockRedis;
     return service;
