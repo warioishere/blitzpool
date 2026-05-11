@@ -114,6 +114,17 @@ Code reviewed:
 3. **PushSolution `channel_msg_bit`**: §8 Message Types marks it `1`. §3.2.1 says "JDP NEVER sets channel_msg". Self-contradiction. → Likely §8 table typo.
 4. **`coinbase_output_max_additional_size` mismatch**: §6.4.3 prose + ext 0x0003 §4.5 reference this field but it's not in §6.4.3 table and not in SRI struct. Vestigial from earlier draft? → Either add to table or remove from prose.
 5. **§3.2.1 "least significant bit ... bit 15"**: Internal contradiction; bit 15 of a U16 is MSB. Prose typo, fix needed.
+6. **NewMiningJob (0x15) `channel_msg_bit`**: §8 Message Types table marks it `0`. SRI Rust (`CHANNEL_BIT_NEW_MINING_JOB = true` in `sv2/subprotocols/mining/src/lib.rs:89`) + bosminer/BraiinsOS both require `channel_msg=1`. Real-world break: **discovered in production 2026-05-11** — a BraiinsOS S19kPro miner opened a Standard channel and our pool sent NewMiningJob with channel_msg=0 (following the spec table); bosminer rejected every frame as `Unknown message type [0] from stratum v2 extension [21]` and disconnected after channel-open. Fixed on master in commit `16434bc` by flipping the bit to match SRI. Same class of doc-bug as PushSolution row above. → PR needed against `sv2-spec/08-Message-Types.md`.
+
+### Implementation observations across SV2 clients (NewMiningJob channel_msg routing)
+
+| Client | Strictness | Behavior with channel_msg=0 | Behavior with channel_msg=1 |
+|---|---|---|---|
+| BraiinsOS (bosminer) | **strict** | ❌ "Unknown message type" → disconnect | ✅ accepts |
+| SRI Rust standard-channel JDC | **strict** | ❌ ParserError | ✅ accepts |
+| Bitaxe ESP-Miner (`feature/stratum-v2-support`) | **permissive** | ✅ accepts (dispatcher ignores `extension_type` bit, switches purely on `msg_type`) | ✅ accepts |
+
+Bitaxe's permissiveness is *technically* not spec-strict per §3.2.1 (it should read the channel_msg bit for routing), but functionally correct because the channel_id is already the first payload field, so both bit values resolve to the same parse. No firmware fix needed — flipping our pool's bit to match SRI keeps Bitaxe working AND fixes BraiinsOS. Bitaxe code references: `components/stratum_v2/sv2_protocol.c:64-71` (parser stores but doesn't validate the bit), `main/tasks/stratum_v2_task.c:916` (dispatch switches on `hdr.msg_type` only).
 
 ## G. Known Gaps in our Implementation
 
