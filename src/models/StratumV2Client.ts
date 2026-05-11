@@ -2093,7 +2093,16 @@ export class StratumV2Client {
       version: jobTemplate.block.version,
       merkleRoot,
     });
-    await this.sendFrame(Sv2MsgType.NEW_MINING_JOB, jobPayload, 0);
+    // NewMiningJob carries channel_msg=1 per SRI reference impl
+    // (`CHANNEL_BIT_NEW_MINING_JOB = true`). The sv2-spec §8 table
+    // erroneously lists it as channel_msg=0 — same class of doc-bug
+    // we already documented for PushSolution. BraiinsOS / bosminer
+    // follow SRI strictly and reject channel_msg=0 frames as
+    // "Unknown message type", which is what was breaking Standard-
+    // channel Braiins miners. Payload is byte-identical either way
+    // (channel_id is already the first field), so the change is
+    // purely the routing bit in the frame header.
+    await this.sendFrame(Sv2MsgType.NEW_MINING_JOB, jobPayload, SV2_CHANNEL_MSG_FLAG);
 
     // Store job-specific difficulty (SV2 spec: shares validated against target from when job was sent)
     channel.jobIdToDifficulty.set(parseInt(job.jobId, 16), channel.sessionDifficulty);
