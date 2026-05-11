@@ -103,4 +103,45 @@ describe('Coinbase Output Weights TLV (ext 0x0003)', () => {
     const unrelated = Buffer.from([0x00, 0x09, 0x01, 0x00, 0x02, 0x00, 0x00]);
     expect(parseCoinbaseOutputWeightsTlv(unrelated)).toBeNull();
   });
+
+  it('parses the spec wire example back to weights=[200, 4900, 4900]', () => {
+    // Verbatim from extensions/0x0003-coinbase-output-weights.md §1.1:
+    const wire = Buffer.from('000301000e0300c80000002413000024130000', 'hex');
+    expect(parseCoinbaseOutputWeightsTlv(wire)).toEqual([200, 4900, 4900]);
+  });
+});
+
+// ── Integration: full AllocateMiningJobToken.Success + ext 0x0003 TLV ──
+// Exercises the prod-code wire shape: serialize base success message,
+// append the 0x0003 weights TLV (when negotiated), then parse both back.
+// Catches any regression where the TLV gets corrupted by being concatenated
+// onto the base payload.
+describe('AllocateMiningJobToken.Success + 0x0003 TLV roundtrip', () => {
+  // Production serializers used directly — no fakes.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const jdp = require('./sv2-jdp-messages');
+
+  it('client can split base payload from trailing TLV bytes', () => {
+    const baseMsg = {
+      requestId: 0xdeadbeef,
+      miningJobToken: Buffer.from('mytoken1234', 'utf8'),
+      coinbaseOutputs: Buffer.from('00', 'hex'), // empty Vec<TxOut>
+    };
+    const baseBuf: Buffer = jdp.serializeAllocateMiningJobTokenSuccess(baseMsg);
+    const tlvBuf = encodeCoinbaseOutputWeightsTlv([1, 99, 4_000_000_000]);
+    const combined = Buffer.concat([baseBuf, tlvBuf]);
+
+    // Re-parse the base portion. It should consume exactly baseBuf.length
+    // bytes and leave the TLV intact at the tail.
+    const reader = new BufferReader(combined);
+    const parsedBase = jdp.deserializeAllocateMiningJobTokenSuccess(reader);
+    expect(parsedBase.requestId).toBe(baseMsg.requestId);
+    expect(parsedBase.miningJobToken).toEqual(baseMsg.miningJobToken);
+    expect(parsedBase.coinbaseOutputs).toEqual(baseMsg.coinbaseOutputs);
+
+    // The remaining bytes after base-parse should be exactly the TLV.
+    const tail = combined.subarray(reader.position);
+    expect(tail).toEqual(tlvBuf);
+    expect(parseCoinbaseOutputWeightsTlv(tail)).toEqual([1, 99, 4_000_000_000]);
+  });
 });

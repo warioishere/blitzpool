@@ -309,6 +309,16 @@ export class JobDeclarationClient {
    * If at least one is supported, .Success carries that subset.
    */
   private async handleRequestExtensions(payload: Buffer): Promise<void> {
+    // Spec ext 0x0001 §4.2: "RequestExtensions MUST be sent immediately
+    // after SetupConnection.Success and before any other protocol-
+    // specific messages." We ignore stray pre-setup requests rather
+    // than answering — answering would let a client skip the
+    // SetupConnection handshake.
+    if (!this.setupComplete) {
+      console.warn(`[JDP ${this.clientId}] ⚠️  RequestExtensions before SetupConnection, ignoring`);
+      return;
+    }
+
     const reader = new BufferReader(payload);
     const msg = deserializeRequestExtensions(reader);
 
@@ -614,6 +624,20 @@ export class JobDeclarationClient {
     this.service.onJobDeclared(this.clientId, job, newToken);
   }
 
+  /**
+   * PushSolution handler — JDS-side block reconstruction + propagation.
+   *
+   * Spec §6.1: JDS is responsible for "Publishing valid block submissions
+   * received from JDC." Spec §6.4.9: "When receiving PushSolution, JDS
+   * MUST attempt to reconstruct and propagate the block using the template
+   * data associated with its most recently sent DeclareMiningJob.Success."
+   *
+   * In practice the JDC ALSO submits the block via its own Template
+   * Provider's SubmitSolution. Both paths run in parallel — the design
+   * intent is to reduce orphan risk by having two independent
+   * propagators. Bitcoin Core's submitblock RPC is idempotent ("duplicate"
+   * is a successful no-op), so the second arrival never causes harm.
+   */
   private async handlePushSolution(payload: Buffer): Promise<void> {
     const reader = new BufferReader(payload);
     const solution = deserializePushSolution(reader);

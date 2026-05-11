@@ -66,6 +66,7 @@ import {
   serializeReconnect,
   deserializeRequestExtensions,
   serializeRequestExtensionsSuccess,
+  serializeRequestExtensionsError,
   SV2_EXTENSION_NEGOTIATION_ID,
 } from './sv2/sv2-messages';
 import {
@@ -378,15 +379,29 @@ export class StratumV2Client {
     const extensionId = extensionType & 0x7FFF;
 
     // Extension 1: Extensions Negotiation (0x0001)
-    // Spec: after SetupConnection.Success, client may send RequestExtensions before other messages.
-    // We support no extensions, so respond with Success + empty supported list.
+    // Spec: after SetupConnection.Success, client may send RequestExtensions.
+    // The SV2 mining server currently supports NO extensions — so per ext
+    // 0x0001 §4.1 ("Servers MUST respond with RequestExtensions.Error if
+    // none of the requested extensions are supported") we respond with
+    // .Error listing every requested extension as unsupported, NOT with
+    // .Success + empty list (which would be a spec violation).
     if (extensionId === SV2_EXTENSION_NEGOTIATION_ID) {
       if (msgType === 0x00) {
         const reader = new BufferReader(payload);
         const msg = deserializeRequestExtensions(reader);
         console.log(`[SV2 ${this.sessionId}] RequestExtensions: requested=[${msg.requestedExtensions.map(e => `0x${e.toString(16)}`).join(', ')}]`);
-        const responsePayload = serializeRequestExtensionsSuccess({ requestId: msg.requestId, supportedExtensions: [] });
-        await this.sendFrameWithExtension(0x01, responsePayload, SV2_EXTENSION_NEGOTIATION_ID);
+        if (msg.requestedExtensions.length === 0) {
+          // No extensions requested — .Success with empty list is fine.
+          const responsePayload = serializeRequestExtensionsSuccess({ requestId: msg.requestId, supportedExtensions: [] });
+          await this.sendFrameWithExtension(0x01, responsePayload, SV2_EXTENSION_NEGOTIATION_ID);
+        } else {
+          const errorPayload = serializeRequestExtensionsError({
+            requestId: msg.requestId,
+            unsupportedExtensions: msg.requestedExtensions,
+            requiredExtensions: [],
+          });
+          await this.sendFrameWithExtension(0x02, errorPayload, SV2_EXTENSION_NEGOTIATION_ID);
+        }
       } else {
         console.warn(`[SV2 ${this.sessionId}] Unknown Extension 1 msgType: 0x${msgType.toString(16)}, ignoring`);
       }

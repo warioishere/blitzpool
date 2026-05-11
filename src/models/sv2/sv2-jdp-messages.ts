@@ -174,12 +174,21 @@ export function deserializeProvideMissingTransactionsSuccess(reader: BufferReade
 }
 
 // ── PushSolution (0x60) ────────────────────────────────────────
+//
+// IMPORTANT — wire field order:
+//   extranonce | prev_hash | ntime | nonce | nbits | version
+//
+// The spec table in §6.4.9 lists nonce BEFORE ntime, but the SRI Rust
+// reference (sv2/subprotocols/job-declaration/src/push_solution.rs)
+// has ntime BEFORE nonce, and that's what real JDCs put on the wire.
+// We follow SRI to stay interoperable; the spec table is a known
+// documentation bug.
 
 export interface Sv2PushSolution {
   extranonce: Buffer;  // B0_32
   prevHash: Buffer;    // U256
-  nonce: number;       // U32
   ntime: number;       // U32
+  nonce: number;       // U32
   nBits: number;       // U32
   version: number;     // U32
 }
@@ -188,8 +197,8 @@ export function serializePushSolution(msg: Sv2PushSolution): Buffer {
   const w = new BufferWriter();
   w.writeB0_32(msg.extranonce);
   w.writeU256(msg.prevHash);
-  w.writeU32(msg.nonce);
   w.writeU32(msg.ntime);
+  w.writeU32(msg.nonce);
   w.writeU32(msg.nBits);
   w.writeU32(msg.version);
   return w.toBuffer();
@@ -199,8 +208,8 @@ export function deserializePushSolution(reader: BufferReader): Sv2PushSolution {
   return {
     extranonce: reader.readB0_32(),
     prevHash: reader.readU256(),
-    nonce: reader.readU32(),
     ntime: reader.readU32(),
+    nonce: reader.readU32(),
     nBits: reader.readU32(),
     version: reader.readU32(),
   };

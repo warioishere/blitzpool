@@ -287,6 +287,34 @@ describe('SV2 JDP Messages', () => {
     expect(buf.length).toBe(57);
   });
 
+  it('PushSolution wire field order matches SRI (extranonce | prev_hash | ntime | nonce | nbits | version)', () => {
+    // Distinct sentinel values per field so any swap is loud.
+    const msg: Sv2PushSolution = {
+      extranonce: Buffer.alloc(0),
+      prevHash: Buffer.alloc(32, 0xaa),
+      ntime: 0x11111111,
+      nonce: 0x22222222,
+      nBits: 0x33333333,
+      version: 0x44444444,
+    };
+    const buf = serializePushSolution(msg);
+
+    // B0_32 length prefix (1 byte) + zero extranonce
+    expect(buf[0]).toBe(0x00);
+
+    // U256 prev_hash next (32 bytes of 0xaa)
+    for (let i = 1; i < 33; i++) expect(buf[i]).toBe(0xaa);
+
+    // Then ntime (LE) — this is the critical assertion.
+    expect(buf.readUInt32LE(33)).toBe(0x11111111);
+    // Then nonce
+    expect(buf.readUInt32LE(37)).toBe(0x22222222);
+    // Then nbits
+    expect(buf.readUInt32LE(41)).toBe(0x33333333);
+    // Then version
+    expect(buf.readUInt32LE(45)).toBe(0x44444444);
+  });
+
   it('serialized SetCustomMiningJob has correct fixed overhead', () => {
     const msg: Sv2SetCustomMiningJob = {
       channelId: 1,
