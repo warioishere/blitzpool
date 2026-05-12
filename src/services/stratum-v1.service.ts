@@ -1,7 +1,7 @@
 import { Injectable, OnModuleInit, Inject } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import { Cache } from 'cache-manager';
+import type { Cache } from 'cache-manager';
 import { Socket } from 'net';
 
 import { StratumV1Client } from '../models/StratumV1Client';

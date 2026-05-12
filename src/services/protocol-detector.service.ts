@@ -1,6 +1,6 @@
 import { Injectable, OnModuleInit, Inject, forwardRef } from '@nestjs/common';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import { Cache } from 'cache-manager';
+import type { Cache } from 'cache-manager';
 import { ConfigService } from '@nestjs/config';
 import { Server, Socket, createConnection } from 'net';
 

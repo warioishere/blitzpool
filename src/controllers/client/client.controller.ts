@@ -1,6 +1,6 @@
 import { Controller, Get, NotFoundException, Param, Query, Post, Inject } from '@nestjs/common';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import { Cache } from 'cache-manager';
+import type { Cache } from 'cache-manager';
 import { ConfigService } from '@nestjs/config';
 
 import { AddressSettingsService } from '../../ORM/address-settings/address-settings.service';

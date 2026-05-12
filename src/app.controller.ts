@@ -1,6 +1,6 @@
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Controller, Get, Inject, Query, Param } from '@nestjs/common';
-import { Cache } from 'cache-manager';
+import type { Cache } from 'cache-manager';
 import { firstValueFrom } from 'rxjs';
 import { readFileSync } from 'fs';
 import { join } from 'path';

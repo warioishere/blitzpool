@@ -3,13 +3,33 @@ import { ConfigService } from '@nestjs/config';
 import { RPCClient } from 'rpc-bitcoin';
 import { BehaviorSubject, filter, shareReplay } from 'rxjs';
 import { RpcBlockService } from '../ORM/rpc-block/rpc-block.service';
-import * as zmq from 'zeromq';
+import { createClient as createRedisClient, RedisClientType } from 'redis';
 
 import { IBlockTemplate } from '../models/bitcoin-rpc/IBlockTemplate';
 import { IMiningInfo } from '../models/bitcoin-rpc/IMiningInfo';
 import { IPeerInfo } from '../models/bitcoin-rpc/IPeerInfo';
 import { INetworkInfo } from '../models/bitcoin-rpc/INetworkInfo';
 import * as fs from 'node:fs';
+
+/**
+ * How the pool learns about new bitcoind blocks. Configurable via
+ * `BLOCK_NOTIFY_SOURCE`:
+ *
+ *   - `zmq`         (default, legacy) — pool process subscribes
+ *                    directly to bitcoind's ZMQ feed. Requires the
+ *                    Node `zeromq` NAPI binding, which doesn't yet
+ *                    run on Bun (oven-sh/bun#18546).
+ *   - `redis-pubsub` — pool subscribes to a Redis channel populated
+ *                    by an external `zmq-sidecar` process. Runtime-
+ *                    agnostic (works on Bun). See `zmq-sidecar/`.
+ *   - `polling`     — last-resort fallback. Calls `getmininginfo`
+ *                    every 500 ms. ~250 ms median block-detection
+ *                    latency hit vs ZMQ.
+ *
+ * The downstream effect (pollMiningInfo → newBlock$) is identical
+ * across all three sources; only the trigger differs.
+ */
+type BlockNotifySource = 'zmq' | 'redis-pubsub' | 'polling';
 
 @Injectable()
 export class BitcoinRpcService implements OnModuleInit {
@@ -49,35 +69,103 @@ export class BitcoinRpcService implements OnModuleInit {
             console.error('Could not reach RPC host');
         });
 
-        if (this.configService.get('BITCOIN_ZMQ_HOST')) {
-            console.log('Using ZMQ');
-            const sock = new zmq.Subscriber;
-
-
-            sock.connectTimeout = 1000;
-            sock.events.on('connect', () => {
-                console.log('ZMQ Connected');
-            });
-            sock.events.on('connect:retry', () => {
-                console.log('ZMQ Unable to connect, Retrying');
-            });
-
-            sock.connect(this.configService.get('BITCOIN_ZMQ_HOST'));
-            sock.subscribe('rawblock');
-            // Don't await this, otherwise it will block the rest of the program
-            this.listenForNewBlocks(sock);
-            await this.pollMiningInfo();
-
-        } else {
-            setInterval(this.pollMiningInfo.bind(this), 500);
+        const source = this.resolveBlockNotifySource();
+        switch (source) {
+            case 'redis-pubsub':
+                await this.startRedisPubSubListener();
+                await this.pollMiningInfo();
+                break;
+            case 'zmq':
+                await this.startZmqListener();
+                await this.pollMiningInfo();
+                break;
+            case 'polling':
+            default:
+                console.log('[BitcoinRpc] block notify source: polling (every 500ms)');
+                setInterval(this.pollMiningInfo.bind(this), 500);
+                break;
         }
     }
 
-    private async listenForNewBlocks(sock: zmq.Subscriber) {
-        for await (const [topic, msg] of sock) {
-            console.log("New Block");
+    /**
+     * Decide which notification source to use, with backwards-compatible
+     * defaults: if `BLOCK_NOTIFY_SOURCE` is unset, we keep the legacy
+     * behaviour — ZMQ when `BITCOIN_ZMQ_HOST` is configured, polling
+     * otherwise. Explicit `BLOCK_NOTIFY_SOURCE` overrides this.
+     */
+    private resolveBlockNotifySource(): BlockNotifySource {
+        const explicit = this.configService.get<string>('BLOCK_NOTIFY_SOURCE')?.trim()?.toLowerCase();
+        if (explicit === 'redis-pubsub' || explicit === 'redis' || explicit === 'pubsub') return 'redis-pubsub';
+        if (explicit === 'zmq') return 'zmq';
+        if (explicit === 'polling' || explicit === 'poll') return 'polling';
+        // Legacy auto-detect
+        return this.configService.get('BITCOIN_ZMQ_HOST') ? 'zmq' : 'polling';
+    }
+
+    private async startZmqListener(): Promise<void> {
+        // Lazy import — keeps the `zeromq` NAPI binding from loading on
+        // runtimes where it crashes (e.g. Bun, see oven-sh/bun#18546).
+        // Pool can still boot in 'redis-pubsub' or 'polling' mode without
+        // ever touching zeromq.
+        const zmq = await import('zeromq');
+        console.log('[BitcoinRpc] block notify source: ZMQ (direct subscribe)');
+        const sock = new zmq.Subscriber;
+
+        sock.connectTimeout = 1000;
+        sock.events.on('connect', () => console.log('[BitcoinRpc] ZMQ connected'));
+        sock.events.on('connect:retry', () => console.log('[BitcoinRpc] ZMQ retrying connect'));
+
+        sock.connect(this.configService.get('BITCOIN_ZMQ_HOST'));
+        sock.subscribe('rawblock');
+        // Don't await — would block the rest of onModuleInit
+        this.listenForNewBlocksZmq(sock);
+    }
+
+    private async listenForNewBlocksZmq(sock: any) {
+        for await (const [, _msg] of sock) {
+            console.log('[BitcoinRpc] new block (via ZMQ)');
             await this.pollMiningInfo();
         }
+    }
+
+    private async startRedisPubSubListener(): Promise<void> {
+        const channel = this.configService.get<string>('BLOCK_NOTIFY_CHANNEL')?.trim() ?? 'pool:bitcoind:newblock';
+        const host = this.configService.get<string>('REDIS_HOST')?.trim();
+        const port = parseInt(this.configService.get<string>('REDIS_PORT') ?? '6379', 10);
+        const password = this.configService.get<string>('REDIS_PASSWORD')?.trim() || undefined;
+
+        if (!host) {
+            console.error('[BitcoinRpc] BLOCK_NOTIFY_SOURCE=redis-pubsub but REDIS_HOST is unset — falling back to polling');
+            setInterval(this.pollMiningInfo.bind(this), 500);
+            return;
+        }
+
+        console.log(`[BitcoinRpc] block notify source: Redis pub/sub (channel: ${channel})`);
+
+        const url = `redis://${password ? `:${password}@` : ''}${host}:${port}`;
+        const sub = createRedisClient({ url }) as RedisClientType;
+        sub.on('error', (e: Error) => console.error('[BitcoinRpc] Redis pub/sub error:', e.message));
+        sub.on('reconnecting', () => console.log('[BitcoinRpc] Redis pub/sub reconnecting'));
+        sub.on('ready', () => console.log('[BitcoinRpc] Redis pub/sub ready'));
+        await sub.connect();
+
+        await sub.subscribe(channel, async (hash: string) => {
+            console.log(`[BitcoinRpc] new block (via Redis pub/sub): ${hash.slice(0, 16)}…`);
+            await this.pollMiningInfo();
+        });
+
+        // Heartbeat watchdog — warn if the sidecar stops publishing for >90s.
+        // Helpful prod observability; loss of heartbeat = ZMQ subscription
+        // probably hung, which would silently stall job dispatch.
+        const heartbeatChannel = `${channel}:heartbeat`;
+        let lastHeartbeatAt = Date.now();
+        await sub.subscribe(heartbeatChannel, () => { lastHeartbeatAt = Date.now(); });
+        setInterval(() => {
+            const since = Date.now() - lastHeartbeatAt;
+            if (since > 90_000) {
+                console.warn(`[BitcoinRpc] no ZMQ-sidecar heartbeat for ${Math.round(since / 1000)}s — block notifications may be stalled`);
+            }
+        }, 30_000).unref();
     }
 
     public getBlockHeight(): number {

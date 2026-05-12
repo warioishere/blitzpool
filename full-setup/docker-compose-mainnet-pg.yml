@@ -107,6 +107,35 @@ services:
     volumes:
       - "./data/mainnet/public-pool/redis:/data"
 
+  # ─── ZMQ → Redis pub/sub bridge ───────────────────────────────────
+  # Tiny Node sidecar that subscribes to bitcoind's ZMQ hashblock topic
+  # and re-publishes block notifications onto Redis pub/sub channel
+  # `pool:bitcoind:newblock`. The pool reads from that channel when
+  # BLOCK_NOTIFY_SOURCE=redis-pubsub. See zmq-sidecar/README.md.
+  zmq-sidecar:
+    container_name: blitzpool-zmq-sidecar
+    build:
+      context: ../zmq-sidecar
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    stop_grace_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - bitcoin
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - BITCOIN_ZMQ_HOST=${BITCOIN_ZMQ_HOST:-tcp://bitcoin:28332}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - BLOCK_NOTIFY_CHANNEL=${BLOCK_NOTIFY_CHANNEL:-pool:bitcoind:newblock}
+
   public-pool:
     container_name: public-pool
     build:
@@ -130,6 +159,12 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      # Soft dependency: pool can boot before the sidecar has connected
+      # to bitcoind, but we want the container started so the channel
+      # exists when the pool subscribes. With service_started (not
+      # healthy) we don't block on sidecar internals.
+      zmq-sidecar:
+        condition: service_started
     ports:
       - "0.0.0.0:3333:3333/tcp"
       - "0.0.0.0:3339:3339/tcp"
@@ -189,6 +224,15 @@ services:
       - REDIS_PASSWORD=${REDIS_PASSWORD:-}
       - REDIS_DB=0
       - REDIS_TTL=600
+      # ── Block notification source ─────────────────────────────────
+      # Where the pool learns about new bitcoind blocks. Default `zmq`
+      # keeps legacy behaviour (direct ZMQ subscribe). Set to
+      # `redis-pubsub` to use the zmq-sidecar bridge — required when
+      # the pool runs on Bun (zeromq NAPI doesn't load there, see
+      # oven-sh/bun#18546). Channel must match the sidecar's
+      # BLOCK_NOTIFY_CHANNEL setting.
+      - BLOCK_NOTIFY_SOURCE=${BLOCK_NOTIFY_SOURCE:-zmq}
+      - BLOCK_NOTIFY_CHANNEL=${BLOCK_NOTIFY_CHANNEL:-pool:bitcoind:newblock}
       # Firebase Cloud Messaging (FCM) - Optional
       - FCM_SERVICE_ACCOUNT_PATH=/app/fcm-key.json
 

@@ -1,0 +1,20 @@
+{
+  "name": "blitzpool-zmq-sidecar",
+  "version": "1.0.0",
+  "description": "ZMQ → Redis pub/sub bridge so the main pool can run on a runtime that lacks libuv uv_async_init (e.g. Bun).",
+  "private": true,
+  "type": "module",
+  "main": "index.ts",
+  "scripts": {
+    "start": "tsx index.ts"
+  },
+  "dependencies": {
+    "redis": "^4.6.0",
+    "tsx": "^4.7.0",
+    "zeromq": "6.0.0-beta.19"
+  },
+  "devDependencies": {
+    "@types/node": "^18.16.12",
+    "typescript": "^5.1.3"
+  }
+}

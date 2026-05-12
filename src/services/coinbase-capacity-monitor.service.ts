@@ -2,7 +2,7 @@ import { Injectable, Inject, OnModuleInit, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import { Cache } from 'cache-manager';
+import type { Cache } from 'cache-manager';
 
 import { PplnsService } from './pplns.service';
 import { GroupService } from './group.service';

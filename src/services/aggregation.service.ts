@@ -2,7 +2,7 @@ import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Inject, Injectable, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
-import { Cache } from 'cache-manager';
+import type { Cache } from 'cache-manager';
 import { firstValueFrom } from 'rxjs';
 
 import { AddressSettingsService } from '../ORM/address-settings/address-settings.service';
