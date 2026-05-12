@@ -1,5 +1,7 @@
 import { Controller, Get, NotFoundException, Param, Query, Post, Inject } from '@nestjs/common';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import type { RedisClientType } from 'redis';
+import { REDIS_CLIENT } from '../../providers/redis-client.provider';
 import type { Cache } from 'cache-manager';
 import { ConfigService } from '@nestjs/config';
 
@@ -36,6 +38,7 @@ export class ClientController {
 
     constructor(
         @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
+        @Inject(REDIS_CLIENT) private readonly redisClient: RedisClientType | null,
         private readonly configService: ConfigService,
         private readonly clientService: ClientService,
         private readonly clientStatisticsService: ClientStatisticsService,
@@ -131,9 +134,7 @@ export class ClientController {
         // Clear all cache keys for this address (including worker-specific caches)
         // Try to get Redis client to use keys() for pattern matching
         try {
-            const store: any = this.cacheManager.store;
-            if (store && store.client) {
-                const redisClient = store.client;
+            if (this.redisClient) {
                 // Find all cache keys containing this address
                 const patterns = [
                     `CLIENT_INFO_${address}*`,
@@ -149,14 +150,14 @@ export class ClientController {
                 ];
 
                 for (const pattern of patterns) {
-                    let cursor = '0';
+                    let cursor = 0;
                     do {
-                        const result = await redisClient.scan(cursor, { MATCH: pattern, COUNT: 1000 });
-                        cursor = result.cursor.toString();
+                        const result = await this.redisClient.scan(cursor, { MATCH: pattern, COUNT: 1000 });
+                        cursor = Number(result.cursor);
                         if (result.keys.length > 0) {
-                            await redisClient.del(result.keys);
+                            await this.redisClient.del(result.keys);
                         }
-                    } while (cursor !== '0');
+                    } while (cursor !== 0);
                 }
                 console.log(`[ClientController] Cache keys cleared for ${address}`);
             }

@@ -86,6 +86,7 @@ import { PoolRejectedStatisticsModule } from './ORM/pool-rejected-statistics/poo
 import { ClientRejectedStatisticsModule } from './ORM/client-rejected-statistics/client-rejected-statistics.module';
 import { ClientDifficultyStatisticsModule } from './ORM/client-difficulty-statistics/client-difficulty-statistics.module';
 import { buildDatabaseConfig } from './config/database.config';
+import { redisClientProvider } from './providers/redis-client.provider';
 
 const ORMModules = [
     ClientStatisticsModule,
@@ -192,6 +193,7 @@ const ORMModules = [
         EmailController,
     ],
     providers: [
+        redisClientProvider,
         // TimeslotMigrationService, // Disabled - migration incomplete, leaving data in mixed state
         DiscordService,
         AppService,

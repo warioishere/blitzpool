@@ -1,6 +1,6 @@
-import { Injectable, Inject, OnModuleInit } from '@nestjs/common';
-import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import type { Cache } from 'cache-manager';
+import { Injectable, Inject } from '@nestjs/common';
+import type { RedisClientType } from 'redis';
+import { REDIS_CLIENT } from '../providers/redis-client.provider';
 
 import { AddressSettingsService } from '../ORM/address-settings/address-settings.service';
 
@@ -10,32 +10,16 @@ export interface AddressBestDifficultySnapshot {
 }
 
 @Injectable()
-export class AddressSettingsCacheService implements OnModuleInit {
-  private redisClient: any = null;
-  private useRedis: boolean = false;
+export class AddressSettingsCacheService {
+  private get useRedis(): boolean { return this.redisClient !== null; }
 
   // Fallback in-memory cache
   private readonly cache = new Map<string, AddressBestDifficultySnapshot>();
 
   constructor(
     private readonly addressSettingsService: AddressSettingsService,
-    @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
+    @Inject(REDIS_CLIENT) private readonly redisClient: RedisClientType | null,
   ) {}
-
-  async onModuleInit(): Promise<void> {
-    try {
-      const store: any = this.cacheManager.store;
-      if (store && store.client) {
-        this.redisClient = store.client;
-        this.useRedis = true;
-        console.log('[AddressSettingsCacheService] Using Redis cache');
-      } else {
-        console.log('[AddressSettingsCacheService] Redis not available, using in-memory cache');
-      }
-    } catch (error) {
-      console.warn('[AddressSettingsCacheService] Failed to access Redis client, using in-memory cache:', error);
-    }
-  }
 
   async getBestDifficulty(address: string): Promise<AddressBestDifficultySnapshot> {
     const cached = await this.ensure(address);
@@ -82,14 +66,14 @@ export class AddressSettingsCacheService implements OnModuleInit {
         await this.redisClient.del(key);
       } else {
         const pattern = 'address:settings:*';
-        let cursor = '0';
+        let cursor = 0;
         do {
           const result = await this.redisClient.scan(cursor, { MATCH: pattern, COUNT: 1000 });
-          cursor = result.cursor.toString();
+          cursor = Number(result.cursor);
           if (result.keys.length > 0) {
             await this.redisClient.del(result.keys);
           }
-        } while (cursor !== '0');
+        } while (cursor !== 0);
       }
     } else {
       // Fallback in-memory implementation

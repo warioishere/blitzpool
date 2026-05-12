@@ -1,7 +1,7 @@
 import { Injectable, Inject, OnModuleInit, forwardRef } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import type { Cache } from 'cache-manager';
+import type { RedisClientType } from 'redis';
+import { REDIS_CLIENT } from '../providers/redis-client.provider';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { PplnsGroupBlockHistoryEntity } from '../ORM/pplns-group/pplns-group-block-history.entity';
@@ -93,7 +93,7 @@ export type GroupSoloPayoutEntry = CoinbaseDistributionEntry;
 @Injectable()
 export class GroupSoloService implements OnModuleInit {
 
-    private redis: any = null;
+    private redis: RedisClientType | null = null;
     private enabled = false;
     private feeAddress: string;
     private feePercent: number;
@@ -159,7 +159,7 @@ export class GroupSoloService implements OnModuleInit {
 
     constructor(
         private readonly configService: ConfigService,
-        @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
+        @Inject(REDIS_CLIENT) private readonly redisClient: RedisClientType | null,
         @InjectRepository(PplnsGroupBlockHistoryEntity)
         private readonly historyRepo: Repository<PplnsGroupBlockHistoryEntity>,
         @InjectRepository(PplnsGroupBalanceEntity)
@@ -186,16 +186,11 @@ export class GroupSoloService implements OnModuleInit {
     async onModuleInit(): Promise<void> {
         if (!this.enabled) return;
 
-        try {
-            const store: any = this.cacheManager.store;
-            if (store?.client) {
-                this.redis = store.client;
-                console.log('[GroupSolo] Service initialized with Redis');
-            } else {
-                console.error('[GroupSolo] Redis not available — group-solo will not function!');
-            }
-        } catch (error) {
-            console.error('[GroupSolo] Failed to access Redis client:', error);
+        if (this.redisClient) {
+            this.redis = this.redisClient;
+            console.log('[GroupSolo] Service initialized with Redis');
+        } else {
+            console.error('[GroupSolo] Redis not available — group-solo will not function!');
         }
     }
 

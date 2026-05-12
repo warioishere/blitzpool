@@ -210,15 +210,13 @@ function createService(opts: { feeAddress?: string; feePercent?: string; port?: 
     }),
   };
 
-  const cacheManager = { store: { client: redis } };
-
   const stratumV1JobsService = {
     newMiningJob$: { subscribe: jest.fn(() => ({ unsubscribe: jest.fn() })) },
   };
 
   const service = new PplnsService(
     configService as any,
-    cacheManager as any,
+    redis as any,
     balanceService as any,
     payoutHistoryRepo as any,
     stratumV1JobsService as any,

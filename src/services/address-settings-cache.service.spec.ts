@@ -11,7 +11,7 @@ describe('AddressSettingsCacheService', () => {
     };
     service = new AddressSettingsCacheService(
       addressSettingsService as unknown as AddressSettingsService,
-      { store: {} } as any,
+      null, // REDIS_CLIENT — test uses in-memory fallback path
     );
   });
 

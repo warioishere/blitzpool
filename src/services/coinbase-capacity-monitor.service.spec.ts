@@ -55,7 +55,7 @@ function createMonitor(opts: {
         set: jest.fn(async (k: string, v: string) => { redisStore.set(k, v); }),
         del: jest.fn(async (k: string) => { redisStore.delete(k); }),
     };
-    const cacheManager = { store: { client: redis } };
+    // REDIS_CLIENT mock used directly
 
     const pplnsService = {
         isEnabled: () => state.pplnsEnabled,
@@ -92,7 +92,7 @@ function createMonitor(opts: {
 
     const service = new CoinbaseCapacityMonitorService(
         config as any,
-        cacheManager as any,
+        redis as any,
         pplnsService as any,
         groupService as any,
         groupSoloService as any,

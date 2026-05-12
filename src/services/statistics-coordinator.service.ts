@@ -2,8 +2,8 @@ import { Injectable, Inject, OnModuleInit, OnModuleDestroy } from '@nestjs/commo
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
-import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import type { Cache } from 'cache-manager';
+import type { RedisClientType } from 'redis';
+import { REDIS_CLIENT } from '../providers/redis-client.provider';
 
 import { PoolShareStatisticsEntity } from '../ORM/pool-share-statistics/pool-share-statistics.entity';
 import { PoolRejectedStatisticsEntity } from '../ORM/pool-rejected-statistics/pool-rejected-statistics.entity';
@@ -34,7 +34,6 @@ import { TimeSlotHelper } from '../utils/time-slot.helper';
  */
 @Injectable()
 export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestroy {
-  private redisClient: any = null;
   private currentTimeSlot: number | null = null;
   private isFlushing: boolean = false;
 
@@ -104,7 +103,7 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
   };
 
   constructor(
-    @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
+    @Inject(REDIS_CLIENT) private readonly redisClient: RedisClientType | null,
     @InjectRepository(PoolShareStatisticsEntity)
     private readonly poolShareStatisticsRepository: Repository<PoolShareStatisticsEntity>,
     @InjectRepository(PoolRejectedStatisticsEntity)
@@ -129,9 +128,7 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
 
   async onModuleInit(): Promise<void> {
     try {
-      const store: any = this.cacheManager.store;
-      if (store && store.client) {
-        this.redisClient = store.client;
+      if (this.redisClient) {
         console.log('[StatisticsCoordinator] Initialized, using Redis for statistics coordination');
         console.log('[StatisticsCoordinator] Flush interval: every 60 seconds');
 
@@ -159,11 +156,14 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
    */
   private async checkRedisPersistence(): Promise<void> {
     try {
-      const config = await this.redisClient.config('GET', 'appendonly');
-      const aofEnabled = config && config.length >= 2 && config[1] === 'yes';
+      if (!this.redisClient) return;
+      // node-redis v4 exposes CONFIG GET via configGet(name) returning an
+      // object like { appendonly: 'yes' } (or null on error / unsupported).
+      const aofRes = await (this.redisClient as any).configGet('appendonly');
+      const aofEnabled = aofRes?.appendonly === 'yes';
 
-      const saveConfig = await this.redisClient.config('GET', 'save');
-      const rdbEnabled = saveConfig && saveConfig.length >= 2 && saveConfig[1] !== '';
+      const saveRes = await (this.redisClient as any).configGet('save');
+      const rdbEnabled = !!saveRes?.save && saveRes.save.length > 0;
 
       if (!aofEnabled && !rdbEnabled) {
         console.warn('⚠️  [StatisticsCoordinator] WARNING: Redis persistence is DISABLED!');
@@ -622,8 +622,9 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
    * More efficient than KEYS command
    */
   private async scanKeys(pattern: string): Promise<string[]> {
+    if (!this.redisClient) return [];
     const keysSet = new Set<string>();  // Use Set to deduplicate keys (SCAN can return duplicates)
-    let cursor = '0';
+    let cursor = 0;
 
     do {
       const result = await this.redisClient.scan(cursor, {
@@ -638,12 +639,12 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
         COUNT: 1000,
       });
 
-      cursor = result.cursor.toString();
+      cursor = Number(result.cursor);
 
       if (result.keys && result.keys.length > 0) {
         result.keys.forEach(key => keysSet.add(key));  // Set prevents duplicates
       }
-    } while (cursor !== '0');
+    } while (cursor !== 0);
 
     return Array.from(keysSet);  // Convert Set back to array
   }
@@ -723,8 +724,8 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
         // node-redis v4 returns the hash object directly for hGetAll;
         // null/undefined / array (error reply) → mapped to null so the
         // caller's null-check protects downstream parsing.
-        if (r && typeof r === 'object' && !Array.isArray(r)) {
-          out.push(r as Record<string, string>);
+        if (r && typeof r === 'object' && !Array.isArray(r) && !(r instanceof Buffer)) {
+          out.push(r as unknown as Record<string, string>);
         } else {
           out.push(null);
         }

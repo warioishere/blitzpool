@@ -1,6 +1,6 @@
 import { Injectable, OnModuleInit, Inject, forwardRef } from '@nestjs/common';
-import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import type { Cache } from 'cache-manager';
+import type { RedisClientType } from 'redis';
+import { REDIS_CLIENT } from '../providers/redis-client.provider';
 import { ConfigService } from '@nestjs/config';
 import { Server, Socket, createConnection } from 'net';
 
@@ -136,7 +136,7 @@ export class ProtocolDetectorService implements OnModuleInit {
 
   constructor(
     private readonly configService: ConfigService,
-    @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
+    @Inject(REDIS_CLIENT) private readonly redisClient: RedisClientType | null,
     @Inject(forwardRef(() => StratumV1Service))
     private readonly stratumV1Service: StratumV1Service,
     @Inject(forwardRef(() => StratumV2Service))
@@ -153,17 +153,12 @@ export class ProtocolDetectorService implements OnModuleInit {
 
   async onModuleInit(): Promise<void> {
     // Wire up Redis for shared ban state across instances and admin-removable bans
-    try {
-      const store: any = this.cacheManager.store;
-      if (store && store.client) {
-        _setBanRedisClient(store.client);
-        await _refreshBanCache();
-        console.log('[ProtocolDetector] Using Redis for fail-ban state');
-      } else {
-        console.log('[ProtocolDetector] Redis not available, using in-memory fail-ban');
-      }
-    } catch (err) {
-      console.warn('[ProtocolDetector] Failed to attach Redis for fail-ban:', (err as Error).message);
+    if (this.redisClient) {
+      _setBanRedisClient(this.redisClient);
+      await _refreshBanCache();
+      console.log('[ProtocolDetector] Using Redis for fail-ban state');
+    } else {
+      console.log('[ProtocolDetector] Redis not available, using in-memory fail-ban');
     }
 
     this.startPorts();

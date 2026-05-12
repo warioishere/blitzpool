@@ -1,7 +1,7 @@
 import { Injectable, Inject, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import type { Cache } from 'cache-manager';
+import type { RedisClientType } from 'redis';
+import { REDIS_CLIENT } from '../providers/redis-client.provider';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { Subscription } from 'rxjs';
@@ -85,7 +85,7 @@ export type PplnsPayoutEntry = CoinbaseDistributionEntry;
 
 @Injectable()
 export class PplnsService implements OnModuleInit, OnModuleDestroy {
-    private redis: any = null;
+    private redis: RedisClientType | null = null;
     private enabled = false;
     private feeAddress: string;
     private feePercent: number;
@@ -114,7 +114,7 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
 
     constructor(
         private readonly configService: ConfigService,
-        @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
+        @Inject(REDIS_CLIENT) private readonly redisClient: RedisClientType | null,
         private readonly balanceService: PplnsBalanceService,
         @InjectRepository(PplnsPayoutHistoryEntity)
         private readonly payoutHistoryRepo: Repository<PplnsPayoutHistoryEntity>,
@@ -130,16 +130,11 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
     async onModuleInit(): Promise<void> {
         if (!this.enabled) return;
 
-        try {
-            const store: any = this.cacheManager.store;
-            if (store?.client) {
-                this.redis = store.client;
-                console.log('[PPLNS] Service initialized with Redis');
-            } else {
-                console.error('[PPLNS] Redis not available — PPLNS will not function!');
-            }
-        } catch (error) {
-            console.error('[PPLNS] Failed to access Redis client:', error);
+        if (this.redisClient) {
+            this.redis = this.redisClient;
+            console.log('[PPLNS] Service initialized with Redis');
+        } else {
+            console.error('[PPLNS] Redis not available — PPLNS will not function!');
         }
 
         // Deployment migration: pre-aggregate rollouts have a populated

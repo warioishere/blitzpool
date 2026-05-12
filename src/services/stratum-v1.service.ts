@@ -1,7 +1,7 @@
 import { Injectable, OnModuleInit, Inject } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import type { Cache } from 'cache-manager';
+import type { RedisClientType } from 'redis';
+import { REDIS_CLIENT } from '../providers/redis-client.provider';
 import { Socket } from 'net';
 
 import { StratumV1Client } from '../models/StratumV1Client';
@@ -29,7 +29,6 @@ import { PoolModeHashrateService } from '../ORM/pool-mode-hashrate/pool-mode-has
 @Injectable()
 export class StratumV1Service implements OnModuleInit {
   private readonly clientsByAddress = new Map<string, Set<StratumV1Client>>();
-  private redisClient: any = null;
 
   constructor(
     private readonly bitcoinRpcService: BitcoinRpcService,
@@ -48,7 +47,7 @@ export class StratumV1Service implements OnModuleInit {
     private readonly externalSharesService: ExternalSharesService,
     private readonly clientDifficultyStatisticsService: ClientDifficultyStatisticsService,
     private readonly shareTotalsCacheService: ShareTotalsCacheService,
-    @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
+    @Inject(REDIS_CLIENT) private readonly redisClient: RedisClientType | null,
     private readonly pplnsService: PplnsService,
     private readonly groupSoloService: GroupSoloService,
     private readonly minerActiveModeService: MinerActiveModeService,
@@ -56,17 +55,11 @@ export class StratumV1Service implements OnModuleInit {
   ) {}
 
   async onModuleInit(): Promise<void> {
-    // Extract Redis client for passing to StratumV1ClientStatistics
-    try {
-      const store: any = this.cacheManager.store;
-      if (store && store.client) {
-        this.redisClient = store.client;
-        console.log('[StratumV1Service] Redis client available for client statistics');
-      }
-    } catch (error) {
-      console.warn('[StratumV1Service] Failed to access Redis client:', error);
+    // Redis client is now injected directly (REDIS_CLIENT). Log presence
+    // for parity with old startup output.
+    if (this.redisClient) {
+      console.log('[StratumV1Service] Redis client available for client statistics');
     }
-
     // NOTE: Server startup has been moved to ProtocolDetectorService.
     // This service now only handles V1 client management and business logic.
   }

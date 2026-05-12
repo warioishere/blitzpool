@@ -1,8 +1,8 @@
-import { Injectable, Inject, OnModuleInit } from '@nestjs/common';
-import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import type { Cache } from 'cache-manager';
+import { Injectable, Inject } from '@nestjs/common';
+import type { RedisClientType } from 'redis';
 
 import { MiningMode } from './mining-mode.service';
+import { REDIS_CLIENT } from '../providers/redis-client.provider';
 
 /**
  * Per-address "currently-active mining mode" marker.
@@ -28,23 +28,11 @@ import { MiningMode } from './mining-mode.service';
  * (>5 min) lets the fallback take over.
  */
 @Injectable()
-export class MinerActiveModeService implements OnModuleInit {
+export class MinerActiveModeService {
 
-    private redis: any = null;
     private static readonly TTL_SECONDS = 5 * 60;
 
-    constructor(@Inject(CACHE_MANAGER) private readonly cacheManager: Cache) {}
-
-    onModuleInit(): void {
-        try {
-            const store: any = this.cacheManager.store;
-            if (store?.client) {
-                this.redis = store.client;
-            }
-        } catch {
-            // Redis optional — falls keine Redis-Verbindung da, wird jeder mark/get ein no-op.
-        }
-    }
+    constructor(@Inject(REDIS_CLIENT) private readonly redis: RedisClientType | null) {}
 
     private key(address: string): string {
         return `miner:${address}:mode`;

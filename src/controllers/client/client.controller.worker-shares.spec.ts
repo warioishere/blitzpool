@@ -1,6 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import { REDIS_CLIENT } from '../../providers/redis-client.provider';
 import { ConfigService } from '@nestjs/config';
 
 jest.mock('node-telegram-bot-api', () => ({}));
@@ -40,6 +41,7 @@ describe('ClientController GET :address/worker-shares', () => {
             controllers: [ClientController],
             providers: [
                 { provide: CACHE_MANAGER, useValue: cacheManager },
+        { provide: REDIS_CLIENT, useValue: null },
                 { provide: ConfigService, useValue: { get: jest.fn() } },
                 { provide: ClientService, useValue: {} },
                 { provide: ClientStatisticsService, useValue: {} },

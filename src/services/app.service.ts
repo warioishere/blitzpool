@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import type { Cache } from 'cache-manager';
+import type { RedisClientType } from 'redis';
+import { REDIS_CLIENT } from '../providers/redis-client.provider';
 import { ConfigService } from '@nestjs/config';
 import { DataSource } from 'typeorm';
 
@@ -64,7 +64,7 @@ export class AppService implements OnModuleInit {
     private readonly autoSynchronize: boolean;
 
     constructor(
-        @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
+        @Inject(REDIS_CLIENT) private readonly redisClient: RedisClientType | null,
         private readonly clientStatisticsService: ClientStatisticsService,
         private readonly clientDifficultyStatisticsService: ClientDifficultyStatisticsService,
         private readonly clientRejectedStatisticsService: ClientRejectedStatisticsService,
@@ -136,10 +136,9 @@ export class AppService implements OnModuleInit {
 
     private async flushRedisBeforeMigration(): Promise<void> {
         try {
-            const store: any = this.cacheManager.store;
-            if (store?.client) {
+            if (this.redisClient) {
                 this.logger.log('Flushing Redis database before SQLite→PostgreSQL migration...');
-                await store.client.flushDb();
+                await this.redisClient.flushDb();
                 this.logger.log('Redis FLUSHDB complete.');
             } else {
                 this.logger.warn('Redis client not available — skipping FLUSHDB before migration.');

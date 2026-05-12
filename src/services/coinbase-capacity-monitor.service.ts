@@ -1,8 +1,8 @@
 import { Injectable, Inject, OnModuleInit, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
-import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import type { Cache } from 'cache-manager';
+import type { RedisClientType } from 'redis';
+import { REDIS_CLIENT } from '../providers/redis-client.provider';
 
 import { PplnsService } from './pplns.service';
 import { GroupService } from './group.service';
@@ -53,7 +53,9 @@ interface AlertState {
 export class CoinbaseCapacityMonitorService implements OnModuleInit {
 
     private readonly logger = new Logger(CoinbaseCapacityMonitorService.name);
-    private redis: any = null;
+    // Aliased to the injected `redisClient` for back-compat with the
+    // existing call sites (this.redis.get/set/del). Set once in onModuleInit.
+    private redis: RedisClientType | null = null;
     private enabled = false;
     private adminEmail = '';
     private warningThreshold = DEFAULT_WARNING_THRESHOLD;
@@ -61,7 +63,7 @@ export class CoinbaseCapacityMonitorService implements OnModuleInit {
 
     constructor(
         private readonly config: ConfigService,
-        @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
+        @Inject(REDIS_CLIENT) private readonly redisClient: RedisClientType | null,
         private readonly pplnsService: PplnsService,
         private readonly groupService: GroupService,
         private readonly groupSoloService: GroupSoloService,
@@ -101,13 +103,8 @@ export class CoinbaseCapacityMonitorService implements OnModuleInit {
             + `urgent=${(this.urgentThreshold * 100).toFixed(0)}%`,
         );
 
-        try {
-            const store: any = this.cacheManager.store;
-            if (store?.client) this.redis = store.client;
-            else this.logger.warn('Redis not available — dedup skipped, will alert every cycle');
-        } catch (err) {
-            this.logger.warn(`Redis wiring failed: ${(err as Error).message}`);
-        }
+        if (this.redisClient) this.redis = this.redisClient;
+        else this.logger.warn('Redis not available — dedup skipped, will alert every cycle');
     }
 
     /** Hourly — scheduled via @Cron. Runs all buckets sequentially. */

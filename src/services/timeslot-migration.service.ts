@@ -1,8 +1,9 @@
 import { Injectable, OnModuleInit, Inject } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import type { Cache } from 'cache-manager';
+import type { RedisClientType } from 'redis';
 import { DataSource } from 'typeorm';
+
+import { REDIS_CLIENT } from '../providers/redis-client.provider';
 
 /**
  * One-time migration service to adjust time slot labeling
@@ -34,7 +35,7 @@ export class TimeslotMigrationService implements OnModuleInit {
   constructor(
     private readonly dataSource: DataSource,
     private readonly configService: ConfigService,
-    @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
+    @Inject(REDIS_CLIENT) private readonly redisClient: RedisClientType | null,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -214,13 +215,12 @@ export class TimeslotMigrationService implements OnModuleInit {
    */
   private async clearRedisStatisticsKeys(): Promise<void> {
     try {
-      const store: any = this.cacheManager.store;
-      if (!store || !store.client) {
+      if (!this.redisClient) {
         console.log('[TimeslotMigration] Redis not available, skipping key cleanup');
         return;
       }
 
-      const redisClient = store.client;
+      const redisClient = this.redisClient;
       const patterns = ['pool:rejected:*', 'pool:shares:*', 'pool:mode-hashrate:*'];
       let totalKeysDeleted = 0;
 
@@ -257,14 +257,13 @@ export class TimeslotMigrationService implements OnModuleInit {
    */
   private async acquireMigrationLock(): Promise<boolean> {
     try {
-      const store: any = this.cacheManager.store;
-      if (!store || !store.client) {
+      if (!this.redisClient) {
         // No Redis - fall back to database-level locking via transactions
         console.log('[TimeslotMigration] Redis not available, using database-level locking');
         return true;
       }
 
-      const redisClient = store.client;
+      const redisClient = this.redisClient;
       const instanceId = `node-${process.pid}`;
 
       // SET key value NX EX seconds - atomic operation
@@ -273,9 +272,7 @@ export class TimeslotMigrationService implements OnModuleInit {
       const result = await redisClient.set(
         this.MIGRATION_LOCK_KEY,
         instanceId,
-        'NX',
-        'EX',
-        this.LOCK_TTL_SECONDS
+        { NX: true, EX: this.LOCK_TTL_SECONDS },
       );
 
       return result === 'OK';
@@ -291,13 +288,11 @@ export class TimeslotMigrationService implements OnModuleInit {
    */
   private async releaseMigrationLock(): Promise<void> {
     try {
-      const store: any = this.cacheManager.store;
-      if (!store || !store.client) {
+      if (!this.redisClient) {
         return;
       }
 
-      const redisClient = store.client;
-      await redisClient.del(this.MIGRATION_LOCK_KEY);
+      await this.redisClient.del(this.MIGRATION_LOCK_KEY);
       console.log('[TimeslotMigration] ✓ Released migration lock');
     } catch (error) {
       console.warn('[TimeslotMigration] Failed to release lock (non-critical):', error);

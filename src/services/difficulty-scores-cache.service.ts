@@ -1,8 +1,8 @@
-import { Injectable, Inject, OnModuleInit } from '@nestjs/common';
-import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import type { Cache } from 'cache-manager';
+import { Injectable, Inject } from '@nestjs/common';
+import type { RedisClientType } from 'redis';
 
 import { ClientDifficultyStatisticsService } from '../ORM/client-difficulty-statistics/client-difficulty-statistics.service';
+import { REDIS_CLIENT } from '../providers/redis-client.provider';
 
 export interface DifficultyScoreSlot {
   time: string;
@@ -14,29 +14,18 @@ export interface DifficultyScoresResult {
 }
 
 @Injectable()
-export class DifficultyScoresCacheService implements OnModuleInit {
-  private redisClient: any = null;
-  private useRedis: boolean = false;
+export class DifficultyScoresCacheService {
+  private get useRedis(): boolean {
+    return this.redisClient !== null;
+  }
 
   // Fallback in-memory cache
   private readonly memoryCache = new Map<string, DifficultyScoresResult>();
 
   constructor(
     private readonly clientDifficultyStatisticsService: ClientDifficultyStatisticsService,
-    @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
+    @Inject(REDIS_CLIENT) private readonly redisClient: RedisClientType | null,
   ) {}
-
-  async onModuleInit(): Promise<void> {
-    try {
-      const store: any = this.cacheManager.store;
-      if (store && store.client) {
-        this.redisClient = store.client;
-        this.useRedis = true;
-      }
-    } catch (error) {
-      // Silently fall back to in-memory cache
-    }
-  }
 
   /**
    * Get difficulty scores with caching.
@@ -185,14 +174,14 @@ export class DifficultyScoresCacheService implements OnModuleInit {
           pattern = `diffscores:*`;
         }
 
-        let cursor = '0';
+        let cursor = 0;
         do {
           const result = await this.redisClient.scan(cursor, { MATCH: pattern, COUNT: 1000 });
-          cursor = result.cursor.toString();
+          cursor = Number(result.cursor);
           if (result.keys.length > 0) {
             await this.redisClient.del(result.keys);
           }
-        } while (cursor !== '0');
+        } while (cursor !== 0);
       } catch (error) {
         // Silently fail
       }
