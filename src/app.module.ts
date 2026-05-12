@@ -5,7 +5,9 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { redisStore } from 'cache-manager-redis-yet';
+import { createCache } from 'cache-manager';
+import KeyvRedis from '@keyv/redis';
+import { Keyv } from 'keyv';
 
 import { AppController } from './app.controller';
 import { AddressController } from './controllers/address/address.controller';
@@ -118,40 +120,33 @@ const ORMModules = [
             inject: [ConfigService],
             useFactory: (configService: ConfigService) => buildDatabaseConfig(configService),
         }),
+        // cache-manager v7 wants a list of Keyv stores. We pass one Keyv
+        // backed by Redis (when REDIS_HOST is set) or fall back to the
+        // default in-memory Keyv. Plumbed via useFactory so the choice
+        // happens after ConfigModule initialised, matching the legacy
+        // v5 setup behaviour.
         CacheModule.registerAsync({
             isGlobal: true,
             imports: [ConfigModule],
             inject: [ConfigService],
-            useFactory: async (configService: ConfigService) => {
+            useFactory: (configService: ConfigService): { stores: Keyv[] } => {
                 const redisHost = configService.get<string>('REDIS_HOST');
                 const redisPort = parseInt(configService.get<string>('REDIS_PORT') ?? '6379', 10);
                 const redisPassword = configService.get<string>('REDIS_PASSWORD');
                 const redisDb = parseInt(configService.get<string>('REDIS_DB') ?? '0', 10);
                 const redisTtl = parseInt(configService.get<string>('REDIS_TTL') ?? '600', 10);
 
-                // Use Redis if REDIS_HOST is configured, otherwise fall back to in-memory cache
                 if (redisHost && redisHost.length > 0) {
                     console.log(`[Cache] Using Redis cache at ${redisHost}:${redisPort} (DB: ${redisDb})`);
-                    try {
-                        return {
-                            store: await redisStore({
-                                socket: {
-                                    host: redisHost,
-                                    port: redisPort,
-                                },
-                                password: redisPassword && redisPassword.length > 0 ? redisPassword : undefined,
-                                database: redisDb,
-                                ttl: redisTtl * 1000, // Convert to milliseconds
-                            }),
-                        };
-                    } catch (error) {
-                        console.error('[Cache] Failed to connect to Redis, falling back to in-memory cache:', error);
-                        return {}; // Fall back to in-memory cache
-                    }
-                } else {
-                    console.log('[Cache] Using in-memory cache (Redis not configured)');
-                    return {}; // In-memory cache
+                    const url = `redis://${redisPassword ? `:${encodeURIComponent(redisPassword)}@` : ''}${redisHost}:${redisPort}/${redisDb}`;
+                    const store = new KeyvRedis(url);
+                    const keyv = new Keyv({ store, ttl: redisTtl * 1000 });
+                    return { stores: [keyv] };
                 }
+
+                console.log('[Cache] Using in-memory cache (Redis not configured)');
+                // Default in-memory Keyv (no Redis store).
+                return { stores: [new Keyv({ ttl: redisTtl * 1000 })] };
             },
         }),
         ScheduleModule.forRoot(),
