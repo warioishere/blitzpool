@@ -22,7 +22,7 @@ export class EmailController {
     // looser limits invite SMTP-quota abuse and spam-listing of the
     // pool's sender domain.
     @UseGuards(ThrottlerGuard)
-    @Throttle(5, 60)
+    @Throttle({ default: { limit: 5, ttl: 60000 } })
     @Post('register')
     async register(@Body() body: RegisterDto): Promise<{ ok: true; verificationSent: true }> {
         try {

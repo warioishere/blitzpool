@@ -16,7 +16,12 @@ export class PushSubscriptionCleanupService implements OnModuleInit {
         private pushSubscriptionRepository: Repository<PushSubscriptionEntity>,
         private readonly configService: ConfigService,
     ) {
-        this.cleanupEnabled = (this.configService.get('PUSH_SUBSCRIPTION_CLEANUP_ENABLED')?.toLowerCase() === 'true') ?? true;
+        // Default ON: cleanup runs unless explicitly disabled with 'false'.
+        // The previous `(get() === 'true') ?? true` was a no-op (`false ?? true`
+        // returns `false` since false isn't nullish), so this corrects an
+        // unintended behaviour while keeping the documented default.
+        const flag = this.configService.get('PUSH_SUBSCRIPTION_CLEANUP_ENABLED')?.toLowerCase();
+        this.cleanupEnabled = flag !== 'false';
         this.staleThresholdDays = Number(this.configService.get('PUSH_SUBSCRIPTION_STALE_DAYS')) || 90;
     }
 

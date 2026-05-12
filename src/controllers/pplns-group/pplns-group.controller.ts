@@ -168,7 +168,7 @@ export class PplnsGroupController {
      * service-level pending cap + reject cooldown).
      */
     @UseGuards(ThrottlerGuard)
-    @Throttle(5, 60)
+    @Throttle({ default: { limit: 5, ttl: 60000 } })
     @Post('public/:id/join-request')
     async createJoinRequest(
         @Param('id') id: string,
@@ -453,7 +453,7 @@ export class PplnsGroupController {
     // otherwise DoS the SMTP provider or spam addresses for tribunal-style
     // harassment. Token-auth isn't a substitute for rate-limiting here.
     @UseGuards(ThrottlerGuard)
-    @Throttle(10, 60)
+    @Throttle({ default: { limit: 10, ttl: 60000 } })
     @Post(':id/invitations')
     async createInvitation(
         @Param('id') id: string,
@@ -479,7 +479,7 @@ export class PplnsGroupController {
      */
     // Tighter than single because each call can send many mails.
     @UseGuards(ThrottlerGuard)
-    @Throttle(5, 60)
+    @Throttle({ default: { limit: 5, ttl: 60000 } })
     @Post(':id/invitations/batch')
     async createInvitationsBatch(
         @Param('id') id: string,
@@ -565,7 +565,7 @@ export class PplnsGroupController {
      * the admin can share. Atomic-replaces any existing active open link.
      */
     @UseGuards(ThrottlerGuard)
-    @Throttle(10, 60)
+    @Throttle({ default: { limit: 10, ttl: 60000 } })
     @Post(':id/invitations/open')
     async createOpenInvitation(
         @Param('id') id: string,

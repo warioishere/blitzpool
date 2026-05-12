@@ -52,7 +52,7 @@ export class PplnsInvitationController {
     // 20 req/min per IP. Token is 256-bit so brute force isn't the concern;
     // this just caps accidental burst / malicious retry loops.
     @UseGuards(ThrottlerGuard)
-    @Throttle(20, 60)
+    @Throttle({ default: { limit: 20, ttl: 60000 } })
     @Post(':token/accept')
     async accept(@Param('token') token: string) {
         try {
@@ -70,7 +70,7 @@ export class PplnsInvitationController {
      * of an unwanted invitation even without email access.
      */
     @UseGuards(ThrottlerGuard)
-    @Throttle(20, 60)
+    @Throttle({ default: { limit: 20, ttl: 60000 } })
     @Post(':token/decline')
     async decline(@Param('token') token: string) {
         try {
@@ -112,7 +112,7 @@ export class PplnsInvitationController {
     // 10 req/min per IP. Open links can be claimed by anyone, so this is
     // the realistic abuse vector — limit harder than the directed flow.
     @UseGuards(ThrottlerGuard)
-    @Throttle(10, 60)
+    @Throttle({ default: { limit: 10, ttl: 60000 } })
     @Post('open/:token/accept')
     async acceptOpen(
         @Param('token') token: string,

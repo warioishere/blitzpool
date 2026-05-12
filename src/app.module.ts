@@ -159,7 +159,10 @@ const ORMModules = [
         // group create / invitation, invitation accept / decline) can resolve
         // their backend. Defaults are intentionally unused — there is no
         // global guard, and untagged endpoints are not rate-limited.
-        ThrottlerModule.forRoot({ ttl: 60, limit: 60 }),
+        // Throttler v5 wants an array of named throttlers, ttl in MILLISECONDS.
+        // We don't use the global guard, so this default is purely a fallback
+        // for any future @UseGuards(ThrottlerGuard) without @Throttle().
+        ThrottlerModule.forRoot([{ name: 'default', ttl: 60_000, limit: 60 }]),
         HttpModule,
         TypeOrmModule.forFeature([
             PplnsBalanceEntity,
