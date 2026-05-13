@@ -19,9 +19,17 @@ export class PplnsPayoutHistoryCreatedAtBigint1781100000000 implements Migration
             ALTER COLUMN "createdAt" TYPE BIGINT
             USING (EXTRACT(EPOCH FROM "createdAt") * 1000)::BIGINT
         `);
+        await queryRunner.query(`
+            ALTER TABLE pplns_payout_history
+            ALTER COLUMN "createdAt" SET DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint
+        `);
     }
 
     public async down(queryRunner: QueryRunner): Promise<void> {
+        await queryRunner.query(`
+            ALTER TABLE pplns_payout_history
+            ALTER COLUMN "createdAt" DROP DEFAULT
+        `);
         await queryRunner.query(`
             ALTER TABLE pplns_payout_history
             ALTER COLUMN "createdAt" TYPE TIMESTAMP WITH TIME ZONE

@@ -33,9 +33,17 @@ export class PplnsBalanceTimestampsToBigint1781000000000 implements MigrationInt
             ALTER COLUMN "updatedAt" TYPE BIGINT
             USING (EXTRACT(EPOCH FROM "updatedAt") * 1000)::BIGINT
         `);
+        await queryRunner.query(`
+            ALTER TABLE pplns_balance
+            ALTER COLUMN "updatedAt" SET DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint
+        `);
     }
 
     public async down(queryRunner: QueryRunner): Promise<void> {
+        await queryRunner.query(`
+            ALTER TABLE pplns_balance
+            ALTER COLUMN "updatedAt" DROP DEFAULT
+        `);
         await queryRunner.query(`
             ALTER TABLE pplns_balance
             ALTER COLUMN "lastAcceptedShareAt" TYPE TIMESTAMP WITH TIME ZONE

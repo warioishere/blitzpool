@@ -46,6 +46,8 @@ export class TrackedEntityTimestampsToBigint1781400000000 implements MigrationIn
     ];
 
     public async up(queryRunner: QueryRunner): Promise<void> {
+        const BIGINT_DEFAULT = `(EXTRACT(EPOCH FROM NOW()) * 1000)::bigint`;
+
         for (const t of TrackedEntityTimestampsToBigint1781400000000.TABLES) {
             await queryRunner.query(`ALTER TABLE ${t} ALTER COLUMN "createdAt" DROP DEFAULT`);
             await queryRunner.query(`ALTER TABLE ${t} ALTER COLUMN "updatedAt" DROP DEFAULT`);
@@ -65,6 +67,8 @@ export class TrackedEntityTimestampsToBigint1781400000000 implements MigrationIn
                 USING CASE WHEN "deletedAt" IS NULL THEN NULL
                            ELSE (EXTRACT(EPOCH FROM "deletedAt") * 1000)::BIGINT END
             `);
+            await queryRunner.query(`ALTER TABLE ${t} ALTER COLUMN "createdAt" SET DEFAULT ${BIGINT_DEFAULT}`);
+            await queryRunner.query(`ALTER TABLE ${t} ALTER COLUMN "updatedAt" SET DEFAULT ${BIGINT_DEFAULT}`);
         }
 
         // client_entity custom Date columns.
@@ -95,6 +99,8 @@ export class TrackedEntityTimestampsToBigint1781400000000 implements MigrationIn
         `);
 
         for (const t of [...TrackedEntityTimestampsToBigint1781400000000.TABLES].reverse()) {
+            await queryRunner.query(`ALTER TABLE ${t} ALTER COLUMN "createdAt" DROP DEFAULT`);
+            await queryRunner.query(`ALTER TABLE ${t} ALTER COLUMN "updatedAt" DROP DEFAULT`);
             await queryRunner.query(`
                 ALTER TABLE ${t}
                 ALTER COLUMN "deletedAt" TYPE TIMESTAMP

@@ -49,9 +49,9 @@ describe('StatisticsCoordinator.bulkUpsert* — real Postgres', () => {
         });
         await dataSource.initialize();
 
-        // synchronize creates the table without DB defaults; the production
-        // migration RestoreTimestampDefaults1781500000000 sets these so raw
-        // INSERTs through the unnest path pick them up. Apply the same here.
+        // synchronize creates the table without DB defaults; the bigint
+        // migrations (1781000-1781400) set these so raw INSERTs through the
+        // unnest path pick them up. Apply the same here.
         const tables = [
             'client_statistics_entity', 'client_rejected_statistics_entity',
             'pool_share_statistics_entity', 'pool_rejected_statistics_entity',
