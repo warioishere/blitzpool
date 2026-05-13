@@ -247,6 +247,51 @@ export class ClientService implements OnModuleDestroy {
         })
     }
 
+    /**
+     * Hot-path lookup for the `GET /api/client/:address` dashboard
+     * endpoint (polled every few seconds per active miner).
+     *
+     * Why this exists separately from `getByAddress()`:
+     *   ClientEntity has 5 Date columns (`startTime`, `firstSeen`,
+     *   `createdAt`, `updatedAt`, `deletedAt`). The default `.find()` path
+     *   fetches all 12 columns and runs each row through TypeORM's
+     *   RawSqlResultsToEntityTransformer (transformColumns → setEntityValue
+     *   → `DateTimeTransformer.from` for every Date column). On prod the
+     *   2026-05-13 CPU profile attributed ~25-30 % of non-idle CPU to
+     *   TypeORM entity hydration, with `postgres-date.parseDate` alone at
+     *   3.59 %. This method sidesteps both:
+     *     1. SELECT only the 7 columns the controller actually uses.
+     *     2. Use a raw query so TypeORM never builds an entity (no
+     *        transformer chain, no per-row entity constructor).
+     *
+     * Sqlite path keeps the entity-based query — sqlite is dev/test only,
+     * perf doesn't matter there, and the shape compatibility is preserved
+     * because the controller accesses the same 7 field names either way.
+     */
+    public async getByAddressLight(address: string): Promise<Array<{
+        sessionId: string;
+        clientName: string;
+        bestDifficulty: number;
+        hashRate: number;
+        currentDifficulty: number | null;
+        startTime: Date;
+        updatedAt: Date;
+    }>> {
+        if (this.clientRepository.manager.connection.options.type === 'postgres') {
+            return this.clientRepository.query(
+                `SELECT "sessionId", "clientName", "bestDifficulty", "hashRate",
+                        "currentDifficulty", "startTime", "updatedAt"
+                 FROM client_entity
+                 WHERE address = $1 AND "deletedAt" IS NULL`,
+                [address],
+            );
+        }
+        // Sqlite / pg-mem fallback: TypeORM-portable entity query. Returns
+        // the full entity; the controller picks the 7 fields it needs from
+        // either shape interchangeably.
+        return this.clientRepository.find({ where: { address } }) as unknown as Promise<any>;
+    }
+
 
     public async getByName(address: string, clientName: string): Promise<ClientEntity[]> {
         return await this.clientRepository.find({

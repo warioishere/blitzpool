@@ -20,7 +20,7 @@ import { WorkerSharesService } from '../../ORM/worker-shares/worker-shares.servi
 
 describe('ClientController getClientInfo', () => {
   let app: NestFastifyApplication;
-  let clientService: { getByAddress: jest.Mock };
+  let clientService: { getByAddressLight: jest.Mock };
   let clientStatisticsService: { getTotalSharesForAddress: jest.Mock };
   let addressSettingsService: { getSettings: jest.Mock };
   let stratumV1Service: { getCurrentDifficulties: jest.Mock };
@@ -29,7 +29,7 @@ describe('ClientController getClientInfo', () => {
 
   beforeEach(async () => {
     clientService = {
-      getByAddress: jest.fn().mockResolvedValue([
+      getByAddressLight: jest.fn().mockResolvedValue([
         {
           sessionId: 'session-1',
           clientName: 'worker-1',
@@ -131,7 +131,7 @@ describe('ClientController getClientInfo', () => {
         },
       ],
     });
-    expect(clientService.getByAddress).toHaveBeenCalledWith('btc123');
+    expect(clientService.getByAddressLight).toHaveBeenCalledWith('btc123');
     expect(stratumV1Service.getCurrentDifficulties).toHaveBeenCalledWith(
       'btc123',
     );

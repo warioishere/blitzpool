@@ -168,4 +168,34 @@ describe.each(['sqlite'] as const)('WorkerSharesService (%s)', (driver) => {
             expect(row?.rejectedShares).toBe(15);
         });
     });
+
+    // Hot-path-equivalence: getWorkerTotalsLight must return the same
+    // (clientName, rejectedShares) pairs as getWorkerTotals for any
+    // populated address. Used by the dashboard worker-shares endpoint.
+    describe('getWorkerTotalsLight', () => {
+        it('returns the same {clientName, rejectedShares} pairs as getWorkerTotals', async () => {
+            await ds.getRepository(WorkerSharesEntity).save([
+                { address: 'addr1', clientName: 'rig1', shares: 1000, rejectedShares: 42 },
+                { address: 'addr1', clientName: 'rig2', shares: 500, rejectedShares: 7 },
+                // Different address — must NOT leak into the result.
+                { address: 'addr2', clientName: 'rig9', shares: 999, rejectedShares: 9 },
+            ]);
+
+            const legacy = await service.getWorkerTotals('addr1');
+            const light = await service.getWorkerTotalsLight('addr1');
+
+            expect(light.length).toBe(legacy.length);
+            expect(light.length).toBe(2);
+
+            const lightByName = new Map(light.map((r) => [r.clientName, r.rejectedShares]));
+            for (const legacyRow of legacy) {
+                expect(lightByName.get(legacyRow.clientName)).toBe(legacyRow.rejectedShares);
+            }
+        });
+
+        it('returns empty array for an unknown address', async () => {
+            const light = await service.getWorkerTotalsLight('unknown');
+            expect(light).toEqual([]);
+        });
+    });
 });

@@ -182,3 +182,131 @@ describe.each(['sqlite', 'postgres'] as const)(
     });
   },
 );
+
+// ── getByAddressLight equivalence ──────────────────────────────────
+//
+// `getByAddressLight` is the hot-path replacement for `getByAddress`
+// used by the `GET /api/client/:address` dashboard endpoint. It skips
+// TypeORM entity hydration on Postgres (raw SELECT) and falls back to
+// the entity query on sqlite. This describe pins that, for the 7 fields
+// the controller actually consumes, both methods produce equivalent
+// output on a populated table.
+describe.each(['sqlite', 'postgres'] as const)(
+  'ClientService.getByAddressLight equivalence (%s)',
+  (driver) => {
+    let dataSource: DataSource;
+    let pgMem: ReturnType<typeof newDb> | undefined;
+    let service: ClientService;
+
+    beforeAll(async () => {
+      const setup = await createDataSource(driver);
+      dataSource = setup.dataSource;
+      pgMem = setup.pgMem;
+      service = new ClientService(dataSource.getRepository(ClientEntity));
+    });
+
+    afterAll(async () => {
+      await dataSource.destroy();
+    });
+
+    beforeEach(async () => {
+      await dataSource.getRepository(ClientEntity).clear();
+    });
+
+    it('returns the same {sessionId, clientName, bestDifficulty, hashRate, currentDifficulty, startTime, updatedAt} for each row as getByAddress', async () => {
+      const repo = dataSource.getRepository(ClientEntity);
+      const now = new Date('2024-06-01T12:00:00Z');
+      const earlier = new Date('2024-06-01T10:00:00Z');
+
+      await repo.save([
+        {
+          address: 'btc-test',
+          clientName: 'worker-a',
+          sessionId: 'sess0aaa',
+          userAgent: 'ua-a',
+          startTime: earlier,
+          firstSeen: earlier,
+          bestDifficulty: 123.45,
+          hashRate: 1000,
+          currentDifficulty: 4096,
+          createdAt: earlier,
+          updatedAt: now,
+        },
+        {
+          address: 'btc-test',
+          clientName: 'worker-b',
+          sessionId: 'sess0bbb',
+          userAgent: 'ua-b',
+          startTime: earlier,
+          firstSeen: earlier,
+          bestDifficulty: 0.5,
+          hashRate: 250,
+          currentDifficulty: null,
+          createdAt: earlier,
+          updatedAt: now,
+        },
+      ]);
+
+      const legacy = await service.getByAddress('btc-test');
+      const light = await service.getByAddressLight('btc-test');
+
+      expect(light.length).toBe(legacy.length);
+
+      // Map both shapes by composite key so we can compare row-by-row
+      // regardless of result ordering.
+      const keyOf = (r: any) => `${r.sessionId}|${r.clientName}`;
+      const legacyByKey = new Map(legacy.map((r) => [keyOf(r), r]));
+
+      for (const lightRow of light) {
+        const legacyRow = legacyByKey.get(keyOf(lightRow));
+        expect(legacyRow).toBeDefined();
+        expect(lightRow.sessionId).toBe(legacyRow!.sessionId);
+        expect(lightRow.clientName).toBe(legacyRow!.clientName);
+        expect(lightRow.bestDifficulty).toBe(legacyRow!.bestDifficulty);
+        expect(lightRow.hashRate).toBe(legacyRow!.hashRate);
+        expect(lightRow.currentDifficulty).toBe(legacyRow!.currentDifficulty);
+        // Date columns can come back as either Date or string depending on
+        // the driver — normalize both before compare.
+        const startA = new Date(lightRow.startTime as any).getTime();
+        const startB = new Date(legacyRow!.startTime as any).getTime();
+        expect(startA).toBe(startB);
+        const upA = new Date(lightRow.updatedAt as any).getTime();
+        const upB = new Date(legacyRow!.updatedAt as any).getTime();
+        expect(upA).toBe(upB);
+      }
+    });
+
+    it('excludes soft-deleted rows (deletedAt IS NULL) just like getByAddress default', async () => {
+      const repo = dataSource.getRepository(ClientEntity);
+      const now = new Date('2024-06-01T12:00:00Z');
+
+      await repo.save([
+        {
+          address: 'btc-test', clientName: 'live', sessionId: 'sess0liv',
+          userAgent: null, startTime: now, firstSeen: now,
+          bestDifficulty: 1, hashRate: 100, currentDifficulty: null,
+          createdAt: now, updatedAt: now,
+        },
+        {
+          address: 'btc-test', clientName: 'gone', sessionId: 'sess0gon',
+          userAgent: null, startTime: now, firstSeen: now,
+          bestDifficulty: 1, hashRate: 100, currentDifficulty: null,
+          createdAt: now, updatedAt: now, deletedAt: now,
+        },
+      ]);
+
+      const light = await service.getByAddressLight('btc-test');
+      expect(light.length).toBe(1);
+      expect((light[0] as any).clientName).toBe('live');
+    });
+
+    it('returns an empty array for an unknown address', async () => {
+      const light = await service.getByAddressLight('unknown-address');
+      expect(light).toEqual([]);
+    });
+
+    // Suppress unused: pgMem is declared for symmetry with the killDeadClients
+    // describe block above; not needed here.
+    void pgMem;
+  },
+);

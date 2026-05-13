@@ -62,7 +62,11 @@ export class ClientController {
         }
 
         const [workers, addressSettings, totalShares] = await Promise.all([
-            this.clientService.getByAddress(address),
+            // Hot path — `getByAddressLight` skips TypeORM entity hydration
+            // on Postgres (raw SELECT of only the 7 fields used below).
+            // Saves the per-row `DateTimeTransformer.from` chain that the
+            // 2026-05-13 prod CPU profile flagged at ~25-30 % of non-idle CPU.
+            this.clientService.getByAddressLight(address),
             this.addressSettingsService.getSettings(address, false),
             this.shareTotalsCacheService.getAddressTotal(address),
         ]);
@@ -266,7 +270,9 @@ export class ClientController {
 
         const [workerShares, dbWorkerTotals] = await Promise.all([
             this.shareTotalsCacheService.getWorkerTotals(address),
-            this.workerSharesService.getWorkerTotals(address),
+            // Hot path — `getWorkerTotalsLight` returns only (clientName,
+            // rejectedShares) via raw query on Postgres, no entity hydration.
+            this.workerSharesService.getWorkerTotalsLight(address),
         ]);
 
         // Create a map for quick lookup of rejected counts (PK lookup, no full scan)

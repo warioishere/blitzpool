@@ -17,6 +17,32 @@ export class WorkerSharesService {
     }
 
     /**
+     * Hot-path lookup used by `GET /api/client/:address/worker-shares`.
+     * Caller only needs `clientName` + `rejectedShares` (the `shares`
+     * total comes from `ShareTotalsCacheService.getWorkerTotals`).
+     *
+     * Although `WorkerSharesEntity` has no Date columns (so no
+     * `parseDate` cost), bypassing TypeORM's entity hydration still
+     * skips the per-row constructor + transformColumns loop. The win is
+     * smaller than for `ClientService.getByAddressLight` but the pattern
+     * is the same — raw query on Postgres, entity fallback on sqlite/
+     * pg-mem (dev/test).
+     */
+    public async getWorkerTotalsLight(address: string): Promise<Array<{ clientName: string; rejectedShares: number }>> {
+        if (this.dataSource.options.type === 'postgres') {
+            return this.dataSource.query(
+                `SELECT "clientName", "rejectedShares"
+                 FROM worker_shares_entity
+                 WHERE address = $1`,
+                [address],
+            );
+        }
+        // Sqlite / pg-mem fallback — controller reads only the two
+        // fields above from each row.
+        return this.repo.find({ where: { address } }) as unknown as Promise<any>;
+    }
+
+    /**
      * Seed from client_statistics_entity if worker_shares_entity is empty.
      * Runs once on first deploy to backfill cumulative totals.
      */

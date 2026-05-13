@@ -22,7 +22,7 @@ describe('ClientController GET :address/worker-shares', () => {
     let app: NestFastifyApplication;
     let cacheManager: { get: jest.Mock; set: jest.Mock };
     let shareTotalsCacheService: { getWorkerTotals: jest.Mock };
-    let workerSharesService: { getWorkerTotals: jest.Mock };
+    let workerSharesService: { getWorkerTotalsLight: jest.Mock };
 
     beforeEach(async () => {
         cacheManager = {
@@ -33,7 +33,7 @@ describe('ClientController GET :address/worker-shares', () => {
             getWorkerTotals: jest.fn(),
         };
         workerSharesService = {
-            getWorkerTotals: jest.fn(),
+            getWorkerTotalsLight: jest.fn(),
         };
 
         const module: TestingModule = await Test.createTestingModule({
@@ -70,7 +70,7 @@ describe('ClientController GET :address/worker-shares', () => {
             { workerName: 'rig1', total: 1000 },
             { workerName: 'rig2', total: 500 },
         ]);
-        workerSharesService.getWorkerTotals.mockResolvedValue([
+        workerSharesService.getWorkerTotalsLight.mockResolvedValue([
             { clientName: 'rig1', shares: 1000, rejectedShares: 42 },
             { clientName: 'rig2', shares: 500, rejectedShares: 7 },
         ]);
@@ -90,7 +90,7 @@ describe('ClientController GET :address/worker-shares', () => {
             { workerName: 'rig1', total: 300 },
         ]);
         // worker_shares_entity has no row for this address yet (e.g. first deploy)
-        workerSharesService.getWorkerTotals.mockResolvedValue([]);
+        workerSharesService.getWorkerTotalsLight.mockResolvedValue([]);
 
         const res = await app.inject({ method: 'GET', url: '/api/client/addr1/worker-shares' });
 
@@ -108,12 +108,12 @@ describe('ClientController GET :address/worker-shares', () => {
         expect(res.statusCode).toBe(200);
         expect(JSON.parse(res.payload)).toEqual(cached);
         expect(shareTotalsCacheService.getWorkerTotals).not.toHaveBeenCalled();
-        expect(workerSharesService.getWorkerTotals).not.toHaveBeenCalled();
+        expect(workerSharesService.getWorkerTotalsLight).not.toHaveBeenCalled();
     });
 
     it('stores the result in cache after a miss', async () => {
         shareTotalsCacheService.getWorkerTotals.mockResolvedValue([{ workerName: 'rig1', total: 100 }]);
-        workerSharesService.getWorkerTotals.mockResolvedValue([{ clientName: 'rig1', shares: 100, rejectedShares: 3 }]);
+        workerSharesService.getWorkerTotalsLight.mockResolvedValue([{ clientName: 'rig1', shares: 100, rejectedShares: 3 }]);
 
         await app.inject({ method: 'GET', url: '/api/client/addr1/worker-shares' });
 
