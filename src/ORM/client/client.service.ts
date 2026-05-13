@@ -358,6 +358,22 @@ export class ClientService implements OnModuleDestroy {
         })
     }
 
+    /**
+     * Hot-path lookup for `GET /api/client/:address/:workerName` — caller
+     * only uses `bestDifficulty`, so raw-SELECT bypasses TypeORM hydration
+     * for every column.
+     */
+    public async getByNameLight(address: string, clientName: string): Promise<Array<{ bestDifficulty: number }>> {
+        if (this.clientRepository.manager.connection.options.type === 'postgres') {
+            return this.clientRepository.query(
+                `SELECT "bestDifficulty" FROM client_entity
+                 WHERE address = $1 AND "clientName" = $2 AND "deletedAt" IS NULL`,
+                [address, clientName],
+            );
+        }
+        return this.clientRepository.find({ where: { address, clientName } }) as unknown as Promise<any>;
+    }
+
     public async getFirstSeen(address: string, clientName: string): Promise<number | null> {
         if (this.clientRepository.manager.connection.options.type === 'postgres') {
             // Raw query — bypasses RawSqlResultsToEntityTransformer. Per-share-
@@ -445,6 +461,42 @@ export class ClientService implements OnModuleDestroy {
                 sessionId
             }
         })
+    }
+
+    /**
+     * Hot-path lookup for `GET /api/client/:address/:workerName/:sessionId` —
+     * raw SELECT of the 5 columns the controller reads. Skips
+     * RawSqlResultsToEntityTransformer + the 5 Date-column transformer
+     * chains on Postgres.
+     */
+    public async getBySessionIdLight(
+        address: string, clientName: string, sessionId: string,
+    ): Promise<{
+        sessionId: string;
+        clientName: string;
+        address: string;
+        bestDifficulty: number;
+        startTime: number;
+    } | null> {
+        if (this.clientRepository.manager.connection.options.type === 'postgres') {
+            const rows: Array<{
+                sessionId: string;
+                clientName: string;
+                address: string;
+                bestDifficulty: number;
+                startTime: string;
+            }> = await this.clientRepository.query(
+                `SELECT "sessionId", "clientName", address, "bestDifficulty", "startTime"
+                 FROM client_entity
+                 WHERE address = $1 AND "clientName" = $2 AND "sessionId" = $3 AND "deletedAt" IS NULL
+                 LIMIT 1`,
+                [address, clientName, sessionId],
+            );
+            const r = rows[0];
+            return r ? { ...r, startTime: Number(r.startTime) } : null;
+        }
+        const entity = await this.clientRepository.findOne({ where: { address, clientName, sessionId } });
+        return entity as any;
     }
 
     public async deleteAll() {

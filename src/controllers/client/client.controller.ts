@@ -452,9 +452,9 @@ export class ClientController {
             return cachedResult;
         }
 
-        const workers = await this.clientService.getByName(address, workerName);
+        const workers = await this.clientService.getByNameLight(address, workerName);
 
-        const bestDifficulty = workers.reduce((pre, cur, idx, arr) => {
+        const bestDifficulty = workers.reduce((pre, cur) => {
             if (cur.bestDifficulty > pre) {
                 return cur.bestDifficulty;
             }
@@ -481,7 +481,7 @@ export class ClientController {
             return cachedResult;
         }
 
-        const worker = await this.clientService.getBySessionId(address, workerName, sessionId);
+        const worker = await this.clientService.getBySessionIdLight(address, workerName, sessionId);
         if (worker == null) {
             return new NotFoundException();
         }

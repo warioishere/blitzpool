@@ -21,7 +21,7 @@ import { WorkerSharesService } from '../../ORM/worker-shares/worker-shares.servi
 describe('ClientController worker chart data', () => {
   let app: NestFastifyApplication;
   let clientStatisticsService: { getChartDataForGroup: jest.Mock };
-  let clientService: { getByName: jest.Mock };
+  let clientService: { getByNameLight: jest.Mock };
 
   beforeEach(async () => {
     clientStatisticsService = {
@@ -40,7 +40,7 @@ describe('ClientController worker chart data', () => {
       ]),
     };
     clientService = {
-      getByName: jest.fn().mockResolvedValue([
+      getByNameLight: jest.fn().mockResolvedValue([
         { bestDifficulty: 12.34 },
       ]),
     };
