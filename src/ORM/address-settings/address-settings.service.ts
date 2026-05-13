@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 
 import { AddressSettingsEntity } from './address-settings.entity';
 
@@ -36,6 +36,40 @@ export class AddressSettingsService {
         }
 
         return settings;
+    }
+
+    /**
+     * Hot-path helper for the per-minute push-notification cron. Returns
+     * only the `bestDifficulty` column for the given addresses in a single
+     * raw SELECT on Postgres (no entity hydration), keyed for O(1) lookup
+     * via address. Missing addresses are absent from the map.
+     */
+    public async getBestDifficultiesForAddresses(addresses: string[]): Promise<Map<string, number>> {
+        const out = new Map<string, number>();
+        if (addresses.length === 0) return out;
+        const dbType = this.addressSettingsRepository.manager.connection.options.type;
+        if (dbType === 'postgres') {
+            const rows: Array<{ address: string; bestDifficulty: number | string | null }> =
+                await this.addressSettingsRepository.query(
+                    `SELECT address, "bestDifficulty"
+                     FROM address_settings_entity
+                     WHERE address = ANY($1::text[])`,
+                    [addresses],
+                );
+            for (const row of rows) {
+                const v = row.bestDifficulty;
+                const n = typeof v === 'number' ? v : (v == null ? 0 : Number(v));
+                out.set(row.address, Number.isFinite(n) ? n : 0);
+            }
+            return out;
+        }
+        const rows = await this.addressSettingsRepository.find({
+            where: { address: In(addresses) },
+        });
+        for (const row of rows) {
+            out.set(row.address, row.bestDifficulty ?? 0);
+        }
+        return out;
     }
 
     public async updateBestDifficulty(address: string, bestDifficulty: number, bestDifficultyUserAgent: string) {

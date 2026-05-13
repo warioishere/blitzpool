@@ -240,44 +240,49 @@ export class PushNotificationService implements OnModuleInit {
 
             console.log(`[PushNotification] Checking best difficulty for ${addresses.length} address(es)`);
 
+            // Single-shot bulk read: one IN-list query each for settings and
+            // trackers. Old code did `for (addr) { await getSettings; await
+            // getTracker; }` — 2N sequential round-trips. Now it's 2, in
+            // parallel.
+            const [settingsByAddress, trackersByAddress] = await Promise.all([
+                this.addressSettingsService.getBestDifficultiesForAddresses(addresses),
+                this.trackerService.getTrackersForAddresses(addresses),
+            ]);
+
+            const toUpsertTracker: Array<{ address: string; bestDifficulty: number }> = [];
+            const notifyTargets: Array<{ address: string; difficulty: number }> = [];
+
             for (const address of addresses) {
+                if (!settingsByAddress.has(address)) continue;
+                const currentDifficulty = settingsByAddress.get(address) ?? 0;
+                const tracker = trackersByAddress.get(address);
+                if (!tracker) {
+                    toUpsertTracker.push({ address, bestDifficulty: currentDifficulty });
+                    console.log(`[PushNotification] Initialized tracker for ${address} with difficulty ${this.formatDifficulty(currentDifficulty)}`);
+                    continue;
+                }
+                if (currentDifficulty > tracker.bestDifficulty) {
+                    console.log(`[PushNotification] Difficulty increased for ${address}: ${this.formatDifficulty(tracker.bestDifficulty)} -> ${this.formatDifficulty(currentDifficulty)}`);
+                    notifyTargets.push({ address, difficulty: currentDifficulty });
+                    toUpsertTracker.push({ address, bestDifficulty: currentDifficulty });
+                } else if (currentDifficulty < tracker.bestDifficulty) {
+                    // address_settings is the source of truth. A drop is
+                    // expected after /bestdiff_reset (settings -> 0 before
+                    // resetTracker lands) and for legacy rows that lost
+                    // precision under the old `real` column. Sync the tracker
+                    // down silently.
+                    toUpsertTracker.push({ address, bestDifficulty: currentDifficulty });
+                }
+            }
+
+            if (toUpsertTracker.length > 0) {
+                await this.trackerService.updateTrackersBulk(toUpsertTracker);
+            }
+            for (const t of notifyTargets) {
                 try {
-                    // Get current bestDifficulty from AddressSettingsService
-                    const settings = await this.addressSettingsService.getSettings(address, false);
-                    if (!settings) {
-                        continue;
-                    }
-
-                    const currentDifficulty = settings.bestDifficulty ?? 0;
-
-                    // Get tracker
-                    const tracker = await this.trackerService.getTracker(address);
-
-                    // Initialize tracker if it doesn't exist
-                    if (!tracker) {
-                        await this.trackerService.updateTracker(address, currentDifficulty);
-                        console.log(`[PushNotification] Initialized tracker for ${address} with difficulty ${this.formatDifficulty(currentDifficulty)}`);
-                        continue;
-                    }
-
-                    // Check if difficulty has increased
-                    if (currentDifficulty > tracker.bestDifficulty) {
-                        console.log(`[PushNotification] Difficulty increased for ${address}: ${this.formatDifficulty(tracker.bestDifficulty)} -> ${this.formatDifficulty(currentDifficulty)}`);
-
-                        await this.sendNotificationsForAddress(address, currentDifficulty);
-                        await this.trackerService.updateTracker(address, currentDifficulty);
-                    } else if (currentDifficulty < tracker.bestDifficulty) {
-                        // address_settings is the source of truth. A drop is
-                        // expected after /bestdiff_reset (settings -> 0 before
-                        // resetTracker lands) and for legacy rows that lost
-                        // precision under the old `real` column. Sync the
-                        // tracker down silently — the previous WARNING log
-                        // was a leftover from the pre-migration drift bug
-                        // (1776000000000-AddressSettingsBestDifficultyToDouble).
-                        await this.trackerService.updateTracker(address, currentDifficulty);
-                    }
+                    await this.sendNotificationsForAddress(t.address, t.difficulty);
                 } catch (error: any) {
-                    console.error(`[PushNotification] Error checking address ${address}:`, error.message);
+                    console.error(`[PushNotification] Error notifying ${t.address}:`, error.message);
                 }
             }
         } catch (error: any) {
