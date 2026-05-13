@@ -42,6 +42,18 @@ export interface StratumV2ChannelState {
   extranonceSize: number;
   sessionDifficulty: number;
   jobIdToDifficulty: Map<number, number>;  // Tracks difficulty for each job (SV2 spec: shares validated against job-specific target)
+  /**
+   * Standard channels only. The merkle root sent to the miner in NewMiningJob
+   * is stored verbatim per jobId so share validation hashes the exact same
+   * 80-byte header the miner did. Replaces the previous design that
+   * recomputed merkleRoot via MiningJob.applyExtranonceAndGetCoinbaseHash —
+   * which mutated the MiningJob's coinbase script buffer in place and broke
+   * for BraiinsOS Standard channels under message-ordering edge cases.
+   * SRI reference pattern (channels-sv2/src/server/standard.rs:595).
+   * Extended channels reconstruct merkleRoot on submit from ExtendedJobData
+   * + miner-supplied extranonce — that path already avoids mutation.
+   */
+  jobIdToMerkleRoot: Map<number, Buffer>;
   extendedJobs: Map<number, ExtendedJobData>;
   latestExtendedPrevHash: Buffer;
   latestExtendedNBits: number;

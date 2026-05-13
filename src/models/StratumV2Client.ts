@@ -646,6 +646,7 @@ export class StratumV2Client {
       extranonceSize: 0,
       sessionDifficulty: channelDifficulty,
       jobIdToDifficulty: new Map(),
+      jobIdToMerkleRoot: new Map(),
       extendedJobs: new Map(),
       latestExtendedPrevHash: Buffer.alloc(32),
       latestExtendedNBits: 0,
@@ -845,6 +846,7 @@ export class StratumV2Client {
       extranonceSize: rollableExtranonceSize,
       sessionDifficulty: channelDifficulty,
       jobIdToDifficulty: new Map(),
+      jobIdToMerkleRoot: new Map(),
       extendedJobs: new Map(),
       latestExtendedPrevHash: Buffer.alloc(32),
       latestExtendedNBits: 0,
@@ -2098,6 +2100,9 @@ export class StratumV2Client {
 
     // Store job-specific difficulty (SV2 spec: shares validated against target from when job was sent)
     channel.jobIdToDifficulty.set(parseInt(job.jobId, 16), channel.sessionDifficulty);
+    // Store the merkle root we sent so share validation hashes the exact same
+    // 80-byte header — see jobIdToMerkleRoot doc on StratumV2ChannelState.
+    channel.jobIdToMerkleRoot.set(parseInt(job.jobId, 16), Buffer.from(merkleRoot));
 
     if (this.debugMessages) {
       console.log(`[SV2 ${this.sessionId}] 📨 NewMiningJob: channel=${targetChannelId}, jobId=0x${job.jobId}, height=${jobTemplate.blockData.height}, version=0x${jobTemplate.block.version.toString(16)}, futureJob=${!sendPrevHash}, merkleRoot=${merkleRoot.toString('hex').substring(0, 16)}...`);
@@ -2180,32 +2185,45 @@ export class StratumV2Client {
       return;
     }
 
-    // Reconstruct block
-    // versionMask = submitted version XOR base version
-    const versionMask = submission.version ^ jobTemplate.block.version;
-    const extraNonce1 = channel.extranoncePrefix.toString('hex');
-    // Zero-pad extraNonce2 to fill remaining extranonce space (12-byte slot:
-    // 4-byte prefix + 8-byte enonce2). Must match the value used in
-    // sendNewMiningJob to produce the same merkleRoot for share validation.
-    const extraNonce2 = '0000000000000000';
+    // SV2 Standard channels: hash exactly the 80-byte header the miner did.
+    // Use the merkle root we stored at NewMiningJob send time — recomputing
+    // via MiningJob.applyExtranonceAndGetCoinbaseHash mutates the coinbase
+    // script and is fragile under message-ordering edge cases (BraiinsOS
+    // Standard SV2 was rejecting ~19% of shares as 0.00-diff before this fix
+    // because the recomputed merkleRoot diverged from the one sent).
+    // Pattern mirrors SRI's channels-sv2 server/standard.rs:595 — store the
+    // merkleRoot at send time, use it byte-for-byte at validate time.
+    const sentMerkleRoot = channel.jobIdToMerkleRoot.get(submission.jobId);
+    if (!sentMerkleRoot) {
+      // Should not happen: jobIdToDifficulty resolved above means the job
+      // is active. Defensive — same treatment as a stale job.
+      await this.recordRejectedShare('JobNotFound', channel.sessionDifficulty);
+      await this.sendShareError(submission.channelId, submission.sequenceNumber, 'invalid-job-id');
+      return;
+    }
 
-    // Hot path: only compute the 80-byte header for hash validation.
-    // Full Block (for `bitcoind.submitblock`) is built below ONLY if the
-    // share actually meets network difficulty — same pattern the SV2
-    // Extended path (~line 1515) has used since inception. Saves the
-    // ~3000-tx clone in MiningJob.copyAndUpdateBlock per share.
-    const header = job.computeShareHeader(
-      jobTemplate,
-      versionMask,
-      submission.nonce,
-      extraNonce1,
-      extraNonce2,
-      submission.ntime,
-    );
+    // Header reconstruction — same layout as MiningJob.computeShareHeader,
+    // but driven by the stored merkleRoot instead of re-applying extranonce.
+    let version = jobTemplate.block.version;
+    const versionMask = submission.version ^ jobTemplate.block.version;
+    if (versionMask !== 0) {
+      version = version ^ versionMask;
+    }
+    const header = Buffer.alloc(80);
+    header.writeInt32LE(version, 0);
+    jobTemplate.block.prevHash.copy(header, 4);
+    sentMerkleRoot.copy(header, 36);
+    header.writeUInt32LE(submission.ntime >>> 0, 68);
+    header.writeUInt32LE(jobTemplate.block.bits >>> 0, 72);
+    header.writeUInt32LE(submission.nonce >>> 0, 76);
+
     const { submissionDifficulty, hashBuffer } = DifficultyUtils.calculateDifficulty(header);
 
     // Look up job-specific difficulty (SV2 spec: validate against target from when job was sent)
     const jobDifficulty = channel.jobIdToDifficulty.get(submission.jobId) ?? channel.sessionDifficulty;
+    // Used below only for block reconstruction on network-diff hits.
+    const extraNonce1 = channel.extranoncePrefix.toString('hex');
+    const extraNonce2 = '0000000000000000';
 
     if (this.debugMessages) console.log(`[SV2 ${this.sessionId}] 🎯 Share difficulty: ${submissionDifficulty.toFixed(2)} (target: ${jobDifficulty.toFixed(2)})`);
 
@@ -2459,6 +2477,7 @@ export class StratumV2Client {
               }
             }
             ch.jobIdToDifficulty.clear();
+            ch.jobIdToMerkleRoot.clear();
           }
         }
         await this.broadcastNewJobToAllChannels(jt, jt.blockData.clearJobs);
