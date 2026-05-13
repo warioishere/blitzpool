@@ -2,18 +2,47 @@ import { DataSource } from 'typeorm';
 
 import { ClientDifficultyStatisticsEntity } from './client-difficulty-statistics.entity';
 import { ClientDifficultyStatisticsService } from './client-difficulty-statistics.service';
+import { TrackedEntityTimestampSubscriber } from '../utils/tracked-entity.subscriber';
 
-describe('ClientDifficultyStatisticsService', () => {
+// PG_E2E=1 enables the real-Postgres path. The 2026-05 bigint cleanup
+// broke `flushPostgres` (passing `new Date()` to a bigint column), and
+// the sqlite-only spec didn't catch it because SQLite is permissive
+// about type coercion. Running this spec against the real Postgres
+// container catches PG-only type strictness issues.
+//
+// Container: `docker run -d --name blitzpool-test-pg -p 15432:5432 \
+//   -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres \
+//   -e POSTGRES_DB=blitzpool_test postgres:18`
+const PG_E2E = process.env.PG_E2E === '1';
+const drivers = PG_E2E ? (['sqlite', 'postgres'] as const) : (['sqlite'] as const);
+
+describe.each(drivers)('ClientDifficultyStatisticsService (%s)', (driver) => {
   let dataSource: DataSource;
   let service: ClientDifficultyStatisticsService;
 
   beforeEach(async () => {
-    dataSource = new DataSource({
-      type: 'sqlite',
-      database: ':memory:',
-      entities: [ClientDifficultyStatisticsEntity],
-      synchronize: true,
-    });
+    if (driver === 'sqlite') {
+      dataSource = new DataSource({
+        type: 'sqlite',
+        database: ':memory:',
+        entities: [ClientDifficultyStatisticsEntity],
+        subscribers: [TrackedEntityTimestampSubscriber],
+        synchronize: true,
+      });
+    } else {
+      dataSource = new DataSource({
+        type: 'postgres',
+        host: process.env.PG_HOST ?? 'localhost',
+        port: parseInt(process.env.PG_PORT ?? '15432', 10),
+        username: process.env.PG_USER ?? 'postgres',
+        password: process.env.PG_PASSWORD ?? 'postgres',
+        database: process.env.PG_DATABASE ?? 'blitzpool_test',
+        entities: [ClientDifficultyStatisticsEntity],
+        subscribers: [TrackedEntityTimestampSubscriber],
+        synchronize: true,
+        dropSchema: true,
+      });
+    }
     await dataSource.initialize();
     service = new ClientDifficultyStatisticsService(
       dataSource.getRepository(ClientDifficultyStatisticsEntity) as any,
@@ -38,11 +67,9 @@ describe('ClientDifficultyStatisticsService', () => {
       difficulty: 50,
     });
 
-    // Not in DB yet — only buffered
     let count = await repository.count();
     expect(count).toBe(0);
 
-    // Flush to DB
     await service.flushBuffer();
 
     count = await repository.count();
@@ -84,13 +111,11 @@ describe('ClientDifficultyStatisticsService', () => {
     const slotTime = Math.floor(timestamp / (60 * 60 * 1000)) * 60 * 60 * 1000;
     const repository = dataSource.getRepository(ClientDifficultyStatisticsEntity);
 
-    // First flush with high value
     await service.recordShareDifficulty({
       address: 'addr1', clientName: 'workerA', timestamp, difficulty: 100,
     });
     await service.flushBuffer();
 
-    // Second flush with lower value — DB should keep 100
     await service.recordShareDifficulty({
       address: 'addr1', clientName: 'workerA', timestamp: timestamp + 5_000, difficulty: 50,
     });
@@ -147,12 +172,10 @@ describe('ClientDifficultyStatisticsService', () => {
   });
 
   it('does not flush when buffer is empty', async () => {
-    // Should not throw
     await service.flushBuffer();
   });
 
   it('re-buffers records on flush failure', async () => {
-    // Use a service with a broken repository
     const brokenRepo = {
       manager: { connection: { options: { type: 'sqlite' } } },
       metadata: { tableName: 'nonexistent_table' },
@@ -168,12 +191,11 @@ describe('ClientDifficultyStatisticsService', () => {
 
       await brokenService.flushBuffer();
 
-      // Record should be re-buffered — flush again to verify it's still there
       expect(brokenRepo.query).toHaveBeenCalledTimes(1);
       brokenRepo.query.mockClear();
 
       await brokenService.flushBuffer();
-      expect(brokenRepo.query).toHaveBeenCalledTimes(1); // Tried again
+      expect(brokenRepo.query).toHaveBeenCalledTimes(1);
     } finally {
       consoleSpy.mockRestore();
     }

@@ -153,12 +153,14 @@ export class ClientDifficultyStatisticsService implements OnModuleDestroy {
     }
   }
 
-  async getMaximaForAddress(address: string, from: number, to: number) {
+  async getMaximaForAddress(address: string, from: number, to: number): Promise<Array<{ slotTime: number; maxDifficulty: number }>> {
     if (!address) {
       return [];
     }
 
-    return this.repository
+    // Raw query bypasses entity transformers — PG returns bigint as string.
+    // Coerce both columns explicitly so the TS return type matches runtime.
+    const rows = await this.repository
       .createQueryBuilder('stat')
       .select('stat.slotTime', 'slotTime')
       .addSelect('MAX(stat.maxDifficulty)', 'maxDifficulty')
@@ -166,7 +168,12 @@ export class ClientDifficultyStatisticsService implements OnModuleDestroy {
       .andWhere('stat.slotTime BETWEEN :from AND :to', { from, to })
       .groupBy('stat.slotTime')
       .orderBy('stat.slotTime', 'ASC')
-      .getRawMany<{ slotTime: number; maxDifficulty: number }>();
+      .getRawMany<{ slotTime: number | string; maxDifficulty: number | string }>();
+
+    return rows.map(r => ({
+      slotTime: Number(r.slotTime),
+      maxDifficulty: Number(r.maxDifficulty),
+    }));
   }
 
   async deleteOlderThan(cutoff: number): Promise<void> {
