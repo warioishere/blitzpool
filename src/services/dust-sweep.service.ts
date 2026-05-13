@@ -156,16 +156,16 @@ export class DustSweepService implements OnModuleInit {
         groupSwept: number;
     }> {
         const abandonedCutoffMs = Date.now() - this.abandonedDays * 24 * 60 * 60 * 1000;
-        const dustCutoff = new Date(Date.now() - this.dormantDays * 24 * 60 * 60 * 1000);
+        const dustCutoffMs = Date.now() - this.dormantDays * 24 * 60 * 60 * 1000;
 
         const pplnsResult = await this.sweepPplnsPairs(abandonedCutoffMs);
-        const groupSwept = await this.sweepGroupDust(dustCutoff);
+        const groupSwept = await this.sweepGroupDust(dustCutoffMs);
 
         if (pplnsResult.pairsClosed > 0 || groupSwept > 0) {
             console.log(
                 `[DustSweep] PPLNS paired ${pplnsResult.pairsClosed} rows `
                 + `(${pplnsResult.satsPaired} sats), group-solo swept ${groupSwept} dust rows `
-                + `(abandoned<${new Date(abandonedCutoffMs).toISOString()}, dust<${dustCutoff.toISOString()})`,
+                + `(abandoned<${new Date(abandonedCutoffMs).toISOString()}, dust<${new Date(dustCutoffMs).toISOString()})`,
             );
         }
 
@@ -358,7 +358,7 @@ export class DustSweepService implements OnModuleInit {
      * so the single-sided sweep is correct: positive rows < dust that
      * haven't mined in dormantDays are deleted with an audit row.
      */
-    private async sweepGroupDust(cutoff: Date): Promise<number> {
+    private async sweepGroupDust(cutoffMs: number): Promise<number> {
         const candidates = await this.groupBalanceRepo
             .createQueryBuilder('b')
             .where('b."pendingSats" > 0')
@@ -368,7 +368,7 @@ export class DustSweepService implements OnModuleInit {
             // 546 protocol-policy value.
             .andWhere('b."pendingSats" < :minPayout', { minPayout: this.minPayoutSats })
             .andWhere('b."lastAcceptedShareAt" IS NOT NULL')
-            .andWhere('b."lastAcceptedShareAt" < :cutoff', { cutoff })
+            .andWhere('b."lastAcceptedShareAt" < :cutoffMs', { cutoffMs })
             .getMany();
 
         let swept = 0;

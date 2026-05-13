@@ -40,13 +40,13 @@ export class EmailController {
      * confirmation + a "go back to your dashboard" link.
      */
     @Get('verify/:token')
-    async verify(@Param('token') token: string): Promise<{ address: string; email: string; verifiedAt: Date }> {
+    async verify(@Param('token') token: string): Promise<{ address: string; email: string; verifiedAt: string }> {
         try {
             const binding = await this.addressEmailService.verify(token);
             return {
                 address: binding.address,
                 email: binding.email,
-                verifiedAt: binding.verifiedAt!,
+                verifiedAt: new Date(binding.verifiedAt!).toISOString(),
             };
         } catch (e) {
             throw this.toHttp(e);
@@ -63,10 +63,13 @@ export class EmailController {
      * Returns `{ email: null }` when no verified binding exists.
      */
     @Get('by-address/:address')
-    async byAddress(@Param('address') address: string): Promise<{ email: string | null; verifiedAt: Date | null }> {
+    async byAddress(@Param('address') address: string): Promise<{ email: string | null; verifiedAt: string | null }> {
         const binding = await this.addressEmailService.getVerified(address);
         if (!binding) return { email: null, verifiedAt: null };
-        return { email: maskEmail(binding.email), verifiedAt: binding.verifiedAt };
+        return {
+            email: maskEmail(binding.email),
+            verifiedAt: binding.verifiedAt != null ? new Date(binding.verifiedAt).toISOString() : null,
+        };
     }
 
     private toHttp(e: any): HttpException {

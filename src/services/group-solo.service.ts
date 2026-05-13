@@ -265,7 +265,7 @@ export class GroupSoloService implements OnModuleInit {
         // when the balance row doesn't exist yet — the first pending
         // credit in onBlockFound will initialize it.
         this.balanceRepo.update({ address, groupId: entry.groupId }, {
-            lastAcceptedShareAt: new Date(now),
+            lastAcceptedShareAt: now,
         }).catch(err => {
             console.warn(`[GroupSolo] touchLastAcceptedShareAt failed for ${address} in ${entry.groupId}:`, (err as Error).message);
         });
@@ -724,7 +724,7 @@ export class GroupSoloService implements OnModuleInit {
 
                 const balancesToSave = new Map<string, PplnsGroupBalanceEntity>();
                 const historyRows: PplnsGroupBlockHistoryEntity[] = [];
-                const now = new Date();
+                const now = Date.now();
 
                 // 1. Apply absolute balanceAfter values from the distribution.
                 for (const [addr, newBalance] of balanceAfter) {
@@ -831,7 +831,7 @@ export class GroupSoloService implements OnModuleInit {
         // the dormancy cutoff). The credit shouldn't count as the
         // recipient "being active", but it should reset the clock so the
         // sweep doesn't immediately reclaim what the kick just gave them.
-        const now = new Date();
+        const now = Date.now();
         const existing = await this.balanceRepo.findOneBy({ address, groupId });
         if (existing) {
             existing.pendingSats += sats;
@@ -1081,7 +1081,7 @@ export class GroupSoloService implements OnModuleInit {
         // it (see docstring above for why that's intentional under
         // Variant B). The blockFoundLocks check above is the actual
         // serialization with the block-found path.
-        const lastResetAt = group.lastRoundResetAt?.getTime() ?? 0;
+        const lastResetAt = group.lastRoundResetAt ?? 0;
         if (Date.now() - lastResetAt < 60_000) {
             console.log(`[GroupSolo] Skipping scheduled reset for ${groupId} — last scheduled reset ${Date.now() - lastResetAt}ms ago`);
             return;
@@ -1103,7 +1103,7 @@ export class GroupSoloService implements OnModuleInit {
         // Mark the reset for the scheduled-vs-scheduled guard above and
         // for `computeNextResetAt` / the custom-preset elapsed-check in
         // GroupRoundResetService (both anchor on this column).
-        await this.groupRepo.update({ id: groupId }, { lastRoundResetAt: new Date() });
+        await this.groupRepo.update({ id: groupId }, { lastRoundResetAt: Date.now() });
     }
 
     // ── Stats (for API) ──────────────────────────────────────────

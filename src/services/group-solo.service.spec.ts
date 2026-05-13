@@ -1143,7 +1143,7 @@ describe('GroupSoloService', () => {
             // lastRoundResetAt updated
             expect(groupRepo.update).toHaveBeenCalledWith(
                 { id: 'g1' },
-                expect.objectContaining({ lastRoundResetAt: expect.any(Date) }),
+                expect.objectContaining({ lastRoundResetAt: expect.any(Number) }),
             );
         });
 
@@ -1171,7 +1171,7 @@ describe('GroupSoloService', () => {
             groupRepo.findOneBy = jest.fn(async () => ({
                 id: 'g1',
                 dissolvedAt: null,
-                lastRoundResetAt: new Date(Date.now() - 30_000),  // 30s ago
+                lastRoundResetAt: Date.now() - 30_000,  // 30s ago
             }));
             groupRepo.update = jest.fn();
 
@@ -1245,13 +1245,13 @@ describe('GroupSoloService', () => {
         groupService._setMembership('bc1qalice', 'g1', true);
         groupService._setMembership('bc1qbob', 'g1', true);
 
-        const STALE = new Date('2020-01-01T00:00:00Z');
+        const STALE = Date.parse('2020-01-01T00:00:00Z');
 
         // Seed: bob has 900 sats pending; alice has a stale balance row
         // (mined long ago, dust-eligible by timestamp).
         (balanceRepo._rows as any[]).push(
             { address: 'bc1qbob', groupId: 'g1', pendingSats: 900, totalPaidSats: 0,
-              lastAcceptedShareAt: new Date() },
+              lastAcceptedShareAt: Date.now() },
             { address: 'bc1qalice', groupId: 'g1', pendingSats: 100, totalPaidSats: 0,
               lastAcceptedShareAt: STALE },
         );
@@ -1265,9 +1265,9 @@ describe('GroupSoloService', () => {
         // Timestamp must have been refreshed inside the kick window —
         // not left at STALE — otherwise the next sweep cron run would
         // immediately absorb the just-credited 900 sats.
-        expect(aliceRow?.lastAcceptedShareAt).toBeInstanceOf(Date);
-        expect(aliceRow.lastAcceptedShareAt.getTime()).toBeGreaterThanOrEqual(before);
-        expect(aliceRow.lastAcceptedShareAt.getTime()).toBeLessThanOrEqual(after);
+        expect(typeof aliceRow?.lastAcceptedShareAt).toBe('number');
+        expect(aliceRow.lastAcceptedShareAt).toBeGreaterThanOrEqual(before);
+        expect(aliceRow.lastAcceptedShareAt).toBeLessThanOrEqual(after);
     });
 
     // ── Finder-bonus per-miner coinbase ────────────────────────────

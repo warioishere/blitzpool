@@ -1,4 +1,6 @@
-import { Column, CreateDateColumn, Entity, Index, PrimaryColumn } from 'typeorm';
+import { BeforeInsert, Column, Entity, Index, PrimaryColumn } from 'typeorm';
+
+import { epochMsTransformer } from '../utils/epoch-ms-transformer';
 
 /**
  * Invitation for an address to join a payout group. Two flavours:
@@ -62,12 +64,17 @@ export class PplnsGroupInvitationEntity {
     @Column({ type: 'boolean', default: false })
     approvalRequired: boolean;
 
-    @CreateDateColumn()
-    createdAt: Date;
+    @Column({ type: 'bigint', transformer: epochMsTransformer })
+    createdAt: number;
 
-    @Column({ type: 'timestamp' })
-    expiresAt: Date;
+    @Column({ type: 'bigint', transformer: epochMsTransformer })
+    expiresAt: number;
 
-    @Column({ type: 'timestamp', nullable: true })
-    respondedAt: Date | null;
+    @Column({ type: 'bigint', nullable: true, transformer: epochMsTransformer })
+    respondedAt: number | null;
+
+    @BeforeInsert()
+    private fillCreatedAt(): void {
+        if (this.createdAt == null) this.createdAt = Date.now();
+    }
 }

@@ -141,7 +141,8 @@ describe('PplnsGroupInvitationService', () => {
         const r = await service.createInvitation('g1', 'bc1qbob', 'good-token');
         expect(r.email).toBe('bob@example.com');
         expect(r.token).toBeTruthy();
-        expect(r.expiresAt).toBeInstanceOf(Date);
+        expect(typeof r.expiresAt).toBe('number');
+        expect(r.expiresAt).toBeGreaterThan(Date.now());
 
         expect(emailService.sendInvitation).toHaveBeenCalledTimes(1);
         const sent = (emailService.sendInvitation as jest.Mock).mock.calls[0][0];
@@ -287,7 +288,7 @@ describe('PplnsGroupInvitationService', () => {
         const { service, invitationRepo } = makeService();
         const r = await service.createOpenInvite('g1', '24h', 'good-token');
         expect(r.token).toBeTruthy();
-        expect(r.expiresAt.getTime()).toBeGreaterThan(Date.now());
+        expect(r.expiresAt).toBeGreaterThan(Date.now());
 
         expect(invitationRepo.rows).toHaveLength(1);
         const row = invitationRepo.rows[0];

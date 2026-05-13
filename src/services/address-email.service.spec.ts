@@ -77,7 +77,7 @@ describe('AddressEmailService — K1-minimal FCFS-lock + binding-change notifica
         bindingRepo.rows.push({
             address: 'bc1qbob',
             email: 'bob@example.com',
-            verifiedAt: new Date(),
+            verifiedAt: Date.now(),
         });
 
         await expect(service.register('bc1qbob', 'eve@evil.com'))
@@ -100,7 +100,7 @@ describe('AddressEmailService — K1-minimal FCFS-lock + binding-change notifica
         bindingRepo.rows.push({
             address: 'bc1qalice',
             email: 'alice@example.com',
-            verifiedAt: new Date(),
+            verifiedAt: Date.now(),
         });
 
         const result = await service.register('bc1qalice', 'alice@example.com');
@@ -115,7 +115,7 @@ describe('AddressEmailService — K1-minimal FCFS-lock + binding-change notifica
         bindingRepo.rows.push({
             address: 'bc1qalice',
             email: 'alice@example.com',
-            verifiedAt: new Date(),
+            verifiedAt: Date.now(),
         });
         // User submits with different case — should still be treated as same email
         await expect(service.register('bc1qalice', 'Alice@Example.COM')).resolves.toBeDefined();
@@ -130,7 +130,7 @@ describe('AddressEmailService — K1-minimal FCFS-lock + binding-change notifica
         bindingRepo.rows.push({
             address: 'bc1qbob',
             email: 'bob@example.com',
-            verifiedAt: new Date(),
+            verifiedAt: Date.now(),
         });
         (emailService.sendBindingChangeAttempt as jest.Mock).mockRejectedValueOnce(new Error('SMTP down'));
 
@@ -159,13 +159,13 @@ describe('AddressEmailService — K1-minimal FCFS-lock + binding-change notifica
         bindingRepo.rows.push({
             address: 'bc1qbob',
             email: 'bob@example.com',
-            verifiedAt: new Date(),
+            verifiedAt: Date.now(),
         });
         verificationRepo.rows.push({
             token: 'stale-tok',
             address: 'bc1qbob',
             email: 'eve@evil.com',
-            expiresAt: new Date(Date.now() + 60_000),
+            expiresAt: Date.now() + 60_000,
         });
 
         await expect(service.verify('stale-tok'))
@@ -174,21 +174,21 @@ describe('AddressEmailService — K1-minimal FCFS-lock + binding-change notifica
 
     it('verify on already-verified binding with SAME pending email is idempotent (refreshes verifiedAt)', async () => {
         const { service, bindingRepo, verificationRepo } = makeService();
-        const oldDate = new Date('2025-01-01');
+        const oldMs = Date.parse('2025-01-01T00:00:00Z');
         bindingRepo.rows.push({
             address: 'bc1qalice',
             email: 'alice@example.com',
-            verifiedAt: oldDate,
+            verifiedAt: oldMs,
         });
         verificationRepo.rows.push({
             token: 'tok-1',
             address: 'bc1qalice',
             email: 'alice@example.com',
-            expiresAt: new Date(Date.now() + 60_000),
+            expiresAt: Date.now() + 60_000,
         });
 
         const result = await service.verify('tok-1');
         expect(result.email).toBe('alice@example.com');
-        expect(result.verifiedAt!.getTime()).toBeGreaterThan(oldDate.getTime());
+        expect(result.verifiedAt!).toBeGreaterThan(oldMs);
     });
 });

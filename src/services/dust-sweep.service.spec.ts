@@ -76,14 +76,8 @@ function makeQb<T extends Record<string, any>>(rows: T[]) {
                 addClause(r => r.pendingSats < params.minPayout);
             } else if (expr === 'b."lastAcceptedShareAt" IS NOT NULL') {
                 addClause(r => r.lastAcceptedShareAt != null);
-            } else if (expr === 'b."lastAcceptedShareAt" < :cutoff') {
-                // group-balance path — still Date-based until that entity migrates.
-                const cutoff = params.cutoff.getTime();
-                addClause(r => (r.lastAcceptedShareAt instanceof Date
-                    ? r.lastAcceptedShareAt.getTime()
-                    : Number(r.lastAcceptedShareAt)) < cutoff);
             } else if (expr === 'b."lastAcceptedShareAt" < :cutoffMs') {
-                // pplns_balance path — bigint epoch-ms column.
+                // both pplns_balance and pplns_group_balance: bigint epoch-ms column.
                 const cutoffMs = params.cutoffMs;
                 addClause(r => {
                     const raw = r.lastAcceptedShareAt;

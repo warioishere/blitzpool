@@ -1,4 +1,6 @@
-import { Column, Entity, Index, PrimaryColumn, UpdateDateColumn } from 'typeorm';
+import { BeforeInsert, BeforeUpdate, Column, Entity, Index, PrimaryColumn } from 'typeorm';
+
+import { epochMsTransformer } from '../utils/epoch-ms-transformer';
 
 /**
  * Pending/paid balances per (address, groupId). Composite PK — one address
@@ -24,14 +26,24 @@ export class PplnsGroupBalanceEntity {
     totalPaidSats: number;
 
     /**
-     * Last accepted-share timestamp for this (address, groupId). Updated
-     * by GroupSoloService.recordShare. Drives the dust-sweep cron —
+     * Last accepted-share timestamp for this (address, groupId) as epoch ms.
+     * Updated by GroupSoloService.recordShare. Drives the dust-sweep cron —
      * rows under the dust limit whose share timestamp is > 30d stale
      * get absorbed (audit row in block history, balance row deleted).
      */
-    @Column({ type: 'timestamptz', nullable: true })
-    lastAcceptedShareAt: Date | null;
+    @Column({ type: 'bigint', nullable: true, transformer: epochMsTransformer })
+    lastAcceptedShareAt: number | null;
 
-    @UpdateDateColumn()
-    updatedAt: Date;
+    @Column({ type: 'bigint', transformer: epochMsTransformer })
+    updatedAt: number;
+
+    @BeforeInsert()
+    private fillUpdatedAt(): void {
+        if (this.updatedAt == null) this.updatedAt = Date.now();
+    }
+
+    @BeforeUpdate()
+    private touchUpdatedAt(): void {
+        this.updatedAt = Date.now();
+    }
 }

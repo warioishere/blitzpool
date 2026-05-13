@@ -494,7 +494,7 @@ export class PplnsGroupController {
         // through as two distinct entries — both then collapse onto the
         // same row inside createInvitation, masking the duplicate.
         const addresses = (body.addresses ?? []).map(a => (a ?? '').trim()).filter(a => !!a);
-        const invited: { address: string; email: string; expiresAt: Date }[] = [];
+        const invited: { address: string; email: string; expiresAt: number }[] = [];
         const skipped: { address: string; reason: string }[] = [];
         const seen = new Set<string>();
         for (const addr of addresses) {
@@ -812,14 +812,14 @@ export class PplnsGroupController {
     // ── Helpers ───────────────────────────────────────────────────
 
     private publicGroupView(group: {
-        id: string; name: string; creatorAddress: string; active: boolean; createdAt: Date;
+        id: string; name: string; creatorAddress: string; active: boolean; createdAt: number;
         roundResetPreset?: 'daily' | 'weekly' | 'monthly' | 'custom' | null;
         roundResetIntervalDays?: number | null;
         roundResetHourLocal?: number | null;
         roundResetTimezone?: string | null;
         finderBonusSats?: number | null;
-        lastRoundResetAt?: Date | null;
-        dissolvedAt?: Date | null;
+        lastRoundResetAt?: number | null;
+        dissolvedAt?: number | null;
         isPublic?: boolean;
     }) {
         // Round-reset config + finder bonus are intentionally exposed on the
