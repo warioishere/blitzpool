@@ -1,4 +1,4 @@
-import { ValueTransformer } from 'typeorm';
+import { FindOperator, ValueTransformer } from 'typeorm';
 
 const EUROPEAN_LOCALE_REGEX =
     /^(\d{1,2})\.(\d{1,2})\.(\d{4}),\s*(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\s*(AM|PM))?$/i;
@@ -94,12 +94,23 @@ function normalizeDate(value: Date | string): Date {
     throw new Error(`Invalid date value received: ${value}`);
 }
 
+// TypeORM invokes `to` not only on insert/update values but also when
+// building predicates from `where` criteria — including FindOperator
+// wrappers (IsNull, Not, In, MoreThan, …). Those aren't Date/string and
+// must pass through untouched, otherwise the transformer crashes on
+// `value.trim()`.
+function isTransformable(value: unknown): value is Date | string {
+    return value instanceof Date || typeof value === 'string';
+}
+
 export class DateTimeTransformer implements ValueTransformer {
-    to(value: Date | string | null | undefined): Date | null | undefined {
+    to(value: Date | string | FindOperator<unknown> | null | undefined): Date | FindOperator<unknown> | null | undefined {
         if (value === null || value === undefined) {
             return value === undefined ? undefined : null;
         }
-
+        if (!isTransformable(value)) {
+            return value;
+        }
         return normalizeDate(value);
     }
 
@@ -107,7 +118,9 @@ export class DateTimeTransformer implements ValueTransformer {
         if (value === null || value === undefined) {
             return value === undefined ? undefined : null;
         }
-
+        if (!isTransformable(value)) {
+            return value as unknown as Date;
+        }
         return normalizeDate(value);
     }
 }
