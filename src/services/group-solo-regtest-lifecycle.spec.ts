@@ -235,7 +235,7 @@ describe('Group-Solo Regtest Lifecycle', () => {
         // finderAddress; without one passed, the legacy "__none__" key
         // is used, which keeps the cross-restart behavior intact.
         const distributionA = await svcA.getPayoutDistribution('grp-1', blockReward);
-        expect(redis._store.get(`groupsolo:grp-1:snapshot:__none__`)).toBeTruthy();
+        expect(redis._hashes.has(`groupsolo:grp-1:snapshot:__none__`)).toBe(true);
 
         // Simulate pool restart: new service instance, same Redis.
         const svcB = new GroupSoloService(

@@ -223,7 +223,14 @@ export function createMockRedis() {
             const e = end === -1 ? z.length - 1 : end;
             z.splice(start, e - start + 1);
         },
-        hSet: async (key: string, field: string, value: string) => { getH(key).set(field, value); },
+        hSet: async (key: string, fieldOrObj: string | Record<string, string>, value?: string) => {
+            const h = getH(key);
+            if (typeof fieldOrObj === 'string') {
+                h.set(fieldOrObj, value as string);
+            } else {
+                for (const [f, v] of Object.entries(fieldOrObj)) h.set(f, v);
+            }
+        },
         hGet: async (key: string, field: string) => hashes.get(key)?.get(field) ?? null,
         hDel: async (key: string, field: string) => { hashes.get(key)?.delete(field); },
         hGetAll: async (key: string) => {
