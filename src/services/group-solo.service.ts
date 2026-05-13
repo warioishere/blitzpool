@@ -151,6 +151,13 @@ export class GroupSoloService implements OnModuleInit {
         cachedAt: number;
     }>();
     private static readonly DISTRIBUTION_CACHE_TTL_MS = 30_000;
+    /**
+     * Inflight-promise dedup keyed on the same `${groupId}:${finder ?? '__none__'}`
+     * shape as cachedDistributions. When a new template fans out to all
+     * group sessions concurrently, only the first caller per key runs the
+     * build; the rest await the same promise.
+     */
+    private inflightBuilds = new Map<string, { promise: Promise<GroupSoloPayoutEntry[]>; blockRewardSats: number }>();
 
     private invalidateDistributionCache(groupId: string): void {
         for (const k of this.cachedDistributions.keys()) {
@@ -340,19 +347,34 @@ export class GroupSoloService implements OnModuleInit {
             cached.blockRewardSats === blockRewardSats &&
             Date.now() - cached.cachedAt < GroupSoloService.DISTRIBUTION_CACHE_TTL_MS
         ) {
-            // The on-disk snapshot in Redis was already written on the
-            // computing path; subsequent cache hits don't need to re-write
-            // it (writeSnapshot is idempotent for the same payload).
             return cached.payouts;
         }
 
-        const keys = redisKeys(groupId);
+        // Coalesce concurrent callers in the same fan-out: if a build is
+        // already running for this (group, finder) at the same reward, await
+        // it instead of starting a duplicate.
+        const inflight = this.inflightBuilds.get(cacheKey);
+        if (inflight && inflight.blockRewardSats === blockRewardSats) {
+            return inflight.promise;
+        }
 
-        // Hot path: called per-miner-stratum-session on every job dispatch.
-        // Read the per-address aggregate hash instead of zRange-ing the
-        // raw zSet every time. Falls back to zSet on the first read after
-        // deploy (then backfills the hash). Same data semantics — the
-        // hash is maintained lock-step with the zSet by recordShare.
+        const build = this.buildDistribution(groupId, blockRewardSats, finderAddress, cacheKey).finally(() => {
+            const current = this.inflightBuilds.get(cacheKey);
+            if (current && current.promise === build) {
+                this.inflightBuilds.delete(cacheKey);
+            }
+        });
+        this.inflightBuilds.set(cacheKey, { promise: build, blockRewardSats });
+        return build;
+    }
+
+    private async buildDistribution(
+        groupId: string,
+        blockRewardSats: number,
+        finderAddress: string | undefined,
+        cacheKey: string,
+    ): Promise<GroupSoloPayoutEntry[]> {
+        const keys = redisKeys(groupId);
         const addressShares = await this.readByAddress(keys);
         if (addressShares.size === 0) {
             return this.fallback(blockRewardSats);
@@ -362,9 +384,6 @@ export class GroupSoloService implements OnModuleInit {
         const balances = new Map<string, number>();
         for (const p of balanceEntities) balances.set(p.address, p.pendingSats);
 
-        // Read finder-bonus from the live group config. Null/0 disables the
-        // bonus path entirely; a positive value combined with `finderAddress`
-        // activates the per-miner bonus output.
         const group = await this.groupRepo.findOneBy({ id: groupId });
         const finderBonusSats = (group?.finderBonusSats ?? 0) > 0
             ? group!.finderBonusSats!
@@ -379,15 +398,6 @@ export class GroupSoloService implements OnModuleInit {
             coinbaseWeightBudget: this.coinbaseWeightBudget,
             minPayoutSats: this.minPayoutSats,
             logLabel: `[GroupSolo ${groupId}]`,
-            // Group-Solo stays on the unsigned-pending ledger model: pendingSats
-            // is always ≥ 0. This means Phase 5a trim redistribution and Phase
-            // 5b floor-rounding residuum go to the fee output instead of
-            // creating matching debits on active members. Cost: ~1–10 sats per
-            // block donated to the fee (trivial relative to the fee percent
-            // the pool already collects). Benefit: the legacy single-sided
-            // dust sweep keeps working, member-kick redistribution stays
-            // sane, and there's no second signed-ledger maintenance machinery
-            // to build just for group-solo.
             suppressMatchingDebits: true,
             finderBonusSats,
             finderAddress,
@@ -397,10 +407,6 @@ export class GroupSoloService implements OnModuleInit {
             ? result.payouts
             : this.fallback(blockRewardSats);
 
-        // Populate the in-memory dispatch-window cache before writing the
-        // on-disk snapshot. The cache lookup at function entry will serve
-        // every subsequent stratum session in the same fan-out from
-        // memory.
         this.cachedDistributions.set(cacheKey, {
             payouts,
             blockRewardSats,

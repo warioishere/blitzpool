@@ -614,6 +614,47 @@ describe('PplnsService', () => {
       expect(fee).toBeDefined();
       expect(fee!.percent).toBeGreaterThanOrEqual(2);
     });
+
+    it('coalesces concurrent callers into one build (thundering-herd dedup)', async () => {
+      const { service, balanceService } = createService({ feePercent: '2' });
+      service.setNetworkDifficulty(100_000);
+      await recordShares(service, [
+        { address: 'bc1qa', difficulty: 500 },
+        { address: 'bc1qb', difficulty: 500 },
+      ]);
+
+      // Invalidate the result cache so every call would otherwise rebuild.
+      (service as any).cachedDistribution = null;
+      (balanceService.getAllWithBalance as jest.Mock).mockClear();
+
+      // Fire 50 concurrent callers in the same microtask batch.
+      const results = await Promise.all(
+        Array.from({ length: 50 }, () => service.getPayoutDistribution(312_500_000)),
+      );
+      // All 50 callers got an identical reference (the same in-flight result).
+      const first = results[0];
+      for (const r of results) {
+        expect(r).toBe(first);
+      }
+      // The expensive balance fetch happened exactly once.
+      expect(balanceService.getAllWithBalance).toHaveBeenCalledTimes(1);
+    });
+
+    it('starts a fresh build when the reward differs', async () => {
+      const { service, balanceService } = createService({ feePercent: '2' });
+      service.setNetworkDifficulty(100_000);
+      await service.recordShare('bc1qa', 100);
+
+      (service as any).cachedDistribution = null;
+      (balanceService.getAllWithBalance as jest.Mock).mockClear();
+
+      // Two concurrent callers with different rewards — both run their own build.
+      await Promise.all([
+        service.getPayoutDistribution(312_500_000),
+        service.getPayoutDistribution(312_500_001),
+      ]);
+      expect(balanceService.getAllWithBalance).toHaveBeenCalledTimes(2);
+    });
   });
 
   // ── Block Found ──────────────────────────────────────────────

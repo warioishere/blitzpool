@@ -101,6 +101,15 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
     private cachedDistributionAt = 0;
     private static readonly DISTRIBUTION_CACHE_TTL_MS = 30_000;
 
+    // Inflight-promise dedup: when a new template fans out to N stratum
+    // sessions all calling getPayoutDistribution() in the same microtask
+    // batch, only the first caller runs the build; the others await the
+    // same promise. Without this, N concurrent callers each saw an empty
+    // cache and each fired their own `getAllWithBalance` + buildCoinbase
+    // — a thundering herd under any pool fan-out.
+    private inflightBuild: Promise<PplnsPayoutEntry[]> | null = null;
+    private inflightBuildReward = 0;
+
     // Block-found lock — prevents concurrent onBlockFound within this
     // process from double-processing. Cross-process idempotency is handled
     // by the pre-check on pplns_payout_history + the unique index.
@@ -471,6 +480,21 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
             return this.cachedDistribution;
         }
 
+        if (this.inflightBuild && this.inflightBuildReward === blockRewardSats) {
+            return this.inflightBuild;
+        }
+
+        const build = this.buildDistribution(blockRewardSats).finally(() => {
+            if (this.inflightBuild === build) {
+                this.inflightBuild = null;
+            }
+        });
+        this.inflightBuild = build;
+        this.inflightBuildReward = blockRewardSats;
+        return build;
+    }
+
+    private async buildDistribution(blockRewardSats: number): Promise<PplnsPayoutEntry[]> {
         const addressShares = await this.readWindowByAddress();
         if (addressShares.size === 0) {
             return this.fallbackDistribution(blockRewardSats);

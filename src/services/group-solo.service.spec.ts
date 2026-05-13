@@ -452,6 +452,30 @@ describe('GroupSoloService', () => {
             // Cache was invalidated → recompute → balanceRepo.find got called again.
             expect(balanceFindSpy.mock.calls.length).toBe(callsBeforeReset + 1);
         });
+
+        it('coalesces concurrent callers for the same (group, reward, finder) into one build', async () => {
+            const { service, balanceRepo, groupService } = makeService();
+            groupService._setMembership('bc1qalice', 'g1', true);
+            groupService._setMembership('bc1qbob', 'g1', true);
+            await service.recordShare('bc1qalice', 500);
+            await service.recordShare('bc1qbob', 500);
+
+            // Drop any caches so the next call would compute.
+            (service as any).cachedDistributions.clear();
+            const balanceFindSpy = jest.spyOn(balanceRepo, 'find');
+            balanceFindSpy.mockClear();
+
+            const results = await Promise.all(
+                Array.from({ length: 50 }, () =>
+                    service.getPayoutDistribution('g1', 100_000_000, 'bc1qalice'),
+                ),
+            );
+            const first = results[0];
+            for (const r of results) {
+                expect(r).toBe(first);
+            }
+            expect(balanceFindSpy).toHaveBeenCalledTimes(1);
+        });
     });
 
     it('onBlockFound writes history rows and resets the round', async () => {
