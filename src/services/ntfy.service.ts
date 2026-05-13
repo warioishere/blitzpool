@@ -742,55 +742,55 @@ export class NtfyService implements OnModuleInit {
 
     try {
       const enabledSubscriptions = await this.ntfySubscriptionsService.getHourlyEnabledAddresses();
+      // Sequential await + per-subscriber HTTP loopback used to block the
+      // whole cron tick behind one slow miner. Parallel fan-out lets the
+      // hourly burst finish in roughly the time of the single slowest send.
+      await Promise.all(enabledSubscriptions.map(sub => this.sendHourlyForOne(sub)));
+    } catch (err) {
+      console.error('NTFY: Fehler beim Ausführen der Stundlich-Benachrichtigungen:', err);
+    }
+  }
 
-      for (const sub of enabledSubscriptions) {
+  private async sendHourlyForOne(sub: { address: string; hourlyStatsEnabled: boolean; hourlyWorkersEnabled: boolean }): Promise<void> {
+    const address = sub.address;
+    try {
+      if (sub.hourlyStatsEnabled) {
         try {
-          const address = sub.address;
-
-          // Send stats if enabled
-          if (sub.hourlyStatsEnabled) {
-            try {
-              const messages = await buildStatsMessage(
-                address,
-                this.clientService,
-                this.addressSettingsService,
-                this.clientStatisticsService,
-                this.numberSuffix
-              );
-              if (messages) {
-                const lang = await this.getLanguage(address);
-                await this.publish(address, messages[lang]);
-              }
-            } catch (err) {
-              console.error(`NTFY: Fehler beim Senden von Stats für ${address}:`, err);
-            }
+          const messages = await buildStatsMessage(
+            address,
+            this.clientService,
+            this.addressSettingsService,
+            this.clientStatisticsService,
+            this.numberSuffix
+          );
+          if (messages) {
+            const lang = await this.getLanguage(address);
+            await this.publish(address, messages[lang]);
           }
+        } catch (err) {
+          console.error(`NTFY: Fehler beim Senden von Stats für ${address}:`, err);
+        }
+      }
 
-          // Send workers overview if enabled
-          if (sub.hourlyWorkersEnabled) {
-            try {
-              const apiPort = process.env.API_PORT ?? '3334';
-              const url = `http://localhost:${apiPort}/api/client/${encodeURIComponent(address)}`;
-              const res = await fetch(url);
-
-              if (res.ok) {
-                const payload = await res.json();
-                if (payload && Array.isArray(payload.workers) && payload.workers.length > 0) {
-                  const messages = buildWorkersOverviewMessage(payload, this.numberSuffix);
-                  const lang = await this.getLanguage(address);
-                  await this.publish(address, messages[lang]);
-                }
-              }
-            } catch (err) {
-              console.error(`NTFY: Fehler beim Senden von Workers für ${address}:`, err);
+      if (sub.hourlyWorkersEnabled) {
+        try {
+          const apiPort = process.env.API_PORT ?? '3334';
+          const url = `http://localhost:${apiPort}/api/client/${encodeURIComponent(address)}`;
+          const res = await fetch(url);
+          if (res.ok) {
+            const payload = await res.json();
+            if (payload && Array.isArray(payload.workers) && payload.workers.length > 0) {
+              const messages = buildWorkersOverviewMessage(payload, this.numberSuffix);
+              const lang = await this.getLanguage(address);
+              await this.publish(address, messages[lang]);
             }
           }
         } catch (err) {
-          console.error(`NTFY: Fehler beim Verarbeiten von Stundlich-Updates für ${sub.address}:`, err);
+          console.error(`NTFY: Fehler beim Senden von Workers für ${address}:`, err);
         }
       }
     } catch (err) {
-      console.error('NTFY: Fehler beim Ausführen der Stundlich-Benachrichtigungen:', err);
+      console.error(`NTFY: Fehler beim Verarbeiten von Stundlich-Updates für ${address}:`, err);
     }
   }
 }
