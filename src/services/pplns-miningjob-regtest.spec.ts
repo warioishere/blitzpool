@@ -74,7 +74,8 @@ function createMockBalanceBacking() {
                 existing.totalPaidSats += sats;
             }
         },
-        touchLastAcceptedShareAt: async (_addr: string) => undefined,
+        markTouch: (_addr: string) => undefined,
+        flushPendingTouches: async () => undefined,
         _rows: rows,
     };
     const applySave = (row: any) => {

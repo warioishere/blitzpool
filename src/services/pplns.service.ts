@@ -336,9 +336,7 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
 
         this.cachedDistribution = null;
 
-        this.balanceService.touchLastAcceptedShareAt(address).catch(err => {
-            console.warn(`[PPLNS] touchLastAcceptedShareAt failed for ${address}:`, (err as Error).message);
-        });
+        this.balanceService.markTouch(address);
 
         await this.trimWindow();
     }

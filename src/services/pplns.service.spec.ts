@@ -122,7 +122,8 @@ function createMockBalanceBacking() {
         existing.totalPaidSats += sats;
       }
     }),
-    touchLastAcceptedShareAt: jest.fn(async () => undefined),
+    markTouch: jest.fn(),
+    flushPendingTouches: jest.fn(async () => undefined),
     // Helpers
     _set: (address: string, balanceSats: number, totalPaidSats = 0) => {
       balances.set(address, { address, balanceSats, totalPaidSats });
