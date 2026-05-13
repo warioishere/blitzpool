@@ -61,8 +61,15 @@ function createMockRedis() {
             h.set(field, val.toString());
             return val;
         }),
-        hSet: jest.fn(async (key: string, field: string, value: string) => {
-            getH(key).set(field, value);
+        hSet: jest.fn(async (key: string, fieldOrObj: string | Record<string, string>, value?: string) => {
+            const h = getH(key);
+            if (typeof fieldOrObj === 'string') {
+                h.set(fieldOrObj, value as string);
+            } else {
+                for (const [f, v] of Object.entries(fieldOrObj)) {
+                    h.set(f, v);
+                }
+            }
         }),
         hGet: jest.fn(async (key: string, field: string) => {
             const h = hashes.get(key);
@@ -866,6 +873,109 @@ describe('GroupSoloService', () => {
             expect(h.get('bc1qbob')).toBeUndefined();
             expect(parseFloat(h.get('bc1qalice')!)).toBe(100);
             expect(parseFloat(h.get('bc1qcharlie')!)).toBe(300);
+        });
+    });
+
+    /**
+     * bestShare cache — O(1) read for getRoundBestDifficulty, mirrors the
+     * byAddress aggregate pattern. Must stay in lock-step with recordShare.
+     */
+    describe('bestShare cache', () => {
+        const KEY = 'groupsolo:g1:best-share';
+
+        it('recordShare seeds the bestShare cache on the first share', async () => {
+            const { service, redis, groupService } = makeService();
+            groupService._setMembership('bc1qalice', 'g1', true);
+            await service.recordShare('bc1qalice', 750);
+
+            const h = redis._hashes.get(KEY)!;
+            expect(parseFloat(h.get('diff')!)).toBe(750);
+            expect(h.get('address')).toBe('bc1qalice');
+            expect(parseInt(h.get('time')!, 10)).toBeGreaterThan(0);
+        });
+
+        it('recordShare overwrites the cache only when a higher diff arrives', async () => {
+            const { service, redis, groupService } = makeService();
+            groupService._setMembership('bc1qalice', 'g1', true);
+            groupService._setMembership('bc1qbob', 'g1', true);
+            await service.recordShare('bc1qalice', 1000);
+            await service.recordShare('bc1qbob', 500);   // lower → no change
+            await service.recordShare('bc1qbob', 2000);  // higher → wins
+
+            const h = redis._hashes.get(KEY)!;
+            expect(parseFloat(h.get('diff')!)).toBe(2000);
+            expect(h.get('address')).toBe('bc1qbob');
+        });
+
+        it('getRoundBestDifficulty reads from the cache without ZRANGE on the hot path', async () => {
+            const { service, redis, groupService } = makeService();
+            groupService._setMembership('bc1qalice', 'g1', true);
+            await service.recordShare('bc1qalice', 1234);
+
+            (redis.zRange as jest.Mock).mockClear();
+            const best = await service.getRoundBestDifficulty('g1');
+
+            expect(redis.zRange).not.toHaveBeenCalled();
+            expect(best.bestDifficulty).toBe(1234);
+            expect(best.address).toBe('bc1qalice');
+        });
+
+        it('cold-cache fallback: empty hash + populated zSet → reads from zSet and backfills hash', async () => {
+            const { service, redis, groupService } = makeService();
+            groupService._setMembership('bc1qalice', 'g1', true);
+            await service.recordShare('bc1qalice', 100);
+            await service.recordShare('bc1qalice', 500);
+
+            // Simulate pre-deploy state: zSet has the shares, bestShare cache
+            // wasn't maintained at the time.
+            redis._hashes.delete(KEY);
+
+            const first = await service.getRoundBestDifficulty('g1');
+            expect(first.bestDifficulty).toBe(500);
+            expect(first.address).toBe('bc1qalice');
+
+            // Allow the fire-and-forget backfill hSet to complete.
+            await new Promise(resolve => setImmediate(resolve));
+
+            // Second read must NOT touch the zSet — cache is now warm.
+            (redis.zRange as jest.Mock).mockClear();
+            const second = await service.getRoundBestDifficulty('g1');
+            expect(redis.zRange).not.toHaveBeenCalled();
+            expect(second.bestDifficulty).toBe(500);
+        });
+
+        it('removeMemberState clears the cache only if the kicked member held the record', async () => {
+            const { service, redis, groupService } = makeService();
+            groupService._setMembership('bc1qalice', 'g1', true);
+            groupService._setMembership('bc1qbob', 'g1', true);
+            groupService._setMembership('bc1qcharlie', 'g1', true);
+            await service.recordShare('bc1qalice', 100);
+            await service.recordShare('bc1qbob', 5000);   // bob holds the record
+            await service.recordShare('bc1qcharlie', 200);
+
+            // Kicking a non-holder leaves the cache intact.
+            await service.removeMemberState('g1', 'bc1qcharlie', ['bc1qalice', 'bc1qbob']);
+            expect(redis._hashes.get(KEY)?.get('address')).toBe('bc1qbob');
+
+            // Kicking the holder drops the cache → next read falls back to zSet.
+            await service.removeMemberState('g1', 'bc1qbob', ['bc1qalice']);
+            expect(redis._hashes.get(KEY)).toBeUndefined();
+
+            const best = await service.getRoundBestDifficulty('g1');
+            expect(best.address).toBe('bc1qalice');
+            expect(best.bestDifficulty).toBe(100);
+        });
+
+        it('resetRound clears the cache (block-found round wipe)', async () => {
+            const { service, redis, groupService } = makeService();
+            groupService._setMembership('bc1qalice', 'g1', true);
+            await service.recordShare('bc1qalice', 999);
+            expect(redis._hashes.get(KEY)).toBeDefined();
+
+            await service.getPayoutDistribution('g1', 100_000_000);
+            await service.onBlockFound(900_000, 100_000_000, 'bc1qalice');
+
+            expect(redis._hashes.get(KEY)).toBeUndefined();
         });
     });
 

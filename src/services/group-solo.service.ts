@@ -74,6 +74,9 @@ function redisKeys(groupId: string) {
         // PPLNS's `pplns:window:by-address` hash maintained alongside
         // `pplns:shares`.
         byAddress: `groupsolo:${groupId}:by-address`,
+        // Best single-share of the round: { diff, address, time }. Updated
+        // by recordShare, cleared by resetRound.
+        bestShare: `groupsolo:${groupId}:best-share`,
     };
 }
 
@@ -253,6 +256,19 @@ export class GroupSoloService implements OnModuleInit {
             await this.redis.incrByFloat(keys.total, difficulty);
             await this.redis.hSet(keys.lastAcceptedShareAt, address, String(now));
             await this.redis.hIncrByFloat(keys.byAddress, address, difficulty);
+        }
+
+        // Best-of-round cache. Read-compare-write is racy (two concurrent
+        // higher-diff shares may overwrite each other) but a lost update
+        // self-corrects on the next share that beats the loser. Acceptable
+        // for a display metric.
+        const currentBest = parseFloat((await this.redis.hGet(keys.bestShare, 'diff')) ?? '0') || 0;
+        if (difficulty > currentBest) {
+            await this.redis.hSet(keys.bestShare, {
+                diff: String(difficulty),
+                address,
+                time: String(now),
+            });
         }
 
         // Persist last-accepted-share timestamp on the balance row so the
@@ -886,6 +902,7 @@ export class GroupSoloService implements OnModuleInit {
         // the empty zSet — otherwise the next round's getRoundStats would
         // see stale per-address shares from the prior round.
         await this.redis.del(keys.byAddress);
+        await this.redis.del(keys.bestShare);
         // lastAcceptedShareAt is intentionally NOT cleared on round reset —
         // it survives across blocks so the inactivity gate measures actual
         // time since last work, not time since last round start.
@@ -1001,6 +1018,12 @@ export class GroupSoloService implements OnModuleInit {
             await this.redis.hDel(keys.byAddress, address);
             await this.redis.hDel(keys.rejectedShares, address);
             await this.redis.hDel(keys.lastAcceptedShareAt, address);
+            // If the kicked member held the best-share record, drop the
+            // cache. Next read recomputes from zSet and re-seeds.
+            const bestHolder = await this.redis.hGet(keys.bestShare, 'address');
+            if (bestHolder === address) {
+                await this.redis.del(keys.bestShare);
+            }
             // Drop the kicked member's per-finder snapshot. It would
             // otherwise live until 1h TTL or the next block-found wipe.
             // Inert (the member's stratum sessions can no longer route
@@ -1254,6 +1277,19 @@ export class GroupSoloService implements OnModuleInit {
             return { bestDifficulty: 0, address: null, time: null };
         }
         const keys = redisKeys(groupId);
+
+        const cached = await this.redis.hGetAll(keys.bestShare);
+        if (cached && cached.diff) {
+            return {
+                bestDifficulty: parseFloat(cached.diff) || 0,
+                address: cached.address || null,
+                time: parseInt(cached.time, 10) || null,
+            };
+        }
+
+        // Cold-start: cache empty but the round may already have shares
+        // (deploy mid-round before bestShare was maintained). Compute
+        // from the zSet once and seed the cache so future reads are O(1).
         const entries = await this.redis.zRange(keys.shares, 0, -1);
         let bestDiff = 0;
         let bestAddr: string | null = null;
@@ -1266,6 +1302,13 @@ export class GroupSoloService implements OnModuleInit {
                 bestAddr = addr;
                 bestTime = parseInt(timeStr, 10) || null;
             }
+        }
+        if (bestDiff > 0 && bestAddr) {
+            this.redis.hSet(keys.bestShare, {
+                diff: String(bestDiff),
+                address: bestAddr,
+                time: String(bestTime ?? 0),
+            }).catch(() => undefined);
         }
         return { bestDifficulty: bestDiff, address: bestAddr, time: bestTime };
     }
