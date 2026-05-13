@@ -31,6 +31,55 @@ import * as fs from 'node:fs';
  */
 type BlockNotifySource = 'zmq' | 'redis-pubsub' | 'polling';
 
+/**
+ * Tracks staleness of the zmq-sidecar heartbeat in the redis-pubsub
+ * notify path. Pure (no timers, no I/O) so it's easy to test with a
+ * synthetic clock — production code passes `Date.now()` in.
+ *
+ * Semantics:
+ *   - `fresh`         — last heartbeat is within threshold.
+ *   - `first-stale`   — just crossed threshold this tick (warn + start
+ *                       defensive polling).
+ *   - `still-stale`   — already past threshold on a previous tick
+ *                       (keep defensive polling, don't re-warn).
+ *
+ * `recordHeartbeat` returns `'recovered'` exactly once when a heartbeat
+ * arrives after a `first-stale`/`still-stale` tick, so the caller can
+ * log a single recovery line. Subsequent heartbeats return `'normal'`.
+ */
+export type WatchdogTickState = 'fresh' | 'first-stale' | 'still-stale';
+export type HeartbeatEvent = 'normal' | 'recovered';
+
+export class HeartbeatWatchdog {
+    private lastHeartbeatAt: number;
+    private stalled = false;
+
+    constructor(private readonly staleThresholdMs: number, initialNow: number) {
+        this.lastHeartbeatAt = initialNow;
+    }
+
+    recordHeartbeat(now: number): HeartbeatEvent {
+        const wasStalled = this.stalled;
+        this.stalled = false;
+        this.lastHeartbeatAt = now;
+        return wasStalled ? 'recovered' : 'normal';
+    }
+
+    check(now: number): WatchdogTickState {
+        const since = now - this.lastHeartbeatAt;
+        if (since <= this.staleThresholdMs) {
+            return 'fresh';
+        }
+        const firstStale = !this.stalled;
+        this.stalled = true;
+        return firstStale ? 'first-stale' : 'still-stale';
+    }
+
+    msSinceLastHeartbeat(now: number): number {
+        return now - this.lastHeartbeatAt;
+    }
+}
+
 @Injectable()
 export class BitcoinRpcService implements OnModuleInit {
 
@@ -154,16 +203,32 @@ export class BitcoinRpcService implements OnModuleInit {
             await this.pollMiningInfo();
         });
 
-        // Heartbeat watchdog — warn if the sidecar stops publishing for >90s.
-        // Helpful prod observability; loss of heartbeat = ZMQ subscription
-        // probably hung, which would silently stall job dispatch.
+        // Heartbeat watchdog — if the sidecar stops publishing for >90s,
+        // fall back to defensive RPC polling so we don't miss blocks while
+        // pub/sub is dead. Defensive polling stops as soon as a heartbeat
+        // arrives again. pollMiningInfo only emits newBlock$ on actual
+        // height change, so the defensive poll is idempotent and cheap
+        // when the chain is quiet.
         const heartbeatChannel = `${channel}:heartbeat`;
-        let lastHeartbeatAt = Date.now();
-        await sub.subscribe(heartbeatChannel, () => { lastHeartbeatAt = Date.now(); });
-        setInterval(() => {
-            const since = Date.now() - lastHeartbeatAt;
-            if (since > 90_000) {
-                console.warn(`[BitcoinRpc] no ZMQ-sidecar heartbeat for ${Math.round(since / 1000)}s — block notifications may be stalled`);
+        const watchdog = new HeartbeatWatchdog(90_000, Date.now());
+        await sub.subscribe(heartbeatChannel, () => {
+            if (watchdog.recordHeartbeat(Date.now()) === 'recovered') {
+                console.log('[BitcoinRpc] ZMQ-sidecar heartbeat recovered — pub/sub primary again');
+            }
+        });
+        setInterval(async () => {
+            const state = watchdog.check(Date.now());
+            if (state === 'fresh') return;
+            const sinceSec = Math.round(watchdog.msSinceLastHeartbeat(Date.now()) / 1000);
+            if (state === 'first-stale') {
+                console.warn(
+                    `[BitcoinRpc] no ZMQ-sidecar heartbeat for ${sinceSec}s — falling back to defensive RPC polling until heartbeat resumes`,
+                );
+            }
+            try {
+                await this.pollMiningInfo();
+            } catch (e) {
+                console.error('[BitcoinRpc] defensive poll failed:', (e as Error).message);
             }
         }, 30_000).unref();
     }
