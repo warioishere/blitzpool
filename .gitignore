@@ -56,3 +56,9 @@ full-setup/blitzpool-testnet.env
 
 # Build output
 dist/
+
+# CPU/heap profiles
+*.cpuprofile
+*.cpuprofile.gz
+*.heapsnapshot
+*.heapprofile
