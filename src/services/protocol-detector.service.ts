@@ -113,13 +113,27 @@ export async function _refreshBanCache(): Promise<void> {
       keys.push(...result.keys);
     } while (cursor !== '0');
 
+    // Pipeline TTL reads into one round-trip per batch (was N sequential
+    // awaits — bad under botnet-scale ban counts).
     const seen = new Set<string>();
-    for (const key of keys) {
-      const ip = key.substring('failban:ban:'.length);
-      seen.add(ip);
-      const ttl = await redisClient.ttl(key);
-      if (ttl > 0) {
-        banCache.set(ip, Date.now() + ttl * 1000);
+    if (keys.length > 0) {
+      const BATCH = 500;
+      for (let i = 0; i < keys.length; i += BATCH) {
+        const batch = keys.slice(i, i + BATCH);
+        const pipeline = redisClient.multi();
+        for (const k of batch) pipeline.ttl(k);
+        const results: any[] = await pipeline.exec();
+        for (let j = 0; j < batch.length; j++) {
+          const ip = batch[j].substring('failban:ban:'.length);
+          seen.add(ip);
+          const raw = results[j];
+          // node-redis v4 returns the raw value (number); guard against the
+          // legacy [err, value] tuple form just in case.
+          const ttl = typeof raw === 'number' ? raw : (Array.isArray(raw) ? Number(raw[1]) : NaN);
+          if (Number.isFinite(ttl) && ttl > 0) {
+            banCache.set(ip, Date.now() + ttl * 1000);
+          }
+        }
       }
     }
     // Drop cached entries that no longer exist in Redis (admin removed them)
