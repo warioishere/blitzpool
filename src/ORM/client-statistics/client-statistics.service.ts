@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
+import { DataSource, Repository } from 'typeorm';
 
 import { ClientStatisticsEntity } from './client-statistics.entity';
 import { ClientEntity } from '../client/client.entity';
@@ -49,6 +49,8 @@ export class ClientStatisticsService {
     private clientStatisticsRepository: Repository<ClientStatisticsEntity>,
     @InjectRepository(PoolShareStatisticsEntity)
     private poolShareStatisticsRepository: Repository<PoolShareStatisticsEntity>,
+    @InjectDataSource()
+    private readonly dataSource: DataSource,
   ) {}
 
   /**
@@ -424,134 +426,151 @@ export class ClientStatisticsService {
       agg: 'AGG',
     } as const;
 
-    const poolAggregates = await this.clientStatisticsRepository
-      .createQueryBuilder('stat')
-      .select('stat.time', 'time')
-      .addSelect('SUM(stat.shares)', 'shares')
-      .addSelect('SUM(stat.acceptedCount)', 'acceptedCount')
-      .addSelect('SUM(stat.rejectedCount)', 'rejectedCount')
-      .addSelect('SUM(stat.rejectedJobNotFoundCount)', 'rejectedJobNotFoundCount')
-      .addSelect('SUM(stat.rejectedJobNotFoundDiff1)', 'rejectedJobNotFoundDiff1')
-      .addSelect('SUM(stat.rejectedDuplicateShareCount)', 'rejectedDuplicateShareCount')
-      .addSelect('SUM(stat.rejectedDuplicateShareDiff1)', 'rejectedDuplicateShareDiff1')
-      .addSelect('SUM(stat.rejectedLowDifficultyShareCount)', 'rejectedLowDifficultyShareCount')
-      .addSelect('SUM(stat.rejectedLowDifficultyShareDiff1)', 'rejectedLowDifficultyShareDiff1')
-      .where('stat.time < :detailCutoff', baseFilters)
-      .andWhere(
-        'NOT (stat.address = :pool AND stat.clientName = :pool AND stat.sessionId = :pool)',
-        baseFilters,
-      )
-      .andWhere('stat.sessionId != :agg', baseFilters)
-      .groupBy('stat.time')
-      .getRawMany();
+    // Wrap the five mutations in a single transaction so an interrupt
+    // (OOM-kill, container stop, uncaughtException trap, DB connection
+    // reset) anywhere in the routine leaves the table in a consistent
+    // state — either all aggregates committed AND raw rows deleted, or
+    // nothing applied. Without this, a crash between the POOL insert
+    // (step 1) and the raw-row delete (step 3) would leave orphan raw
+    // rows for already-aggregated slots, and the next cron tick would
+    // hit a unique-key violation when trying to re-insert the same
+    // (POOL, POOL, POOL, slot) aggregate.
+    //
+    // Lock-scope is safe: the routine only touches rows with
+    // `time < detailCutoff` (7+ days old). The coordinator's hot-path
+    // INSERTs write only current-slot rows. Disjoint row sets → no
+    // contention even with a long transaction. Default READ COMMITTED
+    // isolation is fine.
+    await this.dataSource.transaction(async (manager) => {
+      const poolAggregates = await manager
+        .createQueryBuilder(ClientStatisticsEntity, 'stat')
+        .select('stat.time', 'time')
+        .addSelect('SUM(stat.shares)', 'shares')
+        .addSelect('SUM(stat.acceptedCount)', 'acceptedCount')
+        .addSelect('SUM(stat.rejectedCount)', 'rejectedCount')
+        .addSelect('SUM(stat.rejectedJobNotFoundCount)', 'rejectedJobNotFoundCount')
+        .addSelect('SUM(stat.rejectedJobNotFoundDiff1)', 'rejectedJobNotFoundDiff1')
+        .addSelect('SUM(stat.rejectedDuplicateShareCount)', 'rejectedDuplicateShareCount')
+        .addSelect('SUM(stat.rejectedDuplicateShareDiff1)', 'rejectedDuplicateShareDiff1')
+        .addSelect('SUM(stat.rejectedLowDifficultyShareCount)', 'rejectedLowDifficultyShareCount')
+        .addSelect('SUM(stat.rejectedLowDifficultyShareDiff1)', 'rejectedLowDifficultyShareDiff1')
+        .where('stat.time < :detailCutoff', baseFilters)
+        .andWhere(
+          'NOT (stat.address = :pool AND stat.clientName = :pool AND stat.sessionId = :pool)',
+          baseFilters,
+        )
+        .andWhere('stat.sessionId != :agg', baseFilters)
+        .groupBy('stat.time')
+        .getRawMany();
 
-    if (poolAggregates.length > 0) {
-      const insertedAt = new Date();
-      await this.clientStatisticsRepository
+      if (poolAggregates.length > 0) {
+        const insertedAt = new Date();
+        await manager
+          .createQueryBuilder()
+          .insert()
+          .into(ClientStatisticsEntity)
+          .values(
+            poolAggregates.map((row) => ({
+              address: 'POOL',
+              clientName: 'POOL',
+              sessionId: 'POOL',
+              time: Number(row.time),
+              shares: Number(row.shares ?? 0),
+              acceptedCount: Number(row.acceptedCount ?? 0),
+              rejectedCount: Number(row.rejectedCount ?? 0),
+              rejectedJobNotFoundCount: Number(row.rejectedJobNotFoundCount ?? 0),
+              rejectedJobNotFoundDiff1: Number(row.rejectedJobNotFoundDiff1 ?? 0),
+              rejectedDuplicateShareCount: Number(row.rejectedDuplicateShareCount ?? 0),
+              rejectedDuplicateShareDiff1: Number(row.rejectedDuplicateShareDiff1 ?? 0),
+              rejectedLowDifficultyShareCount: Number(row.rejectedLowDifficultyShareCount ?? 0),
+              rejectedLowDifficultyShareDiff1: Number(row.rejectedLowDifficultyShareDiff1 ?? 0),
+              createdAt: insertedAt,
+              updatedAt: insertedAt,
+            })),
+          )
+          .execute();
+      }
+
+      const workerAggregates = await manager
+        .createQueryBuilder(ClientStatisticsEntity, 'stat')
+        .select('stat.address', 'address')
+        .addSelect('stat.clientName', 'clientName')
+        .addSelect('SUM(stat.shares)', 'shares')
+        .addSelect('SUM(stat.acceptedCount)', 'acceptedCount')
+        .addSelect('SUM(stat.rejectedCount)', 'rejectedCount')
+        .addSelect('SUM(stat.rejectedJobNotFoundCount)', 'rejectedJobNotFoundCount')
+        .addSelect('SUM(stat.rejectedJobNotFoundDiff1)', 'rejectedJobNotFoundDiff1')
+        .addSelect('SUM(stat.rejectedDuplicateShareCount)', 'rejectedDuplicateShareCount')
+        .addSelect('SUM(stat.rejectedDuplicateShareDiff1)', 'rejectedDuplicateShareDiff1')
+        .addSelect('SUM(stat.rejectedLowDifficultyShareCount)', 'rejectedLowDifficultyShareCount')
+        .addSelect('SUM(stat.rejectedLowDifficultyShareDiff1)', 'rejectedLowDifficultyShareDiff1')
+        .where('stat.time < :detailCutoff', baseFilters)
+        .andWhere('stat.sessionId != :agg', baseFilters)
+        .andWhere(
+          'NOT (stat.address = :pool AND stat.clientName = :pool AND stat.sessionId = :pool)',
+          baseFilters,
+        )
+        .groupBy('stat.address')
+        .addGroupBy('stat.clientName')
+        .getRawMany();
+
+      if (workerAggregates.length > 0) {
+        const insertedAt = new Date();
+        await manager
+          .createQueryBuilder()
+          .insert()
+          .into(ClientStatisticsEntity)
+          .values(
+            workerAggregates.map((row) => ({
+              address: row.address,
+              clientName: row.clientName,
+              sessionId: 'AGG',
+              time: detailCutoffTimestamp,
+              shares: Number(row.shares ?? 0),
+              acceptedCount: Number(row.acceptedCount ?? 0),
+              rejectedCount: Number(row.rejectedCount ?? 0),
+              rejectedJobNotFoundCount: Number(row.rejectedJobNotFoundCount ?? 0),
+              rejectedJobNotFoundDiff1: Number(row.rejectedJobNotFoundDiff1 ?? 0),
+              rejectedDuplicateShareCount: Number(row.rejectedDuplicateShareCount ?? 0),
+              rejectedDuplicateShareDiff1: Number(row.rejectedDuplicateShareDiff1 ?? 0),
+              rejectedLowDifficultyShareCount: Number(row.rejectedLowDifficultyShareCount ?? 0),
+              rejectedLowDifficultyShareDiff1: Number(row.rejectedLowDifficultyShareDiff1 ?? 0),
+              createdAt: insertedAt,
+              updatedAt: insertedAt,
+            })),
+          )
+          .execute();
+      }
+
+      await manager
         .createQueryBuilder()
-        .insert()
-        .into(ClientStatisticsEntity)
-        .values(
-          poolAggregates.map((row) => ({
-            address: 'POOL',
-            clientName: 'POOL',
-            sessionId: 'POOL',
-            time: Number(row.time),
-            shares: Number(row.shares ?? 0),
-            acceptedCount: Number(row.acceptedCount ?? 0),
-            rejectedCount: Number(row.rejectedCount ?? 0),
-            rejectedJobNotFoundCount: Number(row.rejectedJobNotFoundCount ?? 0),
-            rejectedJobNotFoundDiff1: Number(row.rejectedJobNotFoundDiff1 ?? 0),
-            rejectedDuplicateShareCount: Number(row.rejectedDuplicateShareCount ?? 0),
-            rejectedDuplicateShareDiff1: Number(row.rejectedDuplicateShareDiff1 ?? 0),
-            rejectedLowDifficultyShareCount: Number(row.rejectedLowDifficultyShareCount ?? 0),
-            rejectedLowDifficultyShareDiff1: Number(row.rejectedLowDifficultyShareDiff1 ?? 0),
-            createdAt: insertedAt,
-            updatedAt: insertedAt,
-          })),
+        .delete()
+        .from(ClientStatisticsEntity)
+        .where('time < :detailCutoff', { detailCutoff: detailCutoffTimestamp })
+        .andWhere(
+          'NOT (sessionId = :agg OR (address = :pool AND clientName = :pool AND sessionId = :pool))',
+          { agg: 'AGG', pool: 'POOL' },
         )
         .execute();
-    }
 
-    const workerAggregates = await this.clientStatisticsRepository
-      .createQueryBuilder('stat')
-      .select('stat.address', 'address')
-      .addSelect('stat.clientName', 'clientName')
-      .addSelect('SUM(stat.shares)', 'shares')
-      .addSelect('SUM(stat.acceptedCount)', 'acceptedCount')
-      .addSelect('SUM(stat.rejectedCount)', 'rejectedCount')
-      .addSelect('SUM(stat.rejectedJobNotFoundCount)', 'rejectedJobNotFoundCount')
-      .addSelect('SUM(stat.rejectedJobNotFoundDiff1)', 'rejectedJobNotFoundDiff1')
-      .addSelect('SUM(stat.rejectedDuplicateShareCount)', 'rejectedDuplicateShareCount')
-      .addSelect('SUM(stat.rejectedDuplicateShareDiff1)', 'rejectedDuplicateShareDiff1')
-      .addSelect('SUM(stat.rejectedLowDifficultyShareCount)', 'rejectedLowDifficultyShareCount')
-      .addSelect('SUM(stat.rejectedLowDifficultyShareDiff1)', 'rejectedLowDifficultyShareDiff1')
-      .where('stat.time < :detailCutoff', baseFilters)
-      .andWhere('stat.sessionId != :agg', baseFilters)
-      .andWhere(
-        'NOT (stat.address = :pool AND stat.clientName = :pool AND stat.sessionId = :pool)',
-        baseFilters,
-      )
-      .groupBy('stat.address')
-      .addGroupBy('stat.clientName')
-      .getRawMany();
-
-    if (workerAggregates.length > 0) {
-      const insertedAt = new Date();
-      await this.clientStatisticsRepository
+      await manager
         .createQueryBuilder()
-        .insert()
-        .into(ClientStatisticsEntity)
-        .values(
-          workerAggregates.map((row) => ({
-            address: row.address,
-            clientName: row.clientName,
-            sessionId: 'AGG',
-            time: detailCutoffTimestamp,
-            shares: Number(row.shares ?? 0),
-            acceptedCount: Number(row.acceptedCount ?? 0),
-            rejectedCount: Number(row.rejectedCount ?? 0),
-            rejectedJobNotFoundCount: Number(row.rejectedJobNotFoundCount ?? 0),
-            rejectedJobNotFoundDiff1: Number(row.rejectedJobNotFoundDiff1 ?? 0),
-            rejectedDuplicateShareCount: Number(row.rejectedDuplicateShareCount ?? 0),
-            rejectedDuplicateShareDiff1: Number(row.rejectedDuplicateShareDiff1 ?? 0),
-            rejectedLowDifficultyShareCount: Number(row.rejectedLowDifficultyShareCount ?? 0),
-            rejectedLowDifficultyShareDiff1: Number(row.rejectedLowDifficultyShareDiff1 ?? 0),
-            createdAt: insertedAt,
-            updatedAt: insertedAt,
-          })),
-        )
+        .delete()
+        .from(ClientStatisticsEntity)
+        .where('time < :halfYearCutoff', { halfYearCutoff: halfYearCutoffTimestamp })
+        .andWhere('sessionId = :agg', { agg: 'AGG' })
         .execute();
-    }
 
-    await this.clientStatisticsRepository
-      .createQueryBuilder()
-      .delete()
-      .from(ClientStatisticsEntity)
-      .where('time < :detailCutoff', { detailCutoff: detailCutoffTimestamp })
-      .andWhere(
-        'NOT (sessionId = :agg OR (address = :pool AND clientName = :pool AND sessionId = :pool))',
-        { agg: 'AGG', pool: 'POOL' },
-      )
-      .execute();
-
-    await this.clientStatisticsRepository
-      .createQueryBuilder()
-      .delete()
-      .from(ClientStatisticsEntity)
-      .where('time < :halfYearCutoff', { halfYearCutoff: halfYearCutoffTimestamp })
-      .andWhere('sessionId = :agg', { agg: 'AGG' })
-      .execute();
-
-    await this.clientStatisticsRepository
-      .createQueryBuilder()
-      .delete()
-      .from(ClientStatisticsEntity)
-      .where('time < :monthCutoff', { monthCutoff: monthCutoffTimestamp })
-      .andWhere('address = :pool', { pool: 'POOL' })
-      .andWhere('clientName = :pool', { pool: 'POOL' })
-      .andWhere('sessionId = :pool', { pool: 'POOL' })
-      .execute();
+      await manager
+        .createQueryBuilder()
+        .delete()
+        .from(ClientStatisticsEntity)
+        .where('time < :monthCutoff', { monthCutoff: monthCutoffTimestamp })
+        .andWhere('address = :pool', { pool: 'POOL' })
+        .andWhere('clientName = :pool', { pool: 'POOL' })
+        .andWhere('sessionId = :pool', { pool: 'POOL' })
+        .execute();
+    });
   }
 
   public async getChartDataForSite(range: '1d' | '1m' = '1d') {

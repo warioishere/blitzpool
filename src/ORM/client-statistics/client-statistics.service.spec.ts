@@ -57,6 +57,7 @@ describe.each(['sqlite', 'postgres'] as const)(
       service = new ClientStatisticsService(
         dataSource.getRepository(ClientStatisticsEntity),
         {} as any,
+        dataSource,
       );
     });
 
@@ -246,6 +247,67 @@ describe.each(['sqlite', 'postgres'] as const)(
       });
       expect(hashRate).toBeGreaterThan(0);
     });
+
+    // Regression: deleteOldStatistics ran twice in a row used to throw a
+    // unique-key violation on (POOL, POOL, POOL, slot) when the previous
+    // run had been interrupted between the aggregate-insert and the
+    // raw-row delete (e.g. OOM-kill, container stop, uncaughtException
+    // trap interrupting the loop). The fix wraps the routine in a
+    // transaction so it's all-or-nothing: a re-run after an interrupted
+    // run sees no orphan state and produces the same final result as a
+    // clean single run. We can't easily simulate a mid-routine crash in
+    // a pg-mem / sqlite environment (no signal injection), but back-to-
+    // back invocations exercise the idempotency path that would have
+    // tripped the bug.
+    it('deleteOldStatistics is idempotent — back-to-back runs do not throw', async () => {
+      const repository = dataSource.getRepository(ClientStatisticsEntity);
+      const now = Date.now();
+      const detailCutoff = new Date(now - 7 * 24 * 60 * 60 * 1000).getTime();
+      const oldTime = detailCutoff - 60_000;
+
+      await repository
+        .createQueryBuilder()
+        .insert()
+        .values([
+          {
+            address: 'addr1',
+            clientName: 'workerA',
+            sessionId: 'sess0001',
+            time: oldTime,
+            shares: 10,
+            acceptedCount: 1,
+            rejectedCount: 0,
+            rejectedJobNotFoundCount: 0,
+            rejectedJobNotFoundDiff1: 0,
+            rejectedDuplicateShareCount: 0,
+            rejectedDuplicateShareDiff1: 0,
+            rejectedLowDifficultyShareCount: 0,
+            rejectedLowDifficultyShareDiff1: 0,
+            createdAt: new Date(oldTime),
+            updatedAt: new Date(oldTime),
+          },
+        ])
+        .execute();
+
+      // First run: aggregates the raw row into (POOL, oldTime) and
+      // deletes the raw row. Standard success path.
+      await expect(service.deleteOldStatistics()).resolves.toBeUndefined();
+
+      // Second run: raw rows for oldTime are gone, so the aggregator
+      // returns an empty set → no INSERT attempt → no conflict possible.
+      // Before the transaction fix this still worked for the clean case
+      // but the bug surfaced when previous-run state was inconsistent.
+      await expect(service.deleteOldStatistics()).resolves.toBeUndefined();
+
+      // Final state matches the single-run case.
+      const remaining = await repository.find({ withDeleted: true });
+      const poolRows = remaining.filter(
+        (row) => row.address === 'POOL' && row.clientName === 'POOL' && row.sessionId === 'POOL',
+      );
+      expect(poolRows.length).toBe(1);
+      expect(poolRows[0]?.time).toBe(oldTime);
+      expect(poolRows[0]?.shares).toBe(10);
+    });
   },
 );
 
@@ -265,7 +327,7 @@ describe.each(['sqlite', 'postgres'] as const)(
 describe('ClientStatisticsService — addRejectedShare per-worker reason buckets (Stale conflation)', () => {
   function makeService() {
     const repo = { update: jest.fn() } as any;
-    return new ClientStatisticsService(repo, {} as any);
+    return new ClientStatisticsService(repo, {} as any, {} as any);
   }
 
   const dummyClient = {
