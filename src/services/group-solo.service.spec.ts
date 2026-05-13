@@ -453,6 +453,46 @@ describe('GroupSoloService', () => {
             expect(balanceFindSpy.mock.calls.length).toBe(callsBeforeReset + 1);
         });
 
+        it('round-best read is served from in-process Map after the first improving share', async () => {
+            const { service, redis, groupService } = makeService();
+            groupService._setMembership('bc1qalice', 'g1', true);
+            groupService._setMembership('bc1qbob', 'g1', true);
+
+            await service.recordShare('bc1qalice', 500);
+            await service.recordShare('bc1qbob', 300);
+            await service.recordShare('bc1qalice', 700); // new best
+            await service.recordShare('bc1qbob', 100);    // not best — no Redis write
+
+            // Three improving moments: first share for alice (cold-start cache
+            // miss), bob (no improvement, no write), alice 700 (improvement).
+            // 100 from bob never beats 700 → no extra hSet.
+            const hSetForBest = (redis.hSet as jest.Mock).mock.calls.filter(
+                c => c[0] === 'groupsolo:g1:best-share',
+            );
+            expect(hSetForBest).toHaveLength(2);
+
+            // getRoundBestDifficulty hits the in-process cache: no HGETALL.
+            (redis.hGetAll as jest.Mock).mockClear();
+            const best = await service.getRoundBestDifficulty('g1');
+            expect(best.bestDifficulty).toBe(700);
+            expect(best.address).toBe('bc1qalice');
+            expect(redis.hGetAll).not.toHaveBeenCalled();
+        });
+
+        it('resetRound drops the in-process round-best cache', async () => {
+            const { service, redis, groupService } = makeService();
+            groupService._setMembership('bc1qalice', 'g1', true);
+            await service.recordShare('bc1qalice', 500);
+            (redis.hGetAll as jest.Mock).mockClear();
+
+            await (service as any).resetRound('g1');
+
+            // After reset, no in-process entry → next read falls back to Redis
+            // (which is also empty here → zSet cold-start, also empty).
+            const best = await service.getRoundBestDifficulty('g1');
+            expect(best.bestDifficulty).toBe(0);
+        });
+
         it('coalesces concurrent callers for the same (group, reward, finder) into one build', async () => {
             const { service, balanceRepo, groupService } = makeService();
             groupService._setMembership('bc1qalice', 'g1', true);

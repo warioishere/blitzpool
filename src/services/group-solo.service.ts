@@ -159,6 +159,15 @@ export class GroupSoloService implements OnModuleInit {
      */
     private inflightBuilds = new Map<string, { promise: Promise<GroupSoloPayoutEntry[]>; blockRewardSats: number }>();
 
+    /**
+     * In-process round-best cache. Replaces the per-share Redis hGet+hSet
+     * pair (lines below in recordShare) with an O(1) Map lookup. Redis stays
+     * authoritative across restarts — we write through on improvement only,
+     * so the cross-process consumers (getRoundBestDifficulty / kick path)
+     * still see a consistent value after process restart.
+     */
+    private bestShareInMemory = new Map<string, { diff: number; address: string; time: number }>();
+
     private invalidateDistributionCache(groupId: string): void {
         for (const k of this.cachedDistributions.keys()) {
             if (k.startsWith(`${groupId}:`)) {
@@ -265,17 +274,18 @@ export class GroupSoloService implements OnModuleInit {
             await this.redis.hIncrByFloat(keys.byAddress, address, difficulty);
         }
 
-        // Best-of-round cache. Read-compare-write is racy (two concurrent
-        // higher-diff shares may overwrite each other) but a lost update
-        // self-corrects on the next share that beats the loser. Acceptable
-        // for a display metric.
-        const currentBest = parseFloat((await this.redis.hGet(keys.bestShare, 'diff')) ?? '0') || 0;
-        if (difficulty > currentBest) {
-            await this.redis.hSet(keys.bestShare, {
+        // Round-best — read from in-process Map (no Redis round-trip per
+        // share); write through to Redis only on improvement so the cross-
+        // process consumers (UI /best-difficulty, kick handler) see a
+        // consistent value after a restart.
+        const cachedBest = this.bestShareInMemory.get(entry.groupId);
+        if (!cachedBest || difficulty > cachedBest.diff) {
+            this.bestShareInMemory.set(entry.groupId, { diff: difficulty, address, time: now });
+            this.redis.hSet(keys.bestShare, {
                 diff: String(difficulty),
                 address,
                 time: String(now),
-            });
+            }).catch(() => undefined);
         }
 
         // Persist last-accepted-share timestamp on the balance row so the
@@ -909,6 +919,7 @@ export class GroupSoloService implements OnModuleInit {
         // see stale per-address shares from the prior round.
         await this.redis.del(keys.byAddress);
         await this.redis.del(keys.bestShare);
+        this.bestShareInMemory.delete(groupId);
         // lastAcceptedShareAt is intentionally NOT cleared on round reset —
         // it survives across blocks so the inactivity gate measures actual
         // time since last work, not time since last round start.
@@ -1026,6 +1037,10 @@ export class GroupSoloService implements OnModuleInit {
             await this.redis.hDel(keys.lastAcceptedShareAt, address);
             // If the kicked member held the best-share record, drop the
             // cache. Next read recomputes from zSet and re-seeds.
+            const inMemBest = this.bestShareInMemory.get(groupId);
+            if (inMemBest && inMemBest.address === address) {
+                this.bestShareInMemory.delete(groupId);
+            }
             const bestHolder = await this.redis.hGet(keys.bestShare, 'address');
             if (bestHolder === address) {
                 await this.redis.del(keys.bestShare);
@@ -1284,13 +1299,21 @@ export class GroupSoloService implements OnModuleInit {
         }
         const keys = redisKeys(groupId);
 
+        // In-process cache is authoritative when present.
+        const inMem = this.bestShareInMemory.get(groupId);
+        if (inMem) {
+            return { bestDifficulty: inMem.diff, address: inMem.address, time: inMem.time };
+        }
+
         const cached = await this.redis.hGetAll(keys.bestShare);
         if (cached && cached.diff) {
-            return {
-                bestDifficulty: parseFloat(cached.diff) || 0,
-                address: cached.address || null,
-                time: parseInt(cached.time, 10) || null,
-            };
+            const diff = parseFloat(cached.diff) || 0;
+            const address = cached.address || null;
+            const time = parseInt(cached.time, 10) || null;
+            if (diff > 0 && address) {
+                this.bestShareInMemory.set(groupId, { diff, address, time: time ?? 0 });
+            }
+            return { bestDifficulty: diff, address, time };
         }
 
         // Cold-start: cache empty but the round may already have shares
@@ -1310,6 +1333,7 @@ export class GroupSoloService implements OnModuleInit {
             }
         }
         if (bestDiff > 0 && bestAddr) {
+            this.bestShareInMemory.set(groupId, { diff: bestDiff, address: bestAddr, time: bestTime ?? 0 });
             this.redis.hSet(keys.bestShare, {
                 diff: String(bestDiff),
                 address: bestAddr,
