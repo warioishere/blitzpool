@@ -161,7 +161,9 @@ Mainnet `bitcoin.conf` ships with `blockreservedweight=50000` WU. Blitzpool fits
 | Variable | Default | Purpose |
 |---|---|---|
 | `PPLNS_PORT` | — | Enables PPLNS when set (suggested `3340`) |
-| `PPLNS_HIGH_DIFF_PORT` | `3349` | High-difficulty PPLNS listener for rentals — auto-enabled when `PPLNS_PORT` is set. Reuses `STRATUM_HIGH_DIFF_START_DIFFICULTY` + `STRATUM_HIGH_DIFF_TARGET_SHARES_PER_MINUTE` for diff/target, `PPLNS_WARMUP_SHARES` + `PPLNS_MIN_DIFFICULTY` for ledger gates. Blocks miner-suggested-difficulty so rentals start at the configured high diff |
+| `PPLNS_HIGH_DIFF_PORT` | `3349` | High-difficulty PPLNS listener for rentals — auto-enabled when `PPLNS_PORT` is set. Same PPLNS ledger semantics, fixed high diff, VarDiff off |
+| `PPLNS_HIGH_DIFF_START_DIFFICULTY` | `1000000` | Starting diff on the PPLNS HighDiff port |
+| `PPLNS_HIGH_DIFF_WARMUP_SHARES` | `10` | Warmup shares before PPLNS ledger credit (same gate as the regular PPLNS port) |
 | `PPLNS_FEE_ADDRESS` | — | Pool fee output destination |
 | `PPLNS_FEE_PERCENT` | `2` | Pool fee % |
 | `PPLNS_COINBASE_WEIGHT_BUDGET` | `50000` | Max WU reserved for coinbase outputs (must match `bitcoin.conf:blockreservedweight`) |
