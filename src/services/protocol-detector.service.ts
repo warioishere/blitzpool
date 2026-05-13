@@ -273,69 +273,6 @@ export class ProtocolDetectorService implements OnModuleInit {
           + `initialDiff=${clampedInitialDiff}, minDiff=${pplnsMinDifficulty}, `
           + `warmup=${pplnsWarmup} shares`,
         );
-
-        // PPLNS HighDiff sibling port (auto-enabled alongside the regular
-        // PPLNS port). Same `payoutMode: 'pplns'` so shares land in the
-        // PPLNS window, but with a fixed high starting difficulty and
-        // VarDiff disabled — matching the solo HighDiff port (3339) shape.
-        // Intended audience: rented hashrate (Braiins HashPower, MRR,
-        // NiceHash) for PPLNS miners. Without this port, PPLNS users had
-        // no way to consume rentals: pointing them at 3339 routed shares
-        // to solo (no PPLNS credit, see bc1q...8n0 incident 2026-05-13);
-        // pointing them at 3340 worked but VarDiff start-low warmup wasted
-        // the first minutes of rental capacity.
-        const pplnsHighDiffPort = parseInt(
-          this.configService.get<string>('PPLNS_HIGH_DIFF_PORT') ?? '3349',
-          10,
-        );
-        if (
-          !Number.isNaN(pplnsHighDiffPort)
-          && pplnsHighDiffPort !== normalizedDefaultPort
-          && pplnsHighDiffPort !== highDiffPort
-          && pplnsHighDiffPort !== pplnsPort
-        ) {
-          const pplnsHighDiffStart = parseFloat(
-            this.configService.get<string>('PPLNS_HIGH_DIFF_START_DIFFICULTY')
-              ?? this.configService.get<string>('STRATUM_HIGH_DIFF_START_DIFFICULTY')
-              ?? '1000000',
-          );
-          const pplnsHighDiffTargetShares = parseFloat(
-            this.configService.get<string>('PPLNS_HIGH_DIFF_TARGET_SHARES_PER_MINUTE')
-              ?? (Number.isNaN(pplnsTargetShares) ? normalizedDefaultTargetShares : pplnsTargetShares).toString(),
-          );
-          const pplnsHighDiffWarmupRaw = parseInt(
-            this.configService.get<string>('PPLNS_HIGH_DIFF_WARMUP_SHARES') ?? pplnsWarmup.toString(),
-            10,
-          );
-          const pplnsHighDiffWarmup = Number.isFinite(pplnsHighDiffWarmupRaw) && pplnsHighDiffWarmupRaw >= 0
-            ? pplnsHighDiffWarmupRaw
-            : pplnsWarmup;
-
-          // Floor stays the regular PPLNS min so the ledger gate
-          // (warmup + min-diff anti-CPU-miner protection) keeps its
-          // semantic meaning even though VarDiff is off.
-          const pplnsHighDiffInitial = Math.max(
-            Number.isNaN(pplnsHighDiffStart) ? 1000000 : pplnsHighDiffStart,
-            pplnsMinDifficulty,
-          );
-
-          this.startUnifiedServer({
-            port: pplnsHighDiffPort,
-            initialDifficulty: pplnsHighDiffInitial,
-            allowSuggestedDifficulty: false,
-            targetSharesPerMinute: Number.isNaN(pplnsHighDiffTargetShares)
-              ? normalizedDefaultTargetShares
-              : pplnsHighDiffTargetShares,
-            payoutMode: 'pplns',
-            minimumDifficulty: pplnsMinDifficulty,
-            ledgerWarmupShares: pplnsHighDiffWarmup,
-          });
-          console.log(
-            `[ProtocolDetector] PPLNS HighDiff port ${pplnsHighDiffPort} configured: `
-            + `initialDiff=${pplnsHighDiffInitial} (fixed, VarDiff off), `
-            + `warmup=${pplnsHighDiffWarmup} shares`,
-          );
-        }
       }
     }
 

@@ -43,7 +43,6 @@ Sliding-window pooled mining with a **multi-output coinbase** and a **signed cre
 - Sub-dust or weight-trimmed shares accumulate as a signed **pending credit** on the miner's ledger row; bonus recipients of the same block pick up a matching **pending debit**
 - Fee is a single coinbase output to `PPLNS_FEE_ADDRESS` — exact feePercent, never padded by trim / sub-dust sweep
 - Dedicated port, default `PPLNS_PORT=3340`
-- HighDiff PPLNS port for rentals (Braiins/MRR/NiceHash), default `PPLNS_HIGH_DIFF_PORT=3349` — auto-enabled when PPLNS is on
 
 **When it fits:** mid-size ASIC, wants more regular variance smoothing than Solo, still values non-custodial payouts over FPPS convenience.
 
@@ -161,9 +160,6 @@ Mainnet `bitcoin.conf` ships with `blockreservedweight=50000` WU. Blitzpool fits
 | Variable | Default | Purpose |
 |---|---|---|
 | `PPLNS_PORT` | — | Enables PPLNS when set (suggested `3340`) |
-| `PPLNS_HIGH_DIFF_PORT` | `3349` | High-difficulty PPLNS listener for rentals — auto-enabled when `PPLNS_PORT` is set. Same PPLNS ledger semantics, fixed high diff, VarDiff off |
-| `PPLNS_HIGH_DIFF_START_DIFFICULTY` | `1000000` | Starting diff on the PPLNS HighDiff port |
-| `PPLNS_HIGH_DIFF_WARMUP_SHARES` | `10` | Warmup shares before PPLNS ledger credit (same gate as the regular PPLNS port) |
 | `PPLNS_FEE_ADDRESS` | — | Pool fee output destination |
 | `PPLNS_FEE_PERCENT` | `2` | Pool fee % |
 | `PPLNS_COINBASE_WEIGHT_BUDGET` | `50000` | Max WU reserved for coinbase outputs (must match `bitcoin.conf:blockreservedweight`) |
