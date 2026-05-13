@@ -136,4 +136,73 @@ describe('MiningModeService.getMode', () => {
         });
         expect(await svc.getMode('bc1qalice')).toEqual({ mode: 'group-solo', groupId: 'grp-1' });
     });
+
+    // ── Per-address result cache ──────────────────────────────────────
+    // /api/pplns/mode/:address is uncached and polled per dashboard view.
+    // Without the cache, every poll did Redis GET + (on miss) HGETALL over
+    // the PPLNS window. TTL=30s is shorter than the live-marker TTL so
+    // port-switch detection still propagates within one poll cycle.
+
+    function setupWithSpies(opts: Parameters<typeof setup>[0]) {
+        const pplnsService = {
+            getCurrentDistribution: jest.fn().mockResolvedValue(opts.distribution ?? []),
+        };
+        const groupService = {
+            getGroupForAddress: jest.fn((address: string) => opts.groupForAddress?.[address]),
+        };
+        const minerActiveModeService = {
+            get: jest.fn(async (address: string) => opts.liveMarker?.[address] ?? null),
+            mark: jest.fn(),
+        };
+        const svc = new MiningModeService(
+            pplnsService as any,
+            groupService as any,
+            minerActiveModeService as any,
+        );
+        return { svc, pplnsService, groupService, minerActiveModeService };
+    }
+
+    it('caches subsequent calls for the same address within 30s', async () => {
+        const { svc, minerActiveModeService } = setupWithSpies({
+            liveMarker: { 'bc1qalice': 'pplns' },
+        });
+        await svc.getMode('bc1qalice');
+        await svc.getMode('bc1qalice');
+        await svc.getMode('bc1qalice');
+        expect(minerActiveModeService.get).toHaveBeenCalledTimes(1);
+    });
+
+    it('caches per address — different addresses do not share state', async () => {
+        const { svc, minerActiveModeService } = setupWithSpies({
+            liveMarker: { 'bc1qalice': 'pplns', 'bc1qbob': 'solo' },
+        });
+        await svc.getMode('bc1qalice');
+        await svc.getMode('bc1qbob');
+        expect(minerActiveModeService.get).toHaveBeenCalledTimes(2);
+    });
+
+    it('invalidate() drops the cached entry so the next call re-computes', async () => {
+        const { svc, minerActiveModeService } = setupWithSpies({
+            liveMarker: { 'bc1qalice': 'solo' },
+        });
+        await svc.getMode('bc1qalice');
+        svc.invalidate('bc1qalice');
+        await svc.getMode('bc1qalice');
+        expect(minerActiveModeService.get).toHaveBeenCalledTimes(2);
+    });
+
+    it('re-computes after the cache TTL elapses', async () => {
+        jest.useFakeTimers();
+        try {
+            const { svc, minerActiveModeService } = setupWithSpies({
+                liveMarker: { 'bc1qalice': 'solo' },
+            });
+            await svc.getMode('bc1qalice');
+            jest.setSystemTime(Date.now() + 31_000);
+            await svc.getMode('bc1qalice');
+            expect(minerActiveModeService.get).toHaveBeenCalledTimes(2);
+        } finally {
+            jest.useRealTimers();
+        }
+    });
 });
