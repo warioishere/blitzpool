@@ -1100,15 +1100,23 @@ export class StratumV1Client {
             return false;
         }
 
-        const updatedJobBlock = job.copyAndUpdateBlock(
+        // Hot path: compute only the 80-byte block header for hash
+        // validation. Skipping the full `Block` clone + `transactions.map`
+        // saves ~3000 object allocations per share at production block
+        // density. See `MiningJob.computeShareHeader` for the invariant
+        // pinned against `copyAndUpdateBlock(...).toBuffer(true)`.
+        const versionMask = parseInt(submission.versionMask, 16);
+        const nonce = parseInt(submission.nonce, 16);
+        const extraNonce2 = submission.extraNonce2;
+        const ntime = parseInt(submission.ntime, 16);
+        const header = job.computeShareHeader(
             jobTemplate,
-            parseInt(submission.versionMask, 16),
-            parseInt(submission.nonce, 16),
+            versionMask,
+            nonce,
             this.extraNonce,
-            submission.extraNonce2,
-            parseInt(submission.ntime, 16)
+            extraNonce2,
+            ntime,
         );
-        const header = updatedJobBlock.toBuffer(true);
         const { submissionDifficulty, hashBuffer } = DifficultyUtils.calculateDifficulty(header);
 
         // ckpool-style per-job clamp: a share for a job that predates the
@@ -1153,6 +1161,11 @@ export class StratumV1Client {
                 // so a rejected block does NOT write a phantom row to
                 // `blocks_entity` or push a "block found" notification.
                 console.log('!!! BLOCK FOUND !!!');
+                // Block-found path is rare (~once per ~10h on this pool size)
+                // — build the full Block now, only when actually needed.
+                const updatedJobBlock = job.copyAndUpdateBlock(
+                    jobTemplate, versionMask, nonce, this.extraNonce, extraNonce2, ntime,
+                );
                 const blockHex = updatedJobBlock.toHex(false);
                 const result = await this.bitcoinRpcService.SUBMIT_BLOCK(blockHex);
 

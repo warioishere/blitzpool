@@ -2074,17 +2074,9 @@ export class StratumV2Client {
     // (4-byte enonce1 + 8-byte enonce2). Standard channels don't put anything
     // user-controlled here — only the channel's prefix differentiates merkle roots.
     const extraNonce2 = '0000000000000000';
-    const updatedBlock = job.copyAndUpdateBlock(
-      jobTemplate,
-      0,             // no version mask (doesn't affect merkle root)
-      0,             // nonce doesn't affect merkle root
-      extraNonce1,
-      extraNonce2,
-      jobTemplate.block.timestamp,
-    );
-    const merkleRoot = updatedBlock.merkleRoot
-      ? Buffer.from(updatedBlock.merkleRoot)
-      : Buffer.alloc(32);
+    // Only the merkle root is needed for NewMiningJob — `computeShareMerkleRoot`
+    // skips the full Block allocation that `copyAndUpdateBlock` would do.
+    const merkleRoot = job.computeShareMerkleRoot(jobTemplate, extraNonce1, extraNonce2);
 
     const jobPayload = serializeNewMiningJob({
       channelId: targetChannelId,
@@ -2197,7 +2189,12 @@ export class StratumV2Client {
     // sendNewMiningJob to produce the same merkleRoot for share validation.
     const extraNonce2 = '0000000000000000';
 
-    const updatedJobBlock = job.copyAndUpdateBlock(
+    // Hot path: only compute the 80-byte header for hash validation.
+    // Full Block (for `bitcoind.submitblock`) is built below ONLY if the
+    // share actually meets network difficulty — same pattern the SV2
+    // Extended path (~line 1515) has used since inception. Saves the
+    // ~3000-tx clone in MiningJob.copyAndUpdateBlock per share.
+    const header = job.computeShareHeader(
       jobTemplate,
       versionMask,
       submission.nonce,
@@ -2205,7 +2202,6 @@ export class StratumV2Client {
       extraNonce2,
       submission.ntime,
     );
-    const header = updatedJobBlock.toBuffer(true);
     const { submissionDifficulty, hashBuffer } = DifficultyUtils.calculateDifficulty(header);
 
     // Look up job-specific difficulty (SV2 spec: validate against target from when job was sent)
@@ -2216,6 +2212,13 @@ export class StratumV2Client {
     // Exact accept/reject via direct hash≤target compare — see meetsTarget().
     const jobTarget = DifficultyUtils.difficultyToTarget(jobDifficulty);
     if (DifficultyUtils.meetsTarget(hashBuffer, jobTarget)) {
+      // Build full Block lazily, only when we have a block-finder.
+      let updatedJobBlock: bitcoinjs.Block | null = null;
+      if (submissionDifficulty >= jobTemplate.blockData.networkDifficulty) {
+        updatedJobBlock = job.copyAndUpdateBlock(
+          jobTemplate, versionMask, submission.nonce, extraNonce1, extraNonce2, submission.ntime,
+        );
+      }
       await this.handleValidShare(
         submission,
         submissionDifficulty,
