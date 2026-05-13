@@ -111,7 +111,7 @@ export class ClientDifficultyStatisticsService implements OnModuleDestroy {
 
   private async flushPostgres(records: BufferedDifficulty[]): Promise<void> {
     const BATCH_SIZE = 500;
-    const now = new Date();
+    const now = Date.now();
 
     for (let i = 0; i < records.length; i += BATCH_SIZE) {
       const batch = records.slice(i, i + BATCH_SIZE);
@@ -138,7 +138,7 @@ export class ClientDifficultyStatisticsService implements OnModuleDestroy {
   }
 
   private async flushSqlite(records: BufferedDifficulty[]): Promise<void> {
-    const now = new Date().toISOString();
+    const now = Date.now();
     for (const r of records) {
       const tableName = this.repository.metadata.tableName;
       await this.repository.query(
