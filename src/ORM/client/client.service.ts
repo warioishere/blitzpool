@@ -334,13 +334,33 @@ export class ClientService implements OnModuleDestroy {
         updatedAt: number;
     }>> {
         if (this.clientRepository.manager.connection.options.type === 'postgres') {
-            return this.clientRepository.query(
+            // Raw query bypasses entity transformers; PG returns bigint as
+            // string. Coerce startTime/updatedAt to number so the return
+            // type matches runtime.
+            const rows: Array<{
+                sessionId: string;
+                clientName: string;
+                bestDifficulty: number;
+                hashRate: number;
+                currentDifficulty: number | null;
+                startTime: string;
+                updatedAt: string;
+            }> = await this.clientRepository.query(
                 `SELECT "sessionId", "clientName", "bestDifficulty", "hashRate",
                         "currentDifficulty", "startTime", "updatedAt"
                  FROM client_entity
                  WHERE address = $1 AND "deletedAt" IS NULL`,
                 [address],
             );
+            return rows.map(r => ({
+                sessionId: r.sessionId,
+                clientName: r.clientName,
+                bestDifficulty: r.bestDifficulty,
+                hashRate: r.hashRate,
+                currentDifficulty: r.currentDifficulty,
+                startTime: Number(r.startTime),
+                updatedAt: Number(r.updatedAt),
+            }));
         }
         // Sqlite / pg-mem fallback: TypeORM-portable entity query. Returns
         // the full entity; the controller picks the 7 fields it needs from

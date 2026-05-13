@@ -485,3 +485,138 @@ describe('ClientService.flushHeartbeats — sqlite per-row path (in-memory)', ()
     expect(row?.currentDifficulty).toBe(1024);
   });
 });
+
+// ── Real-Postgres integration ─────────────────────────────────────────
+//
+// PG_E2E=1 enables this block. Validates flushHeartbeatsBulkPostgres
+// against a real Postgres container — the `unnest($5::bigint[])` path
+// silently differs from sqlite + pg-mem (both permissive on types).
+// See memory/feedback-pg-e2e-tests.md for container setup.
+const PG_E2E_CLIENT = process.env.PG_E2E === '1';
+const describeIfClient = PG_E2E_CLIENT ? describe : describe.skip;
+
+describeIfClient('ClientService.flushHeartbeats — real Postgres', () => {
+  let dataSource: DataSource;
+  let service: ClientService;
+
+  beforeAll(async () => {
+    dataSource = new DataSource({
+      type: 'postgres',
+      host: process.env.PG_HOST ?? 'localhost',
+      port: parseInt(process.env.PG_PORT ?? '15432', 10),
+      username: process.env.PG_USER ?? 'postgres',
+      password: process.env.PG_PASSWORD ?? 'postgres',
+      database: process.env.PG_DATABASE ?? 'blitzpool_test',
+      entities: [ClientEntity],
+      subscribers: [TrackedEntityTimestampSubscriber],
+      synchronize: true,
+      dropSchema: true,
+    });
+    await dataSource.initialize();
+  });
+
+  afterAll(async () => {
+    if (dataSource?.isInitialized) await dataSource.destroy();
+  });
+
+  beforeEach(async () => {
+    await dataSource.getRepository(ClientEntity).clear();
+    service = new ClientService(dataSource.getRepository(ClientEntity));
+  });
+
+  it('issues a bulk UPDATE that lands all buffered heartbeats with bigint timestamps', async () => {
+    const repo = dataSource.getRepository(ClientEntity);
+    const t0 = Date.parse('2026-05-13T11:00:00.000Z');
+    await repo.save([
+      { address: 'addr-A', clientName: 'rig1', sessionId: 'sA',
+        startTime: t0, firstSeen: t0, hashRate: 0, bestDifficulty: 0, currentDifficulty: 1024 },
+      { address: 'addr-B', clientName: 'rig2', sessionId: 'sB',
+        startTime: t0, firstSeen: t0, hashRate: 0, bestDifficulty: 0, currentDifficulty: 1024 },
+    ]);
+
+    const t1 = Date.parse('2026-05-13T12:00:00.000Z');
+    await service.heartbeat('addr-A', 'rig1', 'sA', 4242, t1, 8192);
+    await service.heartbeat('addr-B', 'rig2', 'sB', 9999, t1, 4096);
+
+    await service.flushHeartbeats();
+
+    const rowA = await repo.findOneByOrFail({ address: 'addr-A', clientName: 'rig1', sessionId: 'sA' });
+    expect(rowA.hashRate).toBe(4242);
+    expect(rowA.currentDifficulty).toBe(8192);
+    expect(rowA.updatedAt).toBe(t1);     // bigint persists exact ms value
+
+    const rowB = await repo.findOneByOrFail({ address: 'addr-B', clientName: 'rig2', sessionId: 'sB' });
+    expect(rowB.hashRate).toBe(9999);
+    expect(rowB.currentDifficulty).toBe(4096);
+    expect(rowB.updatedAt).toBe(t1);
+  });
+
+  it('killDeadClients sets deletedAt as bigint epoch-ms and matches WHERE on bigint', async () => {
+    const repo = dataSource.getRepository(ClientEntity);
+    const now = Date.now();
+    const staleUpdatedAt = now - 10 * 60 * 1000;
+    const recentUpdatedAt = now - 60 * 1000;
+
+    await repo.save([
+      { address: 'addr-stale', clientName: 'rig1', sessionId: 'stl1',
+        startTime: now, firstSeen: now, hashRate: 0, bestDifficulty: 0,
+        currentDifficulty: null, updatedAt: staleUpdatedAt },
+      { address: 'addr-fresh', clientName: 'rig1', sessionId: 'frs1',
+        startTime: now, firstSeen: now, hashRate: 0, bestDifficulty: 0,
+        currentDifficulty: null, updatedAt: recentUpdatedAt },
+    ]);
+
+    // Force updatedAt back via raw update (subscriber would bump it on .save())
+    await repo.createQueryBuilder().update(ClientEntity)
+      .set({ updatedAt: staleUpdatedAt })
+      .where('sessionId = :s', { s: 'stl1' })
+      .execute();
+    await repo.createQueryBuilder().update(ClientEntity)
+      .set({ updatedAt: recentUpdatedAt })
+      .where('sessionId = :s', { s: 'frs1' })
+      .execute();
+
+    const result = await service.killDeadClients();
+    expect(result.affected ?? 0).toBe(1);
+
+    const stale = await repo.createQueryBuilder('c').withDeleted()
+      .where('c.sessionId = :s', { s: 'stl1' })
+      .getOneOrFail();
+    expect(stale.deletedAt).not.toBeNull();
+    expect(typeof stale.deletedAt).toBe('number');
+
+    const fresh = await repo.findOneByOrFail({ sessionId: 'frs1' });
+    expect(fresh.deletedAt ?? null).toBeNull();
+  });
+
+  it('getFirstSeenLight raw-PG query returns number for firstSeen', async () => {
+    const repo = dataSource.getRepository(ClientEntity);
+    const t0 = Date.parse('2026-05-13T11:00:00.000Z');
+    await repo.save({
+      address: 'addr-Z', clientName: 'rigZ', sessionId: 'sZ',
+      startTime: t0, firstSeen: t0, hashRate: 0, bestDifficulty: 0, currentDifficulty: null,
+    });
+
+    const firstSeen = await service.getFirstSeen('addr-Z', 'rigZ');
+    expect(firstSeen).toBe(t0);          // not Date object, not ISO string
+    expect(typeof firstSeen).toBe('number');
+  });
+
+  it('getByAddressLight raw-PG query returns numbers for startTime/updatedAt', async () => {
+    const repo = dataSource.getRepository(ClientEntity);
+    const t0 = Date.parse('2026-05-13T11:00:00.000Z');
+    const updated = t0 + 60_000;
+    await repo.save({
+      address: 'addr-Q', clientName: 'rigQ', sessionId: 'sQ',
+      startTime: t0, firstSeen: t0, hashRate: 100, bestDifficulty: 123, currentDifficulty: 2048,
+      updatedAt: updated,
+    });
+
+    const light = await service.getByAddressLight('addr-Q');
+    expect(light).toHaveLength(1);
+    expect(typeof light[0].startTime).toBe('number');
+    expect(typeof light[0].updatedAt).toBe('number');
+    expect(light[0].startTime).toBe(t0);
+    expect(light[0].updatedAt).toBe(updated);
+  });
+});

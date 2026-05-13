@@ -124,3 +124,97 @@ describe('PplnsBalanceService.markTouch / flushPendingTouches', () => {
         expect(query).toHaveBeenCalledTimes(1);
     });
 });
+
+// ── Real-Postgres integration ─────────────────────────────────────────
+//
+// PG_E2E=1 enables this block. Validates flushPendingTouches against a
+// real Postgres container — the `unnest($2::bigint[])` array of epoch-ms
+// numbers is silently accepted by sqlite but PG enforces type strictly.
+// See memory/feedback-pg-e2e-tests.md for container setup.
+import { DataSource } from 'typeorm';
+import { PplnsBalanceEntity } from './pplns-balance.entity';
+
+const PG_E2E_PBAL = process.env.PG_E2E === '1';
+const describeIfPbal = PG_E2E_PBAL ? describe : describe.skip;
+
+describeIfPbal('PplnsBalanceService — real Postgres', () => {
+    let dataSource: DataSource;
+    let service: PplnsBalanceService;
+
+    beforeAll(async () => {
+        dataSource = new DataSource({
+            type: 'postgres',
+            host: process.env.PG_HOST ?? 'localhost',
+            port: parseInt(process.env.PG_PORT ?? '15432', 10),
+            username: process.env.PG_USER ?? 'postgres',
+            password: process.env.PG_PASSWORD ?? 'postgres',
+            database: process.env.PG_DATABASE ?? 'blitzpool_test',
+            entities: [PplnsBalanceEntity],
+            synchronize: true,
+            dropSchema: true,
+        });
+        await dataSource.initialize();
+    });
+
+    afterAll(async () => {
+        if (dataSource?.isInitialized) await dataSource.destroy();
+    });
+
+    beforeEach(async () => {
+        await dataSource.getRepository(PplnsBalanceEntity).clear();
+        service = new PplnsBalanceService(
+            dataSource.getRepository(PplnsBalanceEntity) as any,
+        );
+    });
+
+    it('flushPendingTouches bulk-updates lastAcceptedShareAt as bigint', async () => {
+        const repo = dataSource.getRepository(PplnsBalanceEntity);
+        const initialTouch = Date.parse('2026-05-01T00:00:00Z');
+        await repo.save([
+            { address: 'addr-A', balanceSats: 1000, totalPaidSats: 0,
+              lastAcceptedShareAt: initialTouch, updatedAt: initialTouch },
+            { address: 'addr-B', balanceSats: 2000, totalPaidSats: 0,
+              lastAcceptedShareAt: initialTouch, updatedAt: initialTouch },
+        ]);
+
+        const t1 = Date.parse('2026-05-13T12:00:00Z');
+        service.markTouch('addr-A', t1);
+        service.markTouch('addr-B', t1);
+        await service.flushPendingTouches();
+
+        const rowA = await repo.findOneByOrFail({ address: 'addr-A' });
+        expect(rowA.lastAcceptedShareAt).toBe(t1);
+        expect(typeof rowA.lastAcceptedShareAt).toBe('number');
+
+        const rowB = await repo.findOneByOrFail({ address: 'addr-B' });
+        expect(rowB.lastAcceptedShareAt).toBe(t1);
+    });
+
+    it('getBalanceSats raw-PG query returns Number for bigint column', async () => {
+        const repo = dataSource.getRepository(PplnsBalanceEntity);
+        await repo.save({
+            address: 'addr-bal', balanceSats: 12345,
+            totalPaidSats: 67890, lastAcceptedShareAt: null,
+            updatedAt: Date.now(),
+        });
+
+        const sats = await service.getBalanceSats('addr-bal');
+        expect(sats).toBe(12345);
+        expect(typeof sats).toBe('number');
+    });
+
+    it('getBalanceLight returns number-typed sats fields', async () => {
+        const repo = dataSource.getRepository(PplnsBalanceEntity);
+        await repo.save({
+            address: 'addr-light', balanceSats: 111, totalPaidSats: 222,
+            lastAcceptedShareAt: null, updatedAt: Date.now(),
+        });
+
+        const balance = await service.getBalanceLight('addr-light');
+        expect(balance).not.toBeNull();
+        expect(typeof balance!.balanceSats).toBe('number');
+        expect(typeof balance!.totalPaidSats).toBe('number');
+        expect(balance!.balanceSats).toBe(111);
+        expect(balance!.totalPaidSats).toBe(222);
+    });
+});

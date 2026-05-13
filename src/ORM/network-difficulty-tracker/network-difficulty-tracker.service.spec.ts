@@ -97,3 +97,68 @@ describe('NetworkDifficultyTrackerService (postgres)', () => {
     expect(tracker!.previousDifficulty).toBe(2000);
   });
 });
+
+// ── Real-Postgres integration ─────────────────────────────────────────
+//
+// PG_E2E=1 enables this block. The raw INSERT ... ON CONFLICT path
+// for difficultyChanged=true passes `now` (number) for both
+// "createdAt"/"updatedAt"/"lastCheckedAt"/"lastChangedAt" — all bigint
+// now. pg-mem can't catch the type-strict mismatch reliably.
+const PG_E2E_NDT = process.env.PG_E2E === '1';
+const describeIfNdt = PG_E2E_NDT ? describe : describe.skip;
+
+describeIfNdt('NetworkDifficultyTrackerService — real Postgres', () => {
+  let dataSource: DataSource;
+  let service: NetworkDifficultyTrackerService;
+
+  beforeAll(async () => {
+    const { TrackedEntityTimestampSubscriber } = require('../utils/tracked-entity.subscriber');
+    dataSource = new DataSource({
+      type: 'postgres',
+      host: process.env.PG_HOST ?? 'localhost',
+      port: parseInt(process.env.PG_PORT ?? '15432', 10),
+      username: process.env.PG_USER ?? 'postgres',
+      password: process.env.PG_PASSWORD ?? 'postgres',
+      database: process.env.PG_DATABASE ?? 'blitzpool_test',
+      entities: [NetworkDifficultyTrackerEntity],
+      subscribers: [TrackedEntityTimestampSubscriber],
+      synchronize: true,
+      dropSchema: true,
+    });
+    await dataSource.initialize();
+    service = new NetworkDifficultyTrackerService(
+      dataSource.getRepository(NetworkDifficultyTrackerEntity),
+    );
+  });
+
+  afterAll(async () => {
+    if (dataSource?.isInitialized) await dataSource.destroy();
+  });
+
+  beforeEach(async () => {
+    await dataSource.getRepository(NetworkDifficultyTrackerEntity).clear();
+  });
+
+  it('first updateTracker writes bigint timestamps via createQueryBuilder().insert()', async () => {
+    const before = Date.now();
+    await service.updateTracker(1000);
+    const tracker = await service.getTracker();
+
+    expect(typeof tracker!.createdAt).toBe('number');
+    expect(typeof tracker!.updatedAt).toBe('number');
+    expect(typeof tracker!.lastCheckedAt).toBe('number');
+    expect(tracker!.lastCheckedAt).toBeGreaterThanOrEqual(before);
+  });
+
+  it('difficultyChanged=true raw INSERT path sets all 4 timestamp columns as bigint', async () => {
+    await service.updateTracker(1000);
+    const before = Date.now();
+    await service.updateTracker(2000, true);
+
+    const tracker = await service.getTracker();
+    expect(tracker!.currentDifficulty).toBe(2000);
+    expect(typeof tracker!.lastChangedAt).toBe('number');
+    expect(typeof tracker!.updatedAt).toBe('number');
+    expect(tracker!.lastChangedAt!).toBeGreaterThanOrEqual(before);
+  });
+});
