@@ -240,7 +240,7 @@ export class ClientStatisticsService {
           "rejectedDuplicateShareDiff1" = EXCLUDED."rejectedDuplicateShareDiff1",
           "rejectedLowDifficultyShareCount" = EXCLUDED."rejectedLowDifficultyShareCount",
           "rejectedLowDifficultyShareDiff1" = EXCLUDED."rejectedLowDifficultyShareDiff1",
-          "updatedAt" = NOW()
+          "updatedAt" = (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint
       `;
 
       await this.clientStatisticsRepository.query(query, values);
@@ -326,7 +326,7 @@ export class ClientStatisticsService {
 
       const query = `
         UPDATE client_statistics_entity
-        SET ${setClauses}, "updatedAt" = NOW()
+        SET ${setClauses}, "updatedAt" = (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint
         WHERE (address, "clientName", "sessionId", time) IN (${whereTuples})
       `;
 

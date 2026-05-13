@@ -697,7 +697,7 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
         ON CONFLICT (time) DO UPDATE SET
           accepted = pool_share_statistics_entity.accepted + EXCLUDED.accepted,
           rejected = pool_share_statistics_entity.rejected + EXCLUDED.rejected,
-          "updatedAt" = NOW()
+          "updatedAt" = (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint
       `;
 
       await this.poolShareStatisticsRepository.query(query, [times, accepted, rejected]);
@@ -777,7 +777,7 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
           "rejectedDuplicateShareDiff1" = client_statistics_entity."rejectedDuplicateShareDiff1" + EXCLUDED."rejectedDuplicateShareDiff1",
           "rejectedLowDifficultyShareCount" = client_statistics_entity."rejectedLowDifficultyShareCount" + EXCLUDED."rejectedLowDifficultyShareCount",
           "rejectedLowDifficultyShareDiff1" = client_statistics_entity."rejectedLowDifficultyShareDiff1" + EXCLUDED."rejectedLowDifficultyShareDiff1",
-          "updatedAt" = NOW()
+          "updatedAt" = (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint
       `;
 
       await this.clientStatisticsRepository.query(query, [
@@ -846,7 +846,7 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
         SELECT * FROM unnest($1::bigint[], $2::text[], $3::real[])
         ON CONFLICT (time, reason) DO UPDATE SET
           count = pool_rejected_statistics_entity.count + EXCLUDED.count,
-          "updatedAt" = NOW()
+          "updatedAt" = (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint
       `;
 
       await this.poolRejectedStatisticsRepository.query(query, [times, reasons, counts]);
@@ -892,7 +892,7 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
         ON CONFLICT (address, time, reason) DO UPDATE SET
           count = client_rejected_statistics_entity.count + EXCLUDED.count,
           shares = client_rejected_statistics_entity.shares + EXCLUDED.shares,
-          "updatedAt" = NOW()
+          "updatedAt" = (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint
       `;
 
       await this.clientRejectedStatisticsRepository.query(query, [addresses, times, reasons, counts, shares]);
