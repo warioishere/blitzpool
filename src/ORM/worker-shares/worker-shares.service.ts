@@ -83,9 +83,11 @@ export class WorkerSharesService {
     }
 
     public async addSharesBulk(
-        updates: Array<{ address: string; clientName: string; shares: number }>,
+        addresses: string[],
+        clientNames: string[],
+        shares: number[],
     ): Promise<void> {
-        if (updates.length === 0) return;
+        if (addresses.length === 0) return;
 
         const dataSource = this.repo.manager.connection;
 
@@ -96,10 +98,6 @@ export class WorkerSharesService {
             // StatisticsCoordinatorService.bulkUpsertClientStatistics
             // for the wider rationale (~9× speedup measured on prod
             // hardware for ~1500-row inserts).
-            const addresses = updates.map(u => u.address);
-            const clientNames = updates.map(u => u.clientName);
-            const shares = updates.map(u => u.shares);
-
             await dataSource.query(
                 `INSERT INTO worker_shares_entity (address, "clientName", shares)
                  SELECT * FROM unnest($1::text[], $2::text[], $3::double precision[])
@@ -108,15 +106,15 @@ export class WorkerSharesService {
                 [addresses, clientNames, shares],
             );
         } else {
-            for (const u of updates) {
+            for (let i = 0; i < addresses.length; i++) {
                 const existing = await this.repo.findOne({
-                    where: { address: u.address, clientName: u.clientName },
+                    where: { address: addresses[i], clientName: clientNames[i] },
                 });
                 if (existing) {
-                    existing.shares += u.shares;
+                    existing.shares += shares[i];
                     await this.repo.save(existing);
                 } else {
-                    await this.repo.save({ address: u.address, clientName: u.clientName, shares: u.shares });
+                    await this.repo.save({ address: addresses[i], clientName: clientNames[i], shares: shares[i] });
                 }
             }
         }
@@ -127,18 +125,17 @@ export class WorkerSharesService {
      * Called by StatisticsCoordinator after each successful client-statistics flush.
      */
     public async addRejectedBulk(
-        updates: Array<{ address: string; clientName: string; rejectedShares: number }>,
+        addresses: string[],
+        clientNames: string[],
+        rejectedShares: number[],
     ): Promise<void> {
-        if (updates.length === 0) return;
+        if (addresses.length === 0) return;
 
         const dataSource = this.repo.manager.connection;
 
         if (dataSource.options.type === 'postgres') {
-            // unnest() with parallel arrays — see addSharesBulk above.
-            const addresses = updates.map(u => u.address);
-            const clientNames = updates.map(u => u.clientName);
-            const zeroShares = updates.map(() => 0);
-            const rejectedShares = updates.map(u => u.rejectedShares);
+            const n = addresses.length;
+            const zeroShares: number[] = new Array(n).fill(0);
 
             await dataSource.query(
                 `INSERT INTO worker_shares_entity (address, "clientName", shares, "rejectedShares")
@@ -148,15 +145,15 @@ export class WorkerSharesService {
                 [addresses, clientNames, zeroShares, rejectedShares],
             );
         } else {
-            for (const u of updates) {
+            for (let i = 0; i < addresses.length; i++) {
                 const existing = await this.repo.findOne({
-                    where: { address: u.address, clientName: u.clientName },
+                    where: { address: addresses[i], clientName: clientNames[i] },
                 });
                 if (existing) {
-                    existing.rejectedShares += u.rejectedShares;
+                    existing.rejectedShares += rejectedShares[i];
                     await this.repo.save(existing);
                 } else {
-                    await this.repo.save({ address: u.address, clientName: u.clientName, shares: 0, rejectedShares: u.rejectedShares });
+                    await this.repo.save({ address: addresses[i], clientName: clientNames[i], shares: 0, rejectedShares: rejectedShares[i] });
                 }
             }
         }
