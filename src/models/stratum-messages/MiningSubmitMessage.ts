@@ -1,6 +1,3 @@
-import { Expose, Transform } from 'class-transformer';
-import { ArrayMaxSize, ArrayMinSize, IsArray, IsString } from 'class-validator';
-
 import { eRequestMethod } from '../enums/eRequestMethod';
 import { StratumBaseMessage } from './StratumBaseMessage';
 import * as bitcoinjs from 'bitcoinjs-lib';
@@ -8,47 +5,13 @@ import * as bitcoinjs from 'bitcoinjs-lib';
 
 export class MiningSubmitMessage extends StratumBaseMessage {
 
-    @IsArray()
-    @ArrayMinSize(5)
-    @ArrayMaxSize(6)
     public params: string[];
 
-    @Expose()
-    @IsString()
-    @Transform(({ value, key, obj, type }) => {
-        return obj.params[0];
-    })
     public userId: string;
-    @Expose()
-    @IsString()
-    @Transform(({ value, key, obj, type }) => {
-        return obj.params[1];
-    })
     public jobId: string;
-    @Expose()
-    @IsString()
-    @Transform(({ value, key, obj, type }) => {
-        return obj.params[2];
-    })
     public extraNonce2: string;
-    @Expose()
-    @IsString()
-    @Transform(({ value, key, obj, type }) => {
-        return obj.params[3];
-    })
     public ntime: string;
-    @Expose()
-    @IsString()
-    @Transform(({ value, key, obj, type }) => {
-        return obj.params[4];
-    })
-    public nonce: string
-
-    @Expose()
-    @IsString()
-    @Transform(({ value, key, obj, type }) => {
-        return obj.params[5] == null ? '0' : obj.params[5];
-    })
+    public nonce: string;
     public versionMask?: string | null;
 
     constructor() {
@@ -56,12 +19,28 @@ export class MiningSubmitMessage extends StratumBaseMessage {
         this.method = eRequestMethod.AUTHORIZE;
     }
 
+    /**
+     * Field-mapping factory — replaces the class-transformer `plainToInstance`
+     * call site. Six index→field reads, one allocation.
+     */
+    public static parse(plain: { id?: number | string; params: string[] }): MiningSubmitMessage {
+        const m = new MiningSubmitMessage();
+        m.id = plain.id ?? null;
+        m.params = plain.params;
+        m.userId = plain.params[0];
+        m.jobId = plain.params[1];
+        m.extraNonce2 = plain.params[2];
+        m.ntime = plain.params[3];
+        m.nonce = plain.params[4];
+        m.versionMask = plain.params[5] == null ? '0' : plain.params[5];
+        return m;
+    }
 
     public response() {
         return {
             id: this.id,
             error: null,
-            result: true
+            result: true,
         };
     }
 
@@ -75,10 +54,4 @@ export class MiningSubmitMessage extends StratumBaseMessage {
         });
         return bitcoinjs.crypto.hash256(Buffer.from(canonical)).toString('base64');
     }
-
-
-
-
-
-
 }

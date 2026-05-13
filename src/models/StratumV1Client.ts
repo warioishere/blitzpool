@@ -1,8 +1,6 @@
 import { ConfigService } from '@nestjs/config';
 import * as bitcoinjs from 'bitcoinjs-lib';
 import { getAddressInfo } from 'bitcoin-address-validation';
-import { plainToInstance } from 'class-transformer';
-import { validate, ValidatorOptions } from 'class-validator';
 import * as crypto from 'crypto';
 import { Socket } from 'net';
 import { firstValueFrom, Subscription } from 'rxjs';
@@ -414,10 +412,7 @@ export class StratumV1Client {
                     break;
                 }
 
-                const subscriptionMessage = plainToInstance(
-                    SubscriptionMessage,
-                    parsedMessage,
-                );
+                const subscriptionMessage = SubscriptionMessage.parse(parsedMessage);
 
                 {
 
@@ -483,10 +478,7 @@ export class StratumV1Client {
                     break;
                 }
 
-                const configurationMessage = plainToInstance(
-                    ConfigurationMessage,
-                    parsedMessage,
-                );
+                const configurationMessage = ConfigurationMessage.parse(parsedMessage);
 
                 {
                     this.clientConfiguration = configurationMessage;
@@ -511,10 +503,7 @@ export class StratumV1Client {
                     break;
                 }
 
-                const authorizationMessage = plainToInstance(
-                    AuthorizationMessage,
-                    parsedMessage,
-                );
+                const authorizationMessage = AuthorizationMessage.parse(parsedMessage);
 
                 // Trim + normalise bech32 (lowercase) before accepting. Without
                 // this, every downstream lookup (PPLNS window aggregate, group
@@ -605,10 +594,7 @@ export class StratumV1Client {
                     break;
                 }
 
-                const suggestDifficultyMessage = plainToInstance(
-                    SuggestDifficulty,
-                    parsedMessage
-                );
+                const suggestDifficultyMessage = SuggestDifficulty.parse(parsedMessage);
 
                 if (!this.allowSuggestedDifficulty) {
                     const err = new StratumErrorMessage(
@@ -654,10 +640,7 @@ export class StratumV1Client {
                     break;
                 }
 
-                const miningSubmitMessage = plainToInstance(
-                    MiningSubmitMessage,
-                    parsedMessage,
-                );
+                const miningSubmitMessage = MiningSubmitMessage.parse(parsedMessage);
 
                 if (this.stratumInitialized && this.clientAuthorization) {
                     await this.handleMiningSubmission(miningSubmitMessage);
