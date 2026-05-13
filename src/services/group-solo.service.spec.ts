@@ -501,7 +501,7 @@ describe('GroupSoloService', () => {
             await service.recordShare('bc1qbob', 500);
 
             // Drop any caches so the next call would compute.
-            (service as any).cachedDistributions.clear();
+            (service as any).distributionCache.invalidate();
             const balanceFindSpy = jest.spyOn(balanceRepo, 'find');
             balanceFindSpy.mockClear();
 

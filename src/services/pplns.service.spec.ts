@@ -624,7 +624,7 @@ describe('PplnsService', () => {
       ]);
 
       // Invalidate the result cache so every call would otherwise rebuild.
-      (service as any).cachedDistribution = null;
+      (service as any).distributionCache.invalidate();
       (balanceService.getAllWithBalance as jest.Mock).mockClear();
 
       // Fire 50 concurrent callers in the same microtask batch.
@@ -645,7 +645,7 @@ describe('PplnsService', () => {
       service.setNetworkDifficulty(100_000);
       await service.recordShare('bc1qa', 100);
 
-      (service as any).cachedDistribution = null;
+      (service as any).distributionCache.invalidate();
       (balanceService.getAllWithBalance as jest.Mock).mockClear();
 
       // Two concurrent callers with different rewards — both run their own build.

@@ -19,6 +19,7 @@ import {
     readStoredSnapshot,
     writeStoredSnapshot,
 } from './coinbase-snapshot';
+import { InflightResultCache } from '../utils/inflight-result-cache';
 
 /**
  * Group-solo PROP-style payout engine.
@@ -125,55 +126,26 @@ export class GroupSoloService implements OnModuleInit {
     private blockFoundLocks = new Set<string>();
 
     /**
-     * Per-(group, finderAddress) distribution cache. Mirrors the pattern in
-     * PplnsService (single in-memory cache field with TTL): under a block-
-     * change fan-out, the new-job-broadcast iterates all 400 connected
-     * stratum sessions and each one calls `getPayoutDistribution` with the
-     * same group+reward+finder triple. Without a cache the inner
-     * `buildCoinbaseDistribution` plus the two PG round-trips (balanceRepo,
-     * groupRepo) ran 400× synchronously, adding ~50-200ms per call to the
-     * dispatch storm. With a cache: 1× compute, 399× O(1) hash lookup.
-     *
-     * The cache key is `${groupId}:${finderAddress ?? '__none__'}` and the
-     * value carries a `blockRewardSats` discriminator (the cache is invalid
-     * if the reward differs, e.g. a new template arrived for a different
-     * height). TTL is 30s — short enough that a within-window finder-bonus
-     * config change reflects quickly, long enough to absorb the dispatch
-     * fan-out window.
-     *
-     * Invalidated by `onBlockFound` and `wipeRoundState` (round reset
-     * means the in-flight distribution is no longer valid for any future
-     * job).
+     * Per-(group, finderAddress, reward) distribution cache with TTL +
+     * in-flight-promise dedup. See src/utils/inflight-result-cache.ts.
+     * Cache key includes the reward so a mempool-driven reward change
+     * naturally invalidates; `invalidateDistributionCache(groupId)` clears
+     * the per-group prefix on round reset / block found.
      */
-    private cachedDistributions = new Map<string, {
-        payouts: GroupSoloPayoutEntry[];
-        blockRewardSats: number;
-        cachedAt: number;
-    }>();
-    private static readonly DISTRIBUTION_CACHE_TTL_MS = 30_000;
-    /**
-     * Inflight-promise dedup keyed on the same `${groupId}:${finder ?? '__none__'}`
-     * shape as cachedDistributions. When a new template fans out to all
-     * group sessions concurrently, only the first caller per key runs the
-     * build; the rest await the same promise.
-     */
-    private inflightBuilds = new Map<string, { promise: Promise<GroupSoloPayoutEntry[]>; blockRewardSats: number }>();
+    private readonly distributionCache = new InflightResultCache<string, GroupSoloPayoutEntry[]>(30_000);
 
     /**
-     * In-process round-best cache. Replaces the per-share Redis hGet+hSet
-     * pair (lines below in recordShare) with an O(1) Map lookup. Redis stays
-     * authoritative across restarts — we write through on improvement only,
-     * so the cross-process consumers (getRoundBestDifficulty / kick path)
-     * still see a consistent value after process restart.
+     * In-process round-best cache. Redis is written through on improvement
+     * only so cross-process consumers stay consistent after restart.
      */
     private bestShareInMemory = new Map<string, { diff: number; address: string; time: number }>();
 
+    private distributionCacheKey(groupId: string, finderAddress: string | undefined, blockRewardSats: number): string {
+        return `${groupId}:${finderAddress ?? '__none__'}:${blockRewardSats}`;
+    }
+
     private invalidateDistributionCache(groupId: string): void {
-        for (const k of this.cachedDistributions.keys()) {
-            if (k.startsWith(`${groupId}:`)) {
-                this.cachedDistributions.delete(k);
-            }
-        }
+        this.distributionCache.invalidate(k => k.startsWith(`${groupId}:`));
     }
 
     constructor(
@@ -344,45 +316,16 @@ export class GroupSoloService implements OnModuleInit {
     ): Promise<GroupSoloPayoutEntry[]> {
         if (!this.isEnabled()) return this.fallback(blockRewardSats);
 
-        // ── Cache lookup (block-change fan-out optimisation) ─────────
-        // 400 stratum sessions × identical (group, reward, finder) triples
-        // would otherwise cost 400× the inner compute + 800 PG round-trips
-        // (balanceRepo + groupRepo). With cache: one compute, 399 hash
-        // lookups. TTL is 30s; cache invalidated by onBlockFound /
-        // wipeRoundState so a round-reset can never serve stale state.
-        const cacheKey = `${groupId}:${finderAddress ?? '__none__'}`;
-        const cached = this.cachedDistributions.get(cacheKey);
-        if (
-            cached &&
-            cached.blockRewardSats === blockRewardSats &&
-            Date.now() - cached.cachedAt < GroupSoloService.DISTRIBUTION_CACHE_TTL_MS
-        ) {
-            return cached.payouts;
-        }
-
-        // Coalesce concurrent callers in the same fan-out: if a build is
-        // already running for this (group, finder) at the same reward, await
-        // it instead of starting a duplicate.
-        const inflight = this.inflightBuilds.get(cacheKey);
-        if (inflight && inflight.blockRewardSats === blockRewardSats) {
-            return inflight.promise;
-        }
-
-        const build = this.buildDistribution(groupId, blockRewardSats, finderAddress, cacheKey).finally(() => {
-            const current = this.inflightBuilds.get(cacheKey);
-            if (current && current.promise === build) {
-                this.inflightBuilds.delete(cacheKey);
-            }
-        });
-        this.inflightBuilds.set(cacheKey, { promise: build, blockRewardSats });
-        return build;
+        return this.distributionCache.getOrCompute(
+            this.distributionCacheKey(groupId, finderAddress, blockRewardSats),
+            () => this.buildDistribution(groupId, blockRewardSats, finderAddress),
+        );
     }
 
     private async buildDistribution(
         groupId: string,
         blockRewardSats: number,
         finderAddress: string | undefined,
-        cacheKey: string,
     ): Promise<GroupSoloPayoutEntry[]> {
         const keys = redisKeys(groupId);
         const addressShares = await this.readByAddress(keys);
@@ -416,12 +359,6 @@ export class GroupSoloService implements OnModuleInit {
         const payouts: GroupSoloPayoutEntry[] = result.payouts.length > 0
             ? result.payouts
             : this.fallback(blockRewardSats);
-
-        this.cachedDistributions.set(cacheKey, {
-            payouts,
-            blockRewardSats,
-            cachedAt: Date.now(),
-        });
 
         await this.writeSnapshot(groupId, finderAddress, {
             distribution: payouts,

@@ -26,6 +26,7 @@ import {
     readStoredSnapshot,
     writeStoredSnapshot,
 } from './coinbase-snapshot';
+import { InflightResultCache } from '../utils/inflight-result-cache';
 
 /**
  * PPLNS (Pay Per Last N Shares) engine.
@@ -94,21 +95,14 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
     private readonly coinbaseWeightBudget: number;
     private readonly minPayoutSats: number;
 
-    // Distribution cache — avoids re-reading entire Redis state + re-running
-    // the math on every new job.
-    private cachedDistribution: PplnsPayoutEntry[] | null = null;
-    private cachedDistributionReward = 0;
-    private cachedDistributionAt = 0;
-    private static readonly DISTRIBUTION_CACHE_TTL_MS = 30_000;
-
-    // Inflight-promise dedup: when a new template fans out to N stratum
-    // sessions all calling getPayoutDistribution() in the same microtask
-    // batch, only the first caller runs the build; the others await the
-    // same promise. Without this, N concurrent callers each saw an empty
-    // cache and each fired their own `getAllWithBalance` + buildCoinbase
-    // — a thundering herd under any pool fan-out.
-    private inflightBuild: Promise<PplnsPayoutEntry[]> | null = null;
-    private inflightBuildReward = 0;
+    // Distribution cache with TTL + in-flight dedup. See
+    // src/utils/inflight-result-cache.ts. Key is the blockRewardSats so a
+    // mempool-driven reward change invalidates the entry automatically.
+    private readonly distributionCache = new InflightResultCache<number, PplnsPayoutEntry[]>(30_000);
+    // Most-recent computed distribution — kept separately so the adaptive
+    // capacity helper has something to peek at regardless of cache TTL or
+    // reward-keyed cache eviction.
+    private lastDistribution: PplnsPayoutEntry[] | null = null;
 
     // Block-found lock — prevents concurrent onBlockFound within this
     // process from double-processing. Cross-process idempotency is handled
@@ -286,10 +280,10 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         const P2WPKH_OUTPUT_WEIGHT = 124;
         let avgOutputWeight = P2WPKH_OUTPUT_WEIGHT;
 
-        if (this.cachedDistribution && this.cachedDistribution.length > 0) {
+        if (this.lastDistribution && this.lastDistribution.length > 0) {
             let totalWeight = 0;
             let count = 0;
-            for (const entry of this.cachedDistribution) {
+            for (const entry of this.lastDistribution) {
                 // Skip the fee output — it's accounted for separately below.
                 if (entry.address === this.feeAddress) continue;
                 totalWeight += outputWeightForAddress(entry.address);
@@ -343,7 +337,7 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
             await this.redis.hIncrByFloat(REDIS_KEY_WINDOW_BY_ADDRESS, address, difficulty);
         }
 
-        this.cachedDistribution = null;
+        this.distributionCache.invalidate();
 
         this.balanceService.markTouch(address);
 
@@ -471,27 +465,10 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         if (!this.redis || !this.enabled) {
             return this.fallbackDistribution(blockRewardSats);
         }
-
-        if (
-            this.cachedDistribution &&
-            this.cachedDistributionReward === blockRewardSats &&
-            Date.now() - this.cachedDistributionAt < PplnsService.DISTRIBUTION_CACHE_TTL_MS
-        ) {
-            return this.cachedDistribution;
-        }
-
-        if (this.inflightBuild && this.inflightBuildReward === blockRewardSats) {
-            return this.inflightBuild;
-        }
-
-        const build = this.buildDistribution(blockRewardSats).finally(() => {
-            if (this.inflightBuild === build) {
-                this.inflightBuild = null;
-            }
-        });
-        this.inflightBuild = build;
-        this.inflightBuildReward = blockRewardSats;
-        return build;
+        return this.distributionCache.getOrCompute(
+            blockRewardSats,
+            () => this.buildDistribution(blockRewardSats),
+        );
     }
 
     private async buildDistribution(blockRewardSats: number): Promise<PplnsPayoutEntry[]> {
@@ -519,9 +496,7 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
             ? result.payouts
             : this.fallbackDistribution(blockRewardSats);
 
-        this.cachedDistribution = payouts;
-        this.cachedDistributionReward = blockRewardSats;
-        this.cachedDistributionAt = Date.now();
+        this.lastDistribution = payouts;
 
         await this.writeSnapshot({
             distribution: payouts,
@@ -571,7 +546,7 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
     async onBlockFound(blockHeight: number, blockRewardSats: number): Promise<void> {
         if (!this.redis || !this.enabled) return;
 
-        this.cachedDistribution = null;
+        this.distributionCache.invalidate();
 
         if (this.blockFoundInProgress) {
             console.warn(`[PPLNS] Block ${blockHeight} — skipping, another block-found is already being processed`);
