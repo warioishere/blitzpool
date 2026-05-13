@@ -26,12 +26,13 @@ import { SwapBuffer } from '../../utils/buffers';
 export class PplnsBalanceService implements OnModuleDestroy {
 
     /**
-     * In-memory buffer of latest touch timestamp per address. PPLNS shares
-     * fire markTouch (synchronous, no-await) instead of a PG UPDATE
-     * per share. The only consumer of lastAcceptedShareAt is the nightly
-     * abandoned-balance sweep, which tolerates the 60 s flush lag trivially.
+     * In-memory buffer of latest touch timestamp per address (epoch ms).
+     * PPLNS shares fire markTouch (synchronous, no-await) instead of a PG
+     * UPDATE per share. The only consumer of lastAcceptedShareAt is the
+     * nightly abandoned-balance sweep, which tolerates the 60 s flush
+     * lag trivially.
      */
-    private readonly touches = new SwapBuffer<string, Date>();
+    private readonly touches = new SwapBuffer<string, number>();
     private isFlushingTouches = false;
 
     constructor(
@@ -44,12 +45,42 @@ export class PplnsBalanceService implements OnModuleDestroy {
     }
 
     async getBalanceSats(address: string): Promise<number> {
+        if (this.repo.manager.connection.options.type === 'postgres') {
+            // Raw SELECT — bypasses entity hydration (RawSqlResultsToEntityTransformer).
+            // UI endpoint hot path; called per dashboard poll for every active miner.
+            const rows: Array<{ balanceSats: string }> = await this.repo.query(
+                `SELECT "balanceSats" FROM pplns_balance WHERE address = $1 LIMIT 1`,
+                [address],
+            );
+            return rows[0] ? Number(rows[0].balanceSats) : 0;
+        }
         const entity = await this.repo.findOneBy({ address });
         return entity?.balanceSats ?? 0;
     }
 
     async getBalance(address: string): Promise<PplnsBalanceEntity | null> {
         return this.repo.findOneBy({ address });
+    }
+
+    /**
+     * Hot-path lookup used by `getAddressStatus` for the per-miner UI poll.
+     * Returns just the two scalar balance fields — no Date hydration, no
+     * entity construction. Sqlite path keeps `findOneBy` for dev/test parity.
+     */
+    async getBalanceLight(address: string): Promise<{ balanceSats: number; totalPaidSats: number } | null> {
+        if (this.repo.manager.connection.options.type === 'postgres') {
+            const rows: Array<{ balanceSats: string; totalPaidSats: string }> = await this.repo.query(
+                `SELECT "balanceSats", "totalPaidSats" FROM pplns_balance WHERE address = $1 LIMIT 1`,
+                [address],
+            );
+            if (!rows[0]) return null;
+            return {
+                balanceSats: Number(rows[0].balanceSats),
+                totalPaidSats: Number(rows[0].totalPaidSats),
+            };
+        }
+        const entity = await this.repo.findOneBy({ address });
+        return entity ? { balanceSats: entity.balanceSats, totalPaidSats: entity.totalPaidSats } : null;
     }
 
     /**
@@ -63,10 +94,10 @@ export class PplnsBalanceService implements OnModuleDestroy {
 
     /**
      * Record the most recent accepted-share timestamp for an address in
-     * the in-memory buffer. Synchronous, non-throwing. Coalesces multiple
-     * share-marks per flush window into one PG UPDATE.
+     * the in-memory buffer (epoch ms). Synchronous, non-throwing.
+     * Coalesces multiple share-marks per flush window into one PG UPDATE.
      */
-    markTouch(address: string, when: Date = new Date()): void {
+    markTouch(address: string, when: number = Date.now()): void {
         if (!address) return;
         this.touches.set(address, when);
     }
@@ -87,7 +118,7 @@ export class PplnsBalanceService implements OnModuleDestroy {
             const dbType = this.repo.manager.connection.options.type;
             if (dbType === 'postgres') {
                 const addresses: string[] = [];
-                const stamps: Date[] = [];
+                const stamps: number[] = [];
                 for (const [addr, ts] of snapshot) {
                     addresses.push(addr);
                     stamps.push(ts);
@@ -97,7 +128,7 @@ export class PplnsBalanceService implements OnModuleDestroy {
                      SET "lastAcceptedShareAt" = u."lastAcceptedShareAt"
                      FROM (
                        SELECT unnest($1::text[]) AS address,
-                              unnest($2::timestamptz[]) AS "lastAcceptedShareAt"
+                              unnest($2::bigint[]) AS "lastAcceptedShareAt"
                      ) AS u
                      WHERE t.address = u.address`,
                     [addresses, stamps],

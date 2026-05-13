@@ -1705,8 +1705,8 @@ export class StratumV2Client {
         jobDifficulty,
       );
 
-      const now = new Date();
-      if (!this.entity!.updatedAt || now.getTime() - this.entity!.updatedAt.getTime() > 60000) {
+      const now = Date.now();
+      if (!this.entity!.updatedAt || now - this.entity!.updatedAt > 60000) {
         await this.clientService.heartbeat(
           this.entity!.address,
           this.entity!.clientName,
@@ -1721,11 +1721,11 @@ export class StratumV2Client {
       await this.clientDifficultyStatisticsService.recordShareDifficulty({
         address: this.address!,
         clientName: this.workerName,
-        timestamp: now.getTime(),
+        timestamp: now,
         difficulty: submissionDifficulty,
       });
 
-      if (now.getTime() - this.lastDifficultyCheck >= this.difficultyCheckIntervalMs) {
+      if (now - this.lastDifficultyCheck >= this.difficultyCheckIntervalMs) {
         if (channel.isJdClient) {
           await this.checkJdClientDifficulty(submissionDifficulty);
         } else {
@@ -2565,7 +2565,7 @@ export class StratumV2Client {
     this.creatingEntity = (async () => {
       try {
         const firstSeen = await this.clientService.getFirstSeenIfRecent(this.address!, this.workerName);
-        const startTime = new Date();
+        const startTime = Date.now();
         this.entity = await this.clientService.insert({
           sessionId: this.sessionId,
           address: this.address!,

@@ -2,12 +2,13 @@ import { AddressSettingsService } from '../ORM/address-settings/address-settings
 import { AddressSettingsCacheService } from './address-settings-cache.service';
 
 describe('AddressSettingsCacheService', () => {
-  let addressSettingsService: { getSettings: jest.Mock };
+  let addressSettingsService: { getSettings: jest.Mock; getBestDifficultyLight: jest.Mock };
   let service: AddressSettingsCacheService;
 
   beforeEach(() => {
     addressSettingsService = {
       getSettings: jest.fn(),
+      getBestDifficultyLight: jest.fn().mockResolvedValue(null),
     };
     service = new AddressSettingsCacheService(
       addressSettingsService as unknown as AddressSettingsService,
@@ -133,7 +134,8 @@ describe('AddressSettingsCacheService', () => {
 
     it('cache miss falls through to the underlying service and stores the result', async () => {
       const { redis } = buildRedis();
-      addressSettingsService.getSettings.mockResolvedValueOnce({
+      // Light returns the row → no need to hit the entity-path upsert.
+      addressSettingsService.getBestDifficultyLight.mockResolvedValueOnce({
         bestDifficulty: 7,
         bestDifficultyUserAgent: 'ua',
       });

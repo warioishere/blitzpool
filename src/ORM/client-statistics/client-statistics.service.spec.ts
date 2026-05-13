@@ -99,8 +99,8 @@ describe.each(['sqlite', 'postgres'] as const)(
             rejectedDuplicateShareDiff1: 0,
             rejectedLowDifficultyShareCount: 0,
             rejectedLowDifficultyShareDiff1: 0,
-            createdAt: new Date(oldTime),
-            updatedAt: new Date(oldTime),
+            createdAt: oldTime,
+            updatedAt: oldTime,
           },
           {
             address: 'addr1',
@@ -116,8 +116,8 @@ describe.each(['sqlite', 'postgres'] as const)(
             rejectedDuplicateShareDiff1: 2,
             rejectedLowDifficultyShareCount: 3,
             rejectedLowDifficultyShareDiff1: 3,
-            createdAt: new Date(oldTime),
-            updatedAt: new Date(oldTime),
+            createdAt: oldTime,
+            updatedAt: oldTime,
           },
           {
             address: 'addr2',
@@ -133,8 +133,8 @@ describe.each(['sqlite', 'postgres'] as const)(
             rejectedDuplicateShareDiff1: 0,
             rejectedLowDifficultyShareCount: 0,
             rejectedLowDifficultyShareDiff1: 0,
-            createdAt: new Date(oldTime),
-            updatedAt: new Date(oldTime),
+            createdAt: oldTime,
+            updatedAt: oldTime,
           },
           {
             address: 'addr1',
@@ -150,8 +150,8 @@ describe.each(['sqlite', 'postgres'] as const)(
             rejectedDuplicateShareDiff1: 0,
             rejectedLowDifficultyShareCount: 0,
             rejectedLowDifficultyShareDiff1: 0,
-            createdAt: new Date(recentTime),
-            updatedAt: new Date(recentTime),
+            createdAt: recentTime,
+            updatedAt: recentTime,
           },
         ])
         .execute();
@@ -223,8 +223,8 @@ describe.each(['sqlite', 'postgres'] as const)(
             rejectedDuplicateShareDiff1: 0,
             rejectedLowDifficultyShareCount: 0,
             rejectedLowDifficultyShareDiff1: 0,
-            createdAt: new Date(time),
-            updatedAt: new Date(time),
+            createdAt: time,
+            updatedAt: time,
           })),
         )
         .execute();
@@ -283,8 +283,8 @@ describe.each(['sqlite', 'postgres'] as const)(
             rejectedDuplicateShareDiff1: 0,
             rejectedLowDifficultyShareCount: 0,
             rejectedLowDifficultyShareDiff1: 0,
-            createdAt: new Date(oldTime),
-            updatedAt: new Date(oldTime),
+            createdAt: oldTime,
+            updatedAt: oldTime,
           },
         ])
         .execute();

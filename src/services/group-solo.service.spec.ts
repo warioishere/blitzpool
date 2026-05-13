@@ -4,6 +4,7 @@ import { GroupSoloService } from './group-solo.service';
 import { PplnsGroupBlockHistoryEntity } from '../ORM/pplns-group/pplns-group-block-history.entity';
 import { PplnsGroupBalanceEntity } from '../ORM/pplns-group/pplns-group-balance.entity';
 import { attachMockTxManager } from './__test-helpers__/mock-tx-manager';
+import { readStoredSnapshot } from './coinbase-snapshot';
 
 // ── Mock Redis (sorted set + key-value) ─────────────────────────
 
@@ -1142,7 +1143,7 @@ describe('GroupSoloService', () => {
             // lastRoundResetAt updated
             expect(groupRepo.update).toHaveBeenCalledWith(
                 { id: 'g1' },
-                expect.objectContaining({ lastRoundResetAt: expect.any(Date) }),
+                expect.objectContaining({ lastRoundResetAt: expect.any(Number) }),
             );
         });
 
@@ -1170,7 +1171,7 @@ describe('GroupSoloService', () => {
             groupRepo.findOneBy = jest.fn(async () => ({
                 id: 'g1',
                 dissolvedAt: null,
-                lastRoundResetAt: new Date(Date.now() - 30_000),  // 30s ago
+                lastRoundResetAt: Date.now() - 30_000,  // 30s ago
             }));
             groupRepo.update = jest.fn();
 
@@ -1189,7 +1190,7 @@ describe('GroupSoloService', () => {
             const groupRepo = (service as any).groupRepo;
             groupRepo.findOneBy = jest.fn(async () => ({
                 id: 'g1',
-                dissolvedAt: new Date(),
+                dissolvedAt: Date.now(),
                 lastRoundResetAt: null,
             }));
 
@@ -1244,13 +1245,13 @@ describe('GroupSoloService', () => {
         groupService._setMembership('bc1qalice', 'g1', true);
         groupService._setMembership('bc1qbob', 'g1', true);
 
-        const STALE = new Date('2020-01-01T00:00:00Z');
+        const STALE = Date.parse('2020-01-01T00:00:00Z');
 
         // Seed: bob has 900 sats pending; alice has a stale balance row
         // (mined long ago, dust-eligible by timestamp).
         (balanceRepo._rows as any[]).push(
             { address: 'bc1qbob', groupId: 'g1', pendingSats: 900, totalPaidSats: 0,
-              lastAcceptedShareAt: new Date() },
+              lastAcceptedShareAt: Date.now() },
             { address: 'bc1qalice', groupId: 'g1', pendingSats: 100, totalPaidSats: 0,
               lastAcceptedShareAt: STALE },
         );
@@ -1264,9 +1265,9 @@ describe('GroupSoloService', () => {
         // Timestamp must have been refreshed inside the kick window —
         // not left at STALE — otherwise the next sweep cron run would
         // immediately absorb the just-credited 900 sats.
-        expect(aliceRow?.lastAcceptedShareAt).toBeInstanceOf(Date);
-        expect(aliceRow.lastAcceptedShareAt.getTime()).toBeGreaterThanOrEqual(before);
-        expect(aliceRow.lastAcceptedShareAt.getTime()).toBeLessThanOrEqual(after);
+        expect(typeof aliceRow?.lastAcceptedShareAt).toBe('number');
+        expect(aliceRow.lastAcceptedShareAt).toBeGreaterThanOrEqual(before);
+        expect(aliceRow.lastAcceptedShareAt).toBeLessThanOrEqual(after);
     });
 
     // ── Finder-bonus per-miner coinbase ────────────────────────────
@@ -1302,7 +1303,7 @@ describe('GroupSoloService', () => {
                 lastRoundResetAt: null,
                 finderBonusSats,
                 dissolvedAt: null,
-                createdAt: new Date(),
+                createdAt: Date.now(),
             });
         };
 
@@ -1365,14 +1366,14 @@ describe('GroupSoloService', () => {
 
             // Two distinct snapshots persisted in Redis, each with the
             // bonus output to its respective finder.
-            expect(redis._store.has('groupsolo:g1:snapshot:bc1qalice')).toBe(true);
-            expect(redis._store.has('groupsolo:g1:snapshot:bc1qbob')).toBe(true);
+            expect(redis._hashes.has('groupsolo:g1:snapshot:bc1qalice')).toBe(true);
+            expect(redis._hashes.has('groupsolo:g1:snapshot:bc1qbob')).toBe(true);
 
-            const aliceSnap = JSON.parse(redis._store.get('groupsolo:g1:snapshot:bc1qalice')!);
-            const bobSnap = JSON.parse(redis._store.get('groupsolo:g1:snapshot:bc1qbob')!);
+            const aliceSnap = await readStoredSnapshot(redis, 'groupsolo:g1:snapshot:bc1qalice');
+            const bobSnap = await readStoredSnapshot(redis, 'groupsolo:g1:snapshot:bc1qbob');
 
-            const aliceBonus = (aliceSnap.distribution as any[]).find(d => d.address === 'bc1qalice' && d.sats === FINDER_BONUS);
-            const bobBonus   = (bobSnap.distribution as any[]).find(d => d.address === 'bc1qbob'   && d.sats === FINDER_BONUS);
+            const aliceBonus = aliceSnap!.distribution.find(d => d.address === 'bc1qalice' && d.sats === FINDER_BONUS);
+            const bobBonus   = bobSnap!.distribution.find(d => d.address === 'bc1qbob'   && d.sats === FINDER_BONUS);
             expect(aliceBonus).toBeDefined();
             expect(bobBonus).toBeDefined();
         });
@@ -1410,7 +1411,7 @@ describe('GroupSoloService', () => {
             expect(aliceTotalPaid).toBeLessThan(bobTotalPaid);
 
             // Round resets — all per-finder snapshots cleared.
-            for (const k of redis._store.keys()) {
+            for (const k of redis._hashes.keys()) {
                 expect(k).not.toMatch(/^groupsolo:g1:snapshot/);
             }
         });
@@ -1450,7 +1451,7 @@ describe('GroupSoloService', () => {
             // No dedicated bonus output emitted; falls back to fee + prop split.
             // Snapshot is stored under the legacy "__none__" suffix so a
             // legacy onBlockFound caller (or graceful upgrade) can find it.
-            expect(redis._store.has('groupsolo:g1:snapshot:__none__')).toBe(true);
+            expect(redis._hashes.has('groupsolo:g1:snapshot:__none__')).toBe(true);
             const alice = dist.find(d => d.address === 'bc1qalice')!;
             // Same shape as the no-bonus case above — full miner cut to alice.
             expect(alice.percent).toBeCloseTo(98, 1);
@@ -1505,14 +1506,14 @@ describe('GroupSoloService', () => {
             await service.getPayoutDistribution('g1', 100_000_000, 'bc1qbob');
             await service.getPayoutDistribution('g1', 100_000_000, 'bc1qcharlie');
 
-            const snapshotKeysBefore = Array.from(redis._store.keys()).filter(k => k.startsWith('groupsolo:g1:snapshot'));
+            const snapshotKeysBefore = Array.from(redis._hashes.keys()).filter(k => k.startsWith('groupsolo:g1:snapshot'));
             expect(snapshotKeysBefore.length).toBe(3);
 
             // Charlie finds the block.
             await service.onBlockFound(900_000, 100_000_000, 'bc1qcharlie');
 
             // All 3 snapshots are now stale (round reset) → wiped.
-            const snapshotKeysAfter = Array.from(redis._store.keys()).filter(k => k.startsWith('groupsolo:g1:snapshot'));
+            const snapshotKeysAfter = Array.from(redis._hashes.keys()).filter(k => k.startsWith('groupsolo:g1:snapshot'));
             expect(snapshotKeysAfter.length).toBe(0);
         });
     });

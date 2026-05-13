@@ -1,4 +1,6 @@
-import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn } from 'typeorm';
+import { BeforeInsert, Column, Entity, Index, PrimaryGeneratedColumn } from 'typeorm';
+
+import { epochMsTransformer } from '../utils/epoch-ms-transformer';
 
 // Idempotency defense-in-depth: at most one history row per (block, address).
 // onBlockFound upserts with ON CONFLICT DO NOTHING, so a crash mid-processing
@@ -39,6 +41,11 @@ export class PplnsPayoutHistoryEntity {
     @Column({ type: 'varchar', length: 16, default: 'coinbase' })
     rowType: 'coinbase' | 'pending' | 'dust-sweep';
 
-    @CreateDateColumn()
-    createdAt: Date;
+    @Column({ type: 'bigint', transformer: epochMsTransformer })
+    createdAt: number;
+
+    @BeforeInsert()
+    private fillCreatedAt(): void {
+        if (this.createdAt == null) this.createdAt = Date.now();
+    }
 }

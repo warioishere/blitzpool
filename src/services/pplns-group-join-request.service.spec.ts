@@ -76,7 +76,7 @@ function makeService(opts: { groupPublic?: boolean; groupDissolved?: boolean } =
             };
         }),
         addMemberWithoutAdmin: jest.fn(async (groupId: string, address: string) => {
-            const m = { groupId, address, role: 'member', joinedAt: new Date() };
+            const m = { groupId, address, role: 'member', joinedAt: Date.now() };
             memberRepo.rows.push(m);
             return m;
         }),
@@ -87,7 +87,7 @@ function makeService(opts: { groupPublic?: boolean; groupDissolved?: boolean } =
             return addressEmailService._verified.get(address) ?? null;
         }),
         _setVerified: (address: string, email: string) => {
-            addressEmailService._verified.set(address, { address, email, verifiedAt: new Date() });
+            addressEmailService._verified.set(address, { address, email, verifiedAt: Date.now() });
         },
     };
     const emailService: any = {
@@ -157,7 +157,7 @@ describe('PplnsGroupJoinRequestService', () => {
         for (let i = 0; i < 10; i++) {
             requestRepo.rows.push({
                 id: `r${i}`, groupId: `g${i}`, address: 'bc1qbob',
-                email: 'bob@example.com', status: 'pending', createdAt: new Date(),
+                email: 'bob@example.com', status: 'pending', createdAt: Date.now(),
             });
         }
         await expect(service.createJoinRequest('g11', 'bc1qbob', null))
@@ -251,7 +251,7 @@ describe('PplnsGroupJoinRequestService', () => {
         // Dissolve g1 — pending request should not surface.
         groupService.getGroup = jest.fn(async (id: string) => ({
             id, name: 'Friends', creatorAddress: 'bc1qadmin',
-            isPublic: true, dissolvedAt: new Date(),
+            isPublic: true, dissolvedAt: Date.now(),
         }));
         const list = await service.listForAddress('bc1qbob');
         expect(list).toHaveLength(0);

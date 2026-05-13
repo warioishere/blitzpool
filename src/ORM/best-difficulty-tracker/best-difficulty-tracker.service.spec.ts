@@ -91,3 +91,70 @@ describe('BestDifficultyTrackerService (postgres)', () => {
     expect(tracker).toBeNull();
   });
 });
+
+// ── Real-Postgres integration ─────────────────────────────────────────
+//
+// The pg-mem suite above is type-permissive; real PG enforces bigint
+// strictly on the createdAt/updatedAt columns set by the
+// createQueryBuilder().insert() path. Connects to local container on
+// localhost:15432 — see memory/feedback-pg-e2e-tests.md for setup.
+describe('BestDifficultyTrackerService — real Postgres', () => {
+  let dataSource: DataSource;
+  let service: BestDifficultyTrackerService;
+
+  beforeAll(async () => {
+    const { TrackedEntityTimestampSubscriber } = require('../utils/tracked-entity.subscriber');
+    dataSource = new DataSource({
+      type: 'postgres',
+      host: process.env.PG_HOST ?? 'localhost',
+      port: parseInt(process.env.PG_PORT ?? '15432', 10),
+      username: process.env.PG_USER ?? 'postgres',
+      password: process.env.PG_PASSWORD ?? 'postgres',
+      database: process.env.PG_DATABASE ?? 'blitzpool_test',
+      entities: [BestDifficultyTrackerEntity],
+      subscribers: [TrackedEntityTimestampSubscriber],
+      synchronize: true,
+      dropSchema: true,
+    });
+    await dataSource.initialize();
+    service = new BestDifficultyTrackerService(
+      dataSource.getRepository(BestDifficultyTrackerEntity),
+    );
+  });
+
+  afterAll(async () => {
+    if (dataSource?.isInitialized) await dataSource.destroy();
+  });
+
+  beforeEach(async () => {
+    await dataSource.getRepository(BestDifficultyTrackerEntity).clear();
+  });
+
+  it('updateTracker upsert lands createdAt/updatedAt as bigint', async () => {
+    const beforeMs = Date.now();
+    await service.updateTracker('addr1', 100);
+    const afterMs = Date.now();
+
+    const tracker = await service.getTracker('addr1');
+    expect(tracker).not.toBeNull();
+    expect(typeof tracker!.createdAt).toBe('number');
+    expect(typeof tracker!.updatedAt).toBe('number');
+    expect(tracker!.createdAt).toBeGreaterThanOrEqual(beforeMs);
+    expect(tracker!.createdAt).toBeLessThanOrEqual(afterMs);
+    expect(tracker!.lastCheckedAt).toBeGreaterThanOrEqual(beforeMs);
+  });
+
+  it('upsert preserves createdAt on conflict, updates lastCheckedAt', async () => {
+    await service.updateTracker('addr1', 100);
+    const firstCreatedAt = (await service.getTracker('addr1'))!.createdAt!;
+
+    await new Promise(r => setTimeout(r, 5));    // ensure clock moves
+
+    await service.updateTracker('addr1', 200);
+    const t2 = await service.getTracker('addr1');
+
+    expect(t2!.bestDifficulty).toBe(200);
+    expect(t2!.createdAt).toBe(firstCreatedAt);  // preserved on conflict
+    expect(t2!.lastCheckedAt).toBeGreaterThan(firstCreatedAt);
+  });
+});

@@ -182,10 +182,10 @@ describe('StatisticsCoordinator — in-memory address/worker total flush', () =>
     await (service as any).flushAddressTotals();
 
     expect(cache.drainAddressDeltas).toHaveBeenCalledTimes(1);
-    expect(addressSettings.addSharesBulk).toHaveBeenCalledWith(expect.arrayContaining([
-      { address: 'addr1', shares: 10 },
-      { address: 'addr2', shares: 25 },
-    ]));
+    expect(addressSettings.addSharesBulk).toHaveBeenCalledTimes(1);
+    const [addrs, shares] = addressSettings.addSharesBulk.mock.calls[0];
+    expect(addrs).toEqual(['addr1', 'addr2']);
+    expect(shares).toEqual([10, 25]);
     expect(cache.confirmAddressFlush).toHaveBeenCalledWith(drained);
   });
 
@@ -241,7 +241,11 @@ describe('StatisticsCoordinator — in-memory address/worker total flush', () =>
     const service = buildServiceWithCache(cache, addressSettings, workerShares);
     await (service as any).flushWorkerTotals();
 
-    expect(workerShares.addSharesBulk).toHaveBeenCalledWith(drained);
+    expect(workerShares.addSharesBulk).toHaveBeenCalledTimes(1);
+    const [addrs, clientNames, shares] = workerShares.addSharesBulk.mock.calls[0];
+    expect(addrs).toEqual(['addrA', 'addrB']);
+    expect(clientNames).toEqual(['rig1', 'rig2']);
+    expect(shares).toEqual([12, 7]);
     expect(cache.confirmWorkerFlush).toHaveBeenCalledWith(drained);
   });
 

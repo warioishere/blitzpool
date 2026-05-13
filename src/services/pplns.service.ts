@@ -718,7 +718,7 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
 
                 const balancesToSave = new Map<string, PplnsBalanceEntity>();
                 const historyRows: PplnsPayoutHistoryEntity[] = [];
-                const now = new Date();
+                const now = Date.now();
 
                 // 1. Apply balanceAfter (absolute writes): set every
                 //    non-fee ledger entry to its new value.
@@ -894,7 +894,7 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         currentWindowShares: number;
         currentWindowPercent: number;
     }> {
-        const balance = await this.balanceService.getBalance(address);
+        const balance = await this.balanceService.getBalanceLight(address);
 
         let currentWindowShares = 0;
         let currentWindowPercent = 0;
@@ -980,7 +980,7 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         lifetimePaidSats: number;
     }> {
         const all = await this.balanceService.getAll();
-        const cutoff = new Date(Date.now() - abandonedDays * 24 * 60 * 60 * 1000);
+        const cutoff = Date.now() - abandonedDays * 24 * 60 * 60 * 1000;
 
         let totalCreditSats = 0;
         let totalDebitSats = 0;

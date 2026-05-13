@@ -323,16 +323,22 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
     const drained = this.poolShareStatisticsService.drainSlotDeltas();
     if (drained.size === 0) return;
 
-    const records = Array.from(drained.entries()).map(([time, b]) => ({
-      time,
-      accepted: b.accepted,
-      rejected: b.rejected,
-    }));
+    const n = drained.size;
+    const times: number[] = new Array(n);
+    const accepted: number[] = new Array(n);
+    const rejected: number[] = new Array(n);
+    let i = 0;
+    for (const [time, b] of drained) {
+      times[i] = time;
+      accepted[i] = b.accepted;
+      rejected[i] = b.rejected;
+      i++;
+    }
 
     try {
-      await this.bulkUpsertPoolShares(records);
+      await this.bulkUpsertPoolShares(times, accepted, rejected);
       this.poolShareStatisticsService.confirmFlush(drained);
-      console.log(`[StatisticsCoordinator] Flushed ${records.length} pool share time slots`);
+      console.log(`[StatisticsCoordinator] Flushed ${n} pool share time slots`);
       this.noteFlushSuccess('poolShares');
     } catch (error) {
       console.error(
@@ -363,17 +369,21 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
     const drained = this.poolModeHashrateService.drainSlotDeltas();
     if (drained.size === 0) return;
 
-    const records: Array<{ mode: string; time: number; diff: number }> = [];
+    const modes: string[] = [];
+    const times: number[] = [];
+    const diffs: number[] = [];
     for (const [time, modeMap] of drained) {
       for (const [mode, diff] of modeMap) {
-        records.push({ mode, time, diff });
+        modes.push(mode);
+        times.push(time);
+        diffs.push(diff);
       }
     }
 
     try {
-      await this.bulkUpsertPoolModeHashrate(records);
+      await this.bulkUpsertPoolModeHashrate(modes, times, diffs);
       this.poolModeHashrateService.confirmFlush(drained);
-      console.log(`[StatisticsCoordinator] Flushed ${records.length} pool mode-hashrate records across ${drained.size} slots`);
+      console.log(`[StatisticsCoordinator] Flushed ${modes.length} pool mode-hashrate records across ${drained.size} slots`);
       this.noteFlushSuccess('poolModeHashrate');
     } catch (err) {
       console.error(
@@ -385,17 +395,14 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
   }
 
   private async bulkUpsertPoolModeHashrate(
-    records: Array<{ mode: string; time: number; diff: number }>,
+    modes: string[],
+    times: number[],
+    diffs: number[],
   ): Promise<void> {
-    if (records.length === 0) return;
+    if (modes.length === 0) return;
     const dbType = this.dataSource.options.type;
 
     if (dbType === 'postgres') {
-      // unnest() with parallel array params — see bulkUpsertClientStatistics.
-      const modes = records.map(r => r.mode);
-      const times = records.map(r => r.time);
-      const diffs = records.map(r => r.diff);
-
       const query = `
         INSERT INTO pool_mode_hashrate (mode, time, diff)
         SELECT * FROM unnest($1::text[], $2::bigint[], $3::real[])
@@ -404,17 +411,16 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
       `;
       await this.poolModeHashrateRepository.query(query, [modes, times, diffs]);
     } else {
-      // SQLite path for dev/test parity. Same accumulate-on-conflict
-      // semantic as Postgres.
       const values: any[] = [];
-      const valueTuples = records.map(r => {
-        values.push(r.mode, r.time, r.diff);
-        return `(?, ?, ?)`;
-      }).join(', ');
+      const tuples: string[] = new Array(modes.length);
+      for (let i = 0; i < modes.length; i++) {
+        values.push(modes[i], times[i], diffs[i]);
+        tuples[i] = '(?, ?, ?)';
+      }
 
       const query = `
         INSERT INTO pool_mode_hashrate (mode, time, diff)
-        VALUES ${valueTuples}
+        VALUES ${tuples.join(', ')}
         ON CONFLICT (mode, time) DO UPDATE SET
           diff = diff + excluded.diff
       `;
@@ -442,11 +448,49 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
     const BATCH_SIZE = 1000;
     const successfullyFlushed: typeof drained = [];
 
-    for (let i = 0; i < drained.length; i += BATCH_SIZE) {
-      const batch = drained.slice(i, i + BATCH_SIZE);
+    for (let start = 0; start < drained.length; start += BATCH_SIZE) {
+      const end = Math.min(start + BATCH_SIZE, drained.length);
+      const batchLen = end - start;
+
+      // Pre-allocated parallel arrays, one per column.
+      const addresses: string[] = new Array(batchLen);
+      const clientNames: string[] = new Array(batchLen);
+      const sessionIds: string[] = new Array(batchLen);
+      const times: number[] = new Array(batchLen);
+      const shares: number[] = new Array(batchLen);
+      const acceptedCount: number[] = new Array(batchLen);
+      const rejectedCount: number[] = new Array(batchLen);
+      const rejJnfCount: number[] = new Array(batchLen);
+      const rejJnfDiff: number[] = new Array(batchLen);
+      const rejDupCount: number[] = new Array(batchLen);
+      const rejDupDiff: number[] = new Array(batchLen);
+      const rejLowCount: number[] = new Array(batchLen);
+      const rejLowDiff: number[] = new Array(batchLen);
+
+      for (let j = 0; j < batchLen; j++) {
+        const r = drained[start + j];
+        addresses[j] = r.address;
+        clientNames[j] = r.clientName;
+        sessionIds[j] = r.sessionId;
+        times[j] = r.time;
+        shares[j] = r.shares ?? 0;
+        acceptedCount[j] = r.acceptedCount ?? 0;
+        rejectedCount[j] = r.rejectedCount ?? 0;
+        rejJnfCount[j] = r.rejectedJobNotFoundCount ?? 0;
+        rejJnfDiff[j] = r.rejectedJobNotFoundDiff1 ?? 0;
+        rejDupCount[j] = r.rejectedDuplicateShareCount ?? 0;
+        rejDupDiff[j] = r.rejectedDuplicateShareDiff1 ?? 0;
+        rejLowCount[j] = r.rejectedLowDifficultyShareCount ?? 0;
+        rejLowDiff[j] = r.rejectedLowDifficultyShareDiff1 ?? 0;
+      }
+
       try {
-        await this.bulkUpsertClientStatistics(batch);
-        successfullyFlushed.push(...batch);
+        await this.bulkUpsertClientStatistics(
+          addresses, clientNames, sessionIds, times,
+          shares, acceptedCount, rejectedCount,
+          rejJnfCount, rejJnfDiff, rejDupCount, rejDupDiff, rejLowCount, rejLowDiff,
+        );
+        for (let j = start; j < end; j++) successfullyFlushed.push(drained[j]);
       } catch (error) {
         console.error(`[StatisticsCoordinator] Failed to flush client statistics batch:`, error);
         // Failed batch stays in the cache (we'll only confirm successful ones below).
@@ -483,12 +527,22 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
       rejectedByWorker.set(mapKey, entry);
     }
 
-    const rejectedUpdates = [...rejectedByWorker.values()].filter(u => u.rejectedShares > 0);
-    if (rejectedUpdates.length > 0) {
-      try {
-        await this.workerSharesService.addRejectedBulk(rejectedUpdates);
-      } catch (error) {
-        console.error('[StatisticsCoordinator] Failed to flush rejected worker totals:', error);
+    if (rejectedByWorker.size > 0) {
+      const rejAddresses: string[] = [];
+      const rejClientNames: string[] = [];
+      const rejShares: number[] = [];
+      for (const u of rejectedByWorker.values()) {
+        if (u.rejectedShares <= 0) continue;
+        rejAddresses.push(u.address);
+        rejClientNames.push(u.clientName);
+        rejShares.push(u.rejectedShares);
+      }
+      if (rejAddresses.length > 0) {
+        try {
+          await this.workerSharesService.addRejectedBulk(rejAddresses, rejClientNames, rejShares);
+        } catch (error) {
+          console.error('[StatisticsCoordinator] Failed to flush rejected worker totals:', error);
+        }
       }
     }
   }
@@ -501,17 +555,21 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
     const drained = this.poolRejectedStatisticsService.drainSlotDeltas();
     if (drained.size === 0) return;
 
-    const records: Array<{ time: number; reason: string; count: number }> = [];
-    for (const [time, reasons] of drained) {
-      for (const [reason, count] of reasons) {
-        records.push({ time, reason, count });
+    const times: number[] = [];
+    const reasons: string[] = [];
+    const counts: number[] = [];
+    for (const [time, reasonMap] of drained) {
+      for (const [reason, count] of reasonMap) {
+        times.push(time);
+        reasons.push(reason);
+        counts.push(count);
       }
     }
 
     try {
-      await this.bulkUpsertPoolRejectedStatistics(records);
+      await this.bulkUpsertPoolRejectedStatistics(times, reasons, counts);
       this.poolRejectedStatisticsService.confirmFlush(drained);
-      console.log(`[StatisticsCoordinator] Flushed ${records.length} pool rejected statistics records`);
+      console.log(`[StatisticsCoordinator] Flushed ${times.length} pool rejected statistics records`);
       this.noteFlushSuccess('poolRejected');
     } catch (error) {
       console.error('[StatisticsCoordinator] Failed to flush pool rejected statistics to database:', error);
@@ -528,10 +586,25 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
     const drained = this.clientRejectedStatisticsService.drainDeltas();
     if (drained.length === 0) return;
 
+    const n = drained.length;
+    const addresses: string[] = new Array(n);
+    const times: number[] = new Array(n);
+    const reasons: string[] = new Array(n);
+    const counts: number[] = new Array(n);
+    const shares: number[] = new Array(n);
+    for (let i = 0; i < n; i++) {
+      const r = drained[i];
+      addresses[i] = r.address;
+      times[i] = r.time;
+      reasons[i] = r.reason;
+      counts[i] = r.count;
+      shares[i] = r.shares;
+    }
+
     try {
-      await this.bulkUpsertClientRejectedStatistics(drained);
+      await this.bulkUpsertClientRejectedStatistics(addresses, times, reasons, counts, shares);
       this.clientRejectedStatisticsService.confirmFlush(drained);
-      console.log(`[StatisticsCoordinator] Flushed ${drained.length} client rejected statistics records`);
+      console.log(`[StatisticsCoordinator] Flushed ${n} client rejected statistics records`);
       this.noteFlushSuccess('clientRejected');
     } catch (error) {
       console.error('[StatisticsCoordinator] Failed to flush client rejected statistics to database:', error);
@@ -553,12 +626,20 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
     const deltas = this.shareTotalsCache.drainAddressDeltas();
     if (deltas.size === 0) return;
 
-    const updates = Array.from(deltas.entries()).map(([address, shares]) => ({ address, shares }));
+    const n = deltas.size;
+    const addresses: string[] = new Array(n);
+    const sharesArr: number[] = new Array(n);
+    let i = 0;
+    for (const [address, shares] of deltas) {
+      addresses[i] = address;
+      sharesArr[i] = shares;
+      i++;
+    }
 
     try {
-      await this.addressSettingsService.addSharesBulk(updates);
+      await this.addressSettingsService.addSharesBulk(addresses, sharesArr);
       this.shareTotalsCache.confirmAddressFlush(deltas);
-      console.log(`[StatisticsCoordinator] Flushed ${updates.length} address total updates`);
+      console.log(`[StatisticsCoordinator] Flushed ${n} address total updates`);
       this.noteFlushSuccess('addressTotals');
     } catch (error) {
       console.error('[StatisticsCoordinator] Failed to flush address totals to database:', error);
@@ -575,8 +656,19 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
     const drained = this.shareTotalsCache.drainWorkerDeltas();
     if (drained.length === 0) return;
 
+    const n = drained.length;
+    const addresses: string[] = new Array(n);
+    const clientNames: string[] = new Array(n);
+    const sharesArr: number[] = new Array(n);
+    for (let i = 0; i < n; i++) {
+      const r = drained[i];
+      addresses[i] = r.address;
+      clientNames[i] = r.clientName;
+      sharesArr[i] = r.shares;
+    }
+
     try {
-      await this.workerSharesService.addSharesBulk(drained);
+      await this.workerSharesService.addSharesBulk(addresses, clientNames, sharesArr);
       this.shareTotalsCache.confirmWorkerFlush(drained);
       this.noteFlushSuccess('workerTotals');
     } catch (error) {
@@ -589,38 +681,40 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
   /**
    * Bulk upsert pool shares to database (PostgreSQL or SQLite)
    */
-  private async bulkUpsertPoolShares(records: Array<{ time: number; accepted: number; rejected: number }>): Promise<void> {
+  private async bulkUpsertPoolShares(
+    times: number[],
+    accepted: number[],
+    rejected: number[],
+  ): Promise<void> {
     const dbType = this.dataSource.options.type;
 
     if (dbType === 'postgres') {
       // unnest() with parallel array params (~9× faster than VALUES list,
       // see comment on bulkUpsertClientStatistics for the breakdown).
-      const times = records.map(r => r.time);
-      const accepted = records.map(r => r.accepted);
-      const rejected = records.map(r => r.rejected);
-
       const query = `
         INSERT INTO pool_share_statistics_entity (time, accepted, rejected)
         SELECT * FROM unnest($1::bigint[], $2::real[], $3::real[])
         ON CONFLICT (time) DO UPDATE SET
           accepted = pool_share_statistics_entity.accepted + EXCLUDED.accepted,
           rejected = pool_share_statistics_entity.rejected + EXCLUDED.rejected,
-          "updatedAt" = NOW()
+          "updatedAt" = (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint
       `;
 
       await this.poolShareStatisticsRepository.query(query, [times, accepted, rejected]);
     } else {
-      // SQLite: Use INSERT ... ON CONFLICT to accumulate shares (not replace)
-      const values: any[] = [];
-      const valueTuples = records.map(r => {
-        const tuple = `(?, ?, ?)`;
-        values.push(r.time, r.accepted, r.rejected);
-        return tuple;
-      }).join(', ');
+      const n = times.length;
+      const values: any[] = new Array(n * 3);
+      const tuples: string[] = new Array(n);
+      for (let i = 0; i < n; i++) {
+        values[i * 3] = times[i];
+        values[i * 3 + 1] = accepted[i];
+        values[i * 3 + 2] = rejected[i];
+        tuples[i] = '(?, ?, ?)';
+      }
 
       const query = `
         INSERT INTO pool_share_statistics_entity (time, accepted, rejected)
-        VALUES ${valueTuples}
+        VALUES ${tuples.join(', ')}
         ON CONFLICT (time) DO UPDATE SET
           accepted = accepted + excluded.accepted,
           rejected = rejected + excluded.rejected,
@@ -643,24 +737,24 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
    * Local benchmark on prod hardware: 1500-row insert went 238ms → 27ms (~9×).
    * Identical ON CONFLICT semantics as the previous VALUES version.
    */
-  private async bulkUpsertClientStatistics(records: Array<Partial<ClientStatisticsEntity>>): Promise<void> {
+  private async bulkUpsertClientStatistics(
+    addresses: string[],
+    clientNames: string[],
+    sessionIds: string[],
+    times: number[],
+    shares: number[],
+    acceptedCount: number[],
+    rejectedCount: number[],
+    rejJnfCount: number[],
+    rejJnfDiff: number[],
+    rejDupCount: number[],
+    rejDupDiff: number[],
+    rejLowCount: number[],
+    rejLowDiff: number[],
+  ): Promise<void> {
     const dbType = this.dataSource.options.type;
 
     if (dbType === 'postgres') {
-      const addresses = records.map(r => r.address);
-      const clientNames = records.map(r => r.clientName);
-      const sessionIds = records.map(r => r.sessionId);
-      const times = records.map(r => r.time);
-      const shares = records.map(r => r.shares ?? 0);
-      const acceptedCounts = records.map(r => r.acceptedCount ?? 0);
-      const rejectedCounts = records.map(r => r.rejectedCount ?? 0);
-      const rejJnfCount = records.map(r => r.rejectedJobNotFoundCount ?? 0);
-      const rejJnfDiff = records.map(r => r.rejectedJobNotFoundDiff1 ?? 0);
-      const rejDupCount = records.map(r => r.rejectedDuplicateShareCount ?? 0);
-      const rejDupDiff = records.map(r => r.rejectedDuplicateShareDiff1 ?? 0);
-      const rejLowCount = records.map(r => r.rejectedLowDifficultyShareCount ?? 0);
-      const rejLowDiff = records.map(r => r.rejectedLowDifficultyShareDiff1 ?? 0);
-
       const query = `
         INSERT INTO client_statistics_entity
           (address, "clientName", "sessionId", time, shares, "acceptedCount", "rejectedCount",
@@ -683,35 +777,42 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
           "rejectedDuplicateShareDiff1" = client_statistics_entity."rejectedDuplicateShareDiff1" + EXCLUDED."rejectedDuplicateShareDiff1",
           "rejectedLowDifficultyShareCount" = client_statistics_entity."rejectedLowDifficultyShareCount" + EXCLUDED."rejectedLowDifficultyShareCount",
           "rejectedLowDifficultyShareDiff1" = client_statistics_entity."rejectedLowDifficultyShareDiff1" + EXCLUDED."rejectedLowDifficultyShareDiff1",
-          "updatedAt" = NOW()
+          "updatedAt" = (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint
       `;
 
       await this.clientStatisticsRepository.query(query, [
         addresses, clientNames, sessionIds, times,
-        shares, acceptedCounts, rejectedCounts,
+        shares, acceptedCount, rejectedCount,
         rejJnfCount, rejJnfDiff, rejDupCount, rejDupDiff, rejLowCount, rejLowDiff,
       ]);
     } else {
-      // SQLite: Use INSERT ... ON CONFLICT DO UPDATE to properly accumulate shares
-      const values: any[] = [];
-      const valueTuples = records.map(r => {
-        const tuple = `(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
-        values.push(
-          r.address, r.clientName, r.sessionId, r.time,
-          r.shares, r.acceptedCount, r.rejectedCount,
-          r.rejectedJobNotFoundCount, r.rejectedJobNotFoundDiff1,
-          r.rejectedDuplicateShareCount, r.rejectedDuplicateShareDiff1,
-          r.rejectedLowDifficultyShareCount, r.rejectedLowDifficultyShareDiff1
-        );
-        return tuple;
-      }).join(', ');
+      const n = addresses.length;
+      const values: any[] = new Array(n * 13);
+      const tuples: string[] = new Array(n);
+      for (let i = 0; i < n; i++) {
+        const base = i * 13;
+        values[base + 0] = addresses[i];
+        values[base + 1] = clientNames[i];
+        values[base + 2] = sessionIds[i];
+        values[base + 3] = times[i];
+        values[base + 4] = shares[i];
+        values[base + 5] = acceptedCount[i];
+        values[base + 6] = rejectedCount[i];
+        values[base + 7] = rejJnfCount[i];
+        values[base + 8] = rejJnfDiff[i];
+        values[base + 9] = rejDupCount[i];
+        values[base + 10] = rejDupDiff[i];
+        values[base + 11] = rejLowCount[i];
+        values[base + 12] = rejLowDiff[i];
+        tuples[i] = '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
+      }
 
       const query = `
         INSERT INTO client_statistics_entity
           (address, clientName, sessionId, time, shares, acceptedCount, rejectedCount,
            rejectedJobNotFoundCount, rejectedJobNotFoundDiff1, rejectedDuplicateShareCount,
            rejectedDuplicateShareDiff1, rejectedLowDifficultyShareCount, rejectedLowDifficultyShareDiff1)
-        VALUES ${valueTuples}
+        VALUES ${tuples.join(', ')}
         ON CONFLICT (address, clientName, sessionId, time) DO UPDATE SET
           shares = shares + excluded.shares,
           acceptedCount = acceptedCount + excluded.acceptedCount,
@@ -732,36 +833,37 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
   /**
    * Bulk upsert pool rejected statistics to database (PostgreSQL or SQLite)
    */
-  private async bulkUpsertPoolRejectedStatistics(records: Array<Partial<PoolRejectedStatisticsEntity>>): Promise<void> {
+  private async bulkUpsertPoolRejectedStatistics(
+    times: number[],
+    reasons: string[],
+    counts: number[],
+  ): Promise<void> {
     const dbType = this.dataSource.options.type;
 
     if (dbType === 'postgres') {
-      // unnest() with parallel array params — see bulkUpsertClientStatistics.
-      const times = records.map(r => r.time);
-      const reasons = records.map(r => r.reason);
-      const counts = records.map(r => r.count);
-
       const query = `
         INSERT INTO pool_rejected_statistics_entity (time, reason, count)
         SELECT * FROM unnest($1::bigint[], $2::text[], $3::real[])
         ON CONFLICT (time, reason) DO UPDATE SET
           count = pool_rejected_statistics_entity.count + EXCLUDED.count,
-          "updatedAt" = NOW()
+          "updatedAt" = (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint
       `;
 
       await this.poolRejectedStatisticsRepository.query(query, [times, reasons, counts]);
     } else {
-      // SQLite: Use INSERT ... ON CONFLICT DO UPDATE to accumulate
-      const values: any[] = [];
-      const valueTuples = records.map(r => {
-        const tuple = `(?, ?, ?)`;
-        values.push(r.time, r.reason, r.count);
-        return tuple;
-      }).join(', ');
+      const n = times.length;
+      const values: any[] = new Array(n * 3);
+      const tuples: string[] = new Array(n);
+      for (let i = 0; i < n; i++) {
+        values[i * 3] = times[i];
+        values[i * 3 + 1] = reasons[i];
+        values[i * 3 + 2] = counts[i];
+        tuples[i] = '(?, ?, ?)';
+      }
 
       const query = `
         INSERT INTO pool_rejected_statistics_entity (time, reason, count)
-        VALUES ${valueTuples}
+        VALUES ${tuples.join(', ')}
         ON CONFLICT (time, reason) DO UPDATE SET
           count = count + excluded.count,
           updatedAt = datetime('now')
@@ -774,39 +876,43 @@ export class StatisticsCoordinatorService implements OnModuleInit, OnModuleDestr
   /**
    * Bulk upsert client rejected statistics to database (PostgreSQL or SQLite)
    */
-  private async bulkUpsertClientRejectedStatistics(records: Array<Partial<ClientRejectedStatisticsEntity>>): Promise<void> {
+  private async bulkUpsertClientRejectedStatistics(
+    addresses: string[],
+    times: number[],
+    reasons: string[],
+    counts: number[],
+    shares: number[],
+  ): Promise<void> {
     const dbType = this.dataSource.options.type;
 
     if (dbType === 'postgres') {
-      // unnest() with parallel array params — see bulkUpsertClientStatistics.
-      const addresses = records.map(r => r.address);
-      const times = records.map(r => r.time);
-      const reasons = records.map(r => r.reason);
-      const counts = records.map(r => r.count);
-      const shares = records.map(r => r.shares);
-
       const query = `
         INSERT INTO client_rejected_statistics_entity (address, time, reason, count, shares)
         SELECT * FROM unnest($1::text[], $2::bigint[], $3::text[], $4::real[], $5::real[])
         ON CONFLICT (address, time, reason) DO UPDATE SET
           count = client_rejected_statistics_entity.count + EXCLUDED.count,
           shares = client_rejected_statistics_entity.shares + EXCLUDED.shares,
-          "updatedAt" = NOW()
+          "updatedAt" = (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint
       `;
 
       await this.clientRejectedStatisticsRepository.query(query, [addresses, times, reasons, counts, shares]);
     } else {
-      // SQLite: Use INSERT ... ON CONFLICT DO UPDATE to accumulate
-      const values: any[] = [];
-      const valueTuples = records.map(r => {
-        const tuple = `(?, ?, ?, ?, ?)`;
-        values.push(r.address, r.time, r.reason, r.count, r.shares);
-        return tuple;
-      }).join(', ');
+      const n = addresses.length;
+      const values: any[] = new Array(n * 5);
+      const tuples: string[] = new Array(n);
+      for (let i = 0; i < n; i++) {
+        const base = i * 5;
+        values[base] = addresses[i];
+        values[base + 1] = times[i];
+        values[base + 2] = reasons[i];
+        values[base + 3] = counts[i];
+        values[base + 4] = shares[i];
+        tuples[i] = '(?, ?, ?, ?, ?)';
+      }
 
       const query = `
         INSERT INTO client_rejected_statistics_entity (address, time, reason, count, shares)
-        VALUES ${valueTuples}
+        VALUES ${tuples.join(', ')}
         ON CONFLICT (address, time, reason) DO UPDATE SET
           count = count + excluded.count,
           shares = shares + excluded.shares,

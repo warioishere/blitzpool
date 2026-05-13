@@ -70,11 +70,11 @@ describe.each(['sqlite'] as const)('WorkerSharesService (%s)', (driver) => {
 
     describe('addRejectedBulk', () => {
         it('handles empty array without error', async () => {
-            await expect(service.addRejectedBulk([])).resolves.not.toThrow();
+            await expect(service.addRejectedBulk([], [], [])).resolves.not.toThrow();
         });
 
         it('inserts a new row with shares=0 when the worker does not exist yet', async () => {
-            await service.addRejectedBulk([{ address: 'addr1', clientName: 'rig1', rejectedShares: 7 }]);
+            await service.addRejectedBulk(['addr1'], ['rig1'], [7]);
 
             const row = await ds.getRepository(WorkerSharesEntity).findOne({
                 where: { address: 'addr1', clientName: 'rig1' },
@@ -88,7 +88,7 @@ describe.each(['sqlite'] as const)('WorkerSharesService (%s)', (driver) => {
                 address: 'addr1', clientName: 'rig1', shares: 500, rejectedShares: 5,
             });
 
-            await service.addRejectedBulk([{ address: 'addr1', clientName: 'rig1', rejectedShares: 3 }]);
+            await service.addRejectedBulk(['addr1'], ['rig1'], [3]);
 
             const row = await ds.getRepository(WorkerSharesEntity).findOne({
                 where: { address: 'addr1', clientName: 'rig1' },
@@ -98,10 +98,11 @@ describe.each(['sqlite'] as const)('WorkerSharesService (%s)', (driver) => {
         });
 
         it('handles multiple workers in a single call', async () => {
-            await service.addRejectedBulk([
-                { address: 'addr1', clientName: 'rig1', rejectedShares: 3 },
-                { address: 'addr1', clientName: 'rig2', rejectedShares: 5 },
-            ]);
+            await service.addRejectedBulk(
+                ['addr1', 'addr1'],
+                ['rig1', 'rig2'],
+                [3, 5],
+            );
 
             const totals = await service.getWorkerTotals('addr1');
             const rig1 = totals.find(t => t.clientName === 'rig1');
@@ -111,8 +112,8 @@ describe.each(['sqlite'] as const)('WorkerSharesService (%s)', (driver) => {
         });
 
         it('accumulates correctly across multiple calls', async () => {
-            await service.addRejectedBulk([{ address: 'addr1', clientName: 'rig1', rejectedShares: 4 }]);
-            await service.addRejectedBulk([{ address: 'addr1', clientName: 'rig1', rejectedShares: 6 }]);
+            await service.addRejectedBulk(['addr1'], ['rig1'], [4]);
+            await service.addRejectedBulk(['addr1'], ['rig1'], [6]);
 
             const row = await ds.getRepository(WorkerSharesEntity).findOne({
                 where: { address: 'addr1', clientName: 'rig1' },
@@ -142,8 +143,8 @@ describe.each(['sqlite'] as const)('WorkerSharesService (%s)', (driver) => {
 
     describe('addSharesBulk and addRejectedBulk independence', () => {
         it('addSharesBulk does not overwrite rejectedShares', async () => {
-            await service.addRejectedBulk([{ address: 'addr1', clientName: 'rig1', rejectedShares: 10 }]);
-            await service.addSharesBulk([{ address: 'addr1', clientName: 'rig1', shares: 200 }]);
+            await service.addRejectedBulk(['addr1'], ['rig1'], [10]);
+            await service.addSharesBulk(['addr1'], ['rig1'], [200]);
 
             const row = await ds.getRepository(WorkerSharesEntity).findOne({
                 where: { address: 'addr1', clientName: 'rig1' },
@@ -159,7 +160,7 @@ describe.each(['sqlite'] as const)('WorkerSharesService (%s)', (driver) => {
             await ds.getRepository(WorkerSharesEntity).save({
                 address: 'addr1', clientName: 'rig1', shares: 300, rejectedShares: 0,
             });
-            await service.addRejectedBulk([{ address: 'addr1', clientName: 'rig1', rejectedShares: 15 }]);
+            await service.addRejectedBulk(['addr1'], ['rig1'], [15]);
 
             const row = await ds.getRepository(WorkerSharesEntity).findOne({
                 where: { address: 'addr1', clientName: 'rig1' },

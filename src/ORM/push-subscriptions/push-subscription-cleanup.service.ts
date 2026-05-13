@@ -43,17 +43,16 @@ export class PushSubscriptionCleanupService implements OnModuleInit {
         try {
             console.log(`[PushSubscriptionCleanup] Starting cleanup job...`);
 
-            // Calculate cutoff date (X days ago)
-            const cutoffDate = new Date();
-            cutoffDate.setDate(cutoffDate.getDate() - this.staleThresholdDays);
+            // Calculate cutoff (X days ago, epoch ms)
+            const cutoffMs = Date.now() - this.staleThresholdDays * 24 * 60 * 60 * 1000;
 
             // Find subscriptions with no activity (lastNotificationAt is null or older than threshold)
             const staleSubscriptions = await this.pushSubscriptionRepository
                 .createQueryBuilder('subscription')
                 .where(
-                    '(subscription.lastNotificationAt IS NULL AND subscription.createdAt < :cutoffDate) OR ' +
-                    '(subscription.lastNotificationAt < :cutoffDate)',
-                    { cutoffDate }
+                    '(subscription.lastNotificationAt IS NULL AND subscription.createdAt < :cutoffMs) OR ' +
+                    '(subscription.lastNotificationAt < :cutoffMs)',
+                    { cutoffMs }
                 )
                 .getMany();
 
@@ -86,15 +85,14 @@ export class PushSubscriptionCleanupService implements OnModuleInit {
         try {
             console.log(`[PushSubscriptionCleanup] Manual cleanup triggered`);
 
-            const cutoffDate = new Date();
-            cutoffDate.setDate(cutoffDate.getDate() - this.staleThresholdDays);
+            const cutoffMs = Date.now() - this.staleThresholdDays * 24 * 60 * 60 * 1000;
 
             const staleSubscriptions = await this.pushSubscriptionRepository
                 .createQueryBuilder('subscription')
                 .where(
-                    '(subscription.lastNotificationAt IS NULL AND subscription.createdAt < :cutoffDate) OR ' +
-                    '(subscription.lastNotificationAt < :cutoffDate)',
-                    { cutoffDate }
+                    '(subscription.lastNotificationAt IS NULL AND subscription.createdAt < :cutoffMs) OR ' +
+                    '(subscription.lastNotificationAt < :cutoffMs)',
+                    { cutoffMs }
                 )
                 .getMany();
 

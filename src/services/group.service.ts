@@ -301,7 +301,7 @@ export class GroupService implements OnModuleInit {
         }
 
         const lastActive = await this.groupSoloService.getMemberLastActive(groupId, address);
-        const reference = lastActive ?? member.joinedAt.getTime();
+        const reference = lastActive ?? member.joinedAt;
         const daysSince = (Date.now() - reference) / MS_PER_DAY;
         if (daysSince < this.kickInactivityDays) {
             throw new GroupServiceError(
@@ -606,7 +606,7 @@ export class GroupService implements OnModuleInit {
         const group = await this.groupRepo.findOneBy({ id: groupId });
         if (group) {
             group.active = false;
-            group.dissolvedAt = new Date();
+            group.dissolvedAt = Date.now();
             await this.groupRepo.save(group);
         }
         await this.rebuildCache();

@@ -21,7 +21,7 @@ function makeGroup(overrides: Partial<PplnsGroupEntity> = {}): PplnsGroupEntity 
         name: 'Test Group',
         creatorAddress: 'bc1qcreator',
         adminTokenHash: 'hash',
-        createdAt: new Date('2026-01-01T00:00:00Z'),
+        createdAt: Date.parse('2026-01-01T00:00:00Z'),
         dissolvedAt: null,
         roundResetPreset: 'custom',
         roundResetIntervalDays: 7,
@@ -88,7 +88,7 @@ describe('GroupRoundResetService', () => {
 
     it('skips scheduling when group is dissolved', () => {
         const { service, schedulerRegistry } = makeService();
-        service.applyConfig(makeGroup({ dissolvedAt: new Date() }));
+        service.applyConfig(makeGroup({ dissolvedAt: Date.now() }));
         expect(schedulerRegistry.addCronJob).not.toHaveBeenCalled();
     });
 
@@ -174,7 +174,7 @@ describe('GroupRoundResetService', () => {
         const { service, groupRepo, groupSoloService, jobs } = makeService();
         // 7-day interval, 12h tolerance → due threshold is 6.5 days. Set
         // lastRoundResetAt 3 days ago: clearly too early.
-        const recent = new Date(Date.now() - 3 * DAY_MS);
+        const recent = Date.now() - 3 * DAY_MS;
         const group = makeGroup({ lastRoundResetAt: recent });
         groupRepo.findOneBy.mockResolvedValue(group);
         service.applyConfig(group);
@@ -188,7 +188,7 @@ describe('GroupRoundResetService', () => {
     it('fireIfDue: interval elapsed → reset fires', async () => {
         const { service, groupRepo, groupSoloService, jobs } = makeService();
         // 7-day interval, last reset 8 days ago.
-        const old = new Date(Date.now() - 8 * DAY_MS);
+        const old = Date.now() - 8 * DAY_MS;
         const group = makeGroup({ lastRoundResetAt: old });
         groupRepo.findOneBy.mockResolvedValue(group);
         service.applyConfig(group);
@@ -204,7 +204,7 @@ describe('GroupRoundResetService', () => {
         // 7-day interval, last reset 6.6 days ago. With 12h tolerance the
         // due-threshold is 6.5 days, so this should fire.
         const elapsed = 6.6 * DAY_MS;
-        const last = new Date(Date.now() - elapsed);
+        const last = Date.now() - elapsed;
         const group = makeGroup({ lastRoundResetAt: last });
         groupRepo.findOneBy.mockResolvedValue(group);
         service.applyConfig(group);
@@ -218,7 +218,7 @@ describe('GroupRoundResetService', () => {
     it('fireIfDue: tolerance edge — does NOT fire at 6.4 days', async () => {
         const { service, groupRepo, groupSoloService, jobs } = makeService();
         // 7-day interval, 12h tolerance → 6.5d threshold. 6.4 days elapsed → too early.
-        const last = new Date(Date.now() - 6.4 * DAY_MS);
+        const last = Date.now() - 6.4 * DAY_MS;
         const group = makeGroup({ lastRoundResetAt: last });
         groupRepo.findOneBy.mockResolvedValue(group);
         service.applyConfig(group);
@@ -231,7 +231,7 @@ describe('GroupRoundResetService', () => {
 
     it('fireIfDue: dissolved group → unschedules itself, does not reset', async () => {
         const { service, groupRepo, groupSoloService, schedulerRegistry, jobs } = makeService();
-        const group = makeGroup({ dissolvedAt: new Date() });
+        const group = makeGroup({ dissolvedAt: Date.now() });
         // applyConfig short-circuits on dissolve, so register manually via
         // a non-dissolved view first, then return the dissolved view from
         // findOneBy to simulate "dissolved between schedule and tick".
@@ -266,7 +266,7 @@ describe('GroupRoundResetService', () => {
         const group = makeGroup({
             roundResetPreset: 'daily',
             roundResetIntervalDays: null as any,
-            lastRoundResetAt: new Date(Date.now() - 60 * 1000), // 1 min ago
+            lastRoundResetAt: Date.now() - 60 * 1000, // 1 min ago
         });
         groupRepo.findOneBy.mockResolvedValue(group);
         service.applyConfig(group);
@@ -360,7 +360,7 @@ describe('GroupRoundResetService', () => {
         });
 
         it('returns null when group is dissolved', () => {
-            expect(computeNextResetAt(makeGroup({ dissolvedAt: new Date() }))).toBeNull();
+            expect(computeNextResetAt(makeGroup({ dissolvedAt: Date.now() }))).toBeNull();
         });
 
         it('returns null when timezone is missing', () => {
@@ -422,7 +422,7 @@ describe('GroupRoundResetService', () => {
         });
 
         it('custom: lastResetAt 3d ago + 7d interval → next reset >= ~4d from now', () => {
-            const last = new Date(Date.now() - 3 * DAY_MS);
+            const last = Date.now() - 3 * DAY_MS;
             const next = computeNextResetAt(makeGroup({
                 roundResetPreset: 'custom',
                 roundResetIntervalDays: 7,

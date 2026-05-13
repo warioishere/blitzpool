@@ -401,7 +401,7 @@ export class AppController {
       this.poolShareStatisticsService.getTotalsSince(now - oneDay * 14),
       this.poolShareStatisticsService.getTotalsSince(now - oneDay * 30),
     ]);
-    const sinceBlock = latestBlock?.createdAt ? latestBlock.createdAt.getTime() : 0;
+    const sinceBlock = latestBlock?.createdAt ?? 0;
     const totalsSinceBlock = await this.poolShareStatisticsService.getTotalsSince(sinceBlock);
 
     const data = {

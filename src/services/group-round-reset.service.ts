@@ -171,7 +171,7 @@ export class GroupRoundResetService implements OnApplicationBootstrap {
             }
             const intervalMs = intervalDays * 24 * 60 * 60 * 1000;
             const elapsedMs = group.lastRoundResetAt
-                ? Date.now() - group.lastRoundResetAt.getTime()
+                ? Date.now() - group.lastRoundResetAt
                 : Number.POSITIVE_INFINITY;  // never reset → fire immediately
             const dueThreshold = intervalMs - DST_TOLERANCE_MS;
 
@@ -249,7 +249,7 @@ export function computeNextResetAt(group: PplnsGroupEntity): Date | null {
     // at or after the elapsed-due threshold.
     const intervalMs = group.roundResetIntervalDays! * 24 * 60 * 60 * 1000;
     const earliestMs = group.lastRoundResetAt
-        ? group.lastRoundResetAt.getTime() + intervalMs - DST_TOLERANCE_MS
+        ? group.lastRoundResetAt + intervalMs - DST_TOLERANCE_MS
         : Date.now();
     const lookaheadDays = group.roundResetIntervalDays! + 2; // +2 covers DST + boundary
     const upcoming = tempJob.nextDates(lookaheadDays);

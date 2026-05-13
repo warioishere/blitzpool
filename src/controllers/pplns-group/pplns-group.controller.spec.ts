@@ -6,7 +6,7 @@ import { HttpException } from '@nestjs/common';
 describe('PplnsGroupController.chart', () => {
 
     function setup(opts: {
-        group?: { id: string; dissolvedAt: Date | null };
+        group?: { id: string; dissolvedAt: number | null };
         members?: { address: string }[];
         chartByAddress?: Record<string, { label: string; data: number }[]>;
     }) {
@@ -102,7 +102,7 @@ describe('PplnsGroupController.chart', () => {
 
     it('returns 404 when the group has been dissolved', async () => {
         const { controller } = setup({
-            group: { id: 'g1', dissolvedAt: new Date() },
+            group: { id: 'g1', dissolvedAt: Date.now() },
         });
         await expect(controller.chart('g1', '1d')).rejects.toBeInstanceOf(HttpException);
     });

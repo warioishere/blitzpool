@@ -216,7 +216,7 @@ export class AggregationService implements OnModuleInit {
       const now = Date.now();
       const oneDay = 24 * 60 * 60 * 1000;
       const latestBlock = await this.blocksService.getLatestBlock();
-      const sinceBlock = latestBlock?.createdAt ? latestBlock.createdAt.getTime() : 0;
+      const sinceBlock = latestBlock?.createdAt ?? 0;
 
       const [totals1d, totals14d, totals30d, totalsSinceBlock] = await Promise.all([
         this.poolShareStatisticsService.getTotalsSince(now - oneDay),

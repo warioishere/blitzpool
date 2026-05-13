@@ -28,15 +28,10 @@
  * are written).
  */
 
-const E2E_ENABLED = process.env.PG_E2E === '1';
-
-// Lazy-import pg so the spec doesn't fail to load if pg isn't accessible.
-// (typeorm pulls it in transitively, so it's always available, but we
-// don't want the require to happen at module-load time when the e2e
-// machinery is gated.)
-const describeIf = E2E_ENABLED ? describe : describe.skip;
-
-describeIf('UNNEST refactor — end-to-end equivalence vs old VALUES path', () => {
+// Defaults match the local `blitzpool-test-pg` container (see
+// memory/feedback-pg-e2e-tests.md). Override via PGHOST/PGPORT/PGUSER/
+// PGPASSWORD/PGDATABASE env vars when running against a different PG.
+describe('UNNEST refactor — end-to-end equivalence vs old VALUES path', () => {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { Client } = require('pg');
     let client: any;
@@ -44,10 +39,10 @@ describeIf('UNNEST refactor — end-to-end equivalence vs old VALUES path', () =
     beforeAll(async () => {
         client = new Client({
             host: process.env.PGHOST ?? 'localhost',
-            port: parseInt(process.env.PGPORT ?? '5432', 10),
+            port: parseInt(process.env.PGPORT ?? '15432', 10),
             user: process.env.PGUSER ?? 'postgres',
             password: process.env.PGPASSWORD ?? 'postgres',
-            database: process.env.PGDATABASE ?? 'public_pool',
+            database: process.env.PGDATABASE ?? 'blitzpool_test',
         });
         await client.connect();
     }, 30_000);

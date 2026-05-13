@@ -1,9 +1,4 @@
-import Big from 'big.js';
 import * as bitcoinjs from 'bitcoinjs-lib';
-
-const TRUE_DIFF_ONE = Big(
-  '26959535291011309493156476344723991336010898738574164086137773096960'
-);
 
 const TRUE_DIFF_ONE_BIGINT = BigInt(
   '26959535291011309493156476344723991336010898738574164086137773096960'
@@ -12,14 +7,31 @@ const TRUE_DIFF_ONE_BIGINT = BigInt(
 /** 2^256 as BigInt, used for SV2 target calculations */
 const TWO_TO_256 = 1n << 256n;
 
+/**
+ * 1e15 = 10^15 — largest power of ten ≤ Number.MAX_SAFE_INTEGER (2^53 ≈ 9.007e15).
+ * Both 1e15 and any value < 1e15 round-trip through Number exactly.
+ */
+const FRACTION_SCALE = 1_000_000_000_000_000n;
+const FRACTION_SCALE_NUM = 1e15;
+
+/**
+ * difficulty = TRUE_DIFF_ONE / divisor as a Number. SCALE-then-divide keeps
+ * sub-unit precision for hard targets (divisor > TRUE_DIFF_ONE) and matches
+ * the precision of the original big.js implementation.
+ */
+function bigIntRatioToDifficulty(divisor: bigint): number {
+  if (divisor === 0n) return Number.MAX_SAFE_INTEGER;
+  const scaled = (TRUE_DIFF_ONE_BIGINT * FRACTION_SCALE) / divisor;
+  return Number(scaled) / FRACTION_SCALE_NUM;
+}
+
 export class DifficultyUtils {
   static calculateDifficulty(header: Buffer): { submissionDifficulty: number; submissionHash: string; hashBuffer: Buffer } {
     const hashResult = bitcoinjs.crypto.hash256(Buffer.isBuffer(header) ? header : Buffer.from(header, 'hex'));
     const s64 = DifficultyUtils.le256todouble(hashResult);
-    const difficulty = TRUE_DIFF_ONE.div(s64.toString());
 
     return {
-      submissionDifficulty: difficulty.toNumber(),
+      submissionDifficulty: bigIntRatioToDifficulty(s64),
       submissionHash: hashResult.toString('hex'),
       hashBuffer: hashResult,
     };
@@ -86,8 +98,7 @@ export class DifficultyUtils {
       return Infinity;
     }
 
-    const difficulty = TRUE_DIFF_ONE.div(targetBigint.toString());
-    return difficulty.toNumber();
+    return bigIntRatioToDifficulty(targetBigint);
   }
 
   /**

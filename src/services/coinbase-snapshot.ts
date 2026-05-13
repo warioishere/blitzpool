@@ -10,9 +10,10 @@ import { CoinbaseDistributionEntry } from './coinbase-distribution';
  * PplnsService (one snapshot per pool) and GroupSoloService (one
  * snapshot per (group, finderAddress)).
  *
- * Wire format is JSON; arrays are used instead of Map / Set so the
- * payload survives serialization. Use `readStoredSnapshot` to get the
- * Map / Set hydrated form back.
+ * Wire format is a Redis Hash with one field per scalar / array slot.
+ * `readStoredSnapshot` hydrates back to Set / Map / array form.
+ * Legacy JSON-blob snapshots (pre-Hash rollout, may survive 1h after a
+ * deploy) are read transparently via a GET-fallback path.
  */
 export interface StoredCoinbaseSnapshot {
     distribution: CoinbaseDistributionEntry[];
@@ -36,9 +37,16 @@ export interface ParsedCoinbaseSnapshot {
 }
 
 /**
- * Persist a snapshot under `key` with the given TTL. Tries `SET key val
- * EX ttl` first; falls back to `SET` + `EXPIRE` if the underlying Redis
- * client doesn't accept the options-object form (older ioredis builds).
+ * Persist a snapshot under `key` with the given TTL.
+ *
+ * The previous JSON-blob format produced one big string per snapshot
+ * and forced JSON.parse / JSON.stringify on every read/write. Hash
+ * form replaces that with a flat field-per-scalar layout — no JSON
+ * tree allocation either side.
+ *
+ * `del` before `hSet` guarantees the key has Hash type even if a
+ * legacy JSON-blob (STRING type) is still occupying the slot from a
+ * previous deploy. Otherwise the hSet would throw WRONGTYPE.
  */
 export async function writeStoredSnapshot(
     redis: any,
@@ -46,13 +54,28 @@ export async function writeStoredSnapshot(
     snapshot: StoredCoinbaseSnapshot,
     ttlSeconds: number,
 ): Promise<void> {
-    try {
-        await redis.set(key, JSON.stringify(snapshot), { EX: ttlSeconds });
-    } catch {
-        await redis.set(key, JSON.stringify(snapshot));
-        if (typeof redis.expire === 'function') {
-            await redis.expire(key, ttlSeconds);
-        }
+    const fields: Record<string, string> = {
+        blockRewardSats: String(snapshot.blockRewardSats),
+        consideredAddresses: snapshot.consideredAddresses.join('|'),
+        distribution_count: String(snapshot.distribution.length),
+        balanceAfter_count: String(snapshot.balanceAfter.length),
+    };
+    for (let i = 0; i < snapshot.distribution.length; i++) {
+        const d = snapshot.distribution[i];
+        fields[`d${i}_addr`] = d.address;
+        fields[`d${i}_pct`] = String(d.percent);
+        fields[`d${i}_sats`] = String(d.sats);
+    }
+    for (let i = 0; i < snapshot.balanceAfter.length; i++) {
+        const entry = snapshot.balanceAfter[i];
+        fields[`b${i}_addr`] = entry[0];
+        fields[`b${i}_sats`] = String(entry[1]);
+    }
+
+    await redis.del(key);
+    await redis.hSet(key, fields);
+    if (typeof redis.expire === 'function') {
+        await redis.expire(key, ttlSeconds);
     }
 }
 
@@ -60,18 +83,75 @@ export async function writeStoredSnapshot(
  * Load + hydrate a snapshot, or return null if the key is missing or
  * the stored payload is unparseable.
  *
- * Backwards-compat: snapshots written before the signed-ledger rollout
- * lacked the per-entry `sats` field. They get a derived value
- * `floor(percent / 100 × blockRewardSats)` here so old snapshots that
- * survive across a deploy are still usable. New snapshots always carry
- * `sats` directly so this fallback is dead code in steady state.
+ * Reader has two paths:
+ *   1. Hash (current): HGETALL + parse fields.
+ *   2. Legacy JSON-blob fallback: if HGETALL returns empty or throws
+ *      WRONGTYPE, fall back to GET + JSON.parse. This covers in-flight
+ *      snapshots written by the pre-Hash deploy during the first hour
+ *      after rollout (TTL = 1h). Can be deleted after one stable cycle.
+ *
+ * Backwards-compat for legacy JSON: snapshots written before the
+ * signed-ledger rollout lacked per-entry `sats`. They get a derived
+ * value `floor(percent / 100 × blockRewardSats)` so the few that
+ * survive across the rollout are still usable.
  */
 export async function readStoredSnapshot(
     redis: any,
     key: string,
 ): Promise<ParsedCoinbaseSnapshot | null> {
-    const raw = await redis.get(key);
-    if (!raw) return null;
+    let hash: Record<string, string> | null = null;
+    try {
+        hash = (await redis.hGetAll(key)) ?? null;
+    } catch {
+        // WRONGTYPE — key is a legacy JSON string; fall through to GET branch.
+        hash = null;
+    }
+
+    if (hash && Object.keys(hash).length > 0) {
+        try {
+            return parseHashSnapshot(hash);
+        } catch {
+            return null;
+        }
+    }
+
+    // Either key doesn't exist OR was a legacy JSON-blob; try GET + JSON.parse.
+    try {
+        const raw = await redis.get(key);
+        if (!raw) return null;
+        return parseLegacyJsonSnapshot(raw);
+    } catch {
+        return null;
+    }
+}
+
+function parseHashSnapshot(h: Record<string, string>): ParsedCoinbaseSnapshot {
+    const blockRewardSats = parseInt(h.blockRewardSats, 10);
+    const distCount = parseInt(h.distribution_count, 10);
+    const balCount = parseInt(h.balanceAfter_count, 10);
+
+    const distribution: CoinbaseDistributionEntry[] = new Array(distCount);
+    for (let i = 0; i < distCount; i++) {
+        distribution[i] = {
+            address: h[`d${i}_addr`],
+            percent: parseFloat(h[`d${i}_pct`]),
+            sats: parseInt(h[`d${i}_sats`], 10),
+        };
+    }
+
+    const balanceAfter = new Map<string, number>();
+    for (let i = 0; i < balCount; i++) {
+        balanceAfter.set(h[`b${i}_addr`], parseInt(h[`b${i}_sats`], 10));
+    }
+
+    const consideredAddresses = new Set<string>(
+        h.consideredAddresses ? h.consideredAddresses.split('|').filter(s => s.length > 0) : [],
+    );
+
+    return { distribution, blockRewardSats, consideredAddresses, balanceAfter };
+}
+
+function parseLegacyJsonSnapshot(raw: string): ParsedCoinbaseSnapshot | null {
     try {
         const parsed: StoredCoinbaseSnapshot = JSON.parse(raw);
         return {

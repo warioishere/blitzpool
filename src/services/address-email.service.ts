@@ -95,7 +95,7 @@ export class AddressEmailService {
         await this.verificationRepo.delete({ address });
 
         const token = this.generateToken();
-        const expiresAt = new Date(Date.now() + VERIFICATION_TTL_HOURS * 60 * 60 * 1000);
+        const expiresAt = Date.now() + VERIFICATION_TTL_HOURS * 60 * 60 * 1000;
         await this.verificationRepo.save(this.verificationRepo.create({
             token,
             address,
@@ -112,7 +112,7 @@ export class AddressEmailService {
             to: normalizedEmail,
             address,
             verifyUrl,
-            expiresAt,
+            expiresAt: new Date(expiresAt),
         });
         return { token };
     }
@@ -127,7 +127,7 @@ export class AddressEmailService {
         if (!pending) {
             throw new AddressEmailServiceError('not-found', 'Verification token unknown or already used');
         }
-        if (pending.expiresAt.getTime() < Date.now()) {
+        if (pending.expiresAt < Date.now()) {
             await this.verificationRepo.delete({ token });
             throw new AddressEmailServiceError('expired', 'Verification link expired — request a new one');
         }
@@ -147,18 +147,18 @@ export class AddressEmailService {
                 );
             }
             // Same email — idempotent re-verify, refresh verifiedAt.
-            existing.verifiedAt = new Date();
+            existing.verifiedAt = Date.now();
             saved = await this.bindingRepo.save(existing);
         } else if (existing) {
             // Row exists but never finished verification (legacy) — overwrite.
             existing.email = pending.email;
-            existing.verifiedAt = new Date();
+            existing.verifiedAt = Date.now();
             saved = await this.bindingRepo.save(existing);
         } else {
             saved = await this.bindingRepo.save(this.bindingRepo.create({
                 address: pending.address,
                 email: pending.email,
-                verifiedAt: new Date(),
+                verifiedAt: Date.now(),
             }));
         }
 
@@ -186,7 +186,7 @@ export class AddressEmailService {
     async purgeExpiredTokens(): Promise<number> {
         try {
             const result = await this.verificationRepo.delete({
-                expiresAt: LessThan(new Date()),
+                expiresAt: LessThan(Date.now()),
             });
             const n = result.affected ?? 0;
             if (n > 0) this.logger.log(`Purged ${n} expired verification tokens`);

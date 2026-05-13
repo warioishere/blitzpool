@@ -913,7 +913,7 @@ export class StratumV1Client {
                             this.clientAuthorization.address,
                             this.clientAuthorization.worker
                         );
-                        const startTime = new Date();
+                        const startTime = Date.now();
                         const firstSeenValue = firstSeen ?? startTime;
                         this.entity = await this.clientService.insert({
                             sessionId: this.sessionId,
@@ -1248,9 +1248,9 @@ export class StratumV1Client {
                     this.clientAuthorization.worker,
                     effectiveDiff,
                 );
-                const now = new Date();
+                const now = Date.now();
                 // only update every minute
-                if (this.entity.updatedAt == null || now.getTime() - this.entity.updatedAt.getTime() > 1000 * 60) {
+                if (this.entity.updatedAt == null || now - this.entity.updatedAt > 1000 * 60) {
                     await this.clientService.heartbeat(
                         this.entity.address,
                         this.entity.clientName,
@@ -1265,11 +1265,11 @@ export class StratumV1Client {
                 await this.clientDifficultyStatisticsService.recordShareDifficulty({
                     address: this.clientAuthorization.address,
                     clientName: this.clientAuthorization.worker,
-                    timestamp: now.getTime(),
+                    timestamp: now,
                     difficulty: submissionDifficulty,
                 });
 
-                if (now.getTime() - this.lastDifficultyCheck >= this.difficultyCheckIntervalMs) {
+                if (now - this.lastDifficultyCheck >= this.difficultyCheckIntervalMs) {
                     await this.checkDifficulty();
                 }
 

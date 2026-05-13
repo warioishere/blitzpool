@@ -403,7 +403,7 @@ export async function buildStatsMessage(
     }
     const totalHashrate = workers.reduce((sum, w) => sum + (w.hashRate ?? 0), 0);
     const totalHashrateTH = totalHashrate / 1e12;
-    const lastSeenSeconds = Math.floor((Date.now() - new Date(workers[0].updatedAt).getTime()) / 1000);
+    const lastSeenSeconds = Math.floor((Date.now() - (workers[0].updatedAt ?? Date.now())) / 1000);
     const totalShares = await clientStatisticsService.getTotalSharesForAddress(address);
     const addressSettings = await addressSettingsService.getSettings(address, false);
     const bestDiffRaw = addressSettings?.bestDifficulty ?? 0;

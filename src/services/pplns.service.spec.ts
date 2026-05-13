@@ -60,6 +60,16 @@ function createMockRedis() {
       if (!h) return {};
       return Object.fromEntries(h.entries());
     }),
+    hSet: jest.fn(async (key: string, fields: Record<string, string>) => {
+      // Real Redis would clear the string-key value; tests don't mix types,
+      // but keep parity with the production mock.
+      store.delete(key);
+      const h = getHash(key);
+      for (const [field, value] of Object.entries(fields)) {
+        h.set(field, value);
+      }
+      return Object.keys(fields).length;
+    }),
     hIncrByFloat: jest.fn(hIncrByFloatImpl),
     multi: jest.fn(() => {
       const ops: Array<() => Promise<any>> = [];
@@ -112,6 +122,10 @@ function createMockBalanceBacking() {
     }),
     getBalanceSats: jest.fn(async (address: string) => balances.get(address)?.balanceSats ?? 0),
     getBalance: jest.fn(async (address: string) => balances.get(address) ?? null),
+    getBalanceLight: jest.fn(async (address: string) => {
+      const b = balances.get(address);
+      return b ? { balanceSats: b.balanceSats, totalPaidSats: b.totalPaidSats } : null;
+    }),
     getAllWithBalance: jest.fn(async () =>
       Array.from(balances.values()).filter(b => b.balanceSats !== 0),
     ),

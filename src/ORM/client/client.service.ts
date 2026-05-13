@@ -13,7 +13,7 @@ interface BufferedHeartbeat {
     clientName: string;
     sessionId: string;
     hashRate: number;
-    updatedAt: Date;
+    updatedAt: number;
     currentDifficulty?: number | null;
 }
 
@@ -58,14 +58,14 @@ export class ClientService implements OnModuleDestroy {
     }
 
     public async killDeadClients() {
-        const cutoff = new Date(Date.now() - 5 * 60 * 1000);
+        const cutoffMs = Date.now() - 5 * 60 * 1000;
 
         return await this.clientRepository
             .createQueryBuilder()
             .update(ClientEntity)
-            .set({ deletedAt: () => 'CURRENT_TIMESTAMP' })
+            .set({ deletedAt: Date.now() })
             .where('deletedAt IS NULL')
-            .andWhere('updatedAt < :cutoff', { cutoff })
+            .andWhere('updatedAt < :cutoffMs', { cutoffMs })
             .execute();
     }
 
@@ -82,7 +82,7 @@ export class ClientService implements OnModuleDestroy {
         clientName: string,
         sessionId: string,
         hashRate: number,
-        updatedAt: Date,
+        updatedAt: number,
         currentDifficulty?: number | null,
     ) {
         this.heartbeatBuffer.set(sessionId, {
@@ -120,7 +120,7 @@ export class ClientService implements OnModuleDestroy {
         const clientNames: string[] = [];
         const sessionIds: string[] = [];
         const hashRates: number[] = [];
-        const updatedAts: Date[] = [];
+        const updatedAts: number[] = [];
         const updateDiffFlags: boolean[] = [];
         const currentDifficulties: (number | null)[] = [];
 
@@ -151,7 +151,7 @@ export class ClientService implements OnModuleDestroy {
                     unnest($2::text[]) AS "clientName",
                     unnest($3::text[]) AS "sessionId",
                     unnest($4::double precision[]) AS "hashRate",
-                    unnest($5::timestamptz[]) AS "updatedAt",
+                    unnest($5::bigint[]) AS "updatedAt",
                     unnest($6::boolean[]) AS "updateDiff",
                     unnest($7::real[]) AS "currentDifficulty"
             ) AS u
@@ -209,18 +209,18 @@ export class ClientService implements OnModuleDestroy {
     }
 
     public async delete(sessionId: string) {
-        return await this.clientRepository.softDelete({ sessionId });
+        return await this.clientRepository.update({ sessionId }, { deletedAt: Date.now() });
     }
 
     public async deleteOldClients() {
 
-        const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        const oneDayAgoMs = Date.now() - 24 * 60 * 60 * 1000;
 
         return await this.clientRepository
             .createQueryBuilder()
             .delete()
             .from(ClientEntity)
-            .where('deletedAt < :deletedAt', { deletedAt: oneDayAgo })
+            .where('deletedAt < :cutoff', { cutoff: oneDayAgoMs })
             .execute();
 
     }
@@ -330,17 +330,37 @@ export class ClientService implements OnModuleDestroy {
         bestDifficulty: number;
         hashRate: number;
         currentDifficulty: number | null;
-        startTime: Date;
-        updatedAt: Date;
+        startTime: number;
+        updatedAt: number;
     }>> {
         if (this.clientRepository.manager.connection.options.type === 'postgres') {
-            return this.clientRepository.query(
+            // Raw query bypasses entity transformers; PG returns bigint as
+            // string. Coerce startTime/updatedAt to number so the return
+            // type matches runtime.
+            const rows: Array<{
+                sessionId: string;
+                clientName: string;
+                bestDifficulty: number;
+                hashRate: number;
+                currentDifficulty: number | null;
+                startTime: string;
+                updatedAt: string;
+            }> = await this.clientRepository.query(
                 `SELECT "sessionId", "clientName", "bestDifficulty", "hashRate",
                         "currentDifficulty", "startTime", "updatedAt"
                  FROM client_entity
                  WHERE address = $1 AND "deletedAt" IS NULL`,
                 [address],
             );
+            return rows.map(r => ({
+                sessionId: r.sessionId,
+                clientName: r.clientName,
+                bestDifficulty: r.bestDifficulty,
+                hashRate: r.hashRate,
+                currentDifficulty: r.currentDifficulty,
+                startTime: Number(r.startTime),
+                updatedAt: Number(r.updatedAt),
+            }));
         }
         // Sqlite / pg-mem fallback: TypeORM-portable entity query. Returns
         // the full entity; the controller picks the 7 fields it needs from
@@ -358,45 +378,97 @@ export class ClientService implements OnModuleDestroy {
         })
     }
 
-    public async getFirstSeen(address: string, clientName: string): Promise<Date | null> {
+    /**
+     * Hot-path lookup for `GET /api/client/:address/:workerName` — caller
+     * only uses `bestDifficulty`, so raw-SELECT bypasses TypeORM hydration
+     * for every column.
+     */
+    public async getByNameLight(address: string, clientName: string): Promise<Array<{ bestDifficulty: number }>> {
+        if (this.clientRepository.manager.connection.options.type === 'postgres') {
+            return this.clientRepository.query(
+                `SELECT "bestDifficulty" FROM client_entity
+                 WHERE address = $1 AND "clientName" = $2 AND "deletedAt" IS NULL`,
+                [address, clientName],
+            );
+        }
+        return this.clientRepository.find({ where: { address, clientName } }) as unknown as Promise<any>;
+    }
+
+    public async getFirstSeen(address: string, clientName: string): Promise<number | null> {
+        if (this.clientRepository.manager.connection.options.type === 'postgres') {
+            // Raw query — bypasses RawSqlResultsToEntityTransformer. Per-share-
+            // auth hot path; the entity-hydrated path was ~6.87% inclusive CPU
+            // on the 2026-05-13 prod profile.
+            const rows: Array<{ firstSeen: string | null; startTime: string | null }> =
+                await this.clientRepository.query(
+                    `SELECT "firstSeen", "startTime"
+                     FROM client_entity
+                     WHERE address = $1 AND "clientName" = $2
+                     ORDER BY "firstSeen" ASC NULLS LAST
+                     LIMIT 1`,
+                    [address, clientName],
+                );
+            const row = rows[0];
+            if (!row) return null;
+            const seen = row.firstSeen ?? row.startTime;
+            return seen == null ? null : Number(seen);
+        }
+
+        // SQLite (dev/test): entity-path is fine, perf doesn't matter.
         const result = await this.clientRepository.createQueryBuilder('client')
             .withDeleted()
             .where('client.address = :address AND client.clientName = :clientName', { address, clientName })
             .orderBy('client.firstSeen', 'ASC')
             .getOne();
-        if (!result) {
-            return null;
-        }
-
-        const firstSeen = result.firstSeen ?? result.startTime;
-        if (!firstSeen) {
-            return null;
-        }
-
-        return firstSeen instanceof Date ? firstSeen : new Date(firstSeen);
+        if (!result) return null;
+        return result.firstSeen ?? result.startTime ?? null;
     }
 
-    public async getFirstSeenIfRecent(address: string, clientName: string, minutes = 30): Promise<Date | null> {
-        const cutoff = new Date(Date.now() - minutes * 60 * 1000);
+    public async getFirstSeenIfRecent(address: string, clientName: string, minutes = 30): Promise<number | null> {
+        const cutoffMs = Date.now() - minutes * 60 * 1000;
+
+        if (this.clientRepository.manager.connection.options.type === 'postgres') {
+            // Single raw SELECT of the 4 timestamp columns the function actually needs.
+            // withDeleted == no `deletedAt IS NULL` filter, matched by the raw query
+            // omitting that predicate entirely.
+            const rows: Array<{
+                deletedAt: string | null;
+                updatedAt: string | null;
+                firstSeen: string | null;
+                startTime: string | null;
+            }> = await this.clientRepository.query(
+                `SELECT "deletedAt", "updatedAt", "firstSeen", "startTime"
+                 FROM client_entity
+                 WHERE address = $1 AND "clientName" = $2
+                 ORDER BY "updatedAt" DESC NULLS LAST
+                 LIMIT 1`,
+                [address, clientName],
+            );
+            const row = rows[0];
+            if (!row) return null;
+
+            const lastActiveRaw = row.deletedAt ?? row.updatedAt;
+            if (lastActiveRaw == null) return null;
+            const lastActiveMs = Number(lastActiveRaw);
+            if (!Number.isFinite(lastActiveMs) || lastActiveMs < cutoffMs) return null;
+
+            const seen = row.firstSeen ?? row.startTime;
+            return seen == null ? null : Number(seen);
+        }
+
+        // SQLite fallback.
         const result = await this.clientRepository.createQueryBuilder('client')
             .withDeleted()
             .where('client.address = :address AND client.clientName = :clientName', { address, clientName })
             .orderBy('client.updatedAt', 'DESC')
             .getOne();
 
-        if (result == null) {
-            return null;
-        }
+        if (result == null) return null;
 
-        const lastActiveRaw: any = result.deletedAt ?? result.updatedAt;
-        const lastActive = lastActiveRaw instanceof Date ? lastActiveRaw : new Date(lastActiveRaw);
-        if (lastActive >= cutoff) {
-            const seen = result.firstSeen ?? result.startTime;
-            if (!seen) {
-                return null;
-            }
-
-            return seen instanceof Date ? seen : new Date(seen);
+        const lastActive = result.deletedAt ?? result.updatedAt;
+        if (lastActive == null) return null;
+        if (lastActive >= cutoffMs) {
+            return result.firstSeen ?? result.startTime ?? null;
         }
         return null;
     }
@@ -411,8 +483,49 @@ export class ClientService implements OnModuleDestroy {
         })
     }
 
+    /**
+     * Hot-path lookup for `GET /api/client/:address/:workerName/:sessionId` —
+     * raw SELECT of the 5 columns the controller reads. Skips
+     * RawSqlResultsToEntityTransformer + the 5 Date-column transformer
+     * chains on Postgres.
+     */
+    public async getBySessionIdLight(
+        address: string, clientName: string, sessionId: string,
+    ): Promise<{
+        sessionId: string;
+        clientName: string;
+        address: string;
+        bestDifficulty: number;
+        startTime: number;
+    } | null> {
+        if (this.clientRepository.manager.connection.options.type === 'postgres') {
+            const rows: Array<{
+                sessionId: string;
+                clientName: string;
+                address: string;
+                bestDifficulty: number;
+                startTime: string;
+            }> = await this.clientRepository.query(
+                `SELECT "sessionId", "clientName", address, "bestDifficulty", "startTime"
+                 FROM client_entity
+                 WHERE address = $1 AND "clientName" = $2 AND "sessionId" = $3 AND "deletedAt" IS NULL
+                 LIMIT 1`,
+                [address, clientName, sessionId],
+            );
+            const r = rows[0];
+            return r ? { ...r, startTime: Number(r.startTime) } : null;
+        }
+        const entity = await this.clientRepository.findOne({ where: { address, clientName, sessionId } });
+        return entity as any;
+    }
+
     public async deleteAll() {
-        return await this.clientRepository.softDelete({})
+        return await this.clientRepository
+            .createQueryBuilder()
+            .update(ClientEntity)
+            .set({ deletedAt: Date.now() })
+            .where('deletedAt IS NULL')
+            .execute();
     }
 
     public async getUserAgents(excludeAddresses?: string[]) {

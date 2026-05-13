@@ -1,4 +1,6 @@
-import { Column, CreateDateColumn, Entity, Index, PrimaryColumn } from 'typeorm';
+import { BeforeInsert, Column, Entity, Index, PrimaryColumn } from 'typeorm';
+
+import { epochMsTransformer } from '../utils/epoch-ms-transformer';
 
 /**
  * Pending email-verification token. Created when a user submits an email for
@@ -18,9 +20,14 @@ export class EmailVerificationEntity {
     @Column({ type: 'varchar', length: 320 })
     email: string;
 
-    @CreateDateColumn()
-    createdAt: Date;
+    @Column({ type: 'bigint', transformer: epochMsTransformer })
+    createdAt: number;
 
-    @Column({ type: 'timestamp' })
-    expiresAt: Date;
+    @Column({ type: 'bigint', transformer: epochMsTransformer })
+    expiresAt: number;
+
+    @BeforeInsert()
+    private fillCreatedAt(): void {
+        if (this.createdAt == null) this.createdAt = Date.now();
+    }
 }

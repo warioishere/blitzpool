@@ -37,7 +37,7 @@ export class InvitationServiceError extends Error {
 export interface CreatedInvitation {
     token: string;
     email: string;
-    expiresAt: Date;
+    expiresAt: number;
 }
 
 /**
@@ -97,7 +97,7 @@ export class PplnsGroupInvitationService {
         const pending = await this.invitationRepo.findOne({
             where: { groupId, address, status: 'pending', inviteType: 'directed' },
         });
-        if (pending && pending.expiresAt.getTime() > Date.now()) {
+        if (pending && pending.expiresAt > Date.now()) {
             throw new InvitationServiceError('invitation-pending', 'An invitation for this address is already pending');
         }
 
@@ -111,13 +111,13 @@ export class PplnsGroupInvitationService {
         }
 
         // Mark any expired pending invitation as expired (cleanup).
-        if (pending && pending.expiresAt.getTime() <= Date.now()) {
+        if (pending && pending.expiresAt <= Date.now()) {
             pending.status = 'expired';
             await this.invitationRepo.save(pending);
         }
 
         const token = this.generateToken();
-        const expiresAt = new Date(Date.now() + INVITATION_TTL_DAYS * 24 * 60 * 60 * 1000);
+        const expiresAt = Date.now() + INVITATION_TTL_DAYS * 24 * 60 * 60 * 1000;
         const invitation = await this.invitationRepo.save(this.invitationRepo.create({
             token,
             groupId,
@@ -142,7 +142,7 @@ export class PplnsGroupInvitationService {
             // UI uses HashLocationStrategy — path has to be in the
             // fragment. See address-email.service.ts for the same trap.
             inviteUrl: `${baseUrl}/#/invite/${token}`,
-            expiresAt: invitation.expiresAt,
+            expiresAt: new Date(invitation.expiresAt),
         });
 
         return { token: invitation.token, email: binding.email, expiresAt: invitation.expiresAt };
@@ -194,7 +194,7 @@ export class PplnsGroupInvitationService {
         if (invitation.status === 'declined') {
             throw new InvitationServiceError('already-declined', 'Invitation was declined');
         }
-        if (invitation.expiresAt.getTime() < Date.now()) {
+        if (invitation.expiresAt < Date.now()) {
             invitation.status = 'expired';
             await this.invitationRepo.save(invitation);
             throw new InvitationServiceError('expired', 'Invitation has expired');
@@ -224,7 +224,7 @@ export class PplnsGroupInvitationService {
             // Defensive — user is already a member somehow (manual add?), just
             // mark invitation accepted and return the existing member.
             invitation.status = 'accepted';
-            invitation.respondedAt = new Date();
+            invitation.respondedAt = Date.now();
             await this.invitationRepo.save(invitation);
             return existingMember;
         }
@@ -235,7 +235,7 @@ export class PplnsGroupInvitationService {
         );
 
         invitation.status = 'accepted';
-        invitation.respondedAt = new Date();
+        invitation.respondedAt = Date.now();
         await this.invitationRepo.save(invitation);
         return member;
     }
@@ -254,7 +254,7 @@ export class PplnsGroupInvitationService {
         }
         if (invitation.status === 'pending') {
             invitation.status = 'declined';
-            invitation.respondedAt = new Date();
+            invitation.respondedAt = Date.now();
             await this.invitationRepo.save(invitation);
         }
     }
@@ -276,8 +276,8 @@ export class PplnsGroupInvitationService {
         groupName: string;
         inviterAddress: string;
         maskedEmail: string;
-        createdAt: Date;
-        expiresAt: Date;
+        createdAt: number;
+        expiresAt: number;
     }[]> {
         // Normalise (lowercase bech32) so the lookup key matches what
         // createInvitation stored. Without this, a banner request from
@@ -294,7 +294,7 @@ export class PplnsGroupInvitationService {
         const now = Date.now();
         const result: any[] = [];
         for (const row of rows) {
-            if (row.expiresAt.getTime() < now) continue;
+            if (row.expiresAt < now) continue;
             const group = await this.groupService.getGroup(row.groupId);
             if (!group || group.dissolvedAt) continue;
             result.push({
@@ -322,7 +322,7 @@ export class PplnsGroupInvitationService {
             order: { createdAt: 'DESC' },
         });
         const now = Date.now();
-        return rows.filter(r => r.expiresAt.getTime() >= now);
+        return rows.filter(r => r.expiresAt >= now);
     }
 
     /**
@@ -362,7 +362,7 @@ export class PplnsGroupInvitationService {
         ttl: OpenInviteTtl,
         adminToken: string | undefined,
         approvalRequired: boolean = false,
-    ): Promise<{ token: string; expiresAt: Date; approvalRequired: boolean }> {
+    ): Promise<{ token: string; expiresAt: number; approvalRequired: boolean }> {
         await this.groupService.requireAdminToken(groupId, adminToken);
 
         const ttlMs = OPEN_INVITE_TTL_PRESETS[ttl];
@@ -371,7 +371,7 @@ export class PplnsGroupInvitationService {
         }
 
         const token = this.generateToken();
-        const expiresAt = new Date(Date.now() + ttlMs);
+        const expiresAt = Date.now() + ttlMs;
 
         // Atomic replace: same transaction both revokes old + inserts new
         // so two concurrent admin clicks can't race to leave two active
@@ -380,7 +380,7 @@ export class PplnsGroupInvitationService {
             const repo = em.getRepository(PplnsGroupInvitationEntity);
             await repo.update(
                 { groupId, status: 'pending', inviteType: 'open' },
-                { status: 'revoked', respondedAt: new Date() },
+                { status: 'revoked', respondedAt: Date.now() },
             );
             await repo.save(repo.create({
                 token,
@@ -405,14 +405,14 @@ export class PplnsGroupInvitationService {
     async getActiveOpenInvite(
         groupId: string,
         adminToken: string | undefined,
-    ): Promise<{ token: string; expiresAt: Date; createdAt: Date; approvalRequired: boolean } | null> {
+    ): Promise<{ token: string; expiresAt: number; createdAt: number; approvalRequired: boolean } | null> {
         await this.groupService.requireAdminToken(groupId, adminToken);
         const row = await this.invitationRepo.findOne({
             where: { groupId, inviteType: 'open', status: 'pending' },
             order: { createdAt: 'DESC' },
         });
         if (!row) return null;
-        if (row.expiresAt.getTime() < Date.now()) return null;
+        if (row.expiresAt < Date.now()) return null;
         return {
             token: row.token,
             expiresAt: row.expiresAt,
@@ -432,7 +432,7 @@ export class PplnsGroupInvitationService {
         await this.groupService.requireAdminToken(groupId, adminToken);
         await this.invitationRepo.update(
             { groupId, status: 'pending', inviteType: 'open' },
-            { status: 'revoked', respondedAt: new Date() },
+            { status: 'revoked', respondedAt: Date.now() },
         );
     }
 
@@ -446,13 +446,13 @@ export class PplnsGroupInvitationService {
         token: string;
         groupId: string;
         groupName: string;
-        expiresAt: Date;
+        expiresAt: number;
         approvalRequired: boolean;
     } | null> {
         const invitation = await this.invitationRepo.findOneBy({ token });
         if (!invitation || invitation.inviteType !== 'open') return null;
         if (invitation.status !== 'pending') return null;
-        if (invitation.expiresAt.getTime() < Date.now()) return null;
+        if (invitation.expiresAt < Date.now()) return null;
         const group = await this.groupService.getGroup(invitation.groupId);
         if (!group || group.dissolvedAt) return null;
         return {
@@ -480,7 +480,7 @@ export class PplnsGroupInvitationService {
             // mean the same thing functionally (link is dead).
             throw new InvitationServiceError('expired', 'Open invitation no longer valid');
         }
-        if (invitation.expiresAt.getTime() < Date.now()) {
+        if (invitation.expiresAt < Date.now()) {
             invitation.status = 'expired';
             await this.invitationRepo.save(invitation);
             throw new InvitationServiceError('expired', 'Open invitation has expired');
@@ -538,7 +538,7 @@ export class PplnsGroupInvitationService {
     async expireOld(): Promise<number> {
         try {
             const result = await this.invitationRepo.update(
-                { status: 'pending', expiresAt: LessThan(new Date()) },
+                { status: 'pending', expiresAt: LessThan(Date.now()) },
                 { status: 'expired' },
             );
             const n = result.affected ?? 0;

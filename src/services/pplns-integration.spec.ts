@@ -109,6 +109,12 @@ function createMockRedis() {
       if (!h) return {};
       return Object.fromEntries(h.entries());
     }),
+    hSet: jest.fn(async (key: string, fields: Record<string, string>) => {
+      store.delete(key);
+      const h = getHash(key);
+      for (const [f, v] of Object.entries(fields)) h.set(f, v);
+      return Object.keys(fields).length;
+    }),
     hIncrByFloat: jest.fn(async (key: string, field: string, amount: number) => {
       const h = getHash(key);
       const cur = parseFloat(h.get(field) ?? '0') + amount;

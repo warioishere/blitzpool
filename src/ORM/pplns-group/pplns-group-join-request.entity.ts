@@ -1,4 +1,6 @@
-import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn } from 'typeorm';
+import { BeforeInsert, Column, Entity, Index, PrimaryGeneratedColumn } from 'typeorm';
+
+import { epochMsTransformer } from '../utils/epoch-ms-transformer';
 
 /**
  * User-initiated request to join a public payout group. Created by the
@@ -43,11 +45,16 @@ export class PplnsGroupJoinRequestEntity {
     @Column({ type: 'varchar', length: 16, default: 'pending' })
     status: PplnsGroupJoinRequestStatus;
 
-    @CreateDateColumn({ type: 'timestamptz' })
-    createdAt: Date;
+    @Column({ type: 'bigint', transformer: epochMsTransformer })
+    createdAt: number;
 
-    @Column({ type: 'timestamptz', nullable: true })
-    decidedAt: Date | null;
+    @Column({ type: 'bigint', nullable: true, transformer: epochMsTransformer })
+    decidedAt: number | null;
+
+    @BeforeInsert()
+    private fillCreatedAt(): void {
+        if (this.createdAt == null) this.createdAt = Date.now();
+    }
 
     /**
      * SHA-256 of the admin token that decided this request. Audit trail —

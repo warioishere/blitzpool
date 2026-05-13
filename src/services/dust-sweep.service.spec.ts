@@ -76,9 +76,15 @@ function makeQb<T extends Record<string, any>>(rows: T[]) {
                 addClause(r => r.pendingSats < params.minPayout);
             } else if (expr === 'b."lastAcceptedShareAt" IS NOT NULL') {
                 addClause(r => r.lastAcceptedShareAt != null);
-            } else if (expr === 'b."lastAcceptedShareAt" < :cutoff') {
-                const cutoff = params.cutoff.getTime();
-                addClause(r => r.lastAcceptedShareAt.getTime() < cutoff);
+            } else if (expr === 'b."lastAcceptedShareAt" < :cutoffMs') {
+                // both pplns_balance and pplns_group_balance: bigint epoch-ms column.
+                const cutoffMs = params.cutoffMs;
+                addClause(r => {
+                    const raw = r.lastAcceptedShareAt;
+                    if (raw == null) return false;
+                    const ms = raw instanceof Date ? raw.getTime() : Number(raw);
+                    return ms < cutoffMs;
+                });
             } else {
                 throw new Error(`unmocked andWhere: ${expr}`);
             }
