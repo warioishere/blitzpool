@@ -66,14 +66,19 @@ export class BestDifficultyTrackerService {
                 .createQueryBuilder()
                 .insert()
                 .into(BestDifficultyTrackerEntity)
-                .values({ address: r.address, bestDifficulty: r.bestDifficulty, lastCheckedAt: now })
+                .values({
+                    address: r.address, bestDifficulty: r.bestDifficulty, lastCheckedAt: now,
+                    createdAt: now, updatedAt: now,
+                })
                 .orUpdate(['bestDifficulty', 'lastCheckedAt'], ['address'])
                 .execute();
         }
     }
 
     /**
-     * Update or create tracker (upsert via INSERT ... ON CONFLICT)
+     * Update or create tracker (upsert via INSERT ... ON CONFLICT).
+     * createdAt/updatedAt set explicitly because the @BeforeInsert hook on
+     * TrackedEntity is bypassed by createQueryBuilder().insert().
      */
     public async updateTracker(address: string, bestDifficulty: number): Promise<void> {
         const now = Date.now();
@@ -81,7 +86,7 @@ export class BestDifficultyTrackerService {
             .createQueryBuilder()
             .insert()
             .into(BestDifficultyTrackerEntity)
-            .values({ address, bestDifficulty, lastCheckedAt: now })
+            .values({ address, bestDifficulty, lastCheckedAt: now, createdAt: now, updatedAt: now })
             .orUpdate(['bestDifficulty', 'lastCheckedAt'], ['address'])
             .execute();
     }

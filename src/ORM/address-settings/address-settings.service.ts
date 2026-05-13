@@ -21,12 +21,15 @@ export class AddressSettingsService {
             .getOne();
 
         if (createIfNotFound === true && settings == null) {
-            // Atomic upsert — no race condition
+            // Atomic upsert — no race condition. createdAt/updatedAt set
+            // explicitly because createQueryBuilder().insert() bypasses
+            // the @BeforeInsert hook on TrackedEntity.
+            const now = Date.now();
             await this.addressSettingsRepository
                 .createQueryBuilder()
                 .insert()
                 .into(AddressSettingsEntity)
-                .values({ address })
+                .values({ address, createdAt: now, updatedAt: now })
                 .orIgnore()
                 .execute();
             settings = await this.addressSettingsRepository

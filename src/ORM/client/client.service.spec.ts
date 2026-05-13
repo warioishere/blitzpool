@@ -3,6 +3,7 @@ import { DataType, newDb } from 'pg-mem';
 
 import { ClientEntity } from './client.entity';
 import { ClientService } from './client.service';
+import { TrackedEntityTimestampSubscriber } from '../utils/tracked-entity.subscriber';
 
 type DataSourceSetup = { dataSource: DataSource; pgMem?: ReturnType<typeof newDb> };
 
@@ -14,6 +15,7 @@ async function createDataSource(driver: 'sqlite' | 'postgres'): Promise<DataSour
       dropSchema: true,
       synchronize: true,
       entities: [ClientEntity],
+      subscribers: [TrackedEntityTimestampSubscriber],
     });
 
     await dataSource.initialize();
@@ -37,6 +39,7 @@ async function createDataSource(driver: 'sqlite' | 'postgres'): Promise<DataSour
     database: 'pg-mem',
     synchronize: true,
     entities: [ClientEntity],
+    subscribers: [TrackedEntityTimestampSubscriber],
   });
 
   await dataSource.initialize();
@@ -67,11 +70,11 @@ describe.each(['sqlite', 'postgres'] as const)(
 
     it('marks stale clients as deleted without touching active clients', async () => {
       const repository = dataSource.getRepository(ClientEntity);
-      const now = new Date('2024-01-08T00:00:00Z');
-      const staleUpdatedAt = new Date(now.getTime() - 10 * 60 * 1000);
-      const recentUpdatedAt = new Date(now.getTime() - 60 * 1000);
+      const now = Date.parse('2024-01-08T00:00:00Z');
+      const staleUpdatedAt = now - 10 * 60 * 1000;
+      const recentUpdatedAt = now - 60 * 1000;
 
-      const rows: Array<[string, string, string, string | null, Date, Date, number, number, Date, Date, Date | null]> = [
+      const rows: Array<[string, string, string, string | null, number, number, number, number, number, number, number | null]> = [
         ['addr-old', 'worker-old', 'sess0001', null, now, now, 0, 0, now, staleUpdatedAt, null],
         ['addr-fresh', 'worker-fresh', 'sess0002', null, now, now, 0, 0, now, recentUpdatedAt, null],
         ['addr-deleted', 'worker-deleted', 'sess0003', null, now, now, 0, 0, now, staleUpdatedAt, now],
@@ -93,16 +96,9 @@ describe.each(['sqlite', 'postgres'] as const)(
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
       `;
 
-      const toSqlLiteral = (value: string | number | Date | null) => {
-        if (value === null) {
-          return 'NULL';
-        }
-        if (value instanceof Date) {
-          return `TIMESTAMPTZ '${value.toISOString()}'`;
-        }
-        if (typeof value === 'number') {
-          return value.toString();
-        }
+      const toSqlLiteral = (value: string | number | null) => {
+        if (value === null) return 'NULL';
+        if (typeof value === 'number') return value.toString();
         const escaped = value.replace(/'/g, "''");
         return `'${escaped}'`;
       };
@@ -159,14 +155,14 @@ describe.each(['sqlite', 'postgres'] as const)(
         .where('client.address = :address', { address: 'addr-old' })
         .andWhere('client.clientName = :clientName', { clientName: 'worker-old' })
         .andWhere('client.sessionId = :sessionId', { sessionId: 'sess0001' })
-        .getRawOne<{ deletedAt: Date | null }>();
+        .getRawOne<{ deletedAt: number | null }>();
       const activeClient = await repository
         .createQueryBuilder('client')
         .select('client.deletedAt', 'deletedAt')
         .where('client.address = :address', { address: 'addr-fresh' })
         .andWhere('client.clientName = :clientName', { clientName: 'worker-fresh' })
         .andWhere('client.sessionId = :sessionId', { sessionId: 'sess0002' })
-        .getRawOne<{ deletedAt: Date | null }>();
+        .getRawOne<{ deletedAt: number | null }>();
       const alreadyDeleted = await repository
         .createQueryBuilder('client')
         .withDeleted()
@@ -174,7 +170,7 @@ describe.each(['sqlite', 'postgres'] as const)(
         .where('client.address = :address', { address: 'addr-deleted' })
         .andWhere('client.clientName = :clientName', { clientName: 'worker-deleted' })
         .andWhere('client.sessionId = :sessionId', { sessionId: 'sess0003' })
-        .getRawOne<{ deletedAt: Date | null }>();
+        .getRawOne<{ deletedAt: number | null }>();
 
       expect(staleClient?.deletedAt).not.toBeNull();
       expect(activeClient?.deletedAt ?? null).toBeNull();
@@ -215,8 +211,8 @@ describe.each(['sqlite', 'postgres'] as const)(
 
     it('returns the same {sessionId, clientName, bestDifficulty, hashRate, currentDifficulty, startTime, updatedAt} for each row as getByAddress', async () => {
       const repo = dataSource.getRepository(ClientEntity);
-      const now = new Date('2024-06-01T12:00:00Z');
-      const earlier = new Date('2024-06-01T10:00:00Z');
+      const now = Date.parse('2024-06-01T12:00:00Z');
+      const earlier = Date.parse('2024-06-01T10:00:00Z');
 
       await repo.save([
         {
@@ -265,20 +261,16 @@ describe.each(['sqlite', 'postgres'] as const)(
         expect(lightRow.bestDifficulty).toBe(legacyRow!.bestDifficulty);
         expect(lightRow.hashRate).toBe(legacyRow!.hashRate);
         expect(lightRow.currentDifficulty).toBe(legacyRow!.currentDifficulty);
-        // Date columns can come back as either Date or string depending on
-        // the driver — normalize both before compare.
-        const startA = new Date(lightRow.startTime as any).getTime();
-        const startB = new Date(legacyRow!.startTime as any).getTime();
-        expect(startA).toBe(startB);
-        const upA = new Date(lightRow.updatedAt as any).getTime();
-        const upB = new Date(legacyRow!.updatedAt as any).getTime();
-        expect(upA).toBe(upB);
+        // bigint columns come back as string on raw PG queries, as number
+        // through entity hydration — normalize both before compare.
+        expect(Number(lightRow.startTime)).toBe(Number(legacyRow!.startTime));
+        expect(Number(lightRow.updatedAt)).toBe(Number(legacyRow!.updatedAt));
       }
     });
 
     it('excludes soft-deleted rows (deletedAt IS NULL) just like getByAddress default', async () => {
       const repo = dataSource.getRepository(ClientEntity);
-      const now = new Date('2024-06-01T12:00:00Z');
+      const now = Date.parse('2024-06-01T12:00:00Z');
 
       await repo.save([
         {
@@ -342,8 +334,8 @@ describe('ClientService.flushHeartbeats — bulk Postgres path', () => {
     const query = jest.fn().mockResolvedValue(undefined);
     const service = buildPostgresService(query);
 
-    const t1 = new Date('2026-05-13T12:00:00.000Z');
-    const t2 = new Date('2026-05-13T12:00:30.000Z');
+    const t1 = Date.parse('2026-05-13T12:00:00.000Z');
+    const t2 = Date.parse('2026-05-13T12:00:30.000Z');
     await service.heartbeat('addr-A', 'rig-A', 'sess-A', 100, t1, 2048);
     await service.heartbeat('addr-B', 'rig-B', 'sess-B', 200, t2, null);
     // 6-arg form: currentDifficulty omitted entirely
@@ -356,7 +348,7 @@ describe('ClientService.flushHeartbeats — bulk Postgres path', () => {
     expect(sql).toMatch(/UPDATE client_entity AS t/);
     expect(sql).toMatch(/FROM\s*\(\s*SELECT/);
     expect(sql).toMatch(/unnest\(\$1::text\[\]\)/);
-    expect(sql).toMatch(/unnest\(\$5::timestamptz\[\]\)/);
+    expect(sql).toMatch(/unnest\(\$5::bigint\[\]\)/);
     expect(sql).toMatch(/CASE WHEN u\."updateDiff" THEN u\."currentDifficulty" ELSE t\."currentDifficulty" END/);
 
     expect(params).toHaveLength(7);
@@ -376,8 +368,8 @@ describe('ClientService.flushHeartbeats — bulk Postgres path', () => {
     const query = jest.fn().mockResolvedValue(undefined);
     const service = buildPostgresService(query);
 
-    await service.heartbeat('addr-A', 'rig-A', 'sess-A', 100, new Date(1), 100);
-    await service.heartbeat('addr-A', 'rig-A', 'sess-A', 500, new Date(2), 200);
+    await service.heartbeat('addr-A', 'rig-A', 'sess-A', 100, 1, 100);
+    await service.heartbeat('addr-A', 'rig-A', 'sess-A', 500, 2, 200);
 
     await service.flushHeartbeats();
 
@@ -392,8 +384,8 @@ describe('ClientService.flushHeartbeats — bulk Postgres path', () => {
     const query = jest.fn().mockRejectedValueOnce(new Error('PG down'));
     const service = buildPostgresService(query);
 
-    await service.heartbeat('addr-A', 'rig-A', 'sess-A', 100, new Date(1), 2048);
-    await service.heartbeat('addr-B', 'rig-B', 'sess-B', 200, new Date(1), 4096);
+    await service.heartbeat('addr-A', 'rig-A', 'sess-A', 100, 1, 2048);
+    await service.heartbeat('addr-B', 'rig-B', 'sess-B', 200, 1, 4096);
     await service.flushHeartbeats(); // first call: rejected, re-buffered
 
     query.mockResolvedValueOnce(undefined);
@@ -407,11 +399,11 @@ describe('ClientService.flushHeartbeats — bulk Postgres path', () => {
     const query = jest.fn().mockRejectedValueOnce(new Error('PG down'));
     const service = buildPostgresService(query);
 
-    await service.heartbeat('addr-A', 'rig-A', 'sess-A', 100, new Date(1), 2048);
+    await service.heartbeat('addr-A', 'rig-A', 'sess-A', 100, 1, 2048);
     const inflight = service.flushHeartbeats();
     // While the failing flush is in flight, a newer heartbeat for the same
     // sessionId arrives.
-    await service.heartbeat('addr-A', 'rig-A', 'sess-A', 999, new Date(2), 8192);
+    await service.heartbeat('addr-A', 'rig-A', 'sess-A', 999, 2, 8192);
     await inflight;
 
     query.mockResolvedValueOnce(undefined);
@@ -433,6 +425,7 @@ describe('ClientService.flushHeartbeats — sqlite per-row path (in-memory)', ()
       dropSchema: true,
       synchronize: true,
       entities: [ClientEntity],
+      subscribers: [TrackedEntityTimestampSubscriber],
     });
     await dataSource.initialize();
   });
@@ -448,7 +441,7 @@ describe('ClientService.flushHeartbeats — sqlite per-row path (in-memory)', ()
 
   it('updates buffered sessions end-to-end on sqlite', async () => {
     const repo = dataSource.getRepository(ClientEntity);
-    const t0 = new Date('2026-05-13T11:00:00.000Z');
+    const t0 = Date.parse('2026-05-13T11:00:00.000Z');
     await repo.save({
       address: 'addr-X',
       clientName: 'rig-X',
@@ -460,7 +453,7 @@ describe('ClientService.flushHeartbeats — sqlite per-row path (in-memory)', ()
       currentDifficulty: 1024,
     });
 
-    const t1 = new Date('2026-05-13T12:00:00.000Z');
+    const t1 = Date.parse('2026-05-13T12:00:00.000Z');
     await service.heartbeat('addr-X', 'rig-X', 'sess-X', 4242, t1, 8192);
     await service.flushHeartbeats();
 
@@ -471,7 +464,7 @@ describe('ClientService.flushHeartbeats — sqlite per-row path (in-memory)', ()
 
   it('omitted currentDifficulty leaves the column value untouched', async () => {
     const repo = dataSource.getRepository(ClientEntity);
-    const t0 = new Date('2026-05-13T11:00:00.000Z');
+    const t0 = Date.parse('2026-05-13T11:00:00.000Z');
     await repo.save({
       address: 'addr-Y',
       clientName: 'rig-Y',
@@ -483,7 +476,7 @@ describe('ClientService.flushHeartbeats — sqlite per-row path (in-memory)', ()
       currentDifficulty: 1024,
     });
 
-    const t1 = new Date('2026-05-13T12:00:00.000Z');
+    const t1 = Date.parse('2026-05-13T12:00:00.000Z');
     await service.heartbeat('addr-Y', 'rig-Y', 'sess-Y', 4242, t1);
     await service.flushHeartbeats();
 

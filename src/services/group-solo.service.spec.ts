@@ -1190,7 +1190,7 @@ describe('GroupSoloService', () => {
             const groupRepo = (service as any).groupRepo;
             groupRepo.findOneBy = jest.fn(async () => ({
                 id: 'g1',
-                dissolvedAt: new Date(),
+                dissolvedAt: Date.now(),
                 lastRoundResetAt: null,
             }));
 
@@ -1303,7 +1303,7 @@ describe('GroupSoloService', () => {
                 lastRoundResetAt: null,
                 finderBonusSats,
                 dissolvedAt: null,
-                createdAt: new Date(),
+                createdAt: Date.now(),
             });
         };
 

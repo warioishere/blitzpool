@@ -94,7 +94,7 @@ export class PoolShareStatisticsService {
       {
         accepted: stat.accepted,
         rejected: stat.rejected,
-        updatedAt: new Date(),
+        updatedAt: Date.now(),
       },
     );
   }

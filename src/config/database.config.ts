@@ -1,5 +1,7 @@
 import { ConfigService } from '@nestjs/config';
 import { TypeOrmModuleOptions } from '@nestjs/typeorm';
+
+import { TrackedEntityTimestampSubscriber } from '../ORM/utils/tracked-entity.subscriber';
 import { join } from 'path';
 
 type SupportedDriver = 'sqlite' | 'postgres';
@@ -85,6 +87,7 @@ export function buildDatabaseConfig(config: ConfigService): TypeOrmModuleOptions
             database: config.get<string>('PG_DATABASE'),
             synchronize: synchronizeOverride ?? false,
             autoLoadEntities: true,
+            subscribers: [TrackedEntityTimestampSubscriber],
             logging: loggingEnabled,
             migrations: [sourceMigrations, compiledMigrations],
             // Connection pooling (Phase 3)
@@ -119,6 +122,7 @@ export function buildDatabaseConfig(config: ConfigService): TypeOrmModuleOptions
         database: config.get<string>('SQLITE_DATABASE', SQLITE_DEFAULT_PATH),
         synchronize: synchronizeOverride ?? true,
         autoLoadEntities: true,
+        subscribers: [TrackedEntityTimestampSubscriber],
         logging: loggingEnabled,
         enableWAL: true, // Write-Ahead Logging for better concurrency
         busyTimeout: sqliteBusyTimeout, // Wait up to 30s for locked database

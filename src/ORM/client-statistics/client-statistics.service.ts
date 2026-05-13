@@ -187,7 +187,7 @@ export class ClientStatisticsService {
           clientStatistic.rejectedLowDifficultyShareCount,
         rejectedLowDifficultyShareDiff1:
           clientStatistic.rejectedLowDifficultyShareDiff1,
-        updatedAt: new Date(),
+        updatedAt: Date.now(),
       },
     );
   }
@@ -418,7 +418,7 @@ export class ClientStatisticsService {
         .getRawMany();
 
       if (poolAggregates.length > 0) {
-        const insertedAt = new Date();
+        const insertedAt = Date.now();
         await manager
           .createQueryBuilder()
           .insert()
@@ -469,7 +469,7 @@ export class ClientStatisticsService {
         .getRawMany();
 
       if (workerAggregates.length > 0) {
-        const insertedAt = new Date();
+        const insertedAt = Date.now();
         await manager
           .createQueryBuilder()
           .insert()
