@@ -90,7 +90,11 @@ export class ClientService implements OnModuleDestroy {
     }
 
     /**
-     * Flush buffered heartbeats as individual UPDATEs in a single transaction.
+     * Flush buffered heartbeats. Postgres path issues one bulk UPDATE …
+     * FROM unnest(...) so all buffered sessions land in a single statement
+     * instead of N sequential UPDATEs. Sqlite (dev/test) keeps the per-row
+     * loop — pg-mem doesn't speak parallel-array unnest, and sqlite is
+     * not performance-critical.
      */
     @Interval(30_000)
     public async flushHeartbeats(): Promise<void> {
@@ -100,23 +104,12 @@ export class ClientService implements OnModuleDestroy {
         this.heartbeatBuffer = new Map();
 
         try {
-            await this.clientRepository.manager.transaction(async (manager) => {
-                const repo = manager.getRepository(ClientEntity);
-                for (const hb of snapshot.values()) {
-                    const update: QueryDeepPartialEntity<ClientEntity> = {
-                        hashRate: hb.hashRate,
-                        deletedAt: null,
-                        updatedAt: hb.updatedAt,
-                    };
-                    if (hb.currentDifficulty !== undefined) {
-                        update.currentDifficulty = hb.currentDifficulty;
-                    }
-                    await repo.update(
-                        { address: hb.address, clientName: hb.clientName, sessionId: hb.sessionId },
-                        update,
-                    );
-                }
-            });
+            const dbType = this.clientRepository.manager.connection.options.type;
+            if (dbType === 'postgres') {
+                await this.flushHeartbeatsBulkPostgres(snapshot);
+            } else {
+                await this.flushHeartbeatsPerRow(snapshot);
+            }
         } catch (error) {
             // Re-buffer on failure (keep newer values if buffer already has entries)
             for (const [sid, hb] of snapshot) {
@@ -126,6 +119,75 @@ export class ClientService implements OnModuleDestroy {
             }
             console.error(`[ClientService] flushHeartbeats failed for ${snapshot.size} clients:`, error);
         }
+    }
+
+    private async flushHeartbeatsBulkPostgres(snapshot: Map<string, BufferedHeartbeat>): Promise<void> {
+        const addresses: string[] = [];
+        const clientNames: string[] = [];
+        const sessionIds: string[] = [];
+        const hashRates: number[] = [];
+        const updatedAts: Date[] = [];
+        const updateDiffFlags: boolean[] = [];
+        const currentDifficulties: (number | null)[] = [];
+
+        for (const hb of snapshot.values()) {
+            addresses.push(hb.address);
+            clientNames.push(hb.clientName);
+            sessionIds.push(hb.sessionId);
+            hashRates.push(hb.hashRate);
+            updatedAts.push(hb.updatedAt);
+            if (hb.currentDifficulty !== undefined) {
+                updateDiffFlags.push(true);
+                currentDifficulties.push(hb.currentDifficulty);
+            } else {
+                updateDiffFlags.push(false);
+                currentDifficulties.push(null);
+            }
+        }
+
+        const query = `
+            UPDATE client_entity AS t
+            SET "hashRate" = u."hashRate",
+                "deletedAt" = NULL,
+                "updatedAt" = u."updatedAt",
+                "currentDifficulty" = CASE WHEN u."updateDiff" THEN u."currentDifficulty" ELSE t."currentDifficulty" END
+            FROM (
+                SELECT
+                    unnest($1::text[]) AS address,
+                    unnest($2::text[]) AS "clientName",
+                    unnest($3::text[]) AS "sessionId",
+                    unnest($4::double precision[]) AS "hashRate",
+                    unnest($5::timestamptz[]) AS "updatedAt",
+                    unnest($6::boolean[]) AS "updateDiff",
+                    unnest($7::real[]) AS "currentDifficulty"
+            ) AS u
+            WHERE t.address = u.address
+              AND t."clientName" = u."clientName"
+              AND t."sessionId" = u."sessionId"
+        `;
+        await this.clientRepository.query(query, [
+            addresses, clientNames, sessionIds, hashRates, updatedAts, updateDiffFlags, currentDifficulties,
+        ]);
+    }
+
+    private async flushHeartbeatsPerRow(snapshot: Map<string, BufferedHeartbeat>): Promise<void> {
+        await this.clientRepository.manager.transaction(async (manager) => {
+            const repo = manager.getRepository(ClientEntity);
+            for (const hb of snapshot.values()) {
+                const update: QueryDeepPartialEntity<ClientEntity> = {
+                    hashRate: hb.hashRate,
+                    deletedAt: null,
+                    updatedAt: hb.updatedAt,
+                };
+                if (hb.currentDifficulty !== undefined) {
+                    update.currentDifficulty = hb.currentDifficulty;
+                }
+                await repo.update(
+                    { address: hb.address, clientName: hb.clientName, sessionId: hb.sessionId },
+                    update,
+                );
+            }
+        });
     }
 
     // public async save(client: Partial<ClientEntity>) {

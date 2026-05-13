@@ -310,3 +310,185 @@ describe.each(['sqlite', 'postgres'] as const)(
     void pgMem;
   },
 );
+
+// ── flushHeartbeats bulk Postgres path ──────────────────────────────
+//
+// Hot path on prod (every 30 s). Postgres branch issues one bulk UPDATE
+// via parallel-array unnest; sqlite keeps per-row updates for dev/test.
+// pg-mem doesn't support parallel-array unnest, so the Postgres branch
+// is covered by mocking the repository's `query` method and pinning the
+// SQL + array-shape directly. End-to-end behaviour on the sqlite per-row
+// path is covered by the in-memory DataSource block below.
+describe('ClientService.flushHeartbeats — bulk Postgres path', () => {
+  function buildPostgresService(query: jest.Mock) {
+    const repo: any = {
+      query,
+      manager: {
+        connection: { options: { type: 'postgres' } },
+        transaction: jest.fn(),
+      },
+    };
+    return new ClientService(repo as any);
+  }
+
+  it('empty buffer is a no-op (no PG round-trip)', async () => {
+    const query = jest.fn();
+    const service = buildPostgresService(query);
+    await service.flushHeartbeats();
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('issues exactly one UPDATE with 7 parallel arrays aligned by index', async () => {
+    const query = jest.fn().mockResolvedValue(undefined);
+    const service = buildPostgresService(query);
+
+    const t1 = new Date('2026-05-13T12:00:00.000Z');
+    const t2 = new Date('2026-05-13T12:00:30.000Z');
+    await service.heartbeat('addr-A', 'rig-A', 'sess-A', 100, t1, 2048);
+    await service.heartbeat('addr-B', 'rig-B', 'sess-B', 200, t2, null);
+    // 6-arg form: currentDifficulty omitted entirely
+    await service.heartbeat('addr-C', 'rig-C', 'sess-C', 300, t2);
+
+    await service.flushHeartbeats();
+
+    expect(query).toHaveBeenCalledTimes(1);
+    const [sql, params] = query.mock.calls[0];
+    expect(sql).toMatch(/UPDATE client_entity AS t/);
+    expect(sql).toMatch(/FROM\s*\(\s*SELECT/);
+    expect(sql).toMatch(/unnest\(\$1::text\[\]\)/);
+    expect(sql).toMatch(/unnest\(\$5::timestamptz\[\]\)/);
+    expect(sql).toMatch(/CASE WHEN u\."updateDiff" THEN u\."currentDifficulty" ELSE t\."currentDifficulty" END/);
+
+    expect(params).toHaveLength(7);
+    const [addresses, clientNames, sessionIds, hashRates, updatedAts, updateDiff, currentDifficulties] = params;
+    expect(addresses).toEqual(['addr-A', 'addr-B', 'addr-C']);
+    expect(clientNames).toEqual(['rig-A', 'rig-B', 'rig-C']);
+    expect(sessionIds).toEqual(['sess-A', 'sess-B', 'sess-C']);
+    expect(hashRates).toEqual([100, 200, 300]);
+    expect(updatedAts).toEqual([t1, t2, t2]);
+    // updateDiff guards the CASE: true → set, false → leave column alone.
+    expect(updateDiff).toEqual([true, true, false]);
+    // null is a legitimate "set to NULL"; undefined is "don't touch column".
+    expect(currentDifficulties).toEqual([2048, null, null]);
+  });
+
+  it('latest heartbeat per sessionId wins', async () => {
+    const query = jest.fn().mockResolvedValue(undefined);
+    const service = buildPostgresService(query);
+
+    await service.heartbeat('addr-A', 'rig-A', 'sess-A', 100, new Date(1), 100);
+    await service.heartbeat('addr-A', 'rig-A', 'sess-A', 500, new Date(2), 200);
+
+    await service.flushHeartbeats();
+
+    const [, params] = query.mock.calls[0];
+    const [addresses, , , hashRates, , , currentDifficulties] = params;
+    expect(addresses).toEqual(['addr-A']);
+    expect(hashRates).toEqual([500]);
+    expect(currentDifficulties).toEqual([200]);
+  });
+
+  it('re-buffers the snapshot on bulk UPDATE failure so the next flush retries', async () => {
+    const query = jest.fn().mockRejectedValueOnce(new Error('PG down'));
+    const service = buildPostgresService(query);
+
+    await service.heartbeat('addr-A', 'rig-A', 'sess-A', 100, new Date(1), 2048);
+    await service.heartbeat('addr-B', 'rig-B', 'sess-B', 200, new Date(1), 4096);
+    await service.flushHeartbeats(); // first call: rejected, re-buffered
+
+    query.mockResolvedValueOnce(undefined);
+    await service.flushHeartbeats();
+    expect(query).toHaveBeenCalledTimes(2);
+    const [, params] = query.mock.calls[1];
+    expect(params[0]).toEqual(['addr-A', 'addr-B']);
+  });
+
+  it('does not overwrite a newer in-memory heartbeat with the re-buffered older one', async () => {
+    const query = jest.fn().mockRejectedValueOnce(new Error('PG down'));
+    const service = buildPostgresService(query);
+
+    await service.heartbeat('addr-A', 'rig-A', 'sess-A', 100, new Date(1), 2048);
+    const inflight = service.flushHeartbeats();
+    // While the failing flush is in flight, a newer heartbeat for the same
+    // sessionId arrives.
+    await service.heartbeat('addr-A', 'rig-A', 'sess-A', 999, new Date(2), 8192);
+    await inflight;
+
+    query.mockResolvedValueOnce(undefined);
+    await service.flushHeartbeats();
+    const [, params] = query.mock.calls[1];
+    expect(params[3]).toEqual([999]);
+    expect(params[6]).toEqual([8192]);
+  });
+});
+
+describe('ClientService.flushHeartbeats — sqlite per-row path (in-memory)', () => {
+  let dataSource: DataSource;
+  let service: ClientService;
+
+  beforeAll(async () => {
+    dataSource = new DataSource({
+      type: 'sqlite',
+      database: ':memory:',
+      dropSchema: true,
+      synchronize: true,
+      entities: [ClientEntity],
+    });
+    await dataSource.initialize();
+  });
+
+  afterAll(async () => {
+    await dataSource.destroy();
+  });
+
+  beforeEach(async () => {
+    await dataSource.getRepository(ClientEntity).clear();
+    service = new ClientService(dataSource.getRepository(ClientEntity));
+  });
+
+  it('updates buffered sessions end-to-end on sqlite', async () => {
+    const repo = dataSource.getRepository(ClientEntity);
+    const t0 = new Date('2026-05-13T11:00:00.000Z');
+    await repo.save({
+      address: 'addr-X',
+      clientName: 'rig-X',
+      sessionId: 'sess-X',
+      startTime: t0,
+      firstSeen: t0,
+      hashRate: 0,
+      bestDifficulty: 0,
+      currentDifficulty: 1024,
+    });
+
+    const t1 = new Date('2026-05-13T12:00:00.000Z');
+    await service.heartbeat('addr-X', 'rig-X', 'sess-X', 4242, t1, 8192);
+    await service.flushHeartbeats();
+
+    const row = await repo.findOneBy({ address: 'addr-X', clientName: 'rig-X', sessionId: 'sess-X' });
+    expect(row?.hashRate).toBe(4242);
+    expect(row?.currentDifficulty).toBe(8192);
+  });
+
+  it('omitted currentDifficulty leaves the column value untouched', async () => {
+    const repo = dataSource.getRepository(ClientEntity);
+    const t0 = new Date('2026-05-13T11:00:00.000Z');
+    await repo.save({
+      address: 'addr-Y',
+      clientName: 'rig-Y',
+      sessionId: 'sess-Y',
+      startTime: t0,
+      firstSeen: t0,
+      hashRate: 0,
+      bestDifficulty: 0,
+      currentDifficulty: 1024,
+    });
+
+    const t1 = new Date('2026-05-13T12:00:00.000Z');
+    await service.heartbeat('addr-Y', 'rig-Y', 'sess-Y', 4242, t1);
+    await service.flushHeartbeats();
+
+    const row = await repo.findOneBy({ address: 'addr-Y', clientName: 'rig-Y', sessionId: 'sess-Y' });
+    expect(row?.hashRate).toBe(4242);
+    expect(row?.currentDifficulty).toBe(1024);
+  });
+});
