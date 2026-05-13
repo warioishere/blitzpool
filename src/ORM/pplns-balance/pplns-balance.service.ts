@@ -26,12 +26,13 @@ import { SwapBuffer } from '../../utils/buffers';
 export class PplnsBalanceService implements OnModuleDestroy {
 
     /**
-     * In-memory buffer of latest touch timestamp per address. PPLNS shares
-     * fire markTouch (synchronous, no-await) instead of a PG UPDATE
-     * per share. The only consumer of lastAcceptedShareAt is the nightly
-     * abandoned-balance sweep, which tolerates the 60 s flush lag trivially.
+     * In-memory buffer of latest touch timestamp per address (epoch ms).
+     * PPLNS shares fire markTouch (synchronous, no-await) instead of a PG
+     * UPDATE per share. The only consumer of lastAcceptedShareAt is the
+     * nightly abandoned-balance sweep, which tolerates the 60 s flush
+     * lag trivially.
      */
-    private readonly touches = new SwapBuffer<string, Date>();
+    private readonly touches = new SwapBuffer<string, number>();
     private isFlushingTouches = false;
 
     constructor(
@@ -93,10 +94,10 @@ export class PplnsBalanceService implements OnModuleDestroy {
 
     /**
      * Record the most recent accepted-share timestamp for an address in
-     * the in-memory buffer. Synchronous, non-throwing. Coalesces multiple
-     * share-marks per flush window into one PG UPDATE.
+     * the in-memory buffer (epoch ms). Synchronous, non-throwing.
+     * Coalesces multiple share-marks per flush window into one PG UPDATE.
      */
-    markTouch(address: string, when: Date = new Date()): void {
+    markTouch(address: string, when: number = Date.now()): void {
         if (!address) return;
         this.touches.set(address, when);
     }
@@ -117,7 +118,7 @@ export class PplnsBalanceService implements OnModuleDestroy {
             const dbType = this.repo.manager.connection.options.type;
             if (dbType === 'postgres') {
                 const addresses: string[] = [];
-                const stamps: Date[] = [];
+                const stamps: number[] = [];
                 for (const [addr, ts] of snapshot) {
                     addresses.push(addr);
                     stamps.push(ts);
@@ -127,7 +128,7 @@ export class PplnsBalanceService implements OnModuleDestroy {
                      SET "lastAcceptedShareAt" = u."lastAcceptedShareAt"
                      FROM (
                        SELECT unnest($1::text[]) AS address,
-                              unnest($2::timestamptz[]) AS "lastAcceptedShareAt"
+                              unnest($2::bigint[]) AS "lastAcceptedShareAt"
                      ) AS u
                      WHERE t.address = u.address`,
                     [addresses, stamps],

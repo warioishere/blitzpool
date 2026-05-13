@@ -1,4 +1,6 @@
-import { Column, Entity, PrimaryColumn, UpdateDateColumn } from 'typeorm';
+import { Column, Entity, PrimaryColumn } from 'typeorm';
+
+import { epochMsTransformer } from '../utils/epoch-ms-transformer';
 
 @Entity('pplns_balance')
 export class PplnsBalanceEntity {
@@ -42,19 +44,19 @@ export class PplnsBalanceEntity {
     totalPaidSats: number;
 
     /**
-     * Last accepted-share timestamp for this address (on the PPLNS path).
-     * Updated by PplnsService.recordShare. Primary driver for the
-     * abandoned-balance sweep cron: rows whose `balanceSats != 0` and
-     * whose `lastAcceptedShareAt` is older than the configured
-     * abandonment period get their balance zeroed out.
+     * Last accepted-share timestamp for this address (on the PPLNS path),
+     * stored as epoch milliseconds. Updated by PplnsService.recordShare.
+     * Primary driver for the abandoned-balance sweep cron: rows whose
+     * `balanceSats != 0` and whose `lastAcceptedShareAt` is older than
+     * the configured abandonment period get their balance zeroed out.
      *
      * Nullable because pre-existing rows at migration time have no
      * timestamp — those are treated as "active" until they eventually
      * update or get swept once they truly go inactive.
      */
-    @Column({ type: 'timestamptz', nullable: true })
-    lastAcceptedShareAt: Date | null;
+    @Column({ type: 'bigint', nullable: true, transformer: epochMsTransformer })
+    lastAcceptedShareAt: number | null;
 
-    @UpdateDateColumn()
-    updatedAt: Date;
+    @Column({ type: 'bigint', transformer: epochMsTransformer })
+    updatedAt: number;
 }

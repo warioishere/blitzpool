@@ -77,8 +77,20 @@ function makeQb<T extends Record<string, any>>(rows: T[]) {
             } else if (expr === 'b."lastAcceptedShareAt" IS NOT NULL') {
                 addClause(r => r.lastAcceptedShareAt != null);
             } else if (expr === 'b."lastAcceptedShareAt" < :cutoff') {
+                // group-balance path — still Date-based until that entity migrates.
                 const cutoff = params.cutoff.getTime();
-                addClause(r => r.lastAcceptedShareAt.getTime() < cutoff);
+                addClause(r => (r.lastAcceptedShareAt instanceof Date
+                    ? r.lastAcceptedShareAt.getTime()
+                    : Number(r.lastAcceptedShareAt)) < cutoff);
+            } else if (expr === 'b."lastAcceptedShareAt" < :cutoffMs') {
+                // pplns_balance path — bigint epoch-ms column.
+                const cutoffMs = params.cutoffMs;
+                addClause(r => {
+                    const raw = r.lastAcceptedShareAt;
+                    if (raw == null) return false;
+                    const ms = raw instanceof Date ? raw.getTime() : Number(raw);
+                    return ms < cutoffMs;
+                });
             } else {
                 throw new Error(`unmocked andWhere: ${expr}`);
             }
