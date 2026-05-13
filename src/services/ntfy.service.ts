@@ -164,13 +164,13 @@ export class NtfyService implements OnModuleInit {
     }
     const clientAddresses = await this.clientService.getAllAddresses();
     const addresses = Array.from(new Set(clientAddresses));
-    for (const addr of addresses) {
-      const settings = await this.addressSettingsService.getSettings(
-        addr,
-        false,
-      );
-      this.bestDiffCache.set(addr, settings?.bestDifficulty ?? 0);
-      this.subscribe(addr, false);
+    if (addresses.length > 0) {
+      // Single IN-list read instead of N sequential getSettings round-trips.
+      const diffs = await this.addressSettingsService.getBestDifficultiesForAddresses(addresses);
+      for (const addr of addresses) {
+        this.bestDiffCache.set(addr, diffs.get(addr) ?? 0);
+        this.subscribe(addr, false);
+      }
     }
     this.reconnect();
   }
