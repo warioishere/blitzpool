@@ -3,6 +3,7 @@ import { Interval } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Not, Repository } from 'typeorm';
 import { PplnsBalanceEntity } from './pplns-balance.entity';
+import { SwapBuffer } from '../../utils/buffers';
 
 /**
  * Thin data-access layer around the PPLNS credit/debit ledger.
@@ -30,7 +31,7 @@ export class PplnsBalanceService implements OnModuleDestroy {
      * per share. The only consumer of lastAcceptedShareAt is the nightly
      * abandoned-balance sweep, which tolerates the 60 s flush lag trivially.
      */
-    private pendingTouches = new Map<string, Date>();
+    private readonly touches = new SwapBuffer<string, Date>();
     private isFlushingTouches = false;
 
     constructor(
@@ -67,7 +68,7 @@ export class PplnsBalanceService implements OnModuleDestroy {
      */
     markTouch(address: string, when: Date = new Date()): void {
         if (!address) return;
-        this.pendingTouches.set(address, when);
+        this.touches.set(address, when);
     }
 
     /**
@@ -78,12 +79,10 @@ export class PplnsBalanceService implements OnModuleDestroy {
      */
     @Interval(60_000)
     async flushPendingTouches(): Promise<void> {
-        if (this.isFlushingTouches || this.pendingTouches.size === 0) return;
+        if (this.isFlushingTouches || this.touches.size === 0) return;
         this.isFlushingTouches = true;
 
-        const snapshot = this.pendingTouches;
-        this.pendingTouches = new Map();
-
+        const snapshot = this.touches.drain();
         try {
             const dbType = this.repo.manager.connection.options.type;
             if (dbType === 'postgres') {
@@ -109,12 +108,10 @@ export class PplnsBalanceService implements OnModuleDestroy {
                 }
             }
         } catch (error) {
-            // Re-buffer on failure so the next flush retries.
-            for (const [addr, ts] of snapshot) {
-                if (!this.pendingTouches.has(addr)) {
-                    this.pendingTouches.set(addr, ts);
-                }
-            }
+            // Re-buffer on failure so the next flush retries. Default policy
+            // (existing-wins-if-newer) keeps any newer touch the hot path
+            // recorded during the failed flush.
+            this.touches.rebuffer(snapshot);
             console.warn('[PplnsBalance] flushPendingTouches failed:', (error as Error).message);
         } finally {
             this.isFlushingTouches = false;

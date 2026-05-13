@@ -4,6 +4,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 
 import { ClientDifficultyStatisticsEntity } from './client-difficulty-statistics.entity';
+import { SwapBuffer } from '../../utils/buffers';
 
 const HOUR_IN_MS = 60 * 60 * 1000;
 const FLUSH_INTERVAL_MS = 30_000;
@@ -18,7 +19,7 @@ interface BufferedDifficulty {
 @Injectable()
 export class ClientDifficultyStatisticsService implements OnModuleDestroy {
   /** In-memory buffer: key = "address:clientName:slotTime" → max difficulty */
-  private buffer = new Map<string, BufferedDifficulty>();
+  private readonly buffer = new SwapBuffer<string, BufferedDifficulty>();
   private isFlushing = false;
 
   constructor(
@@ -83,10 +84,7 @@ export class ClientDifficultyStatisticsService implements OnModuleDestroy {
     }
 
     this.isFlushing = true;
-
-    // Swap buffer so new writes go to a fresh map while we flush
-    const snapshot = this.buffer;
-    this.buffer = new Map();
+    const snapshot = this.buffer.drain();
 
     try {
       const records = Array.from(snapshot.values());
@@ -98,16 +96,13 @@ export class ClientDifficultyStatisticsService implements OnModuleDestroy {
         await this.flushPostgres(records);
       }
     } catch (error) {
-      // On failure, merge unflushed records back into the buffer (keep higher max)
-      for (const record of snapshot.values()) {
-        const key = ClientDifficultyStatisticsService.bufferKey(record.address, record.clientName, record.slotTime);
-        const current = this.buffer.get(key);
-        if (current) {
-          current.maxDifficulty = Math.max(current.maxDifficulty, record.maxDifficulty);
-        } else {
-          this.buffer.set(key, record);
-        }
-      }
+      // Max-wins rebuffer: a concurrent share may have beaten the failed
+      // snapshot's value, so keep whichever is larger.
+      this.buffer.rebuffer(snapshot, (incoming, existing) =>
+        existing === undefined
+          ? incoming
+          : { ...existing, maxDifficulty: Math.max(existing.maxDifficulty, incoming.maxDifficulty) },
+      );
       console.error('[ClientDifficultyStatisticsService] Flush failed, records re-buffered:', error);
     } finally {
       this.isFlushing = false;

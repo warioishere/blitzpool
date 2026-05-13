@@ -10,6 +10,7 @@ import {
     MAX_REASONABLE_DIFFICULTY,
     SLOT_DURATION_MS,
 } from '../../constants/mining.constants';
+import { NestedDeltaBuffer } from '../../utils/buffers';
 
 /**
  * Per-mode pool-wide hashrate stats, keyed on 10-min end-time slots.
@@ -31,85 +32,34 @@ import {
 export class PoolModeHashrateService {
 
     /**
-     * In-memory accumulator. `slotDeltas.get(slot).get(mode)` is the
-     * un-flushed delta for that mode in that slot. Coordinator drains all
-     * slots on its 60s tick, including the current in-progress slot
-     * (which the chart filter hides until 60s after it ends anyway).
+     * In-memory accumulator. Slot → mode → un-flushed diff. Backed by the
+     * generic NestedDeltaBuffer — see src/utils/buffers.ts.
      */
-    private readonly slotDeltas = new Map<number, Map<MiningMode, number>>();
+    private readonly slotDeltas = new NestedDeltaBuffer<number, MiningMode>();
 
     constructor(
         @InjectRepository(PoolModeHashrateEntity)
         private readonly repo: Repository<PoolModeHashrateEntity>,
     ) {}
 
-    /**
-     * Add `difficulty` to the current end-time slot for `mode`. Synchronous,
-     * non-throwing — failed stats writes must never block share submission.
-     */
+    /** Synchronous, non-throwing hot-path write. */
     incrementAccepted(mode: MiningMode, difficulty: number): void {
         if (!Number.isFinite(difficulty) || difficulty <= 0) return;
-
-        // Defense-in-depth ceiling. The PG `pool_mode_hashrate.diff` column
-        // is `real` (max ~3.4e38). A misconfigured SV2 client opening a
-        // channel with absurdly small maxTarget gets assigned diff in the
-        // e+50 range — flushing such a value would overflow the column and
-        // poison the slot. Mirrors the same guard in PoolShareStatistics.
         if (difficulty > MAX_REASONABLE_DIFFICULTY) {
             console.warn(
                 `[PoolModeHashrate] Discarded out-of-range share for ${mode}: diff=${difficulty} (limit ${MAX_REASONABLE_DIFFICULTY})`,
             );
             return;
         }
-
-        const slot = TimeSlotHelper.getCurrentSlot();
-        let modeMap = this.slotDeltas.get(slot);
-        if (!modeMap) {
-            modeMap = new Map();
-            this.slotDeltas.set(slot, modeMap);
-        }
-        modeMap.set(mode, (modeMap.get(mode) ?? 0) + difficulty);
+        this.slotDeltas.add(TimeSlotHelper.getCurrentSlot(), mode, difficulty);
     }
 
-    /**
-     * Coordinator API — return a snapshot of all currently-pending slot
-     * deltas. Internal map is NOT cleared; `confirmFlush()` must be called
-     * after the PG upsert succeeds. Any shares that arrive between drain
-     * and confirm are preserved as residuals.
-     */
     drainSlotDeltas(): Map<number, Map<MiningMode, number>> {
-        const snapshot = new Map<number, Map<MiningMode, number>>();
-        for (const [slot, modeMap] of this.slotDeltas) {
-            const copy = new Map<MiningMode, number>();
-            for (const [mode, diff] of modeMap) {
-                if (diff > 0) copy.set(mode, diff);
-            }
-            if (copy.size > 0) snapshot.set(slot, copy);
-        }
-        return snapshot;
+        return this.slotDeltas.drain();
     }
 
-    /**
-     * Coordinator API — subtract a previously-drained snapshot. Residuals
-     * (concurrent increments that happened during the await) remain.
-     */
     confirmFlush(flushed: Map<number, Map<MiningMode, number>>): void {
-        for (const [slot, modeMap] of flushed) {
-            const current = this.slotDeltas.get(slot);
-            if (!current) continue;
-            for (const [mode, flushedAmount] of modeMap) {
-                const have = current.get(mode) ?? 0;
-                const residual = have - flushedAmount;
-                if (residual <= 0) {
-                    current.delete(mode);
-                } else {
-                    current.set(mode, residual);
-                }
-            }
-            if (current.size === 0) {
-                this.slotDeltas.delete(slot);
-            }
-        }
+        this.slotDeltas.confirm(flushed);
     }
 
     /**

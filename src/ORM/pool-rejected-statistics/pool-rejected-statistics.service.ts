@@ -4,6 +4,7 @@ import { Repository, MoreThan } from 'typeorm';
 
 import { PoolRejectedStatisticsEntity } from './pool-rejected-statistics.entity';
 import { TimeSlotHelper } from '../../utils/time-slot.helper';
+import { NestedDeltaBuffer } from '../../utils/buffers';
 
 /**
  * Pool-wide rejected-share counts bucketed per 10-min slot per reason
@@ -20,7 +21,7 @@ type SlotReasonMap = Map<string, number>;
 
 @Injectable()
 export class PoolRejectedStatisticsService {
-  private readonly slotDeltas = new Map<number, SlotReasonMap>();
+  private readonly slotDeltas = new NestedDeltaBuffer<number, string>();
 
   constructor(
     @InjectRepository(PoolRejectedStatisticsEntity)
@@ -30,42 +31,15 @@ export class PoolRejectedStatisticsService {
   /** Synchronous hot-path entry. Non-throwing. */
   public addRejectedShare(reason: string, diff: number): void {
     if (!reason || !Number.isFinite(diff) || diff <= 0) return;
-
-    const timeSlot = TimeSlotHelper.getCurrentSlot();
-    let reasonMap = this.slotDeltas.get(timeSlot);
-    if (!reasonMap) {
-      reasonMap = new Map();
-      this.slotDeltas.set(timeSlot, reasonMap);
-    }
-    reasonMap.set(reason, (reasonMap.get(reason) ?? 0) + diff);
+    this.slotDeltas.add(TimeSlotHelper.getCurrentSlot(), reason, diff);
   }
 
-  /** Coordinator API — snapshot of pending slot×reason deltas. */
   public drainSlotDeltas(): Map<number, SlotReasonMap> {
-    const snapshot = new Map<number, SlotReasonMap>();
-    for (const [slot, reasonMap] of this.slotDeltas) {
-      const copy: SlotReasonMap = new Map();
-      for (const [reason, count] of reasonMap) {
-        if (count > 0) copy.set(reason, count);
-      }
-      if (copy.size > 0) snapshot.set(slot, copy);
-    }
-    return snapshot;
+    return this.slotDeltas.drain();
   }
 
-  /** Coordinator API — subtract a previously-drained snapshot. */
   public confirmFlush(flushed: Map<number, SlotReasonMap>): void {
-    for (const [slot, flushedReasons] of flushed) {
-      const current = this.slotDeltas.get(slot);
-      if (!current) continue;
-      for (const [reason, amount] of flushedReasons) {
-        const have = current.get(reason) ?? 0;
-        const residual = have - amount;
-        if (residual <= 0) current.delete(reason);
-        else current.set(reason, residual);
-      }
-      if (current.size === 0) this.slotDeltas.delete(slot);
-    }
+    this.slotDeltas.confirm(flushed);
   }
 
   // ─── PG-direct API used by the public API endpoints ───

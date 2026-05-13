@@ -7,39 +7,26 @@ import { ClientEntity } from '../client/client.entity';
 import { PoolShareStatisticsEntity } from '../pool-share-statistics/pool-share-statistics.entity';
 import { DIFFICULTY_1, MAX_REASONABLE_DIFFICULTY } from '../../constants/mining.constants';
 import { TimeSlotHelper } from '../../utils/time-slot.helper';
+import { RecordDeltaBuffer } from '../../utils/buffers';
 
-/**
- * In-memory bucket for an (address, clientName, sessionId, slot) tuple.
- * Mirrors the field set of the PG `client_statistics_entity` row.
- */
-interface ClientSlotBucket {
-  shares: number;
-  acceptedCount: number;
-  rejectedCount: number;
-  rejectedJobNotFoundCount: number;
-  rejectedJobNotFoundDiff1: number;
-  rejectedDuplicateShareCount: number;
-  rejectedDuplicateShareDiff1: number;
-  rejectedLowDifficultyShareCount: number;
-  rejectedLowDifficultyShareDiff1: number;
-}
+/** Bucket field set — mirrors the PG row's numeric columns. */
+type BucketField =
+  | 'shares'
+  | 'acceptedCount'
+  | 'rejectedCount'
+  | 'rejectedJobNotFoundCount'
+  | 'rejectedJobNotFoundDiff1'
+  | 'rejectedDuplicateShareCount'
+  | 'rejectedDuplicateShareDiff1'
+  | 'rejectedLowDifficultyShareCount'
+  | 'rejectedLowDifficultyShareDiff1';
 
-interface ClientSlotEntry {
-  address: string;
-  clientName: string;
-  sessionId: string;
-  time: number;
-  bucket: ClientSlotBucket;
-}
-
-function emptyBucket(): ClientSlotBucket {
-  return {
-    shares: 0, acceptedCount: 0, rejectedCount: 0,
-    rejectedJobNotFoundCount: 0, rejectedJobNotFoundDiff1: 0,
-    rejectedDuplicateShareCount: 0, rejectedDuplicateShareDiff1: 0,
-    rejectedLowDifficultyShareCount: 0, rejectedLowDifficultyShareDiff1: 0,
-  };
-}
+const BUCKET_FIELDS: readonly BucketField[] = [
+  'shares', 'acceptedCount', 'rejectedCount',
+  'rejectedJobNotFoundCount', 'rejectedJobNotFoundDiff1',
+  'rejectedDuplicateShareCount', 'rejectedDuplicateShareDiff1',
+  'rejectedLowDifficultyShareCount', 'rejectedLowDifficultyShareDiff1',
+];
 
 @Injectable()
 export class ClientStatisticsService {
@@ -60,7 +47,7 @@ export class ClientStatisticsService {
    * The bucket carries a copy of the key components so drain can produce flat
    * records without re-parsing.
    */
-  private readonly deltas = new Map<string, ClientSlotEntry>();
+  private readonly deltas = new RecordDeltaBuffer<string, BucketField>(BUCKET_FIELDS);
 
   private keyOf(address: string, clientName: string, sessionId: string, slot: number): string {
     return `${address}|${clientName}|${sessionId}|${slot}`;
@@ -75,13 +62,6 @@ export class ClientStatisticsService {
       console.warn(`[ClientStatisticsService] Discarded non-finite share: difficulty=${difficulty}`);
       return;
     }
-    // Defense-in-depth ceiling. `client_statistics_entity.shares` and the
-    // four rejected*Diff1 columns are PG `real` (max ~3.4e38). The upstream
-    // stratum channel-diff clamp normally prevents per-share values from
-    // exceeding ~3× netdiff, but a misconfigured SV2 client opening a channel
-    // with absurdly small maxTarget could slip through. Discard at write
-    // time so the bucket stays flushable. Mirrors the guard in
-    // PoolShareStatistics/PoolModeHashrate.
     if (difficulty > MAX_REASONABLE_DIFFICULTY) {
       console.warn(
         `[ClientStatisticsService] Discarded out-of-range accepted share: difficulty=${difficulty} (limit ${MAX_REASONABLE_DIFFICULTY})`,
@@ -90,13 +70,7 @@ export class ClientStatisticsService {
     }
     const slot = TimeSlotHelper.getCurrentSlot();
     const k = this.keyOf(client.address, client.clientName, client.sessionId, slot);
-    let entry = this.deltas.get(k);
-    if (!entry) {
-      entry = { address: client.address, clientName: client.clientName, sessionId: client.sessionId, time: slot, bucket: emptyBucket() };
-      this.deltas.set(k, entry);
-    }
-    entry.bucket.shares += difficulty;
-    entry.bucket.acceptedCount += 1;
+    this.deltas.addRecord(k, { shares: difficulty, acceptedCount: 1 });
   }
 
   /**
@@ -122,34 +96,26 @@ export class ClientStatisticsService {
 
     const slot = TimeSlotHelper.getCurrentSlot();
     const k = this.keyOf(client.address, client.clientName, client.sessionId, slot);
-    let entry = this.deltas.get(k);
-    if (!entry) {
-      entry = { address: client.address, clientName: client.clientName, sessionId: client.sessionId, time: slot, bucket: emptyBucket() };
-      this.deltas.set(k, entry);
-    }
-    const b = entry.bucket;
-    b.rejectedCount += 1;
+    const partial: Partial<Record<BucketField, number>> = { rejectedCount: 1 };
     switch (reason) {
       case 'JobNotFound':
       case 'Stale':
-        b.rejectedJobNotFoundCount += 1;
-        b.rejectedJobNotFoundDiff1 += difficulty;
+        partial.rejectedJobNotFoundCount = 1;
+        partial.rejectedJobNotFoundDiff1 = difficulty;
         break;
       case 'DuplicateShare':
-        b.rejectedDuplicateShareCount += 1;
-        b.rejectedDuplicateShareDiff1 += difficulty;
+        partial.rejectedDuplicateShareCount = 1;
+        partial.rejectedDuplicateShareDiff1 = difficulty;
         break;
       case 'LowDifficultyShare':
-        b.rejectedLowDifficultyShareCount += 1;
-        b.rejectedLowDifficultyShareDiff1 += difficulty;
+        partial.rejectedLowDifficultyShareCount = 1;
+        partial.rejectedLowDifficultyShareDiff1 = difficulty;
         break;
     }
+    this.deltas.addRecord(k, partial);
   }
 
-  /**
-   * Coordinator API — snapshot of pending bucket deltas in record shape
-   * compatible with the existing `bulkUpsertClientStatistics` UNNEST upsert.
-   */
+  /** Drain rows: flat record shape consumed by `bulkUpsertClientStatistics`. */
   public drainDeltas(): Array<{
     address: string; clientName: string; sessionId: string; time: number;
     shares: number; acceptedCount: number; rejectedCount: number;
@@ -157,56 +123,44 @@ export class ClientStatisticsService {
     rejectedDuplicateShareCount: number; rejectedDuplicateShareDiff1: number;
     rejectedLowDifficultyShareCount: number; rejectedLowDifficultyShareDiff1: number;
   }> {
+    const snap = this.deltas.drain();
     const out: Array<any> = [];
-    for (const { address, clientName, sessionId, time, bucket: b } of this.deltas.values()) {
-      // Skip buckets that have nothing pending.
-      if (b.shares === 0 && b.acceptedCount === 0 && b.rejectedCount === 0) continue;
-      out.push({
-        address, clientName, sessionId, time,
-        shares: b.shares,
-        acceptedCount: b.acceptedCount,
-        rejectedCount: b.rejectedCount,
-        rejectedJobNotFoundCount: b.rejectedJobNotFoundCount,
-        rejectedJobNotFoundDiff1: b.rejectedJobNotFoundDiff1,
-        rejectedDuplicateShareCount: b.rejectedDuplicateShareCount,
-        rejectedDuplicateShareDiff1: b.rejectedDuplicateShareDiff1,
-        rejectedLowDifficultyShareCount: b.rejectedLowDifficultyShareCount,
-        rejectedLowDifficultyShareDiff1: b.rejectedLowDifficultyShareDiff1,
-      });
+    for (const [key, bucket] of snap) {
+      const idx = key.indexOf('|');
+      const idx2 = key.indexOf('|', idx + 1);
+      const idx3 = key.indexOf('|', idx2 + 1);
+      const address = key.slice(0, idx);
+      const clientName = key.slice(idx + 1, idx2);
+      const sessionId = key.slice(idx2 + 1, idx3);
+      const time = parseInt(key.slice(idx3 + 1), 10);
+      out.push({ address, clientName, sessionId, time, ...bucket });
     }
     return out;
   }
 
-  /**
-   * Coordinator API — subtract a previously-drained snapshot. Buckets that
-   * end up fully empty are removed from the map.
-   */
+  /** Subtract a previously-drained snapshot. */
   public confirmFlush(flushed: Array<{ address: string; clientName: string; sessionId: string; time: number;
     shares: number; acceptedCount: number; rejectedCount: number;
     rejectedJobNotFoundCount: number; rejectedJobNotFoundDiff1: number;
     rejectedDuplicateShareCount: number; rejectedDuplicateShareDiff1: number;
     rejectedLowDifficultyShareCount: number; rejectedLowDifficultyShareDiff1: number;
   }>): void {
+    const snap = new Map<string, Record<BucketField, number>>();
     for (const f of flushed) {
       const k = this.keyOf(f.address, f.clientName, f.sessionId, f.time);
-      const entry = this.deltas.get(k);
-      if (!entry) continue;
-      const b = entry.bucket;
-      b.shares -= f.shares;
-      b.acceptedCount -= f.acceptedCount;
-      b.rejectedCount -= f.rejectedCount;
-      b.rejectedJobNotFoundCount -= f.rejectedJobNotFoundCount;
-      b.rejectedJobNotFoundDiff1 -= f.rejectedJobNotFoundDiff1;
-      b.rejectedDuplicateShareCount -= f.rejectedDuplicateShareCount;
-      b.rejectedDuplicateShareDiff1 -= f.rejectedDuplicateShareDiff1;
-      b.rejectedLowDifficultyShareCount -= f.rejectedLowDifficultyShareCount;
-      b.rejectedLowDifficultyShareDiff1 -= f.rejectedLowDifficultyShareDiff1;
-      if (b.shares <= 0 && b.acceptedCount <= 0 && b.rejectedCount <= 0
-          && b.rejectedJobNotFoundCount <= 0 && b.rejectedDuplicateShareCount <= 0
-          && b.rejectedLowDifficultyShareCount <= 0) {
-        this.deltas.delete(k);
-      }
+      snap.set(k, {
+        shares: f.shares,
+        acceptedCount: f.acceptedCount,
+        rejectedCount: f.rejectedCount,
+        rejectedJobNotFoundCount: f.rejectedJobNotFoundCount,
+        rejectedJobNotFoundDiff1: f.rejectedJobNotFoundDiff1,
+        rejectedDuplicateShareCount: f.rejectedDuplicateShareCount,
+        rejectedDuplicateShareDiff1: f.rejectedDuplicateShareDiff1,
+        rejectedLowDifficultyShareCount: f.rejectedLowDifficultyShareCount,
+        rejectedLowDifficultyShareDiff1: f.rejectedLowDifficultyShareDiff1,
+      });
     }
+    this.deltas.confirm(snap);
   }
 
   private calcHashRate(shares: number) {
@@ -970,8 +924,6 @@ export class ClientStatisticsService {
    */
   public async clearRedisKeysForAddress(address: string): Promise<void> {
     const prefix = `${address}|`;
-    for (const k of this.deltas.keys()) {
-      if (k.startsWith(prefix)) this.deltas.delete(k);
-    }
+    this.deltas.deleteWhere(k => k.startsWith(prefix));
   }
 }

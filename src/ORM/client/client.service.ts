@@ -6,6 +6,7 @@ import { IsNull, ObjectLiteral, Repository } from 'typeorm';
 import { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 
 import { ClientEntity } from './client.entity';
+import { SwapBuffer } from '../../utils/buffers';
 
 interface BufferedHeartbeat {
     address: string;
@@ -23,7 +24,7 @@ export class ClientService implements OnModuleDestroy {
     public insertQueue: { result: BehaviorSubject<ObjectLiteral | null>, partialClient: Partial<ClientEntity> }[] = [];
 
     /** Heartbeat buffer: sessionId → latest heartbeat data */
-    private heartbeatBuffer = new Map<string, BufferedHeartbeat>();
+    private readonly heartbeatBuffer = new SwapBuffer<string, BufferedHeartbeat>();
 
 
     constructor(
@@ -100,9 +101,7 @@ export class ClientService implements OnModuleDestroy {
     public async flushHeartbeats(): Promise<void> {
         if (this.heartbeatBuffer.size === 0) return;
 
-        const snapshot = this.heartbeatBuffer;
-        this.heartbeatBuffer = new Map();
-
+        const snapshot = this.heartbeatBuffer.drain();
         try {
             const dbType = this.clientRepository.manager.connection.options.type;
             if (dbType === 'postgres') {
@@ -111,12 +110,7 @@ export class ClientService implements OnModuleDestroy {
                 await this.flushHeartbeatsPerRow(snapshot);
             }
         } catch (error) {
-            // Re-buffer on failure (keep newer values if buffer already has entries)
-            for (const [sid, hb] of snapshot) {
-                if (!this.heartbeatBuffer.has(sid)) {
-                    this.heartbeatBuffer.set(sid, hb);
-                }
-            }
+            this.heartbeatBuffer.rebuffer(snapshot);
             console.error(`[ClientService] flushHeartbeats failed for ${snapshot.size} clients:`, error);
         }
     }
