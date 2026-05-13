@@ -225,14 +225,13 @@ services:
       - REDIS_DB=0
       - REDIS_TTL=600
       # ── Block notification source ─────────────────────────────────
-      # Where the pool learns about new bitcoind blocks. Default `zmq`
-      # keeps legacy behaviour (direct ZMQ subscribe). Set to
-      # `redis-pubsub` to use the zmq-sidecar bridge — required when
-      # the pool runs on Bun (zeromq NAPI doesn't load there, see
-      # oven-sh/bun#18546). Channel must match the sidecar's
-      # BLOCK_NOTIFY_CHANNEL setting.
-      - BLOCK_NOTIFY_SOURCE=${BLOCK_NOTIFY_SOURCE:-zmq}
-      - BLOCK_NOTIFY_CHANNEL=${BLOCK_NOTIFY_CHANNEL:-pool:bitcoind:newblock}
+      # BLOCK_NOTIFY_SOURCE and BLOCK_NOTIFY_CHANNEL are read from the
+      # mounted blitzpool.env (see volumes:). Required values when the
+      # pool runs on Bun: BLOCK_NOTIFY_SOURCE=redis-pubsub (the zmq NAPI
+      # binding can't load under Bun, see oven-sh/bun#18546). Channel
+      # must match the zmq-sidecar's BLOCK_NOTIFY_CHANNEL setting.
+      # Intentionally NOT listed here as environment: entries — compose
+      # `environment:` overlays process.env and would shadow blitzpool.env.
       # Firebase Cloud Messaging (FCM) - Optional
       - FCM_SERVICE_ACCOUNT_PATH=/app/fcm-key.json
 
