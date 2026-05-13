@@ -1,6 +1,5 @@
 import 'reflect-metadata';
 
-import { DataType, newDb } from 'pg-mem';
 import { DataSource } from 'typeorm';
 
 import { TrackedEntityTimestampSubscriber } from '../ORM/utils/tracked-entity.subscriber';
@@ -14,22 +13,6 @@ import { ExternalSharesEntity } from '../ORM/external-shares/external-shares.ent
 import { PoolRejectedStatisticsEntity } from '../ORM/pool-rejected-statistics/pool-rejected-statistics.entity';
 import { PoolShareStatisticsEntity } from '../ORM/pool-share-statistics/pool-share-statistics.entity';
 import { TelegramSubscriptionsEntity } from '../ORM/telegram-subscriptions/telegram-subscriptions.entity';
-import { InitialSchema1700000000000 } from '../migrations/1700000000000-InitialSchema';
-import { UseTimestamptzForDates1707352800000 } from '../migrations/1707352800000-UseTimestamptzForDates';
-import { AddClientDifficultyStatistics1717430400000 } from '../migrations/1717430400000-AddClientDifficultyStatistics';
-import { AddDeviceNotificationsToTelegramSubscriptions1718000000000 } from '../migrations/1718000000000-AddDeviceNotificationsToTelegramSubscriptions';
-import { AddCurrentDifficultyToClients1719000000000 } from '../migrations/1719000000000-AddCurrentDifficultyToClients';
-import { CreateNtfySubscriptions1732060800000 } from '../migrations/1732060800000-CreateNtfySubscriptions';
-import { CreatePushNotifications1734192000000 } from '../migrations/1734192000000-CreatePushNotifications';
-import { AddFcmSupportToPushSubscriptions1735000000000 } from '../migrations/1735000000000-AddFcmSupportToPushSubscriptions';
-import { AddNetworkDifficultyNotifications1735200000000 } from '../migrations/1735200000000-AddNetworkDifficultyNotifications';
-import { FixPushNotificationDefaults1736780400000 } from '../migrations/1736780400000-FixPushNotificationDefaults';
-import { AddHourlyStatsToTelegramSubscriptions1770000000000 } from '../migrations/1770000000000-AddHourlyStatsToTelegramSubscriptions';
-import { PplnsBalanceTimestampsToBigint1781000000000 } from '../migrations/1781000000000-PplnsBalanceTimestampsToBigint';
-import { PplnsPayoutHistoryCreatedAtBigint1781100000000 } from '../migrations/1781100000000-PplnsPayoutHistoryCreatedAtBigint';
-import { EmailTimestampsToBigint1781200000000 } from '../migrations/1781200000000-EmailTimestampsToBigint';
-import { PplnsGroupTimestampsToBigint1781300000000 } from '../migrations/1781300000000-PplnsGroupTimestampsToBigint';
-import { TrackedEntityTimestampsToBigint1781400000000 } from '../migrations/1781400000000-TrackedEntityTimestampsToBigint';
 import {
     MIGRATION_ENTITIES,
     MigrationLogger,
@@ -40,13 +23,15 @@ import { promises as fs } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
-// Suite skipped: pg-mem can't parse the `ALTER COLUMN TYPE BIGINT USING CASE`
-// syntax emitted by the 1781xxxx-…ToBigint migrations introduced in the 2026-05
-// Date→bigint cleanup. Real Postgres handles them fine; the sqlite→postgres
-// data-copy script is exercised end-to-end against a real PG container in
-// pre-deploy checks. Re-enable once pg-mem catches up (or migrate to a
-// container-backed integration test).
-describe.skip('migrateSqliteToPostgres', () => {
+// Real-Postgres backend (port 15432 by default). Switched from pg-mem
+// because pg-mem can't parse the 1781xxxx bigint-conversion migrations.
+// The data-copy script doesn't need migrations replayed — `synchronize:
+// true` builds the post-bigint schema directly from entity metadata,
+// which is what the sqlite source also has. Same shape on both sides.
+//
+// Container: `docker run -d --name blitzpool-test-pg -p 15432:5432 ...`
+// (see memory/feedback-pg-e2e-tests.md).
+describe('migrateSqliteToPostgres', () => {
     let sqliteDataSource: DataSource;
     let postgresDataSource: DataSource;
 
@@ -85,58 +70,19 @@ describe.skip('migrateSqliteToPostgres', () => {
     }
 
     async function createPostgresDataSource(): Promise<DataSource> {
-        const db = newDb({ autoCreateForeignKeyIndices: true });
-        db.public.registerFunction({
-            name: 'pg_get_serial_sequence',
-            args: [DataType.text, DataType.text],
-            returns: DataType.text,
-            implementation: (table: string, column: string) => {
-                const normalized = table.replace(/"/g, '');
-                const tableName = normalized.includes('.') ? normalized.split('.')[1] : normalized;
-                return `${tableName}_${column}_seq`;
-            },
-        });
-        db.public.registerFunction({
-            name: 'current_database',
-            args: [],
-            returns: DataType.text,
-            implementation: () => 'pg-mem',
-        });
-        db.public.registerFunction({
-            name: 'version',
-            args: [],
-            returns: DataType.text,
-            implementation: () => 'PostgreSQL 14.0 (pg-mem)',
-        });
-
-        const dataSource = db.adapters.createTypeormDataSource({
+        const dataSource = new DataSource({
             type: 'postgres',
-            database: 'pg-mem',
+            host: process.env.PG_HOST ?? 'localhost',
+            port: parseInt(process.env.PG_PORT ?? '15432', 10),
+            username: process.env.PG_USER ?? 'postgres',
+            password: process.env.PG_PASSWORD ?? 'postgres',
+            database: process.env.PG_DATABASE ?? 'blitzpool_test',
             entities: [...MIGRATION_ENTITIES],
             subscribers: [TrackedEntityTimestampSubscriber],
-            migrations: [
-                InitialSchema1700000000000,
-                UseTimestamptzForDates1707352800000,
-                AddClientDifficultyStatistics1717430400000,
-                AddDeviceNotificationsToTelegramSubscriptions1718000000000,
-                AddCurrentDifficultyToClients1719000000000,
-                CreateNtfySubscriptions1732060800000,
-                CreatePushNotifications1734192000000,
-                AddFcmSupportToPushSubscriptions1735000000000,
-                AddNetworkDifficultyNotifications1735200000000,
-                FixPushNotificationDefaults1736780400000,
-                AddHourlyStatsToTelegramSubscriptions1770000000000,
-                PplnsBalanceTimestampsToBigint1781000000000,
-                PplnsPayoutHistoryCreatedAtBigint1781100000000,
-                EmailTimestampsToBigint1781200000000,
-                PplnsGroupTimestampsToBigint1781300000000,
-                TrackedEntityTimestampsToBigint1781400000000,
-            ],
-            synchronize: false,
+            synchronize: true,
+            dropSchema: true,
         });
-
         await dataSource.initialize();
-        await dataSource.runMigrations();
         return dataSource;
     }
 

@@ -488,14 +488,11 @@ describe('ClientService.flushHeartbeats — sqlite per-row path (in-memory)', ()
 
 // ── Real-Postgres integration ─────────────────────────────────────────
 //
-// PG_E2E=1 enables this block. Validates flushHeartbeatsBulkPostgres
-// against a real Postgres container — the `unnest($5::bigint[])` path
+// Validates flushHeartbeatsBulkPostgres against the local Postgres
+// container on localhost:15432 — the `unnest($5::bigint[])` path
 // silently differs from sqlite + pg-mem (both permissive on types).
 // See memory/feedback-pg-e2e-tests.md for container setup.
-const PG_E2E_CLIENT = process.env.PG_E2E === '1';
-const describeIfClient = PG_E2E_CLIENT ? describe : describe.skip;
-
-describeIfClient('ClientService.flushHeartbeats — real Postgres', () => {
+describe('ClientService.flushHeartbeats — real Postgres', () => {
   let dataSource: DataSource;
   let service: ClientService;
 

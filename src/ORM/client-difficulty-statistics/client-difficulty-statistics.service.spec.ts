@@ -4,17 +4,14 @@ import { ClientDifficultyStatisticsEntity } from './client-difficulty-statistics
 import { ClientDifficultyStatisticsService } from './client-difficulty-statistics.service';
 import { TrackedEntityTimestampSubscriber } from '../utils/tracked-entity.subscriber';
 
-// PG_E2E=1 enables the real-Postgres path. The 2026-05 bigint cleanup
-// broke `flushPostgres` (passing `new Date()` to a bigint column), and
-// the sqlite-only spec didn't catch it because SQLite is permissive
-// about type coercion. Running this spec against the real Postgres
-// container catches PG-only type strictness issues.
+// Runs against BOTH sqlite (fast in-memory) and the real Postgres
+// container on localhost:15432. The 2026-05 bigint cleanup broke
+// `flushPostgres` (passing `new Date()` to a bigint column), and the
+// sqlite-only spec didn't catch it because SQLite is permissive about
+// type coercion. Real PG enforces strict types and reveals such bugs.
 //
-// Container: `docker run -d --name blitzpool-test-pg -p 15432:5432 \
-//   -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres \
-//   -e POSTGRES_DB=blitzpool_test postgres:18`
-const PG_E2E = process.env.PG_E2E === '1';
-const drivers = PG_E2E ? (['sqlite', 'postgres'] as const) : (['sqlite'] as const);
+// Container required: see memory/feedback-pg-e2e-tests.md for setup.
+const drivers = ['sqlite', 'postgres'] as const;
 
 describe.each(drivers)('ClientDifficultyStatisticsService (%s)', (driver) => {
   let dataSource: DataSource;

@@ -127,17 +127,14 @@ describe('PplnsBalanceService.markTouch / flushPendingTouches', () => {
 
 // ── Real-Postgres integration ─────────────────────────────────────────
 //
-// PG_E2E=1 enables this block. Validates flushPendingTouches against a
-// real Postgres container — the `unnest($2::bigint[])` array of epoch-ms
-// numbers is silently accepted by sqlite but PG enforces type strictly.
+// Validates flushPendingTouches against the local Postgres container on
+// localhost:15432 — the `unnest($2::bigint[])` array of epoch-ms numbers
+// is silently accepted by sqlite but PG enforces type strictly.
 // See memory/feedback-pg-e2e-tests.md for container setup.
 import { DataSource } from 'typeorm';
 import { PplnsBalanceEntity } from './pplns-balance.entity';
 
-const PG_E2E_PBAL = process.env.PG_E2E === '1';
-const describeIfPbal = PG_E2E_PBAL ? describe : describe.skip;
-
-describeIfPbal('PplnsBalanceService — real Postgres', () => {
+describe('PplnsBalanceService — real Postgres', () => {
     let dataSource: DataSource;
     let service: PplnsBalanceService;
 

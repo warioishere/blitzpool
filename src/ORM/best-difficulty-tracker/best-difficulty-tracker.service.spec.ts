@@ -94,14 +94,11 @@ describe('BestDifficultyTrackerService (postgres)', () => {
 
 // ── Real-Postgres integration ─────────────────────────────────────────
 //
-// PG_E2E=1 enables this block. The existing suite uses pg-mem which is
-// type-permissive; real PG enforces bigint strictly on the
-// createdAt/updatedAt columns set by the createQueryBuilder().insert()
-// path. See memory/feedback-pg-e2e-tests.md for container setup.
-const PG_E2E_BDT = process.env.PG_E2E === '1';
-const describeIfBdt = PG_E2E_BDT ? describe : describe.skip;
-
-describeIfBdt('BestDifficultyTrackerService — real Postgres', () => {
+// The pg-mem suite above is type-permissive; real PG enforces bigint
+// strictly on the createdAt/updatedAt columns set by the
+// createQueryBuilder().insert() path. Connects to local container on
+// localhost:15432 — see memory/feedback-pg-e2e-tests.md for setup.
+describe('BestDifficultyTrackerService — real Postgres', () => {
   let dataSource: DataSource;
   let service: BestDifficultyTrackerService;
 

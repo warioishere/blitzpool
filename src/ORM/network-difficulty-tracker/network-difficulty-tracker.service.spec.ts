@@ -100,14 +100,12 @@ describe('NetworkDifficultyTrackerService (postgres)', () => {
 
 // ── Real-Postgres integration ─────────────────────────────────────────
 //
-// PG_E2E=1 enables this block. The raw INSERT ... ON CONFLICT path
-// for difficultyChanged=true passes `now` (number) for both
-// "createdAt"/"updatedAt"/"lastCheckedAt"/"lastChangedAt" — all bigint
-// now. pg-mem can't catch the type-strict mismatch reliably.
-const PG_E2E_NDT = process.env.PG_E2E === '1';
-const describeIfNdt = PG_E2E_NDT ? describe : describe.skip;
-
-describeIfNdt('NetworkDifficultyTrackerService — real Postgres', () => {
+// The raw INSERT ... ON CONFLICT path for difficultyChanged=true passes
+// `now` (number) for "createdAt"/"updatedAt"/"lastCheckedAt"/
+// "lastChangedAt" — all bigint now. pg-mem can't catch type-strict
+// mismatches reliably; real PG container does.
+// See memory/feedback-pg-e2e-tests.md for setup.
+describe('NetworkDifficultyTrackerService — real Postgres', () => {
   let dataSource: DataSource;
   let service: NetworkDifficultyTrackerService;
 
