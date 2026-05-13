@@ -122,6 +122,10 @@ function createMockBalanceBacking() {
     }),
     getBalanceSats: jest.fn(async (address: string) => balances.get(address)?.balanceSats ?? 0),
     getBalance: jest.fn(async (address: string) => balances.get(address) ?? null),
+    getBalanceLight: jest.fn(async (address: string) => {
+      const b = balances.get(address);
+      return b ? { balanceSats: b.balanceSats, totalPaidSats: b.totalPaidSats } : null;
+    }),
     getAllWithBalance: jest.fn(async () =>
       Array.from(balances.values()).filter(b => b.balanceSats !== 0),
     ),

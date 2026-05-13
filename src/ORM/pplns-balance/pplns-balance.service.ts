@@ -44,12 +44,42 @@ export class PplnsBalanceService implements OnModuleDestroy {
     }
 
     async getBalanceSats(address: string): Promise<number> {
+        if (this.repo.manager.connection.options.type === 'postgres') {
+            // Raw SELECT — bypasses entity hydration (RawSqlResultsToEntityTransformer).
+            // UI endpoint hot path; called per dashboard poll for every active miner.
+            const rows: Array<{ balanceSats: string }> = await this.repo.query(
+                `SELECT "balanceSats" FROM pplns_balance WHERE address = $1 LIMIT 1`,
+                [address],
+            );
+            return rows[0] ? Number(rows[0].balanceSats) : 0;
+        }
         const entity = await this.repo.findOneBy({ address });
         return entity?.balanceSats ?? 0;
     }
 
     async getBalance(address: string): Promise<PplnsBalanceEntity | null> {
         return this.repo.findOneBy({ address });
+    }
+
+    /**
+     * Hot-path lookup used by `getAddressStatus` for the per-miner UI poll.
+     * Returns just the two scalar balance fields — no Date hydration, no
+     * entity construction. Sqlite path keeps `findOneBy` for dev/test parity.
+     */
+    async getBalanceLight(address: string): Promise<{ balanceSats: number; totalPaidSats: number } | null> {
+        if (this.repo.manager.connection.options.type === 'postgres') {
+            const rows: Array<{ balanceSats: string; totalPaidSats: string }> = await this.repo.query(
+                `SELECT "balanceSats", "totalPaidSats" FROM pplns_balance WHERE address = $1 LIMIT 1`,
+                [address],
+            );
+            if (!rows[0]) return null;
+            return {
+                balanceSats: Number(rows[0].balanceSats),
+                totalPaidSats: Number(rows[0].totalPaidSats),
+            };
+        }
+        const entity = await this.repo.findOneBy({ address });
+        return entity ? { balanceSats: entity.balanceSats, totalPaidSats: entity.totalPaidSats } : null;
     }
 
     /**

@@ -894,7 +894,7 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         currentWindowShares: number;
         currentWindowPercent: number;
     }> {
-        const balance = await this.balanceService.getBalance(address);
+        const balance = await this.balanceService.getBalanceLight(address);
 
         let currentWindowShares = 0;
         let currentWindowPercent = 0;

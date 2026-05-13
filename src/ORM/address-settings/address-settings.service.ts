@@ -39,6 +39,38 @@ export class AddressSettingsService {
     }
 
     /**
+     * Hot-path lookup that returns just the (bestDifficulty,
+     * bestDifficultyUserAgent) pair — what AddressSettingsCacheService
+     * needs on a Redis cache miss. Skips entity hydration; raw SELECT
+     * on Postgres.
+     */
+    public async getBestDifficultyLight(
+        address: string,
+    ): Promise<{ bestDifficulty: number; bestDifficultyUserAgent: string | null } | null> {
+        if (this.addressSettingsRepository.manager.connection.options.type === 'postgres') {
+            const rows: Array<{ bestDifficulty: number | string | null; bestDifficultyUserAgent: string | null }> =
+                await this.addressSettingsRepository.query(
+                    `SELECT "bestDifficulty", "bestDifficultyUserAgent"
+                     FROM address_settings_entity
+                     WHERE address = $1
+                     LIMIT 1`,
+                    [address],
+                );
+            if (!rows[0]) return null;
+            const v = rows[0].bestDifficulty;
+            const n = typeof v === 'number' ? v : (v == null ? 0 : Number(v));
+            return {
+                bestDifficulty: Number.isFinite(n) ? n : 0,
+                bestDifficultyUserAgent: rows[0].bestDifficultyUserAgent ?? null,
+            };
+        }
+        const settings = await this.addressSettingsRepository.findOne({ where: { address } });
+        return settings
+            ? { bestDifficulty: settings.bestDifficulty ?? 0, bestDifficultyUserAgent: settings.bestDifficultyUserAgent ?? null }
+            : null;
+    }
+
+    /**
      * Hot-path helper for the per-minute push-notification cron. Returns
      * only the `bestDifficulty` column for the given addresses in a single
      * raw SELECT on Postgres (no entity hydration), keyed for O(1) lookup

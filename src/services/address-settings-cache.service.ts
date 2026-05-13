@@ -120,10 +120,17 @@ export class AddressSettingsCacheService implements OnModuleInit {
         }
       }
 
-      const settings = await this.addressSettingsService.getSettings(address, true);
+      let light = await this.addressSettingsService.getBestDifficultyLight(address);
+      if (!light) {
+        // Row doesn't exist yet — atomic upsert via the entity path, then
+        // re-query Light. createIfNotFound only fires on the cold path
+        // (first share for an address), so the extra round-trip is rare.
+        await this.addressSettingsService.getSettings(address, true);
+        light = await this.addressSettingsService.getBestDifficultyLight(address);
+      }
       const snapshot = {
-        bestDifficulty: settings?.bestDifficulty ?? 0,
-        bestDifficultyUserAgent: settings?.bestDifficultyUserAgent ?? null,
+        bestDifficulty: light?.bestDifficulty ?? 0,
+        bestDifficultyUserAgent: light?.bestDifficultyUserAgent ?? null,
       };
 
       const payload = JSON.stringify(snapshot);

@@ -359,43 +359,87 @@ export class ClientService implements OnModuleDestroy {
     }
 
     public async getFirstSeen(address: string, clientName: string): Promise<Date | null> {
+        if (this.clientRepository.manager.connection.options.type === 'postgres') {
+            // Raw query — bypasses RawSqlResultsToEntityTransformer. Per-share-
+            // auth hot path; the entity-hydrated path was ~6.87% inclusive CPU
+            // on the 2026-05-13 prod profile.
+            const rows: Array<{ firstSeen: string | Date | null; startTime: string | Date | null }> =
+                await this.clientRepository.query(
+                    `SELECT "firstSeen", "startTime"
+                     FROM client_entity
+                     WHERE address = $1 AND "clientName" = $2
+                     ORDER BY "firstSeen" ASC NULLS LAST
+                     LIMIT 1`,
+                    [address, clientName],
+                );
+            const row = rows[0];
+            if (!row) return null;
+            const seen = row.firstSeen ?? row.startTime;
+            if (!seen) return null;
+            return seen instanceof Date ? seen : new Date(seen);
+        }
+
+        // SQLite (dev/test): entity-path is fine, perf doesn't matter.
         const result = await this.clientRepository.createQueryBuilder('client')
             .withDeleted()
             .where('client.address = :address AND client.clientName = :clientName', { address, clientName })
             .orderBy('client.firstSeen', 'ASC')
             .getOne();
-        if (!result) {
-            return null;
-        }
-
+        if (!result) return null;
         const firstSeen = result.firstSeen ?? result.startTime;
-        if (!firstSeen) {
-            return null;
-        }
-
+        if (!firstSeen) return null;
         return firstSeen instanceof Date ? firstSeen : new Date(firstSeen);
     }
 
     public async getFirstSeenIfRecent(address: string, clientName: string, minutes = 30): Promise<Date | null> {
-        const cutoff = new Date(Date.now() - minutes * 60 * 1000);
+        const cutoffMs = Date.now() - minutes * 60 * 1000;
+
+        if (this.clientRepository.manager.connection.options.type === 'postgres') {
+            // Single raw SELECT of the 4 timestamp columns the function actually needs.
+            // withDeleted == no `deletedAt IS NULL` filter, matched by the raw query
+            // omitting that predicate entirely.
+            const rows: Array<{
+                deletedAt: string | Date | null;
+                updatedAt: string | Date | null;
+                firstSeen: string | Date | null;
+                startTime: string | Date | null;
+            }> = await this.clientRepository.query(
+                `SELECT "deletedAt", "updatedAt", "firstSeen", "startTime"
+                 FROM client_entity
+                 WHERE address = $1 AND "clientName" = $2
+                 ORDER BY "updatedAt" DESC NULLS LAST
+                 LIMIT 1`,
+                [address, clientName],
+            );
+            const row = rows[0];
+            if (!row) return null;
+
+            const lastActiveRaw = row.deletedAt ?? row.updatedAt;
+            if (!lastActiveRaw) return null;
+            const lastActiveMs = lastActiveRaw instanceof Date
+                ? lastActiveRaw.getTime()
+                : Date.parse(lastActiveRaw);
+            if (!Number.isFinite(lastActiveMs) || lastActiveMs < cutoffMs) return null;
+
+            const seen = row.firstSeen ?? row.startTime;
+            if (!seen) return null;
+            return seen instanceof Date ? seen : new Date(seen);
+        }
+
+        // SQLite fallback.
         const result = await this.clientRepository.createQueryBuilder('client')
             .withDeleted()
             .where('client.address = :address AND client.clientName = :clientName', { address, clientName })
             .orderBy('client.updatedAt', 'DESC')
             .getOne();
 
-        if (result == null) {
-            return null;
-        }
+        if (result == null) return null;
 
         const lastActiveRaw: any = result.deletedAt ?? result.updatedAt;
         const lastActive = lastActiveRaw instanceof Date ? lastActiveRaw : new Date(lastActiveRaw);
-        if (lastActive >= cutoff) {
+        if (lastActive.getTime() >= cutoffMs) {
             const seen = result.firstSeen ?? result.startTime;
-            if (!seen) {
-                return null;
-            }
-
+            if (!seen) return null;
             return seen instanceof Date ? seen : new Date(seen);
         }
         return null;
