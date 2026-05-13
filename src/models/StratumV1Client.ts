@@ -1421,7 +1421,18 @@ export class StratumV1Client {
             } else if (!this.socket.destroyed) {
                 this.socket.destroy();
             }
-            console.error(`Error occurred while writing to socket: ${this.sessionId}`, error);
+            // ECONNRESET / EPIPE / ETIMEDOUT are routine ungraceful-disconnect
+            // signals from the miner side (power blip, WiFi drop, miner reboot).
+            // Socket is fully cleaned up above; the error is informational only.
+            // Prod sees ~225 of these per day — dumping a full Error stack each
+            // time drowns out signal in the logs. Compact one-liner for the
+            // routine cases, full Error object preserved for anything else.
+            const code = (error as NodeJS.ErrnoException)?.code;
+            if (code === 'ECONNRESET' || code === 'EPIPE' || code === 'ETIMEDOUT') {
+                console.log(`Socket write failed (${code}): ${this.sessionId}`);
+            } else {
+                console.error(`Error occurred while writing to socket: ${this.sessionId}`, error);
+            }
             return false;
         }
     }
