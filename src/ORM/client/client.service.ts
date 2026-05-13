@@ -310,7 +310,9 @@ export class ClientService implements OnModuleDestroy {
     }
 
     public async deleteAll() {
-        return await this.clientRepository.softDelete({})
+        // TypeORM rejects softDelete({}) — empty criteria are a safety guard.
+        // Scope to live rows so the call has explicit criteria.
+        return await this.clientRepository.softDelete({ deletedAt: IsNull() });
     }
 
     public async getUserAgents(excludeAddresses?: string[]) {
