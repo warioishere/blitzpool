@@ -187,7 +187,7 @@ export class StratumV2Client {
   private sessionDifficulty: number;
   private statistics: StratumV1ClientStatistics;
   private stratumSubscription: Subscription | null = null;
-  private difficultyCheckInterval: NodeJS.Timer | null = null;
+  private difficultyCheckInterval: NodeJS.Timeout | null = null;
   private entity: ClientEntity | null = null;
   private creatingEntity: Promise<void> | null = null;
   public hashRate: number = 0;
@@ -1488,7 +1488,10 @@ export class StratumV2Client {
     const coinbaseTxid = bitcoinjs.crypto.hash256(coinbaseTxBytes);
 
     // 3. Walk merkle path to compute merkle root
-    let merkleRoot = Buffer.from(coinbaseTxid);
+    // Explicit Buffer<ArrayBufferLike> type lets us reassign from
+    // hash256() (which returns the same loose Buffer type) without
+    // running into TS 6's stricter Buffer-variance.
+    let merkleRoot: Buffer = Buffer.from(coinbaseTxid);
     const bothHashes = Buffer.alloc(64);
     for (const sibling of extJob.merklePath) {
       bothHashes.set(merkleRoot, 0);

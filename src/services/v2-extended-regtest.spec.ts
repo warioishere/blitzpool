@@ -148,7 +148,7 @@ describe('V2 Extended Channel Regtest — coinbase reconstruction produces valid
     const coinbaseTxid = bitcoinjs.crypto.hash256(realCoinbaseBytes);
 
     // Path A — walk jobTemplate.merkle_branch (what Production does on a winning share)
-    let walkedRoot = Buffer.from(coinbaseTxid);
+    let walkedRoot: Buffer = Buffer.from(coinbaseTxid);
     const both = Buffer.alloc(64);
     for (const sibHex of jobTemplate.merkle_branch) {
       both.set(walkedRoot, 0);

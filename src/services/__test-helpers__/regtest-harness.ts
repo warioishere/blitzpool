@@ -15,8 +15,8 @@
 import * as bitcoinjs from 'bitcoinjs-lib';
 import * as ecc from 'tiny-secp256k1';
 import * as http from 'http';
-import * as merkle from 'merkle-lib';
-import * as merkleProof from 'merkle-lib/proof';
+const merkle: (leaves: Buffer[], hashFn: (b: Buffer) => Buffer) => Buffer[] = require('merkle-lib');
+const merkleProof: (tree: Buffer[], leaf: Buffer) => Buffer[] = require('merkle-lib/proof');
 
 import { MiningJob } from '../../models/MiningJob';
 import { IJobTemplate } from '../stratum-v1-jobs.service';

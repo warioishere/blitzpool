@@ -106,7 +106,7 @@ const enum ReaderState {
 
 export class Sv2FrameReader {
   private decryptFn: DecryptFn | null;
-  private buf = Buffer.alloc(0);
+  private buf: Buffer = Buffer.alloc(0);
   private state = ReaderState.READING_HEADER;
   private currentHeader: Sv2FrameHeader | null = null;
 
@@ -128,7 +128,10 @@ export class Sv2FrameReader {
    * Feed incoming TCP data and return any complete frames.
    */
   feed(data: Buffer): ParsedFrame[] {
-    this.buf = this.buf.length === 0 ? data : Buffer.concat([this.buf, data]);
+    // TS 6 strictness: Buffer.concat() returns Buffer<ArrayBuffer> which
+    // is technically narrower than the bare `Buffer` (= Buffer<ArrayBufferLike>)
+    // the field is typed as. Runtime-identical, so widen with a cast.
+    this.buf = this.buf.length === 0 ? data : (Buffer.concat([this.buf, data]) as Buffer);
     const frames: ParsedFrame[] = [];
 
     while (true) {

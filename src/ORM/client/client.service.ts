@@ -2,8 +2,7 @@ import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { Interval } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import { BehaviorSubject, firstValueFrom } from 'rxjs';
-import { IsNull, ObjectLiteral, Repository } from 'typeorm';
-import { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
+import { IsNull, ObjectLiteral, QueryDeepPartialEntity, Repository } from 'typeorm';
 
 import { ClientEntity } from './client.entity';
 

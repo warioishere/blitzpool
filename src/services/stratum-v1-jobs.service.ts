@@ -1,7 +1,10 @@
 import { Injectable } from '@nestjs/common';
 import * as bitcoinjs from 'bitcoinjs-lib';
-import * as merkle from 'merkle-lib';
-import * as merkleProof from 'merkle-lib/proof';
+// merkle-lib exports a callable via `module.exports = fn`. TS 6 wraps namespace
+// imports in `__importStar`, which yields an object (not callable). Use require
+// to get the raw function reference.
+const merkle: (leaves: Buffer[], hashFn: (b: Buffer) => Buffer) => Buffer[] = require('merkle-lib');
+const merkleProof: (tree: Buffer[], leaf: Buffer) => Buffer[] = require('merkle-lib/proof');
 import { combineLatest, filter, from, interval, map, Observable, shareReplay, startWith, switchMap, tap } from 'rxjs';
 
 import { MiningJob } from '../models/MiningJob';

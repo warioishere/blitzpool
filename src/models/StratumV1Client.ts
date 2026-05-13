@@ -88,7 +88,7 @@ export class StratumV1Client {
     private clientAuthorization: AuthorizationMessage;
     private clientSuggestedDifficulty: SuggestDifficulty;
     private stratumSubscription: Subscription;
-    private backgroundWork: NodeJS.Timer[] = [];
+    private backgroundWork: NodeJS.Timeout[] = [];
 
     private statistics: StratumV1ClientStatistics;
     private stratumInitialized = false;

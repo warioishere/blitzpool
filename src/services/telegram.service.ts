@@ -3,7 +3,7 @@ import { Interval } from '@nestjs/schedule';
 import { ConfigService } from '@nestjs/config';
 import { validate } from 'bitcoin-address-validation';
 import { Block } from 'bitcoinjs-lib';
-import * as TelegramBot from 'node-telegram-bot-api';
+import TelegramBot = require('node-telegram-bot-api');
 import { NumberSuffix } from '../utils/NumberSuffix';
 import { decryptMessageIfNeeded } from '../utils/message-decryptor';
 import { TelegramSubscriptionsService } from '../ORM/telegram-subscriptions/telegram-subscriptions.service';
