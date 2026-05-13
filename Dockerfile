@@ -71,7 +71,8 @@ RUN apk add --no-cache curl
 #   3335 — V1 TLS
 #   3339 — V2
 #   3340 — PPLNS
-EXPOSE 3333 3334 3335 3339 3340
+#   3349 — PPLNS HighDiff (rentals)
+EXPOSE 3333 3334 3335 3339 3340 3349
 
 WORKDIR /public-pool
 
