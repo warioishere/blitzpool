@@ -18,7 +18,18 @@ import { NtfyService } from './ntfy.service';
 import { PplnsService } from './pplns.service';
 import { GroupService } from './group.service';
 import { GroupSoloService } from './group-solo.service';
-import { buildStatsMessage, buildWorkersOverviewMessage } from './common-command-handlers';
+import {
+    buildStatsMessage,
+    buildWorkersOverviewMessage,
+    buildPoolHashrateMessage,
+    buildCurrentDifficultyMessage,
+    buildNextDifficultyMessage,
+    buildPplnsStatusMessage,
+    buildPplnsTopMessage,
+    buildGroupStatusMessage,
+    buildGroupMembersMessage,
+    buildGroupHistoryMessage,
+} from './common-command-handlers';
 
 @Injectable()
 export class TelegramService implements OnModuleInit {
@@ -502,78 +513,15 @@ Getting started:
         });
 
         this.bot.onText(/\/difficulty/, async (msg) => {
-            const chatId = msg.chat.id;
-
-            try {
-                const res = await fetch('https://mempool.space/api/v1/mining/hashrate/3d');
-                const json = await res.json();
-                const difficulty = (json.currentDifficulty / 1e12).toFixed(2);
-                this.reply(chatId, {
-                    de: `Aktuelle Difficulty: ${difficulty} T`,
-                    en: `Current difficulty: ${difficulty} T`
-                });
-            } catch (e) {
-                this.reply(chatId, {
-                    de: 'Konnte die Difficulty nicht abrufen.',
-                    en: 'Could not fetch difficulty.'
-                });
-                console.error(e);
-            }
+            this.reply(msg.chat.id, await buildCurrentDifficultyMessage());
         });
 
         this.bot.onText(/\/next_difficulty/, async (msg) => {
-            const chatId = msg.chat.id;
-
-            try {
-                const res = await fetch('https://mempool.space/api/v1/difficulty-adjustment');
-                const data = await res.json();
-
-                const progress = data.progressPercent.toFixed(2);
-                const change = data.difficultyChange.toFixed(2);
-                const estimatedDate = new Date(data.estimatedRetargetDate).toLocaleString('de-CH');
-
-                const changeText = change >= 0 ? `📈 +${change}%` : `📉 ${change}%`;
-
-                this.reply(chatId, {
-                    de: `📊 Nächste Difficulty-Anpassung:
-
-• Fortschritt: ${progress}%
-• Geschätzt: ${estimatedDate}
-• Erwartete Änderung: ${changeText}`,
-                    en: `📊 Next difficulty adjustment:
-
-• Progress: ${progress}%
-• Estimated: ${estimatedDate}
-• Expected change: ${changeText}`
-                });
-            } catch (err) {
-                console.error("Fehler bei /next_difficulty:", err);
-                this.reply(chatId, {
-                    de: 'Konnte die nächste Difficulty-Anpassung nicht abrufen.',
-                    en: 'Could not fetch next difficulty adjustment.'
-                });
-            }
+            this.reply(msg.chat.id, await buildNextDifficultyMessage());
         });
 
         this.bot.onText(/\/poolhashrate/, async (msg) => {
-            const chatId = msg.chat.id;
-
-            try {
-                const apiPort = process.env.API_PORT || '3334';
-                const res = await fetch(`http://localhost:${apiPort}/api/pool`);
-                const data = await res.json();
-                const hashrateTH = (data.totalHashRate / 1e12).toFixed(2);
-                this.reply(chatId, {
-                    de: `Aktuelle Pool-Hashrate: ${hashrateTH} TH/s`,
-                    en: `Current pool hashrate: ${hashrateTH} TH/s`
-                });
-            } catch (err) {
-                console.error('Fehler bei /poolhashrate:', err);
-                this.reply(chatId, {
-                    de: 'Konnte die Pool-Hashrate nicht abrufen.',
-                    en: 'Could not fetch pool hashrate.'
-                });
-            }
+            this.reply(msg.chat.id, await buildPoolHashrateMessage());
         });
 
         this.bot.onText(/\/remove(?:\s+(.+))?/, async (msg, match) => {
@@ -1218,303 +1166,40 @@ Getting started:
     }
 
     private async handlePplnsStatus(chatId: number, addressParam?: string): Promise<void> {
-        if (!this.pplnsService.isEnabled()) {
-            await this.reply(chatId, {
-                de: 'PPLNS ist auf diesem Pool nicht aktiv.',
-                en: 'PPLNS is not enabled on this pool.'
-            });
-            return;
-        }
-
         const address = await this.resolveAddressForChat(chatId, addressParam);
         if (!address) return;
-
-        try {
-            const [status, window, distribution, myHashrate] = await Promise.all([
-                this.pplnsService.getAddressStatus(address),
-                this.pplnsService.getWindowStats(),
-                this.pplnsService.getCurrentDistribution(),
-                this.clientService.getTotalHashrateForAddresses([address]),
-            ]);
-
-            const pplnsAddresses = distribution.map(d => d.address);
-            const totalPplnsHashrate = pplnsAddresses.length > 0
-                ? await this.clientService.getTotalHashrateForAddresses(pplnsAddresses)
-                : 0;
-
-            const trimmed = this.formatAddress(address);
-            const percent = status.currentWindowPercent.toFixed(2);
-            const myShares = this.numberSuffix.to(status.currentWindowShares);
-            const totalShares = this.numberSuffix.to(window.totalShares);
-            const minerCount = window.minerCount;
-
-            const balance = status.balanceSats;
-            const totalPaid = status.totalPaidSats;
-
-            const ledgerDe = balance > 0
-                ? `${this.formatSats(balance)} sats (Pool schuldet dir)`
-                : balance < 0
-                    ? `${this.formatSats(balance)} sats (du schuldest dem Pool — wird mit nächster Auszahlung verrechnet)`
-                    : '0 sats';
-            const ledgerEn = balance > 0
-                ? `${this.formatSats(balance)} sats (pool owes you)`
-                : balance < 0
-                    ? `${this.formatSats(balance)} sats (you owe the pool — settled at the next payout)`
-                    : '0 sats';
-
-            await this.reply(chatId, {
-                de: `PPLNS Status — ${trimmed}\n` +
-                    `Window-Anteil: ${percent}%\n` +
-                    `Deine Hashrate: ${this.formatHashrate(myHashrate)}\n` +
-                    `PPLNS-Hashrate (gesamt): ${this.formatHashrate(totalPplnsHashrate)}\n` +
-                    `Deine Shares: ${myShares}\n` +
-                    `Pool-Shares (Window): ${totalShares}\n` +
-                    `Aktive Miner im Window: ${minerCount}\n` +
-                    `Saldo: ${ledgerDe}\n` +
-                    `Lifetime ausbezahlt: ${this.formatSats(totalPaid)} sats`,
-                en: `PPLNS status — ${trimmed}\n` +
-                    `Window share: ${percent}%\n` +
-                    `Your hashrate: ${this.formatHashrate(myHashrate)}\n` +
-                    `PPLNS hashrate (total): ${this.formatHashrate(totalPplnsHashrate)}\n` +
-                    `Your shares: ${myShares}\n` +
-                    `Pool shares (window): ${totalShares}\n` +
-                    `Active miners in window: ${minerCount}\n` +
-                    `Ledger: ${ledgerEn}\n` +
-                    `Lifetime paid: ${this.formatSats(totalPaid)} sats`,
-            });
-        } catch (err) {
-            console.error('[Telegram] /pplns_status failed:', (err as Error).message);
-            await this.reply(chatId, {
-                de: 'PPLNS-Status konnte nicht geladen werden.',
-                en: 'Could not load PPLNS status.'
-            });
-        }
+        const msg = await buildPplnsStatusMessage(
+            address, this.pplnsService, this.clientService, this.numberSuffix,
+        );
+        if (msg) await this.reply(chatId, msg);
     }
 
     private async handlePplnsTop(chatId: number): Promise<void> {
-        if (!this.pplnsService.isEnabled()) {
-            await this.reply(chatId, {
-                de: 'PPLNS ist auf diesem Pool nicht aktiv.',
-                en: 'PPLNS is not enabled on this pool.'
-            });
-            return;
-        }
-
-        try {
-            const distribution = await this.pplnsService.getCurrentDistribution();
-            if (distribution.length === 0) {
-                await this.reply(chatId, {
-                    de: 'Keine Shares im aktuellen PPLNS-Window.',
-                    en: 'No shares in the current PPLNS window.'
-                });
-                return;
-            }
-
-            const top = distribution.slice(0, 10);
-            const lines = top.map((entry, idx) =>
-                `${(idx + 1).toString().padStart(2, ' ')}. ${this.formatAddress(entry.address)}   ${entry.percent.toFixed(2)}%`
-            );
-
-            await this.reply(chatId, {
-                de: `Top 10 PPLNS-Miner (von ${distribution.length} aktiven):\n${lines.join('\n')}`,
-                en: `Top 10 PPLNS miners (out of ${distribution.length} active):\n${lines.join('\n')}`,
-            });
-        } catch (err) {
-            console.error('[Telegram] /pplns_top failed:', (err as Error).message);
-            await this.reply(chatId, {
-                de: 'PPLNS-Top-Liste konnte nicht geladen werden.',
-                en: 'Could not load PPLNS top list.'
-            });
-        }
+        await this.reply(chatId, await buildPplnsTopMessage(this.pplnsService));
     }
 
     private async handleGroupStatus(chatId: number, addressParam?: string): Promise<void> {
         const address = await this.resolveAddressForChat(chatId, addressParam);
         if (!address) return;
-
-        const entry = this.groupService.getGroupForAddress(address);
-        if (!entry) {
-            await this.reply(chatId, {
-                de: `${this.formatAddress(address)} ist in keiner Gruppe.`,
-                en: `${this.formatAddress(address)} is not in any group.`
-            });
-            return;
-        }
-
-        try {
-            const [group, members, round, best] = await Promise.all([
-                this.groupService.getGroup(entry.groupId),
-                this.groupService.listMembers(entry.groupId),
-                this.groupSoloService.getRoundStats(entry.groupId),
-                this.groupSoloService.getRoundBestDifficulty(entry.groupId),
-            ]);
-
-            if (!group) {
-                await this.reply(chatId, {
-                    de: 'Gruppe nicht mehr verfügbar.',
-                    en: 'Group is no longer available.'
-                });
-                return;
-            }
-
-            const memberAddresses = members.map(m => m.address);
-            const groupHashrate = memberAddresses.length > 0
-                ? await this.clientService.getTotalHashrateForAddresses(memberAddresses)
-                : 0;
-
-            const member = round.perAddress.find(p => p.address === address);
-            const myShare = member ? `${member.percent.toFixed(2)}%` : '0%';
-            const myShares = member ? this.numberSuffix.to(member.totalShares) : '0';
-            const totalShares = this.numberSuffix.to(round.totalShares);
-            const totalRejected = this.numberSuffix.to(round.totalRejected);
-            const memberCount = round.perAddress.length;
-
-            const bestDiffStr = best.bestDifficulty > 0
-                ? `${this.numberSuffix.to(best.bestDifficulty)} (${this.formatAddress(best.address ?? '')})`
-                : '—';
-
-            await this.reply(chatId, {
-                de: `Gruppe: ${group.name}\n` +
-                    `Aktive Miner (Round): ${memberCount}\n` +
-                    `Gruppen-Hashrate: ${this.formatHashrate(groupHashrate)}\n` +
-                    `Dein Anteil: ${myShare} (${myShares})\n` +
-                    `Round-Shares gesamt: ${totalShares}\n` +
-                    `Round-Rejected: ${totalRejected}\n` +
-                    `Beste Round-Difficulty: ${bestDiffStr}`,
-                en: `Group: ${group.name}\n` +
-                    `Active miners (round): ${memberCount}\n` +
-                    `Group hashrate: ${this.formatHashrate(groupHashrate)}\n` +
-                    `Your share: ${myShare} (${myShares})\n` +
-                    `Round shares total: ${totalShares}\n` +
-                    `Round rejected: ${totalRejected}\n` +
-                    `Best round difficulty: ${bestDiffStr}`,
-            });
-        } catch (err) {
-            console.error('[Telegram] /group_status failed:', (err as Error).message);
-            await this.reply(chatId, {
-                de: 'Gruppen-Status konnte nicht geladen werden.',
-                en: 'Could not load group status.'
-            });
-        }
+        await this.reply(chatId, await buildGroupStatusMessage(
+            address, this.groupService, this.groupSoloService, this.clientService, this.numberSuffix,
+        ));
     }
 
     private async handleGroupMembers(chatId: number, addressParam?: string): Promise<void> {
         const address = await this.resolveAddressForChat(chatId, addressParam);
         if (!address) return;
-
-        const entry = this.groupService.getGroupForAddress(address);
-        if (!entry) {
-            await this.reply(chatId, {
-                de: `${this.formatAddress(address)} ist in keiner Gruppe.`,
-                en: `${this.formatAddress(address)} is not in any group.`
-            });
-            return;
-        }
-
-        try {
-            const [group, members, round] = await Promise.all([
-                this.groupService.getGroup(entry.groupId),
-                this.groupService.listMembers(entry.groupId),
-                this.groupSoloService.getRoundStats(entry.groupId),
-            ]);
-
-            if (!group) {
-                await this.reply(chatId, {
-                    de: 'Gruppe nicht mehr verfügbar.',
-                    en: 'Group is no longer available.'
-                });
-                return;
-            }
-
-            const shareByAddr = new Map<string, number>();
-            for (const p of round.perAddress) shareByAddr.set(p.address, p.percent);
-
-            // Sort: members with shares first (desc), then alphabetical fallback.
-            const sorted = [...members].sort((a, b) => {
-                const sa = shareByAddr.get(a.address) ?? -1;
-                const sb = shareByAddr.get(b.address) ?? -1;
-                return sb - sa;
-            });
-
-            const lines = sorted.map(m => {
-                const share = shareByAddr.get(m.address);
-                const shareStr = share !== undefined ? `${share.toFixed(2)}%` : '—';
-                const trimmed = this.formatAddress(m.address);
-                const youMarker = m.address === address ? ' (du)' : '';
-                const youMarkerEn = m.address === address ? ' (you)' : '';
-                return { de: `${trimmed}   ${shareStr}${youMarker}`, en: `${trimmed}   ${shareStr}${youMarkerEn}` };
-            });
-
-            await this.reply(chatId, {
-                de: `Mitglieder von "${group.name}" (${members.length}):\n${lines.map(l => l.de).join('\n')}`,
-                en: `Members of "${group.name}" (${members.length}):\n${lines.map(l => l.en).join('\n')}`,
-            });
-        } catch (err) {
-            console.error('[Telegram] /group_members failed:', (err as Error).message);
-            await this.reply(chatId, {
-                de: 'Mitgliederliste konnte nicht geladen werden.',
-                en: 'Could not load member list.'
-            });
-        }
+        await this.reply(chatId, await buildGroupMembersMessage(
+            address, this.groupService, this.groupSoloService, this.numberSuffix,
+        ));
     }
 
     private async handleGroupHistory(chatId: number, addressParam?: string): Promise<void> {
         const address = await this.resolveAddressForChat(chatId, addressParam);
         if (!address) return;
-
-        const entry = this.groupService.getGroupForAddress(address);
-        if (!entry) {
-            await this.reply(chatId, {
-                de: `${this.formatAddress(address)} ist in keiner Gruppe.`,
-                en: `${this.formatAddress(address)} is not in any group.`
-            });
-            return;
-        }
-
-        try {
-            const [group, history] = await Promise.all([
-                this.groupService.getGroup(entry.groupId),
-                this.groupSoloService.getBlockHistory(entry.groupId, 50),
-            ]);
-
-            if (!group) {
-                await this.reply(chatId, {
-                    de: 'Gruppe nicht mehr verfügbar.',
-                    en: 'Group is no longer available.'
-                });
-                return;
-            }
-
-            // Filter to entries for this address; aggregate by block.
-            const own = history.filter(h => h.address === address).slice(0, 10);
-
-            if (own.length === 0) {
-                await this.reply(chatId, {
-                    de: `Keine Auszahlungen für ${this.formatAddress(address)} in "${group.name}".`,
-                    en: `No payouts for ${this.formatAddress(address)} in "${group.name}".`
-                });
-                return;
-            }
-
-            const lang = this.getLanguage(chatId);
-            const formatter = this.deviceNotificationFormatters[lang];
-
-            const lines = own.map(h => {
-                const when = h.createdAt ? formatter.format(new Date(h.createdAt)) : '—';
-                const amount = this.formatSats(h.paidSats ?? 0);
-                return `Block ${h.blockHeight} — ${when} — ${amount} sats`;
-            });
-
-            await this.reply(chatId, {
-                de: `Letzte Auszahlungen für ${this.formatAddress(address)} in "${group.name}":\n${lines.join('\n')}`,
-                en: `Recent payouts for ${this.formatAddress(address)} in "${group.name}":\n${lines.join('\n')}`,
-            });
-        } catch (err) {
-            console.error('[Telegram] /group_history failed:', (err as Error).message);
-            await this.reply(chatId, {
-                de: 'Block-Historie konnte nicht geladen werden.',
-                en: 'Could not load block history.'
-            });
-        }
+        const lang = this.getLanguage(chatId);
+        await this.reply(chatId, await buildGroupHistoryMessage(
+            address, this.groupService, this.groupSoloService, lang,
+        ));
     }
 }

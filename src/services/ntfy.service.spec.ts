@@ -50,6 +50,9 @@ describe('NtfyService', () => {
             {} as any,
             {} as any,
             {} as any,
+            {} as any,
+            {} as any,
+            {} as any,
         );
 
         const address = '1BoatSLRHtKNngkdXEeobR76b53LETtpyT';
@@ -90,6 +93,9 @@ describe('NtfyService', () => {
             {} as any,
             {} as any,
             {} as any,
+            {} as any,
+            {} as any,
+            {} as any,
         );
 
         const secondaryService = new NtfyService(
@@ -98,6 +104,9 @@ describe('NtfyService', () => {
             clientService as any,
             addressSettingsService as any,
             clientStatisticsService as any,
+            {} as any,
+            {} as any,
+            {} as any,
             {} as any,
             {} as any,
             {} as any,
@@ -145,6 +154,9 @@ describe('NtfyService', () => {
             clientService as any,
             addressSettingsService as any,
             clientStatisticsService as any,
+            {} as any,
+            {} as any,
+            {} as any,
             {} as any,
             {} as any,
             {} as any,
