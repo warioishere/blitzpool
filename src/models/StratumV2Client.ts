@@ -1529,6 +1529,25 @@ export class StratumV2Client {
       await this.handleValidShare(submission, submissionDifficulty, extJob.jobTemplate, updatedJobBlock, header, channel, jobDifficulty);
     } else {
       console.warn(`[SV2 ${this.sessionId}] ❌ Extended share rejected: difficulty-too-low (${submissionDifficulty.toFixed(2)} < ${jobDifficulty.toFixed(2)})`);
+      if (this.debugMessages) {
+        const hadJobDiff = channel.jobIdToDifficulty.has(submission.jobId);
+        console.warn(
+          `[SV2 ${this.sessionId}]    reject-detail: ` +
+          `jobId=${submission.jobId} ` +
+          `jobDiff=${jobDifficulty} (${hadJobDiff ? 'from-store' : 'session-fallback'}) ` +
+          `sessionDiff=${channel.sessionDifficulty} ` +
+          `submitted{version=0x${submission.version.toString(16).padStart(8, '0')} ` +
+          `nonce=0x${submission.nonce.toString(16).padStart(8, '0')} ` +
+          `ntime=${submission.ntime} ` +
+          `extranonce=${submission.extranonce.toString('hex')}} ` +
+          `header{bits=0x${extJob.nBits.toString(16)} ` +
+          `prevHash=${extJob.prevHash.toString('hex').substring(0, 16)}... ` +
+          `merkleRoot=${merkleRoot.toString('hex').substring(0, 16)}...} ` +
+          `hash=${hashBuffer.toString('hex').substring(0, 16)}... ` +
+          `prefixLen=${extJob.coinbasePrefix.length} suffixLen=${extJob.coinbaseSuffix.length} ` +
+          `extranoncePrefix=${channel.extranoncePrefix?.toString('hex') ?? '(none)'}`,
+        );
+      }
       await this.recordRejectedShare('LowDifficultyShare', jobDifficulty);
       await this.sendShareError(submission.channelId, submission.sequenceNumber, 'difficulty-too-low');
     }
@@ -2250,6 +2269,22 @@ export class StratumV2Client {
     } else {
       // Low difficulty
       console.warn(`[SV2 ${this.sessionId}] ❌ Share rejected: difficulty-too-low (${submissionDifficulty.toFixed(2)} < ${jobDifficulty.toFixed(2)})`);
+      if (this.debugMessages) {
+        const hadJobDiff = channel.jobIdToDifficulty.has(submission.jobId);
+        console.warn(
+          `[SV2 ${this.sessionId}]    reject-detail: ` +
+          `jobId=0x${submission.jobId.toString(16)} ` +
+          `jobDiff=${jobDifficulty} (${hadJobDiff ? 'from-store' : 'session-fallback'}) ` +
+          `sessionDiff=${channel.sessionDifficulty} ` +
+          `submitted{version=0x${submission.version.toString(16).padStart(8, '0')} ` +
+          `nonce=0x${submission.nonce.toString(16).padStart(8, '0')} ` +
+          `ntime=${submission.ntime}} ` +
+          `header{version=0x${version.toString(16)} bits=0x${jobTemplate.block.bits.toString(16)} ` +
+          `prevHash=${jobTemplate.block.prevHash.toString('hex').substring(0, 16)}... ` +
+          `merkleRoot=${sentMerkleRoot.toString('hex').substring(0, 16)}...} ` +
+          `hash=${hashBuffer.toString('hex').substring(0, 16)}...`,
+        );
+      }
       await this.recordRejectedShare('LowDifficultyShare', jobDifficulty);
       await this.sendShareError(submission.channelId, submission.sequenceNumber, 'difficulty-too-low');
     }
@@ -2263,7 +2298,16 @@ export class StratumV2Client {
     if (targetDiff == null || !Number.isFinite(targetDiff)) return;
 
     if (targetDiff !== this.sessionDifficulty) {
+      const previousDiff = this.sessionDifficulty;
       this.sessionDifficulty = targetDiff;
+
+      if (this.debugMessages) {
+        console.log(
+          `[SV2 ${this.sessionId}] 🔧 Vardiff ratchet: ${previousDiff.toFixed(4)} → ${targetDiff.toFixed(4)} ` +
+          `(${targetDiff > previousDiff ? 'up' : 'down'} ×${(targetDiff / previousDiff).toFixed(2)}, ` +
+          `channels=${this.channels.size})`,
+        );
+      }
 
       if (this.entity) {
         try {
@@ -2276,6 +2320,7 @@ export class StratumV2Client {
 
       // Send SetTarget to all channels (clamped per-channel against declared maxTarget)
       for (const channel of this.channels.values()) {
+        const previousChannelDiff = channel.sessionDifficulty;
         const clampedDiff = DifficultyUtils.clampDifficultyToMaxTarget(targetDiff, channel.declaredMaxTarget);
         channel.sessionDifficulty = clampedDiff;
         const target = DifficultyUtils.difficultyToTarget(clampedDiff);
@@ -2286,7 +2331,13 @@ export class StratumV2Client {
         await this.sendFrame(Sv2MsgType.SET_TARGET, targetPayload, SV2_CHANNEL_MSG_FLAG);
 
         if (this.debugMessages) {
-          console.log(`[SV2 ${this.sessionId}] 🎯 SetTarget: channel=${channel.channelId}, difficulty=${clampedDiff.toFixed(4)}, target=${target.toString('hex').substring(0, 16)}...`);
+          const wasClamped = clampedDiff !== targetDiff;
+          console.log(
+            `[SV2 ${this.sessionId}] 🎯 SetTarget: channel=${channel.channelId}, ` +
+            `diff=${previousChannelDiff.toFixed(4)} → ${clampedDiff.toFixed(4)}${wasClamped ? ' (clamped to declared max)' : ''}, ` +
+            `target=${target.toString('hex').substring(0, 16)}..., ` +
+            `inflight={jobs=${channel.jobIdToDifficulty.size}, merkleRoots=${channel.jobIdToMerkleRoot.size}, extendedJobs=${channel.extendedJobs.size}}`,
+          );
         }
       }
 

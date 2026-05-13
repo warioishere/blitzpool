@@ -122,6 +122,7 @@ export class StratumV1Client {
     private authorizeResponse?: string;
     private difficultyCheckIntervalMs: number;
     private lastDifficultyCheck = 0;
+    private readonly debugMessages: boolean = process.env.SV1_DEBUG_MESSAGES === 'true';
 
     /**
      * Accepted-share counter for the payout-mode warmup gate. Shares
@@ -1312,6 +1313,32 @@ export class StratumV1Client {
             }
 
         } else {
+            if (this.debugMessages) {
+                const inRaceWindow = this.diffChangeJobId != null && submittedJobIdInt < this.diffChangeJobId;
+                console.warn(
+                    `[SV1 ${this.sessionId}] ❌ Share rejected: difficulty-too-low ` +
+                    `(submitted=${submissionDifficulty.toFixed(2)} < effective=${effectiveDiff})`,
+                );
+                console.warn(
+                    `[SV1 ${this.sessionId}]    reject-detail: ` +
+                    `jobId=0x${submission.jobId} (int=${submittedJobIdInt}) ` +
+                    `sessionDiff=${this.sessionDifficulty} ` +
+                    `oldSessionDiff=${this.oldSessionDifficulty} ` +
+                    `diffChangeJobId=${this.diffChangeJobId} ` +
+                    `inRaceWindow=${inRaceWindow} ` +
+                    `submitted{versionMask=0x${(submission.versionMask ?? '0').toString().padStart(8, '0')} ` +
+                    `nonce=0x${submission.nonce} ` +
+                    `ntime=${parseInt(submission.ntime, 16)} ` +
+                    `extranonce2=${submission.extraNonce2}} ` +
+                    `header{version=0x${jobTemplate.block.version.toString(16)} (rolled=0x${(jobTemplate.block.version ^ versionMask).toString(16)}) ` +
+                    `bits=0x${jobTemplate.block.bits.toString(16)} ` +
+                    `prevHash=${jobTemplate.block.prevHash.toString('hex').substring(0, 16)}...} ` +
+                    `extraNonce=${this.extraNonce} ` +
+                    `hash=${hashBuffer.toString('hex').substring(0, 16)}... ` +
+                    `userAgent=${this.entity?.userAgent ?? '?'} ` +
+                    `worker=${this.clientAuthorization.worker}`,
+                );
+            }
             await this.poolRejectedStatisticsService.addRejectedShare(
                 eStratumErrorCode[eStratumErrorCode.LowDifficultyShare],
                 this.sessionDifficulty
@@ -1362,9 +1389,19 @@ export class StratumV1Client {
             // getNextId() returns the current counter value; addJob()
             // bumps it, so this is exactly the id the next sendNewMiningJob
             // call will assign (stratum-v1-jobs.service.ts:185-188).
+            const previousDiff = this.sessionDifficulty;
             this.oldSessionDifficulty = this.sessionDifficulty;
             this.diffChangeJobId = parseInt(this.stratumV1JobsService.getNextId(), 16);
             this.sessionDifficulty = targetDiff;
+            if (this.debugMessages) {
+                console.log(
+                    `[SV1 ${this.sessionId}] 🔧 Vardiff ratchet: ${previousDiff} → ${targetDiff} ` +
+                    `(${targetDiff > previousDiff ? 'up' : 'down'} ×${(targetDiff / previousDiff).toFixed(2)}, ` +
+                    `diffChangeJobId=0x${this.diffChangeJobId.toString(16)}, ` +
+                    `worker=${this.clientAuthorization?.worker ?? '?'}, ` +
+                    `userAgent=${this.entity?.userAgent ?? '?'})`,
+                );
+            }
             await this.recordSessionDifficulty();
 
             const data = JSON.stringify({
