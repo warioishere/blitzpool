@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 
 import { AddressSettingsEntity } from './address-settings.entity';
+import { isoFromEpoch } from '../../utils/epoch-iso';
 
 @Injectable()
 export class AddressSettingsService {
@@ -122,7 +123,14 @@ export class AddressSettingsService {
             .orderBy('settings.bestDifficulty', 'DESC')
             .limit(10)
             .getRawMany();
-        return results.map(r => ({ ...r, bestDifficulty: Number(r.bestDifficulty) }));
+        // getRawMany returns bigint columns as strings (pg-types default) —
+        // coerce to ISO at the boundary so /api/info emits real timestamps,
+        // not raw epoch-ms numerals.
+        return results.map(r => ({
+            ...r,
+            bestDifficulty: Number(r.bestDifficulty),
+            updatedAt: isoFromEpoch(r.updatedAt == null ? null : Number(r.updatedAt)),
+        }));
     }
 
     public async createNew(address: string) {

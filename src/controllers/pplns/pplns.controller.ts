@@ -1,5 +1,6 @@
 import { Controller, Get, Param, Query } from '@nestjs/common';
 import { PplnsService } from '../../services/pplns.service';
+import { isoFromEpoch } from '../../utils/epoch-iso';
 import { ClientStatisticsService } from '../../ORM/client-statistics/client-statistics.service';
 import { ClientService } from '../../ORM/client/client.service';
 import { MiningModeService } from '../../services/mining-mode.service';
@@ -215,6 +216,7 @@ export class PplnsController {
         @Query('limit') limitStr?: string,
     ) {
         const limit = Math.min(parseInt(limitStr ?? '50', 10) || 50, 200);
-        return this.pplnsService.getPayoutHistory(address, limit);
+        const rows = await this.pplnsService.getPayoutHistory(address, limit);
+        return rows.map(r => ({ ...r, createdAt: isoFromEpoch(r.createdAt) }));
     }
 }

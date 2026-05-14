@@ -127,7 +127,8 @@ export class PplnsGroupController {
      */
     @Get('join-requests/by-address/:address')
     async listJoinRequestsForAddress(@Param('address') address: string) {
-        return this.joinRequestService.listForAddress(address);
+        const rows = await this.joinRequestService.listForAddress(address);
+        return rows.map(r => ({ ...r, createdAt: isoFromEpoch(r.createdAt) }));
     }
 
     /**
@@ -154,7 +155,7 @@ export class PplnsGroupController {
             ...this.publicGroupView(group),
             memberCount,
             totalHashrate,
-            recentBlocks: history,
+            recentBlocks: history.map(h => ({ ...h, createdAt: isoFromEpoch(h.createdAt) })),
         };
     }
 
@@ -416,7 +417,8 @@ export class PplnsGroupController {
     async bestDifficulty(@Param('id') id: string) {
         const group = await this.groupService.getGroup(id);
         if (!group || group.dissolvedAt) throw new HttpException({ code: 'not-found' }, HttpStatus.NOT_FOUND);
-        return this.groupSoloService.getRoundBestDifficulty(id);
+        const r = await this.groupSoloService.getRoundBestDifficulty(id);
+        return { ...r, time: isoFromEpoch(r.time) };
     }
 
     @Get(':id/history')
@@ -424,7 +426,8 @@ export class PplnsGroupController {
         const group = await this.groupService.getGroup(id);
         if (!group || group.dissolvedAt) throw new HttpException({ code: 'not-found' }, HttpStatus.NOT_FOUND);
         const limit = Math.min(parseInt(limitStr ?? '100', 10) || 100, 500);
-        return this.groupSoloService.getBlockHistory(id, limit);
+        const rows = await this.groupSoloService.getBlockHistory(id, limit);
+        return rows.map(r => ({ ...r, createdAt: isoFromEpoch(r.createdAt) }));
     }
 
     // ── Admin endpoints ──────────────────────────────────────────

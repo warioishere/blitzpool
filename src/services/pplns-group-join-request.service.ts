@@ -268,7 +268,7 @@ export class PplnsGroupJoinRequestService {
         groupId: string;
         groupName: string;
         status: 'pending';
-        createdAt: Date;
+        createdAt: number;
     }[]> {
         const normalized = normalizeBtcAddress(address);
         if (!normalized) return [];

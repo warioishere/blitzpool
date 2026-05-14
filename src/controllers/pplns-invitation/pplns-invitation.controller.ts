@@ -16,7 +16,12 @@ export class PplnsInvitationController {
      */
     @Get('by-address/:address')
     async listForAddress(@Param('address') address: string) {
-        return this.invitationService.listPendingForAddress(address);
+        const rows = await this.invitationService.listPendingForAddress(address);
+        return rows.map(r => ({
+            ...r,
+            createdAt: isoFromEpoch(r.createdAt),
+            expiresAt: isoFromEpoch(r.expiresAt),
+        }));
     }
 
     /**
