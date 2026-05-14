@@ -1093,6 +1093,16 @@ export class StratumV1Client {
         const nonce = parseInt(submission.nonce, 16);
         const extraNonce2 = submission.extraNonce2;
         const ntime = parseInt(submission.ntime, 16);
+
+        if (this.debugMessages) {
+            console.log(
+                `[SV1 ${this.sessionId}] 📤 mining.submit: ` +
+                `jobId=0x${submission.jobId}, nonce=0x${submission.nonce}, ` +
+                `ntime=${ntime}, extraNonce2=${submission.extraNonce2}, ` +
+                `versionMask=0x${(submission.versionMask ?? '0').padStart(8, '0')}, ` +
+                `worker=${this.clientAuthorization.worker}`,
+            );
+        }
         const header = job.computeShareHeader(
             jobTemplate,
             versionMask,
@@ -1127,6 +1137,15 @@ export class StratumV1Client {
         // the boundary so float is fine there).
         const effectiveTarget = DifficultyUtils.difficultyToTarget(effectiveDiff);
         if (DifficultyUtils.meetsTarget(hashBuffer, effectiveTarget)) {
+            if (this.debugMessages) {
+                const inRaceWindow = this.diffChangeJobId != null && submittedJobIdInt < this.diffChangeJobId;
+                console.log(
+                    `[SV1 ${this.sessionId}] ✅ Share accepted: ` +
+                    `submitted=${submissionDifficulty.toFixed(2)} ≥ effective=${effectiveDiff}` +
+                    `${inRaceWindow ? ` (race-window: clamped from sessionDiff=${this.sessionDifficulty} to oldSessionDiff=${this.oldSessionDifficulty})` : ''}, ` +
+                    `jobId=0x${submission.jobId}, worker=${this.clientAuthorization.worker}`,
+                );
+            }
             // Send success response immediately for minimum latency
             this.write(JSON.stringify(submission.response()) + '\n');
 
