@@ -51,15 +51,27 @@ export class StratumV1ClientStatistics {
     }
 
     /**
-     * Update live hashrate calculation when share is accepted
+     * Update live hashrate calculation when share is accepted.
      * Does NOT persist - caller must use ClientStatisticsService.addAcceptedShare()
+     *
+     * `isCurrentDiff` lets the caller signal that the share was credited
+     * at the session's CURRENT diff (vs clamped to the CK-style old diff
+     * because it belonged to a job issued before the last vardiff ratchet).
+     * Hashrate accumulation always runs — stale-diff shares are real work
+     * the miner did and the user-facing live hashrate must reflect them.
+     * The vardiff submission cache however only accepts current-diff
+     * shares; otherwise the rolling-window sum gets polluted with old-diff
+     * entries and the next vardiff calc would chase a target between the
+     * old and new diff, oscillating. Mirrors ckpool stratifier.c:5781-5783
+     * `if (diff != client->diff) ssdc=0; return;`.
      */
-    public updateHashRate(targetDifficulty: number) {
+    public updateHashRate(targetDifficulty: number, isCurrentDiff: boolean = true) {
         const date = new Date();
         const timeSlot = TimeSlotHelper.getSlotForTime(date.getTime());
 
-        // Update submission cache for difficulty adjustment
-        this.updateSubmissionCache(date, targetDifficulty);
+        if (isCurrentDiff) {
+            this.updateSubmissionCache(date, targetDifficulty);
+        }
 
         // Update hashrate calculation
         if (this.currentTimeSlot == null) {

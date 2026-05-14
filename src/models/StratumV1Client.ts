@@ -618,9 +618,21 @@ export class StratumV1Client {
                 // Clamp the client's suggestion to the port's floor. A
                 // PPLNS-port connection suggesting diff 64 would otherwise
                 // succeed and pollute the ledger with sub-dust shares.
-                this.sessionDifficulty = this.minimumDifficulty > 0
+                const newDiff = this.minimumDifficulty > 0
                     ? Math.max(suggestDifficultyMessage.suggestedDifficulty, this.minimumDifficulty)
                     : suggestDifficultyMessage.suggestedDifficulty;
+                // Snapshot the boundary so the CK-style clamp covers any
+                // in-flight shares from jobs issued before this suggest.
+                // ckpool does the same on every diff-changing event
+                // (stratifier.c:6661). Without this, a miner that calls
+                // mining.suggest_difficulty AFTER the first mining.notify
+                // would have its pre-suggest shares validated against the
+                // new diff with no old-diff fallback.
+                if (newDiff !== this.sessionDifficulty) {
+                    this.oldSessionDifficulty = this.sessionDifficulty;
+                    this.diffChangeJobId = parseInt(this.stratumV1JobsService.getNextId(), 16);
+                }
+                this.sessionDifficulty = newDiff;
                 await this.recordSessionDifficulty();
                 const success = await this.write(JSON.stringify(this.clientSuggestedDifficulty.response(this.sessionDifficulty)) + '\n');
                 if (!success) {
@@ -1217,8 +1229,10 @@ export class StratumV1Client {
                 }
             }
             try {
-                // Update live hashrate calculation
-                this.statistics.updateHashRate(effectiveDiff);
+                // Update live hashrate calculation. The vardiff cache
+                // gates on isCurrentDiff to avoid post-ratchet flapping
+                // when the in-flight stale-diff wave drains.
+                this.statistics.updateHashRate(effectiveDiff, effectiveDiff === this.sessionDifficulty);
 
                 // Persist to Redis atomically (stateless service)
                 await this.clientStatisticsService.addAcceptedShare(this.entity, effectiveDiff);
@@ -1289,7 +1303,12 @@ export class StratumV1Client {
                     difficulty: submissionDifficulty,
                 });
 
-                if (now - this.lastDifficultyCheck >= this.difficultyCheckIntervalMs) {
+                // Gate vardiff calc on current-diff shares only — ckpool
+                // stratifier.c:5781-5783 pattern. Stale-diff (clamped)
+                // shares would otherwise trigger a ratchet decision based
+                // on a polluted cache mix.
+                if (effectiveDiff === this.sessionDifficulty &&
+                    now - this.lastDifficultyCheck >= this.difficultyCheckIntervalMs) {
                     await this.checkDifficulty();
                 }
 
@@ -1435,9 +1454,20 @@ export class StratumV1Client {
                 return;
             }
 
+            // No forced clean_jobs=true on diff change — ckpool runs this
+            // way and the right cover for in-flight stale-diff shares is
+            // the CK-style clamp (effectiveJobDifficulty above), not a
+            // miner-queue flush. The clean_jobs=true line was added in
+            // public-pool issue #39 as the wrong fix: it does nothing for
+            // the ASIC chips already mining the previous job — those
+            // shares still come in with the old jobId and old diff, and
+            // only the clamp handles them. Forcing a clean_jobs notify
+            // here CONCENTRATES the in-flight reject wave at the ratchet
+            // boundary, which is exactly what BraiinsOS's deep pipeline
+            // hit. Next regular notify (block change or periodic refresh)
+            // carries the new diff implicitly; old jobs continue at old
+            // diff until they age out of the registry.
             const jobTemplate = await firstValueFrom(this.stratumV1JobsService.newMiningJob$);
-            // we need to clear the jobs so that the difficulty set takes effect. Otherwise the different miner implementations can cause issues
-            jobTemplate.blockData.clearJobs = true;
             await this.sendNewMiningJob(jobTemplate);
 
         }
