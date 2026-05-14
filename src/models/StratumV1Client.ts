@@ -1357,6 +1357,17 @@ export class StratumV1Client {
                     `[SV1 ${this.sessionId}] ❌ Share rejected: difficulty-too-low ` +
                     `(submitted=${submissionDifficulty.toFixed(2)} < effective=${effectiveDiff})`,
                 );
+                // Cross-check: what coinbase tx-hex did our header use vs
+                // what the miner would have built from coinb1+en1+en2+coinb2.
+                // If these differ, MiningJob.applyExtranonceAndGetCoinbaseHash
+                // wrote a different script than the constructor's
+                // coinbasePart1/2 boundary implied — state-mutation drift.
+                const cbPrefix = job.getCoinbasePrefixBuffer().toString('hex');
+                const cbSuffix = job.getCoinbaseSuffixBuffer().toString('hex');
+                const en1Hex = this.extraNonce;
+                const en2Hex = submission.extraNonce2;
+                const reconstructed = `${cbPrefix}${en1Hex}${en2Hex}${cbSuffix}`;
+                const actual = (job as any).coinbaseTransaction.__toBuffer().toString('hex');
                 console.warn(
                     `[SV1 ${this.sessionId}]    reject-detail: ` +
                     `jobId=0x${submission.jobId} (int=${submittedJobIdInt}) ` +
@@ -1368,11 +1379,15 @@ export class StratumV1Client {
                     `nonce=0x${submission.nonce} ` +
                     `ntime=${parseInt(submission.ntime, 16)} ` +
                     `extranonce2=${submission.extraNonce2}} ` +
-                    `header{version=0x${jobTemplate.block.version.toString(16)} (rolled=0x${(jobTemplate.block.version ^ versionMask).toString(16)}) ` +
-                    `bits=0x${jobTemplate.block.bits.toString(16)} ` +
-                    `prevHash=${jobTemplate.block.prevHash.toString('hex').substring(0, 16)}...} ` +
+                    `template{id=${jobTemplate.blockData.id} height=${jobTemplate.blockData.height} retiredAt=${jobTemplate.blockData.retiredAt ?? 'active'} ` +
+                    `prevHash=${jobTemplate.block.prevHash.toString('hex')} ` +
+                    `bits=0x${jobTemplate.block.bits.toString(16).padStart(8, '0')} ` +
+                    `tplVersion=0x${jobTemplate.block.version.toString(16).padStart(8, '0')} ` +
+                    `tplTimestamp=${jobTemplate.block.timestamp}} ` +
                     `extraNonce=${this.extraNonce} ` +
-                    `hash=${hashBuffer.toString('hex').substring(0, 16)}... ` +
+                    `coinbase{reconstructed=${reconstructed} actual=${actual} match=${reconstructed === actual}} ` +
+                    `header80=${header.toString('hex')} ` +
+                    `hash=${hashBuffer.toString('hex')} ` +
                     `userAgent=${this.entity?.userAgent ?? '?'} ` +
                     `worker=${this.clientAuthorization.worker}`,
                 );

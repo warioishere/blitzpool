@@ -2124,7 +2124,15 @@ export class StratumV2Client {
     channel.jobIdToMerkleRoot.set(parseInt(job.jobId, 16), Buffer.from(merkleRoot));
 
     if (this.debugMessages) {
-      console.log(`[SV2 ${this.sessionId}] 📨 NewMiningJob: channel=${targetChannelId}, jobId=0x${job.jobId}, height=${jobTemplate.blockData.height}, version=0x${jobTemplate.block.version.toString(16)}, futureJob=${!sendPrevHash}, merkleRoot=${merkleRoot.toString('hex').substring(0, 16)}...`);
+      console.log(
+        `[SV2 ${this.sessionId}] 📨 NewMiningJob: channel=${targetChannelId}, jobId=0x${job.jobId}, ` +
+        `templateId=${jobTemplate.blockData.id}, height=${jobTemplate.blockData.height}, ` +
+        `futureJob=${!sendPrevHash}, version=0x${jobTemplate.block.version.toString(16).padStart(8, '0')}, ` +
+        `bits=0x${jobTemplate.block.bits.toString(16).padStart(8, '0')}, ` +
+        `prevHash=${jobTemplate.block.prevHash.toString('hex')}, ` +
+        `merkleRoot=${merkleRoot.toString('hex')}, ` +
+        `en1=${extraNonce1}, en2=${extraNonce2}`,
+      );
     }
 
     // Send SetNewPrevHash if clearing jobs (new block)
@@ -2143,7 +2151,13 @@ export class StratumV2Client {
       await this.sendFrame(Sv2MsgType.SET_NEW_PREV_HASH, prevHashPayload, SV2_CHANNEL_MSG_FLAG);
 
       if (this.debugMessages) {
-        console.log(`[SV2 ${this.sessionId}] 🔗 SetNewPrevHash: channel=${targetChannelId}, jobId=0x${job.jobId}, height=${jobTemplate.blockData.height}, prevHash=${prevHash.toString('hex').substring(0, 16)}..., nBits=0x${jobTemplate.block.bits.toString(16)}, minNtime=${jobTemplate.block.timestamp}`);
+        console.log(
+          `[SV2 ${this.sessionId}] 🔗 SetNewPrevHash: channel=${targetChannelId}, jobId=0x${job.jobId}, ` +
+          `templateId=${jobTemplate.blockData.id}, height=${jobTemplate.blockData.height}, ` +
+          `prevHash=${prevHash.toString('hex')}, ` +
+          `nBits=0x${jobTemplate.block.bits.toString(16).padStart(8, '0')}, ` +
+          `minNtime=${jobTemplate.block.timestamp}`,
+        );
       }
     }
   }
@@ -2271,6 +2285,18 @@ export class StratumV2Client {
       console.warn(`[SV2 ${this.sessionId}] ❌ Share rejected: difficulty-too-low (${submissionDifficulty.toFixed(2)} < ${jobDifficulty.toFixed(2)})`);
       if (this.debugMessages) {
         const hadJobDiff = channel.jobIdToDifficulty.has(submission.jobId);
+        // Recompute the merkle root with the SAME en1/en2 that sendNewMiningJob
+        // would have used. If this differs from the stored sentMerkleRoot,
+        // it means the MiningJob's coinbase script was mutated between
+        // send and validate (state-mutation bug). If it's identical to
+        // sentMerkleRoot but the miner's hash still mismatches, the bug
+        // is elsewhere (e.g., the miner is using a different prevHash).
+        let recomputedMerkle: string;
+        try {
+          recomputedMerkle = job.computeShareMerkleRoot(jobTemplate, extraNonce1, extraNonce2).toString('hex');
+        } catch (e) {
+          recomputedMerkle = `<error: ${(e as Error).message}>`;
+        }
         console.warn(
           `[SV2 ${this.sessionId}]    reject-detail: ` +
           `jobId=0x${submission.jobId.toString(16)} ` +
@@ -2279,10 +2305,13 @@ export class StratumV2Client {
           `submitted{version=0x${submission.version.toString(16).padStart(8, '0')} ` +
           `nonce=0x${submission.nonce.toString(16).padStart(8, '0')} ` +
           `ntime=${submission.ntime}} ` +
-          `header{version=0x${version.toString(16)} bits=0x${jobTemplate.block.bits.toString(16)} ` +
-          `prevHash=${jobTemplate.block.prevHash.toString('hex').substring(0, 16)}... ` +
-          `merkleRoot=${sentMerkleRoot.toString('hex').substring(0, 16)}...} ` +
-          `hash=${hashBuffer.toString('hex').substring(0, 16)}...`,
+          `template{id=${jobTemplate.blockData.id} height=${jobTemplate.blockData.height} retiredAt=${jobTemplate.blockData.retiredAt ?? 'active'} ` +
+          `prevHash=${jobTemplate.block.prevHash.toString('hex')} ` +
+          `bits=0x${jobTemplate.block.bits.toString(16).padStart(8, '0')} ` +
+          `tplVersion=0x${jobTemplate.block.version.toString(16).padStart(8, '0')}} ` +
+          `merkle{sent=${sentMerkleRoot.toString('hex')} recomputed=${recomputedMerkle} match=${sentMerkleRoot.toString('hex') === recomputedMerkle}} ` +
+          `header80=${header.toString('hex')} ` +
+          `hash=${hashBuffer.toString('hex')}`,
         );
       }
       await this.recordRejectedShare('LowDifficultyShare', jobDifficulty);
