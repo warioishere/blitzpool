@@ -1,6 +1,7 @@
 import { Body, Controller, Get, HttpException, HttpStatus, Param, Post, UseGuards } from '@nestjs/common';
 import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 import { InvitationServiceError, PplnsGroupInvitationService } from '../../services/pplns-group-invitation.service';
+import { isoFromEpoch } from '../../utils/epoch-iso';
 
 @Controller('pplns/invitations')
 export class PplnsInvitationController {
@@ -37,9 +38,9 @@ export class PplnsInvitationController {
             address: result.invitation.address,
             email: result.invitation.email,
             status: result.invitation.status,
-            createdAt: result.invitation.createdAt,
-            expiresAt: result.invitation.expiresAt,
-            respondedAt: result.invitation.respondedAt,
+            createdAt: isoFromEpoch(result.invitation.createdAt),
+            expiresAt: isoFromEpoch(result.invitation.expiresAt),
+            respondedAt: isoFromEpoch(result.invitation.respondedAt),
         };
     }
 
@@ -57,7 +58,7 @@ export class PplnsInvitationController {
     async accept(@Param('token') token: string) {
         try {
             const member = await this.invitationService.accept(token);
-            return { address: member.address, role: member.role, joinedAt: member.joinedAt, groupId: member.groupId };
+            return { address: member.address, role: member.role, joinedAt: isoFromEpoch(member.joinedAt), groupId: member.groupId };
         } catch (e) {
             throw this.toHttp(e);
         }
@@ -98,7 +99,7 @@ export class PplnsInvitationController {
             token: result.token,
             groupId: result.groupId,
             groupName: result.groupName,
-            expiresAt: result.expiresAt,
+            expiresAt: isoFromEpoch(result.expiresAt),
             approvalRequired: result.approvalRequired,
         };
     }
@@ -120,7 +121,7 @@ export class PplnsInvitationController {
     ) {
         try {
             const member = await this.invitationService.acceptOpenInvite(token, body?.address ?? '');
-            return { address: member.address, role: member.role, joinedAt: member.joinedAt, groupId: member.groupId };
+            return { address: member.address, role: member.role, joinedAt: isoFromEpoch(member.joinedAt), groupId: member.groupId };
         } catch (e) {
             throw this.toHttp(e);
         }

@@ -16,6 +16,7 @@ import { ShareTotalsCacheService } from '../../services/share-totals-cache.servi
 import { WorkerSharesService } from '../../ORM/worker-shares/worker-shares.service';
 import { DifficultyScoresCacheService } from '../../services/difficulty-scores-cache.service';
 import { generateFormattedTimeSlots } from '../../utils/timeslot.utils';
+import { isoFromEpoch } from '../../utils/epoch-iso';
 
 
 @Controller('client')
@@ -100,8 +101,8 @@ export class ClientController {
                         bestDifficulty: worker.bestDifficulty.toFixed(2),
                         hashRate: worker.hashRate,
                         currentDifficulty,
-                        startTime: worker.startTime,
-                        lastSeen: worker.updatedAt
+                        startTime: isoFromEpoch(worker.startTime),
+                        lastSeen: isoFromEpoch(worker.updatedAt),
                     };
                 })
             )
@@ -492,7 +493,7 @@ export class ClientController {
             name: worker.clientName,
             bestDifficulty: Math.floor(worker.bestDifficulty),
             chartData: chartData,
-            startTime: worker.startTime
+            startTime: isoFromEpoch(worker.startTime),
         };
 
         await this.cacheManager.set(CACHE_KEY, result, this.cacheTTL.clientWorkerSession * 1000);

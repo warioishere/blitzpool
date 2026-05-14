@@ -15,6 +15,7 @@ import { ClientStatisticsService } from '../../ORM/client-statistics/client-stat
 import { ClientRejectedStatisticsService } from '../../ORM/client-rejected-statistics/client-rejected-statistics.service';
 import { eStratumErrorCode, STRATUM_REJECT_STALE } from '../../models/enums/eStratumErrorCode';
 import { generateFormattedTimeSlots } from '../../utils/timeslot.utils';
+import { isoFromEpoch } from '../../utils/epoch-iso';
 
 interface CreateGroupDto {
     name?: string;
@@ -176,7 +177,7 @@ export class PplnsGroupController {
     ) {
         try {
             const r = await this.joinRequestService.createJoinRequest(id, body?.address ?? '', body?.message);
-            return { id: r.id, groupId: r.groupId, status: r.status, createdAt: r.createdAt };
+            return { id: r.id, groupId: r.groupId, status: r.status, createdAt: isoFromEpoch(r.createdAt) };
         } catch (e) {
             throw this.toHttpError(e);
         }
@@ -232,9 +233,9 @@ export class PplnsGroupController {
             const row: any = {
                 address: m.address,
                 role: m.role,
-                joinedAt: m.joinedAt,
+                joinedAt: isoFromEpoch(m.joinedAt),
                 hashrate,
-                lastAcceptedShareAt,
+                lastAcceptedShareAt: isoFromEpoch(lastAcceptedShareAt),
             };
             if (isAdmin) {
                 // Privacy: even the admin only sees a masked email so a
@@ -464,7 +465,7 @@ export class PplnsGroupController {
             const result = await this.invitationService.createInvitation(id, body.address ?? '', token);
             // Privacy: return the masked email so the success toast confirms
             // "invite went out" without revealing the BTC↔email mapping.
-            return { invited: true, email: maskEmail(result.email), expiresAt: result.expiresAt };
+            return { invited: true, email: maskEmail(result.email), expiresAt: isoFromEpoch(result.expiresAt) };
         } catch (e) {
             throw this.toHttpError(e);
         }
@@ -494,7 +495,7 @@ export class PplnsGroupController {
         // through as two distinct entries — both then collapse onto the
         // same row inside createInvitation, masking the duplicate.
         const addresses = (body.addresses ?? []).map(a => (a ?? '').trim()).filter(a => !!a);
-        const invited: { address: string; email: string; expiresAt: number }[] = [];
+        const invited: { address: string; email: string; expiresAt: string | null }[] = [];
         const skipped: { address: string; reason: string }[] = [];
         const seen = new Set<string>();
         for (const addr of addresses) {
@@ -506,7 +507,7 @@ export class PplnsGroupController {
             seen.add(dedupKey);
             try {
                 const r = await this.invitationService.createInvitation(id, addr, token);
-                invited.push({ address: addr, email: maskEmail(r.email), expiresAt: r.expiresAt });
+                invited.push({ address: addr, email: maskEmail(r.email), expiresAt: isoFromEpoch(r.expiresAt) });
             } catch (e) {
                 if (e instanceof GroupServiceError && e.code === 'invalid-token') {
                     throw this.toHttpError(e);
@@ -548,8 +549,8 @@ export class PplnsGroupController {
                 address: r.address,
                 // Privacy: masked even for the admin — see detailsForGroupId.
                 email: r.email ? maskEmail(r.email) : null,
-                createdAt: r.createdAt,
-                expiresAt: r.expiresAt,
+                createdAt: isoFromEpoch(r.createdAt),
+                expiresAt: isoFromEpoch(r.expiresAt),
                 status: r.status,
             }));
         } catch (e) {
@@ -580,7 +581,7 @@ export class PplnsGroupController {
             const link = baseUrl ? `${baseUrl}/#/invite/open/${result.token}` : `/#/invite/open/${result.token}`;
             return {
                 token: result.token,
-                expiresAt: result.expiresAt,
+                expiresAt: isoFromEpoch(result.expiresAt),
                 approvalRequired: result.approvalRequired,
                 link,
             };
@@ -607,8 +608,8 @@ export class PplnsGroupController {
             return {
                 active: true,
                 token: result.token,
-                expiresAt: result.expiresAt,
-                createdAt: result.createdAt,
+                expiresAt: isoFromEpoch(result.expiresAt),
+                createdAt: isoFromEpoch(result.createdAt),
                 approvalRequired: result.approvalRequired,
                 link,
             };
@@ -677,8 +678,8 @@ export class PplnsGroupController {
                 email: maskEmail(r.email),
                 message: r.message,
                 status: r.status,
-                createdAt: r.createdAt,
-                decidedAt: r.decidedAt,
+                createdAt: isoFromEpoch(r.createdAt),
+                decidedAt: isoFromEpoch(r.decidedAt),
             }));
         } catch (e) {
             throw this.toHttpError(e);
@@ -773,8 +774,8 @@ export class PplnsGroupController {
                 roundResetIntervalDays: updated.roundResetIntervalDays,
                 roundResetTimezone: updated.roundResetTimezone,
                 finderBonusSats: updated.finderBonusSats ?? 0,
-                lastRoundResetAt: updated.lastRoundResetAt,
-                nextResetAt: computeNextResetAt(updated as PplnsGroupEntity),
+                lastRoundResetAt: isoFromEpoch(updated.lastRoundResetAt),
+                nextResetAt: computeNextResetAt(updated as PplnsGroupEntity)?.toISOString() ?? null,
                 isPublic: updated.isPublic ?? false,
             };
         } catch (e) {
@@ -832,13 +833,13 @@ export class PplnsGroupController {
             name: group.name,
             creatorAddress: group.creatorAddress,
             active: group.active,
-            createdAt: group.createdAt,
+            createdAt: isoFromEpoch(group.createdAt),
             roundResetPreset: group.roundResetPreset ?? null,
             roundResetIntervalDays: group.roundResetIntervalDays ?? null,
             roundResetTimezone: group.roundResetTimezone ?? null,
             finderBonusSats: group.finderBonusSats ?? 0,
-            lastRoundResetAt: group.lastRoundResetAt ?? null,
-            nextResetAt: computeNextResetAt(group as PplnsGroupEntity),
+            lastRoundResetAt: isoFromEpoch(group.lastRoundResetAt),
+            nextResetAt: computeNextResetAt(group as PplnsGroupEntity)?.toISOString() ?? null,
             isPublic: group.isPublic ?? false,
         };
     }

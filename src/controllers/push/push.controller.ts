@@ -3,6 +3,7 @@ import { PushSubscriptionService } from '../../ORM/push-subscriptions/push-subsc
 import { BestDifficultyTrackerService } from '../../ORM/best-difficulty-tracker/best-difficulty-tracker.service';
 import { AddressSettingsService } from '../../ORM/address-settings/address-settings.service';
 import { PushSubscriptionType } from '../../ORM/push-subscriptions/push-subscription-type.enum';
+import { isoFromEpoch } from '../../utils/epoch-iso';
 
 @Controller('push')
 export class PushController {
@@ -199,7 +200,7 @@ export class PushController {
                     id: subscription.id,
                     address: subscription.address,
                     platform: subscription.platform,
-                    createdAt: subscription.createdAt
+                    createdAt: isoFromEpoch(subscription.createdAt),
                 }
             };
         } catch (error: any) {
@@ -254,15 +255,15 @@ export class PushController {
                     platform: s.platform,
                     endpoint: s.endpoint,
                     subscriptionType: s.subscriptionType,
-                    createdAt: s.createdAt,
-                    lastNotificationAt: s.lastNotificationAt,
+                    createdAt: isoFromEpoch(s.createdAt),
+                    lastNotificationAt: isoFromEpoch(s.lastNotificationAt),
                     bestDiffNotificationsEnabled: s.bestDiffNotificationsEnabled,
                     deviceNotificationsEnabled: s.deviceNotificationsEnabled,
                     blockNotificationsEnabled: s.blockNotificationsEnabled
                 })),
                 tracker: tracker ? {
                     bestDifficulty: tracker.bestDifficulty,
-                    lastCheckedAt: tracker.lastCheckedAt
+                    lastCheckedAt: isoFromEpoch(tracker.lastCheckedAt),
                 } : null
             };
         } catch (error: any) {
@@ -346,7 +347,7 @@ export class PushController {
                     id: subscription.id,
                     address: subscription.address,
                     platform: subscription.platform,
-                    createdAt: subscription.createdAt
+                    createdAt: isoFromEpoch(subscription.createdAt),
                 }
             };
         } catch (error: any) {
