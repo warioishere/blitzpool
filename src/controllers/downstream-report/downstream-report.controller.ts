@@ -1,7 +1,6 @@
 import { Body, Controller, Get, Post } from '@nestjs/common';
 import { DownstreamMinerReport } from '../../models/DownstreamMinerReport';
 import { DownstreamReportService } from '../../services/downstream-report.service';
-import { isoFromEpoch } from '../../utils/epoch-iso';
 
 @Controller('downstream-report')
 export class DownstreamReportController {
@@ -15,9 +14,6 @@ export class DownstreamReportController {
 
   @Get()
   getReports() {
-    return this.downstreamReportService.getReports().map(r => ({
-      ...r,
-      receivedAt: isoFromEpoch(r.receivedAt),
-    }));
+    return this.downstreamReportService.getReports();
   }
 }
