@@ -93,13 +93,19 @@ export class MiningModeService {
         }
 
         // Fallback: no live marker — legacy state-based detection.
-        const distribution = await this.pplnsService.getCurrentDistribution();
-        if (distribution.some(d => d.address === address)) {
-            return { mode: 'pplns' };
-        }
+        // Group-membership wins over residual PPLNS-window shares: group
+        // join is an intentional admin action while PPLNS shares may
+        // linger in the sliding 4× network-diff window from previous
+        // sessions on a PPLNS port. An address that's an active group
+        // member (creator or otherwise) must surface as group-solo so
+        // the UI routes to /payout-group instead of /payout-pplns.
         const group = this.groupService.getGroupForAddress(address);
         if (group && group.active) {
             return { mode: 'group-solo', groupId: group.groupId };
+        }
+        const distribution = await this.pplnsService.getCurrentDistribution();
+        if (distribution.some(d => d.address === address)) {
+            return { mode: 'pplns' };
         }
         return { mode: 'solo' };
     }

@@ -35,17 +35,20 @@ describe('MiningModeService.getMode', () => {
         expect(await svc.getMode('bc1qalice')).toEqual({ mode: 'group-solo', groupId: 'grp-1' });
     });
 
-    it('PPLNS takes precedence over group membership (port-flip override)', async () => {
-        // A group member who started mining on the PPLNS port has shares
-        // landing in the PPLNS window. Share-routing at the stratum layer
-        // gives PPLNS precedence over group-solo in that case; the
-        // mode-detection API mirrors the same priority so the UI reflects
-        // where the miner's shares are actually going.
+    it('group membership wins over residual PPLNS-window shares in the fallback', async () => {
+        // Without a live port-marker the fallback used to surface PPLNS
+        // first, which left group admins / creators stuck on /payout-pplns
+        // for as long as their old PPLNS shares stayed in the 4× window
+        // (sometimes weeks). Group membership is an intentional admin
+        // action — it should win over residual passive PPLNS state. The
+        // live port-marker (checked above this branch) still wins for
+        // miners actively connected on the PPLNS port, so the share-
+        // routing semantic is unchanged.
         const svc = setup({
             groupForAddress: { 'bc1qalice': { groupId: 'grp-1', active: true } },
             distribution: [{ address: 'bc1qalice', difficulty: 500, percent: 50 }],
         });
-        expect(await svc.getMode('bc1qalice')).toEqual({ mode: 'pplns' });
+        expect(await svc.getMode('bc1qalice')).toEqual({ mode: 'group-solo', groupId: 'grp-1' });
     });
 
     it('ignores inactive group membership and falls through to pplns/solo', async () => {
