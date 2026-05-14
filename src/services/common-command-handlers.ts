@@ -404,8 +404,8 @@ export async function buildStatsMessage(
     const totalHashrate = workers.reduce((sum, w) => sum + (w.hashRate ?? 0), 0);
     const totalHashrateTH = totalHashrate / 1e12;
     const lastSeenSeconds = Math.floor((Date.now() - (workers[0].updatedAt ?? Date.now())) / 1000);
-    const totalShares = await clientStatisticsService.getTotalSharesForAddress(address);
     const addressSettings = await addressSettingsService.getSettings(address, false);
+    const totalShares = addressSettings?.shares ?? 0;
     const bestDiffRaw = addressSettings?.bestDifficulty ?? 0;
     const bestDifficultyG = bestDiffRaw / 1e9;
 

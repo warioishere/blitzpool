@@ -8,6 +8,7 @@ import { ClientDifficultyStatisticsService } from '../ORM/client-difficulty-stat
 import { ClientRejectedStatisticsService } from '../ORM/client-rejected-statistics/client-rejected-statistics.service';
 import { ClientStatisticsService } from '../ORM/client-statistics/client-statistics.service';
 import { ClientService } from '../ORM/client/client.service';
+import { PoolModeHashrateService } from '../ORM/pool-mode-hashrate/pool-mode-hashrate.service';
 import { RpcBlockService } from '../ORM/rpc-block/rpc-block.service';
 import {
     DEFAULT_SQLITE_PATH,
@@ -69,6 +70,7 @@ export class AppService implements OnModuleInit {
         private readonly clientDifficultyStatisticsService: ClientDifficultyStatisticsService,
         private readonly clientRejectedStatisticsService: ClientRejectedStatisticsService,
         private readonly clientService: ClientService,
+        private readonly poolModeHashrateService: PoolModeHashrateService,
         private readonly dataSource: DataSource,
         private readonly rpcBlockService: RpcBlockService,
         configService: ConfigService,
@@ -115,17 +117,25 @@ export class AppService implements OnModuleInit {
     private async deleteOldStatistics() {
         console.log('Deleting statistics');
 
-        await this.clientStatisticsService.deleteOldStatistics();
-        const cutoff = Math.floor(
-            (Date.now() - 30 * 24 * 60 * 60 * 1000) / (60 * 60 * 1000),
-        ) * (60 * 60 * 1000);
-        await this.clientDifficultyStatisticsService.deleteOlderThan(cutoff);
+        // 14-day cutoff for per-(address, worker, session, slot) detail
+        // tables — the UI only renders 1d/3d/7d charts from these. Lifetime
+        // totals + balances live in worker_shares_entity /
+        // address_settings_entity / pplns_balance and are untouched.
+        //
+        // Intentionally NOT cleaned: pool_share_statistics_entity +
+        // pool_rejected_statistics_entity. /api/info/shares serves 30-day
+        // totals plus an "accepted-since-last-block" counter (resets when
+        // the pool finds a block); both span longer than 14d at a small
+        // pool where blocks are infrequent. The two pool-wide tables are
+        // tiny (~150k rows total at prod scale) — keeping them uncleaned
+        // costs negligible storage and avoids breaking those endpoints.
+        const cutoff14d = Date.now() - 14 * 24 * 60 * 60 * 1000;
+        const cutoffHourly = Math.floor(cutoff14d / (60 * 60 * 1000)) * (60 * 60 * 1000);
 
-        // Clean up per-client rejected chart data older than 30 days
-        // (only used for 1d/3d/7d address charts, not for pool-wide sinceBlock totals)
-        const rejectedCutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
-        await this.clientRejectedStatisticsService.deleteOlderThan(rejectedCutoff);
-        // Note: pool_rejected_statistics is NOT cleaned — used for rejectedSinceBlock totals
+        await this.clientStatisticsService.deleteOldStatistics();
+        await this.clientDifficultyStatisticsService.deleteOlderThan(cutoffHourly);
+        await this.clientRejectedStatisticsService.deleteOlderThan(cutoff14d);
+        await this.poolModeHashrateService.deleteOlderThan(cutoff14d);
 
         console.log('Deleted old statistics');
         const deletedClients = await this.clientService.deleteOldClients();

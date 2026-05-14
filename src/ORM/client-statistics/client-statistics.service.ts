@@ -369,162 +369,22 @@ export class ClientStatisticsService {
   }
 
   public async deleteOldStatistics() {
-    const now = Date.now();
-    const detailCutoffTimestamp = new Date(now - 7 * 24 * 60 * 60 * 1000).getTime();
-    const halfYearCutoffTimestamp = new Date(now - 180 * 24 * 60 * 60 * 1000).getTime();
-    const monthCutoffTimestamp = new Date(now - 30 * 24 * 60 * 60 * 1000).getTime();
-
-    const baseFilters = {
-      detailCutoff: detailCutoffTimestamp,
-      pool: 'POOL',
-      agg: 'AGG',
-    } as const;
-
-    // Wrap the five mutations in a single transaction so an interrupt
-    // (OOM-kill, container stop, uncaughtException trap, DB connection
-    // reset) anywhere in the routine leaves the table in a consistent
-    // state — either all aggregates committed AND raw rows deleted, or
-    // nothing applied. Without this, a crash between the POOL insert
-    // (step 1) and the raw-row delete (step 3) would leave orphan raw
-    // rows for already-aggregated slots, and the next cron tick would
-    // hit a unique-key violation when trying to re-insert the same
-    // (POOL, POOL, POOL, slot) aggregate.
-    //
-    // Lock-scope is safe: the routine only touches rows with
-    // `time < detailCutoff` (7+ days old). The coordinator's hot-path
-    // INSERTs write only current-slot rows. Disjoint row sets → no
-    // contention even with a long transaction. Default READ COMMITTED
-    // isolation is fine.
-    await this.dataSource.transaction(async (manager) => {
-      const poolAggregates = await manager
-        .createQueryBuilder(ClientStatisticsEntity, 'stat')
-        .select('stat.time', 'time')
-        .addSelect('SUM(stat.shares)', 'shares')
-        .addSelect('SUM(stat.acceptedCount)', 'acceptedCount')
-        .addSelect('SUM(stat.rejectedCount)', 'rejectedCount')
-        .addSelect('SUM(stat.rejectedJobNotFoundCount)', 'rejectedJobNotFoundCount')
-        .addSelect('SUM(stat.rejectedJobNotFoundDiff1)', 'rejectedJobNotFoundDiff1')
-        .addSelect('SUM(stat.rejectedDuplicateShareCount)', 'rejectedDuplicateShareCount')
-        .addSelect('SUM(stat.rejectedDuplicateShareDiff1)', 'rejectedDuplicateShareDiff1')
-        .addSelect('SUM(stat.rejectedLowDifficultyShareCount)', 'rejectedLowDifficultyShareCount')
-        .addSelect('SUM(stat.rejectedLowDifficultyShareDiff1)', 'rejectedLowDifficultyShareDiff1')
-        .where('stat.time < :detailCutoff', baseFilters)
-        .andWhere(
-          'NOT (stat.address = :pool AND stat.clientName = :pool AND stat.sessionId = :pool)',
-          baseFilters,
-        )
-        .andWhere('stat.sessionId != :agg', baseFilters)
-        .groupBy('stat.time')
-        .getRawMany();
-
-      if (poolAggregates.length > 0) {
-        const insertedAt = Date.now();
-        await manager
-          .createQueryBuilder()
-          .insert()
-          .into(ClientStatisticsEntity)
-          .values(
-            poolAggregates.map((row) => ({
-              address: 'POOL',
-              clientName: 'POOL',
-              sessionId: 'POOL',
-              time: Number(row.time),
-              shares: Number(row.shares ?? 0),
-              acceptedCount: Number(row.acceptedCount ?? 0),
-              rejectedCount: Number(row.rejectedCount ?? 0),
-              rejectedJobNotFoundCount: Number(row.rejectedJobNotFoundCount ?? 0),
-              rejectedJobNotFoundDiff1: Number(row.rejectedJobNotFoundDiff1 ?? 0),
-              rejectedDuplicateShareCount: Number(row.rejectedDuplicateShareCount ?? 0),
-              rejectedDuplicateShareDiff1: Number(row.rejectedDuplicateShareDiff1 ?? 0),
-              rejectedLowDifficultyShareCount: Number(row.rejectedLowDifficultyShareCount ?? 0),
-              rejectedLowDifficultyShareDiff1: Number(row.rejectedLowDifficultyShareDiff1 ?? 0),
-              createdAt: insertedAt,
-              updatedAt: insertedAt,
-            })),
-          )
-          .execute();
-      }
-
-      const workerAggregates = await manager
-        .createQueryBuilder(ClientStatisticsEntity, 'stat')
-        .select('stat.address', 'address')
-        .addSelect('stat.clientName', 'clientName')
-        .addSelect('SUM(stat.shares)', 'shares')
-        .addSelect('SUM(stat.acceptedCount)', 'acceptedCount')
-        .addSelect('SUM(stat.rejectedCount)', 'rejectedCount')
-        .addSelect('SUM(stat.rejectedJobNotFoundCount)', 'rejectedJobNotFoundCount')
-        .addSelect('SUM(stat.rejectedJobNotFoundDiff1)', 'rejectedJobNotFoundDiff1')
-        .addSelect('SUM(stat.rejectedDuplicateShareCount)', 'rejectedDuplicateShareCount')
-        .addSelect('SUM(stat.rejectedDuplicateShareDiff1)', 'rejectedDuplicateShareDiff1')
-        .addSelect('SUM(stat.rejectedLowDifficultyShareCount)', 'rejectedLowDifficultyShareCount')
-        .addSelect('SUM(stat.rejectedLowDifficultyShareDiff1)', 'rejectedLowDifficultyShareDiff1')
-        .where('stat.time < :detailCutoff', baseFilters)
-        .andWhere('stat.sessionId != :agg', baseFilters)
-        .andWhere(
-          'NOT (stat.address = :pool AND stat.clientName = :pool AND stat.sessionId = :pool)',
-          baseFilters,
-        )
-        .groupBy('stat.address')
-        .addGroupBy('stat.clientName')
-        .getRawMany();
-
-      if (workerAggregates.length > 0) {
-        const insertedAt = Date.now();
-        await manager
-          .createQueryBuilder()
-          .insert()
-          .into(ClientStatisticsEntity)
-          .values(
-            workerAggregates.map((row) => ({
-              address: row.address,
-              clientName: row.clientName,
-              sessionId: 'AGG',
-              time: detailCutoffTimestamp,
-              shares: Number(row.shares ?? 0),
-              acceptedCount: Number(row.acceptedCount ?? 0),
-              rejectedCount: Number(row.rejectedCount ?? 0),
-              rejectedJobNotFoundCount: Number(row.rejectedJobNotFoundCount ?? 0),
-              rejectedJobNotFoundDiff1: Number(row.rejectedJobNotFoundDiff1 ?? 0),
-              rejectedDuplicateShareCount: Number(row.rejectedDuplicateShareCount ?? 0),
-              rejectedDuplicateShareDiff1: Number(row.rejectedDuplicateShareDiff1 ?? 0),
-              rejectedLowDifficultyShareCount: Number(row.rejectedLowDifficultyShareCount ?? 0),
-              rejectedLowDifficultyShareDiff1: Number(row.rejectedLowDifficultyShareDiff1 ?? 0),
-              createdAt: insertedAt,
-              updatedAt: insertedAt,
-            })),
-          )
-          .execute();
-      }
-
-      await manager
-        .createQueryBuilder()
-        .delete()
-        .from(ClientStatisticsEntity)
-        .where('time < :detailCutoff', { detailCutoff: detailCutoffTimestamp })
-        .andWhere(
-          'NOT (sessionId = :agg OR (address = :pool AND clientName = :pool AND sessionId = :pool))',
-          { agg: 'AGG', pool: 'POOL' },
-        )
-        .execute();
-
-      await manager
-        .createQueryBuilder()
-        .delete()
-        .from(ClientStatisticsEntity)
-        .where('time < :halfYearCutoff', { halfYearCutoff: halfYearCutoffTimestamp })
-        .andWhere('sessionId = :agg', { agg: 'AGG' })
-        .execute();
-
-      await manager
-        .createQueryBuilder()
-        .delete()
-        .from(ClientStatisticsEntity)
-        .where('time < :monthCutoff', { monthCutoff: monthCutoffTimestamp })
-        .andWhere('address = :pool', { pool: 'POOL' })
-        .andWhere('clientName = :pool', { pool: 'POOL' })
-        .andWhere('sessionId = :pool', { pool: 'POOL' })
-        .execute();
-    });
+    // Simple flat 14-day retention. The old code rolled detail rows >7d
+    // into per-worker (sessionId='AGG') and pool-wide (address/clientName/
+    // sessionId='POOL') aggregate rows, then aged those at 180d / 30d
+    // respectively. That existed for chart views older than 7d (per-worker
+    // and pool-wide '1m' = 30d). The UI now shows nothing older than 14d
+    // for these tables — pool-wide 30d / sinceBlock totals come from the
+    // separate pool_share_statistics_entity which is intentionally
+    // exempt from cleanup. Lifetime per-(address, worker) running totals
+    // live in worker_shares_entity. So no rollup is needed here — detail
+    // rows just expire at the 14-day boundary.
+    const cutoff = Date.now() - 14 * 24 * 60 * 60 * 1000;
+    await this.clientStatisticsRepository
+      .createQueryBuilder()
+      .delete()
+      .where('time < :cutoff', { cutoff })
+      .execute();
   }
 
   public async getChartDataForSite(range: '1d' | '1m' = '1d') {

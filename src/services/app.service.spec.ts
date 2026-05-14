@@ -56,6 +56,7 @@ describe('AppService.onModuleInit', () => {
       clientDifficultyStatisticsService as any,
       clientRejectedStatisticsService as any,
       clientService as any,
+      { deleteOlderThan: jest.fn().mockResolvedValue({ affected: 0 }) } as any, // poolModeHashrateService
       dataSource as any,
       rpcBlockService as any,
       configService as any,

@@ -42,6 +42,14 @@ export class PoolModeHashrateService {
         private readonly repo: Repository<PoolModeHashrateEntity>,
     ) {}
 
+    public async deleteOlderThan(cutoff: number) {
+        return this.repo
+            .createQueryBuilder()
+            .delete()
+            .where('"time" < :cutoff', { cutoff })
+            .execute();
+    }
+
     /** Synchronous, non-throwing hot-path write. */
     incrementAccepted(mode: MiningMode, difficulty: number): void {
         if (!Number.isFinite(difficulty) || difficulty <= 0) return;

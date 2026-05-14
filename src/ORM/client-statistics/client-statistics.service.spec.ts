@@ -74,12 +74,12 @@ describe.each(['sqlite', 'postgres'] as const)(
       dateNowSpy.mockRestore();
     });
 
-    it('aggregates and prunes old statistics while keeping recent data', async () => {
+    it('deletes rows older than 14 days, keeps anything younger', async () => {
       const repository = dataSource.getRepository(ClientStatisticsEntity);
       const now = Date.now();
-      const detailCutoff = new Date(now - 7 * 24 * 60 * 60 * 1000).getTime();
-      const oldTime = detailCutoff - 60_000;
-      const recentTime = detailCutoff + 60_000;
+      const cutoff = new Date(now - 14 * 24 * 60 * 60 * 1000).getTime();
+      const oldTime = cutoff - 60_000;       // 14d + 1m old → DELETE
+      const insideRetention = cutoff + 60_000; // 14d - 1m old → KEEP
 
       await repository
         .createQueryBuilder()
@@ -105,42 +105,8 @@ describe.each(['sqlite', 'postgres'] as const)(
           {
             address: 'addr1',
             clientName: 'workerA',
-            sessionId: 'sess0002',
-            time: oldTime,
-            shares: 20,
-            acceptedCount: 2,
-            rejectedCount: 1,
-            rejectedJobNotFoundCount: 1,
-            rejectedJobNotFoundDiff1: 1,
-            rejectedDuplicateShareCount: 2,
-            rejectedDuplicateShareDiff1: 2,
-            rejectedLowDifficultyShareCount: 3,
-            rejectedLowDifficultyShareDiff1: 3,
-            createdAt: oldTime,
-            updatedAt: oldTime,
-          },
-          {
-            address: 'addr2',
-            clientName: 'workerB',
-            sessionId: 'sess0003',
-            time: oldTime,
-            shares: 5,
-            acceptedCount: 1,
-            rejectedCount: 1,
-            rejectedJobNotFoundCount: 0,
-            rejectedJobNotFoundDiff1: 0,
-            rejectedDuplicateShareCount: 0,
-            rejectedDuplicateShareDiff1: 0,
-            rejectedLowDifficultyShareCount: 0,
-            rejectedLowDifficultyShareDiff1: 0,
-            createdAt: oldTime,
-            updatedAt: oldTime,
-          },
-          {
-            address: 'addr1',
-            clientName: 'workerA',
             sessionId: 'sessR001',
-            time: recentTime,
+            time: insideRetention,
             shares: 7,
             acceptedCount: 1,
             rejectedCount: 0,
@@ -150,50 +116,17 @@ describe.each(['sqlite', 'postgres'] as const)(
             rejectedDuplicateShareDiff1: 0,
             rejectedLowDifficultyShareCount: 0,
             rejectedLowDifficultyShareDiff1: 0,
-            createdAt: recentTime,
-            updatedAt: recentTime,
+            createdAt: insideRetention,
+            updatedAt: insideRetention,
           },
         ])
         .execute();
 
       await service.deleteOldStatistics();
 
-      const remaining = await repository.find({
-        order: { address: 'ASC', sessionId: 'ASC', time: 'ASC' },
-        withDeleted: true,
-      });
-
-      const poolAggregate = remaining.find(
-        (row) =>
-          row.address === 'POOL' &&
-          row.clientName === 'POOL' &&
-          row.sessionId === 'POOL',
-      );
-      const workerAggregate = remaining.filter(
-        (row) => row.sessionId === 'AGG',
-      );
-      const recentRow = remaining.find(
-        (row) => row.sessionId === 'sessR001',
-      );
-      const staleSessions = remaining.filter((row) =>
-        ['sess0001', 'sess0002', 'sess0003'].includes(row.sessionId),
-      );
-
-      expect(poolAggregate).toBeDefined();
-      expect(poolAggregate?.time).toBe(oldTime);
-      expect(poolAggregate?.shares).toBe(35);
-      expect(workerAggregate).toHaveLength(2);
-      expect(workerAggregate.map((row) => row.address).sort()).toEqual([
-        'addr1',
-        'addr2',
-      ]);
-      const addr1Aggregate = workerAggregate.find(
-        (row) => row.address === 'addr1',
-      );
-      expect(addr1Aggregate?.shares).toBe(30);
-      expect(addr1Aggregate?.acceptedCount).toBe(3);
-      expect(recentRow).toBeDefined();
-      expect(staleSessions).toHaveLength(0);
+      const remaining = await repository.find({ withDeleted: true });
+      expect(remaining).toHaveLength(1);
+      expect(remaining[0].sessionId).toBe('sessR001');
     });
 
     it('provides chart data without relying on sqlite syntax', async () => {
@@ -248,22 +181,10 @@ describe.each(['sqlite', 'postgres'] as const)(
       expect(hashRate).toBeGreaterThan(0);
     });
 
-    // Regression: deleteOldStatistics ran twice in a row used to throw a
-    // unique-key violation on (POOL, POOL, POOL, slot) when the previous
-    // run had been interrupted between the aggregate-insert and the
-    // raw-row delete (e.g. OOM-kill, container stop, uncaughtException
-    // trap interrupting the loop). The fix wraps the routine in a
-    // transaction so it's all-or-nothing: a re-run after an interrupted
-    // run sees no orphan state and produces the same final result as a
-    // clean single run. We can't easily simulate a mid-routine crash in
-    // a pg-mem / sqlite environment (no signal injection), but back-to-
-    // back invocations exercise the idempotency path that would have
-    // tripped the bug.
     it('deleteOldStatistics is idempotent — back-to-back runs do not throw', async () => {
       const repository = dataSource.getRepository(ClientStatisticsEntity);
       const now = Date.now();
-      const detailCutoff = new Date(now - 7 * 24 * 60 * 60 * 1000).getTime();
-      const oldTime = detailCutoff - 60_000;
+      const oldTime = now - 14 * 24 * 60 * 60 * 1000 - 60_000;
 
       await repository
         .createQueryBuilder()
@@ -289,24 +210,11 @@ describe.each(['sqlite', 'postgres'] as const)(
         ])
         .execute();
 
-      // First run: aggregates the raw row into (POOL, oldTime) and
-      // deletes the raw row. Standard success path.
+      await expect(service.deleteOldStatistics()).resolves.toBeUndefined();
       await expect(service.deleteOldStatistics()).resolves.toBeUndefined();
 
-      // Second run: raw rows for oldTime are gone, so the aggregator
-      // returns an empty set → no INSERT attempt → no conflict possible.
-      // Before the transaction fix this still worked for the clean case
-      // but the bug surfaced when previous-run state was inconsistent.
-      await expect(service.deleteOldStatistics()).resolves.toBeUndefined();
-
-      // Final state matches the single-run case.
       const remaining = await repository.find({ withDeleted: true });
-      const poolRows = remaining.filter(
-        (row) => row.address === 'POOL' && row.clientName === 'POOL' && row.sessionId === 'POOL',
-      );
-      expect(poolRows.length).toBe(1);
-      expect(poolRows[0]?.time).toBe(oldTime);
-      expect(poolRows[0]?.shares).toBe(10);
+      expect(remaining).toHaveLength(0);
     });
   },
 );
