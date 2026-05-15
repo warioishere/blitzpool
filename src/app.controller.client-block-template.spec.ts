@@ -125,4 +125,24 @@ describe('AppController /api/client/:address/block-template', () => {
     const bitcoinRpcService = app.get(BitcoinRpcService);
     expect(bitcoinRpcService.getBlockTemplate).toHaveBeenCalledWith(1);
   });
+
+  it('caches the response keyed on (address, jobTemplateId) — second call skips the build', async () => {
+    const address = bitcoinjs.payments.p2wpkh({ hash: Buffer.alloc(20, 0), network: bitcoinjs.networks.regtest }).address;
+    const bitcoinRpcService = app.get(BitcoinRpcService) as any;
+    const cacheManager = app.get(CACHE_MANAGER) as any;
+
+    // Wire the in-memory cache so the second call hits the cached entry.
+    const store = new Map<string, any>();
+    cacheManager.get.mockImplementation(async (k: string) => store.get(k));
+    cacheManager.set.mockImplementation(async (k: string, v: any) => { store.set(k, v); });
+
+    bitcoinRpcService.getBlockTemplate.mockClear();
+    await app.inject({ method: 'GET', url: `/api/client/${address}/block-template` });
+    await app.inject({ method: 'GET', url: `/api/client/${address}/block-template` });
+    // Heavy work (getblocktemplate) ran once; the second request hit cache.
+    expect(bitcoinRpcService.getBlockTemplate).toHaveBeenCalledTimes(1);
+    // Cache stored exactly one entry keyed on the template id.
+    expect(store.size).toBe(1);
+    expect(Array.from(store.keys())[0]).toMatch(/^CLIENT_BLOCK_TEMPLATE_/);
+  });
 });

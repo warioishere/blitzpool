@@ -17,6 +17,32 @@ export class WorkerSharesService {
     }
 
     /**
+     * Hot-path lookup used by `GET /api/client/:address/worker-shares`.
+     * Caller only needs `clientName` + `rejectedShares` (the `shares`
+     * total comes from `ShareTotalsCacheService.getWorkerTotals`).
+     *
+     * Although `WorkerSharesEntity` has no Date columns (so no
+     * `parseDate` cost), bypassing TypeORM's entity hydration still
+     * skips the per-row constructor + transformColumns loop. The win is
+     * smaller than for `ClientService.getByAddressLight` but the pattern
+     * is the same — raw query on Postgres, entity fallback on sqlite/
+     * pg-mem (dev/test).
+     */
+    public async getWorkerTotalsLight(address: string): Promise<Array<{ clientName: string; rejectedShares: number }>> {
+        if (this.dataSource.options.type === 'postgres') {
+            return this.dataSource.query(
+                `SELECT "clientName", "rejectedShares"
+                 FROM worker_shares_entity
+                 WHERE address = $1`,
+                [address],
+            );
+        }
+        // Sqlite / pg-mem fallback — controller reads only the two
+        // fields above from each row.
+        return this.repo.find({ where: { address } }) as unknown as Promise<any>;
+    }
+
+    /**
      * Seed from client_statistics_entity if worker_shares_entity is empty.
      * Runs once on first deploy to backfill cumulative totals.
      */
@@ -57,9 +83,11 @@ export class WorkerSharesService {
     }
 
     public async addSharesBulk(
-        updates: Array<{ address: string; clientName: string; shares: number }>,
+        addresses: string[],
+        clientNames: string[],
+        shares: number[],
     ): Promise<void> {
-        if (updates.length === 0) return;
+        if (addresses.length === 0) return;
 
         const dataSource = this.repo.manager.connection;
 
@@ -70,10 +98,6 @@ export class WorkerSharesService {
             // StatisticsCoordinatorService.bulkUpsertClientStatistics
             // for the wider rationale (~9× speedup measured on prod
             // hardware for ~1500-row inserts).
-            const addresses = updates.map(u => u.address);
-            const clientNames = updates.map(u => u.clientName);
-            const shares = updates.map(u => u.shares);
-
             await dataSource.query(
                 `INSERT INTO worker_shares_entity (address, "clientName", shares)
                  SELECT * FROM unnest($1::text[], $2::text[], $3::double precision[])
@@ -82,15 +106,15 @@ export class WorkerSharesService {
                 [addresses, clientNames, shares],
             );
         } else {
-            for (const u of updates) {
+            for (let i = 0; i < addresses.length; i++) {
                 const existing = await this.repo.findOne({
-                    where: { address: u.address, clientName: u.clientName },
+                    where: { address: addresses[i], clientName: clientNames[i] },
                 });
                 if (existing) {
-                    existing.shares += u.shares;
+                    existing.shares += shares[i];
                     await this.repo.save(existing);
                 } else {
-                    await this.repo.save({ address: u.address, clientName: u.clientName, shares: u.shares });
+                    await this.repo.save({ address: addresses[i], clientName: clientNames[i], shares: shares[i] });
                 }
             }
         }
@@ -101,18 +125,17 @@ export class WorkerSharesService {
      * Called by StatisticsCoordinator after each successful client-statistics flush.
      */
     public async addRejectedBulk(
-        updates: Array<{ address: string; clientName: string; rejectedShares: number }>,
+        addresses: string[],
+        clientNames: string[],
+        rejectedShares: number[],
     ): Promise<void> {
-        if (updates.length === 0) return;
+        if (addresses.length === 0) return;
 
         const dataSource = this.repo.manager.connection;
 
         if (dataSource.options.type === 'postgres') {
-            // unnest() with parallel arrays — see addSharesBulk above.
-            const addresses = updates.map(u => u.address);
-            const clientNames = updates.map(u => u.clientName);
-            const zeroShares = updates.map(() => 0);
-            const rejectedShares = updates.map(u => u.rejectedShares);
+            const n = addresses.length;
+            const zeroShares: number[] = new Array(n).fill(0);
 
             await dataSource.query(
                 `INSERT INTO worker_shares_entity (address, "clientName", shares, "rejectedShares")
@@ -122,15 +145,15 @@ export class WorkerSharesService {
                 [addresses, clientNames, zeroShares, rejectedShares],
             );
         } else {
-            for (const u of updates) {
+            for (let i = 0; i < addresses.length; i++) {
                 const existing = await this.repo.findOne({
-                    where: { address: u.address, clientName: u.clientName },
+                    where: { address: addresses[i], clientName: clientNames[i] },
                 });
                 if (existing) {
-                    existing.rejectedShares += u.rejectedShares;
+                    existing.rejectedShares += rejectedShares[i];
                     await this.repo.save(existing);
                 } else {
-                    await this.repo.save({ address: u.address, clientName: u.clientName, shares: 0, rejectedShares: u.rejectedShares });
+                    await this.repo.save({ address: addresses[i], clientName: clientNames[i], shares: 0, rejectedShares: rejectedShares[i] });
                 }
             }
         }

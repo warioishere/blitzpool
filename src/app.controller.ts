@@ -73,6 +73,7 @@ export class AppController {
     workers: parseInt(this.configService.get('API_CACHE_TTL_WORKERS') ?? '60') * 1000,
     accepted: parseInt(this.configService.get('API_CACHE_TTL_ACCEPTED') ?? '60') * 1000,
     rejected: parseInt(this.configService.get('API_CACHE_TTL_REJECTED') ?? '60') * 1000,
+    clientBlockTemplate: parseInt(this.configService.get('API_CACHE_TTL_CLIENT_BLOCK_TEMPLATE') ?? '60') * 1000,
   };
 
   constructor(
@@ -147,6 +148,18 @@ export class AppController {
   @Get('client/:address/block-template')
   public async clientBlockTemplate(@Param('address') address: string) {
     const tpl = await firstValueFrom(this.stratumV1JobsService.newMiningJob$);
+
+    // Cache the assembled response per (address, jobTemplateId). The template
+    // id is monotonically increasing and changes on every newMiningJob$
+    // emit (~1/min) — caching by (address, id) naturally invalidates on
+    // template change. Skips a full MiningJob construction (+ copyAndUpdateBlock
+    // 80-byte header build + getblocktemplate JSON marshalling) on repeat
+    // polls from the same dashboard.
+    const cacheKey = `CLIENT_BLOCK_TEMPLATE_${address}_${tpl.blockData.id}`;
+    const cached = await this.cacheManager.get(cacheKey);
+    if (cached != null) {
+      return cached;
+    }
 
     // Build payoutInformation that matches the actual coinbase the pool would
     // produce for this miner. In PPLNS/group-solo the coinbase is a multi-output
@@ -229,7 +242,7 @@ export class AppController {
       tpl.blockData.height,
     );
 
-    return {
+    const result = {
       blockTemplate,
       blockHex: block.toHex(),
       coinbaseTxHex: job.getCoinbaseTxHex(),
@@ -239,6 +252,8 @@ export class AppController {
         ? { groupId: modeResult.groupId }
         : {}),
     };
+    await this.cacheManager.set(cacheKey, result, this.cacheTTL.clientBlockTemplate);
+    return result;
   }
 
   @Get('pool')
@@ -386,7 +401,7 @@ export class AppController {
       this.poolShareStatisticsService.getTotalsSince(now - oneDay * 14),
       this.poolShareStatisticsService.getTotalsSince(now - oneDay * 30),
     ]);
-    const sinceBlock = latestBlock?.createdAt ? latestBlock.createdAt.getTime() : 0;
+    const sinceBlock = latestBlock?.createdAt ?? 0;
     const totalsSinceBlock = await this.poolShareStatisticsService.getTotalsSince(sinceBlock);
 
     const data = {

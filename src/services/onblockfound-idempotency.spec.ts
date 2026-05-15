@@ -247,7 +247,8 @@ describe('PplnsService.onBlockFound — idempotency', () => {
                     existing.totalPaidSats += taken;
                 }
             },
-            touchLastAcceptedShareAt: async (_addr: string) => undefined,
+            markTouch: (_addr: string) => undefined,
+            flushPendingTouches: async () => undefined,
         };
 
         const env: Record<string, string> = {

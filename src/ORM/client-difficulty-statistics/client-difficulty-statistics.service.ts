@@ -4,6 +4,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 
 import { ClientDifficultyStatisticsEntity } from './client-difficulty-statistics.entity';
+import { SwapBuffer } from '../../utils/buffers';
 
 const HOUR_IN_MS = 60 * 60 * 1000;
 const FLUSH_INTERVAL_MS = 30_000;
@@ -18,7 +19,7 @@ interface BufferedDifficulty {
 @Injectable()
 export class ClientDifficultyStatisticsService implements OnModuleDestroy {
   /** In-memory buffer: key = "address:clientName:slotTime" → max difficulty */
-  private buffer = new Map<string, BufferedDifficulty>();
+  private readonly buffer = new SwapBuffer<string, BufferedDifficulty>();
   private isFlushing = false;
 
   constructor(
@@ -83,10 +84,7 @@ export class ClientDifficultyStatisticsService implements OnModuleDestroy {
     }
 
     this.isFlushing = true;
-
-    // Swap buffer so new writes go to a fresh map while we flush
-    const snapshot = this.buffer;
-    this.buffer = new Map();
+    const snapshot = this.buffer.drain();
 
     try {
       const records = Array.from(snapshot.values());
@@ -98,16 +96,13 @@ export class ClientDifficultyStatisticsService implements OnModuleDestroy {
         await this.flushPostgres(records);
       }
     } catch (error) {
-      // On failure, merge unflushed records back into the buffer (keep higher max)
-      for (const record of snapshot.values()) {
-        const key = ClientDifficultyStatisticsService.bufferKey(record.address, record.clientName, record.slotTime);
-        const current = this.buffer.get(key);
-        if (current) {
-          current.maxDifficulty = Math.max(current.maxDifficulty, record.maxDifficulty);
-        } else {
-          this.buffer.set(key, record);
-        }
-      }
+      // Max-wins rebuffer: a concurrent share may have beaten the failed
+      // snapshot's value, so keep whichever is larger.
+      this.buffer.rebuffer(snapshot, (incoming, existing) =>
+        existing === undefined
+          ? incoming
+          : { ...existing, maxDifficulty: Math.max(existing.maxDifficulty, incoming.maxDifficulty) },
+      );
       console.error('[ClientDifficultyStatisticsService] Flush failed, records re-buffered:', error);
     } finally {
       this.isFlushing = false;
@@ -116,7 +111,7 @@ export class ClientDifficultyStatisticsService implements OnModuleDestroy {
 
   private async flushPostgres(records: BufferedDifficulty[]): Promise<void> {
     const BATCH_SIZE = 500;
-    const now = new Date();
+    const now = Date.now();
 
     for (let i = 0; i < records.length; i += BATCH_SIZE) {
       const batch = records.slice(i, i + BATCH_SIZE);
@@ -143,7 +138,7 @@ export class ClientDifficultyStatisticsService implements OnModuleDestroy {
   }
 
   private async flushSqlite(records: BufferedDifficulty[]): Promise<void> {
-    const now = new Date().toISOString();
+    const now = Date.now();
     for (const r of records) {
       const tableName = this.repository.metadata.tableName;
       await this.repository.query(
@@ -158,12 +153,14 @@ export class ClientDifficultyStatisticsService implements OnModuleDestroy {
     }
   }
 
-  async getMaximaForAddress(address: string, from: number, to: number) {
+  async getMaximaForAddress(address: string, from: number, to: number): Promise<Array<{ slotTime: number; maxDifficulty: number }>> {
     if (!address) {
       return [];
     }
 
-    return this.repository
+    // Raw query bypasses entity transformers — PG returns bigint as string.
+    // Coerce both columns explicitly so the TS return type matches runtime.
+    const rows = await this.repository
       .createQueryBuilder('stat')
       .select('stat.slotTime', 'slotTime')
       .addSelect('MAX(stat.maxDifficulty)', 'maxDifficulty')
@@ -171,7 +168,12 @@ export class ClientDifficultyStatisticsService implements OnModuleDestroy {
       .andWhere('stat.slotTime BETWEEN :from AND :to', { from, to })
       .groupBy('stat.slotTime')
       .orderBy('stat.slotTime', 'ASC')
-      .getRawMany<{ slotTime: number; maxDifficulty: number }>();
+      .getRawMany<{ slotTime: number | string; maxDifficulty: number | string }>();
+
+    return rows.map(r => ({
+      slotTime: Number(r.slotTime),
+      maxDifficulty: Number(r.maxDifficulty),
+    }));
   }
 
   async deleteOlderThan(cutoff: number): Promise<void> {

@@ -57,3 +57,42 @@ describe('StratumV1ClientStatistics — minDifficulty floor', () => {
         expect(suggested!).toBeLessThan(1);
     });
 });
+
+/**
+ * After a vardiff ratchet, the in-flight wave of shares against pre-ratchet
+ * jobs is credited at the OLD diff via the CK-style clamp. Those clamped
+ * shares are real work for the hashrate display but MUST NOT enter the
+ * vardiff submission cache — otherwise the rolling-window sum gets
+ * polluted with old-diff entries and the next vardiff calc would chase
+ * a target between the old and new diff, oscillating. Mirrors ckpool
+ * stratifier.c:5781-5783 `if (diff != client->diff) ssdc=0; return;`.
+ */
+describe('StratumV1ClientStatistics — vardiff stale-diff gate', () => {
+    it('current-diff shares enter the submission cache', () => {
+        const stats = new StratumV1ClientStatistics(6);
+        stats.updateHashRate(1024, true);
+        expect((stats as any).submissionCache.length).toBe(1);
+    });
+
+    it('stale-diff shares are excluded from the submission cache', () => {
+        const stats = new StratumV1ClientStatistics(6);
+        stats.updateHashRate(256, false);  // CK-clamped, old diff
+        stats.updateHashRate(256, false);
+        stats.updateHashRate(256, false);
+        expect((stats as any).submissionCache.length).toBe(0);
+    });
+
+    it('stale-diff shares still update live hashrate accumulators', () => {
+        const stats = new StratumV1ClientStatistics(6);
+        // First share establishes the time-slot baseline.
+        stats.updateHashRate(1024, true);
+        const cacheBefore = (stats as any).submissionCache.length;
+        // Stale-diff burst should still drive the share counter — without
+        // this, a quiet miner that only had stale shares for a window
+        // would look dead in the live hashrate display.
+        stats.updateHashRate(256, false);
+        stats.updateHashRate(256, false);
+        expect((stats as any).submissionCache.length).toBe(cacheBefore);  // no cache pollution
+        expect((stats as any).shares).toBeGreaterThan(1024);  // hashrate share-sum advanced
+    });
+});

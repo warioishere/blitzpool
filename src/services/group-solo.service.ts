@@ -19,6 +19,7 @@ import {
     readStoredSnapshot,
     writeStoredSnapshot,
 } from './coinbase-snapshot';
+import { InflightResultCache } from '../utils/inflight-result-cache';
 
 /**
  * Group-solo PROP-style payout engine.
@@ -74,6 +75,9 @@ function redisKeys(groupId: string) {
         // PPLNS's `pplns:window:by-address` hash maintained alongside
         // `pplns:shares`.
         byAddress: `groupsolo:${groupId}:by-address`,
+        // Best single-share of the round: { diff, address, time }. Updated
+        // by recordShare, cleared by resetRound.
+        bestShare: `groupsolo:${groupId}:best-share`,
     };
 }
 
@@ -122,39 +126,26 @@ export class GroupSoloService implements OnModuleInit {
     private blockFoundLocks = new Set<string>();
 
     /**
-     * Per-(group, finderAddress) distribution cache. Mirrors the pattern in
-     * PplnsService (single in-memory cache field with TTL): under a block-
-     * change fan-out, the new-job-broadcast iterates all 400 connected
-     * stratum sessions and each one calls `getPayoutDistribution` with the
-     * same group+reward+finder triple. Without a cache the inner
-     * `buildCoinbaseDistribution` plus the two PG round-trips (balanceRepo,
-     * groupRepo) ran 400× synchronously, adding ~50-200ms per call to the
-     * dispatch storm. With a cache: 1× compute, 399× O(1) hash lookup.
-     *
-     * The cache key is `${groupId}:${finderAddress ?? '__none__'}` and the
-     * value carries a `blockRewardSats` discriminator (the cache is invalid
-     * if the reward differs, e.g. a new template arrived for a different
-     * height). TTL is 30s — short enough that a within-window finder-bonus
-     * config change reflects quickly, long enough to absorb the dispatch
-     * fan-out window.
-     *
-     * Invalidated by `onBlockFound` and `wipeRoundState` (round reset
-     * means the in-flight distribution is no longer valid for any future
-     * job).
+     * Per-(group, finderAddress, reward) distribution cache with TTL +
+     * in-flight-promise dedup. See src/utils/inflight-result-cache.ts.
+     * Cache key includes the reward so a mempool-driven reward change
+     * naturally invalidates; `invalidateDistributionCache(groupId)` clears
+     * the per-group prefix on round reset / block found.
      */
-    private cachedDistributions = new Map<string, {
-        payouts: GroupSoloPayoutEntry[];
-        blockRewardSats: number;
-        cachedAt: number;
-    }>();
-    private static readonly DISTRIBUTION_CACHE_TTL_MS = 30_000;
+    private readonly distributionCache = new InflightResultCache<string, GroupSoloPayoutEntry[]>(30_000);
+
+    /**
+     * In-process round-best cache. Redis is written through on improvement
+     * only so cross-process consumers stay consistent after restart.
+     */
+    private bestShareInMemory = new Map<string, { diff: number; address: string; time: number }>();
+
+    private distributionCacheKey(groupId: string, finderAddress: string | undefined, blockRewardSats: number): string {
+        return `${groupId}:${finderAddress ?? '__none__'}:${blockRewardSats}`;
+    }
 
     private invalidateDistributionCache(groupId: string): void {
-        for (const k of this.cachedDistributions.keys()) {
-            if (k.startsWith(`${groupId}:`)) {
-                this.cachedDistributions.delete(k);
-            }
-        }
+        this.distributionCache.invalidate(k => k.startsWith(`${groupId}:`));
     }
 
     constructor(
@@ -255,12 +246,26 @@ export class GroupSoloService implements OnModuleInit {
             await this.redis.hIncrByFloat(keys.byAddress, address, difficulty);
         }
 
+        // Round-best — read from in-process Map (no Redis round-trip per
+        // share); write through to Redis only on improvement so the cross-
+        // process consumers (UI /best-difficulty, kick handler) see a
+        // consistent value after a restart.
+        const cachedBest = this.bestShareInMemory.get(entry.groupId);
+        if (!cachedBest || difficulty > cachedBest.diff) {
+            this.bestShareInMemory.set(entry.groupId, { diff: difficulty, address, time: now });
+            this.redis.hSet(keys.bestShare, {
+                diff: String(difficulty),
+                address,
+                time: String(now),
+            }).catch(() => undefined);
+        }
+
         // Persist last-accepted-share timestamp on the balance row so the
         // dust-sweep cron can tell dormant dust from active dust. No-op
         // when the balance row doesn't exist yet — the first pending
         // credit in onBlockFound will initialize it.
         this.balanceRepo.update({ address, groupId: entry.groupId }, {
-            lastAcceptedShareAt: new Date(now),
+            lastAcceptedShareAt: now,
         }).catch(err => {
             console.warn(`[GroupSolo] touchLastAcceptedShareAt failed for ${address} in ${entry.groupId}:`, (err as Error).message);
         });
@@ -315,32 +320,18 @@ export class GroupSoloService implements OnModuleInit {
     ): Promise<GroupSoloPayoutEntry[]> {
         if (!this.isEnabled()) return this.fallback(blockRewardSats);
 
-        // ── Cache lookup (block-change fan-out optimisation) ─────────
-        // 400 stratum sessions × identical (group, reward, finder) triples
-        // would otherwise cost 400× the inner compute + 800 PG round-trips
-        // (balanceRepo + groupRepo). With cache: one compute, 399 hash
-        // lookups. TTL is 30s; cache invalidated by onBlockFound /
-        // wipeRoundState so a round-reset can never serve stale state.
-        const cacheKey = `${groupId}:${finderAddress ?? '__none__'}`;
-        const cached = this.cachedDistributions.get(cacheKey);
-        if (
-            cached &&
-            cached.blockRewardSats === blockRewardSats &&
-            Date.now() - cached.cachedAt < GroupSoloService.DISTRIBUTION_CACHE_TTL_MS
-        ) {
-            // The on-disk snapshot in Redis was already written on the
-            // computing path; subsequent cache hits don't need to re-write
-            // it (writeSnapshot is idempotent for the same payload).
-            return cached.payouts;
-        }
+        return this.distributionCache.getOrCompute(
+            this.distributionCacheKey(groupId, finderAddress, blockRewardSats),
+            () => this.buildDistribution(groupId, blockRewardSats, finderAddress),
+        );
+    }
 
+    private async buildDistribution(
+        groupId: string,
+        blockRewardSats: number,
+        finderAddress: string | undefined,
+    ): Promise<GroupSoloPayoutEntry[]> {
         const keys = redisKeys(groupId);
-
-        // Hot path: called per-miner-stratum-session on every job dispatch.
-        // Read the per-address aggregate hash instead of zRange-ing the
-        // raw zSet every time. Falls back to zSet on the first read after
-        // deploy (then backfills the hash). Same data semantics — the
-        // hash is maintained lock-step with the zSet by recordShare.
         const addressShares = await this.readByAddress(keys);
         if (addressShares.size === 0) {
             return this.fallback(blockRewardSats);
@@ -350,9 +341,6 @@ export class GroupSoloService implements OnModuleInit {
         const balances = new Map<string, number>();
         for (const p of balanceEntities) balances.set(p.address, p.pendingSats);
 
-        // Read finder-bonus from the live group config. Null/0 disables the
-        // bonus path entirely; a positive value combined with `finderAddress`
-        // activates the per-miner bonus output.
         const group = await this.groupRepo.findOneBy({ id: groupId });
         const finderBonusSats = (group?.finderBonusSats ?? 0) > 0
             ? group!.finderBonusSats!
@@ -367,15 +355,6 @@ export class GroupSoloService implements OnModuleInit {
             coinbaseWeightBudget: this.coinbaseWeightBudget,
             minPayoutSats: this.minPayoutSats,
             logLabel: `[GroupSolo ${groupId}]`,
-            // Group-Solo stays on the unsigned-pending ledger model: pendingSats
-            // is always ≥ 0. This means Phase 5a trim redistribution and Phase
-            // 5b floor-rounding residuum go to the fee output instead of
-            // creating matching debits on active members. Cost: ~1–10 sats per
-            // block donated to the fee (trivial relative to the fee percent
-            // the pool already collects). Benefit: the legacy single-sided
-            // dust sweep keeps working, member-kick redistribution stays
-            // sane, and there's no second signed-ledger maintenance machinery
-            // to build just for group-solo.
             suppressMatchingDebits: true,
             finderBonusSats,
             finderAddress,
@@ -384,16 +363,6 @@ export class GroupSoloService implements OnModuleInit {
         const payouts: GroupSoloPayoutEntry[] = result.payouts.length > 0
             ? result.payouts
             : this.fallback(blockRewardSats);
-
-        // Populate the in-memory dispatch-window cache before writing the
-        // on-disk snapshot. The cache lookup at function entry will serve
-        // every subsequent stratum session in the same fan-out from
-        // memory.
-        this.cachedDistributions.set(cacheKey, {
-            payouts,
-            blockRewardSats,
-            cachedAt: Date.now(),
-        });
 
         await this.writeSnapshot(groupId, finderAddress, {
             distribution: payouts,
@@ -759,7 +728,7 @@ export class GroupSoloService implements OnModuleInit {
 
                 const balancesToSave = new Map<string, PplnsGroupBalanceEntity>();
                 const historyRows: PplnsGroupBlockHistoryEntity[] = [];
-                const now = new Date();
+                const now = Date.now();
 
                 // 1. Apply absolute balanceAfter values from the distribution.
                 for (const [addr, newBalance] of balanceAfter) {
@@ -866,7 +835,7 @@ export class GroupSoloService implements OnModuleInit {
         // the dormancy cutoff). The credit shouldn't count as the
         // recipient "being active", but it should reset the clock so the
         // sweep doesn't immediately reclaim what the kick just gave them.
-        const now = new Date();
+        const now = Date.now();
         const existing = await this.balanceRepo.findOneBy({ address, groupId });
         if (existing) {
             existing.pendingSats += sats;
@@ -890,6 +859,8 @@ export class GroupSoloService implements OnModuleInit {
         // the empty zSet — otherwise the next round's getRoundStats would
         // see stale per-address shares from the prior round.
         await this.redis.del(keys.byAddress);
+        await this.redis.del(keys.bestShare);
+        this.bestShareInMemory.delete(groupId);
         // lastAcceptedShareAt is intentionally NOT cleared on round reset —
         // it survives across blocks so the inactivity gate measures actual
         // time since last work, not time since last round start.
@@ -1005,6 +976,16 @@ export class GroupSoloService implements OnModuleInit {
             await this.redis.hDel(keys.byAddress, address);
             await this.redis.hDel(keys.rejectedShares, address);
             await this.redis.hDel(keys.lastAcceptedShareAt, address);
+            // If the kicked member held the best-share record, drop the
+            // cache. Next read recomputes from zSet and re-seeds.
+            const inMemBest = this.bestShareInMemory.get(groupId);
+            if (inMemBest && inMemBest.address === address) {
+                this.bestShareInMemory.delete(groupId);
+            }
+            const bestHolder = await this.redis.hGet(keys.bestShare, 'address');
+            if (bestHolder === address) {
+                await this.redis.del(keys.bestShare);
+            }
             // Drop the kicked member's per-finder snapshot. It would
             // otherwise live until 1h TTL or the next block-found wipe.
             // Inert (the member's stratum sessions can no longer route
@@ -1104,7 +1085,7 @@ export class GroupSoloService implements OnModuleInit {
         // it (see docstring above for why that's intentional under
         // Variant B). The blockFoundLocks check above is the actual
         // serialization with the block-found path.
-        const lastResetAt = group.lastRoundResetAt?.getTime() ?? 0;
+        const lastResetAt = group.lastRoundResetAt ?? 0;
         if (Date.now() - lastResetAt < 60_000) {
             console.log(`[GroupSolo] Skipping scheduled reset for ${groupId} — last scheduled reset ${Date.now() - lastResetAt}ms ago`);
             return;
@@ -1126,7 +1107,7 @@ export class GroupSoloService implements OnModuleInit {
         // Mark the reset for the scheduled-vs-scheduled guard above and
         // for `computeNextResetAt` / the custom-preset elapsed-check in
         // GroupRoundResetService (both anchor on this column).
-        await this.groupRepo.update({ id: groupId }, { lastRoundResetAt: new Date() });
+        await this.groupRepo.update({ id: groupId }, { lastRoundResetAt: Date.now() });
     }
 
     // ── Stats (for API) ──────────────────────────────────────────
@@ -1258,6 +1239,27 @@ export class GroupSoloService implements OnModuleInit {
             return { bestDifficulty: 0, address: null, time: null };
         }
         const keys = redisKeys(groupId);
+
+        // In-process cache is authoritative when present.
+        const inMem = this.bestShareInMemory.get(groupId);
+        if (inMem) {
+            return { bestDifficulty: inMem.diff, address: inMem.address, time: inMem.time };
+        }
+
+        const cached = await this.redis.hGetAll(keys.bestShare);
+        if (cached && cached.diff) {
+            const diff = parseFloat(cached.diff) || 0;
+            const address = cached.address || null;
+            const time = parseInt(cached.time, 10) || null;
+            if (diff > 0 && address) {
+                this.bestShareInMemory.set(groupId, { diff, address, time: time ?? 0 });
+            }
+            return { bestDifficulty: diff, address, time };
+        }
+
+        // Cold-start: cache empty but the round may already have shares
+        // (deploy mid-round before bestShare was maintained). Compute
+        // from the zSet once and seed the cache so future reads are O(1).
         const entries = await this.redis.zRange(keys.shares, 0, -1);
         let bestDiff = 0;
         let bestAddr: string | null = null;
@@ -1270,6 +1272,14 @@ export class GroupSoloService implements OnModuleInit {
                 bestAddr = addr;
                 bestTime = parseInt(timeStr, 10) || null;
             }
+        }
+        if (bestDiff > 0 && bestAddr) {
+            this.bestShareInMemory.set(groupId, { diff: bestDiff, address: bestAddr, time: bestTime ?? 0 });
+            this.redis.hSet(keys.bestShare, {
+                diff: String(bestDiff),
+                address: bestAddr,
+                time: String(bestTime ?? 0),
+            }).catch(() => undefined);
         }
         return { bestDifficulty: bestDiff, address: bestAddr, time: bestTime };
     }

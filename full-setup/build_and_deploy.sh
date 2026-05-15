@@ -11,7 +11,7 @@ echo -e "${GREEN}[*] Blitzpool - Build & Deploy (PostgreSQL)${NC}"
 cd "$(dirname "$0")"
 
 echo -e "${GREEN}[1/2] Building image...${NC}"
-docker compose -f "$COMPOSE_FILE" build --no-cache public-pool
+docker compose -f "$COMPOSE_FILE" build public-pool
 
 echo -e "${GREEN}[2/2] Replacing container...${NC}"
 docker compose -f "$COMPOSE_FILE" up -d public-pool

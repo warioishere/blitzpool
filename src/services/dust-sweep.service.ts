@@ -155,17 +155,17 @@ export class DustSweepService implements OnModuleInit {
         pplnsSatsPaired: number;
         groupSwept: number;
     }> {
-        const abandonedCutoff = new Date(Date.now() - this.abandonedDays * 24 * 60 * 60 * 1000);
-        const dustCutoff = new Date(Date.now() - this.dormantDays * 24 * 60 * 60 * 1000);
+        const abandonedCutoffMs = Date.now() - this.abandonedDays * 24 * 60 * 60 * 1000;
+        const dustCutoffMs = Date.now() - this.dormantDays * 24 * 60 * 60 * 1000;
 
-        const pplnsResult = await this.sweepPplnsPairs(abandonedCutoff);
-        const groupSwept = await this.sweepGroupDust(dustCutoff);
+        const pplnsResult = await this.sweepPplnsPairs(abandonedCutoffMs);
+        const groupSwept = await this.sweepGroupDust(dustCutoffMs);
 
         if (pplnsResult.pairsClosed > 0 || groupSwept > 0) {
             console.log(
                 `[DustSweep] PPLNS paired ${pplnsResult.pairsClosed} rows `
                 + `(${pplnsResult.satsPaired} sats), group-solo swept ${groupSwept} dust rows `
-                + `(abandoned<${abandonedCutoff.toISOString()}, dust<${dustCutoff.toISOString()})`,
+                + `(abandoned<${new Date(abandonedCutoffMs).toISOString()}, dust<${new Date(dustCutoffMs).toISOString()})`,
             );
         }
 
@@ -220,12 +220,12 @@ export class DustSweepService implements OnModuleInit {
      * a pair cancels +X on the credit side and -X on the debit side,
      * delta = 0.
      */
-    private async sweepPplnsPairs(cutoff: Date): Promise<{ pairsClosed: number; satsPaired: number }> {
+    private async sweepPplnsPairs(cutoffMs: number): Promise<{ pairsClosed: number; satsPaired: number }> {
         const candidates = await this.pplnsBalanceRepo
             .createQueryBuilder('b')
             .where('b."balanceSats" != 0')
             .andWhere('b."lastAcceptedShareAt" IS NOT NULL')
-            .andWhere('b."lastAcceptedShareAt" < :cutoff', { cutoff })
+            .andWhere('b."lastAcceptedShareAt" < :cutoffMs', { cutoffMs })
             .getMany();
 
         if (candidates.length === 0) return { pairsClosed: 0, satsPaired: 0 };
@@ -358,7 +358,7 @@ export class DustSweepService implements OnModuleInit {
      * so the single-sided sweep is correct: positive rows < dust that
      * haven't mined in dormantDays are deleted with an audit row.
      */
-    private async sweepGroupDust(cutoff: Date): Promise<number> {
+    private async sweepGroupDust(cutoffMs: number): Promise<number> {
         const candidates = await this.groupBalanceRepo
             .createQueryBuilder('b')
             .where('b."pendingSats" > 0')
@@ -368,7 +368,7 @@ export class DustSweepService implements OnModuleInit {
             // 546 protocol-policy value.
             .andWhere('b."pendingSats" < :minPayout', { minPayout: this.minPayoutSats })
             .andWhere('b."lastAcceptedShareAt" IS NOT NULL')
-            .andWhere('b."lastAcceptedShareAt" < :cutoff', { cutoff })
+            .andWhere('b."lastAcceptedShareAt" < :cutoffMs', { cutoffMs })
             .getMany();
 
         let swept = 0;

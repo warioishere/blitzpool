@@ -60,6 +60,16 @@ function createMockRedis() {
       if (!h) return {};
       return Object.fromEntries(h.entries());
     }),
+    hSet: jest.fn(async (key: string, fields: Record<string, string>) => {
+      // Real Redis would clear the string-key value; tests don't mix types,
+      // but keep parity with the production mock.
+      store.delete(key);
+      const h = getHash(key);
+      for (const [field, value] of Object.entries(fields)) {
+        h.set(field, value);
+      }
+      return Object.keys(fields).length;
+    }),
     hIncrByFloat: jest.fn(hIncrByFloatImpl),
     multi: jest.fn(() => {
       const ops: Array<() => Promise<any>> = [];
@@ -112,6 +122,10 @@ function createMockBalanceBacking() {
     }),
     getBalanceSats: jest.fn(async (address: string) => balances.get(address)?.balanceSats ?? 0),
     getBalance: jest.fn(async (address: string) => balances.get(address) ?? null),
+    getBalanceLight: jest.fn(async (address: string) => {
+      const b = balances.get(address);
+      return b ? { balanceSats: b.balanceSats, totalPaidSats: b.totalPaidSats } : null;
+    }),
     getAllWithBalance: jest.fn(async () =>
       Array.from(balances.values()).filter(b => b.balanceSats !== 0),
     ),
@@ -122,7 +136,8 @@ function createMockBalanceBacking() {
         existing.totalPaidSats += sats;
       }
     }),
-    touchLastAcceptedShareAt: jest.fn(async () => undefined),
+    markTouch: jest.fn(),
+    flushPendingTouches: jest.fn(async () => undefined),
     // Helpers
     _set: (address: string, balanceSats: number, totalPaidSats = 0) => {
       balances.set(address, { address, balanceSats, totalPaidSats });
@@ -612,6 +627,47 @@ describe('PplnsService', () => {
       const fee = dist.find(d => d.address === 'bc1qfee');
       expect(fee).toBeDefined();
       expect(fee!.percent).toBeGreaterThanOrEqual(2);
+    });
+
+    it('coalesces concurrent callers into one build (thundering-herd dedup)', async () => {
+      const { service, balanceService } = createService({ feePercent: '2' });
+      service.setNetworkDifficulty(100_000);
+      await recordShares(service, [
+        { address: 'bc1qa', difficulty: 500 },
+        { address: 'bc1qb', difficulty: 500 },
+      ]);
+
+      // Invalidate the result cache so every call would otherwise rebuild.
+      (service as any).distributionCache.invalidate();
+      (balanceService.getAllWithBalance as jest.Mock).mockClear();
+
+      // Fire 50 concurrent callers in the same microtask batch.
+      const results = await Promise.all(
+        Array.from({ length: 50 }, () => service.getPayoutDistribution(312_500_000)),
+      );
+      // All 50 callers got an identical reference (the same in-flight result).
+      const first = results[0];
+      for (const r of results) {
+        expect(r).toBe(first);
+      }
+      // The expensive balance fetch happened exactly once.
+      expect(balanceService.getAllWithBalance).toHaveBeenCalledTimes(1);
+    });
+
+    it('starts a fresh build when the reward differs', async () => {
+      const { service, balanceService } = createService({ feePercent: '2' });
+      service.setNetworkDifficulty(100_000);
+      await service.recordShare('bc1qa', 100);
+
+      (service as any).distributionCache.invalidate();
+      (balanceService.getAllWithBalance as jest.Mock).mockClear();
+
+      // Two concurrent callers with different rewards — both run their own build.
+      await Promise.all([
+        service.getPayoutDistribution(312_500_000),
+        service.getPayoutDistribution(312_500_001),
+      ]);
+      expect(balanceService.getAllWithBalance).toHaveBeenCalledTimes(2);
     });
   });
 

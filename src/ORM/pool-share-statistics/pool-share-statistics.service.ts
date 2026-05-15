@@ -7,6 +7,7 @@ import {
   MAX_REASONABLE_DIFFICULTY,
 } from '../../constants/mining.constants';
 import { TimeSlotHelper } from '../../utils/time-slot.helper';
+import { RecordDeltaBuffer } from '../../utils/buffers';
 
 /**
  * Pool-wide accepted / rejected share counters keyed on 10-min end-time
@@ -21,10 +22,11 @@ import { TimeSlotHelper } from '../../utils/time-slot.helper';
  * slots off the chart until the flush has committed them.
  */
 type SlotBucket = { accepted: number; rejected: number };
+const SLOT_FIELDS = ['accepted', 'rejected'] as const;
 
 @Injectable()
 export class PoolShareStatisticsService {
-  private readonly slotDeltas = new Map<number, SlotBucket>();
+  private readonly slotDeltas = new RecordDeltaBuffer<number, 'accepted' | 'rejected'>(SLOT_FIELDS);
 
   constructor(
     @InjectRepository(PoolShareStatisticsEntity)
@@ -63,15 +65,8 @@ export class PoolShareStatisticsService {
     }
 
     if (accepted <= 0 && rejected <= 0) return;
-
     const timeSlot = TimeSlotHelper.getCurrentSlot();
-    let bucket = this.slotDeltas.get(timeSlot);
-    if (!bucket) {
-      bucket = { accepted: 0, rejected: 0 };
-      this.slotDeltas.set(timeSlot, bucket);
-    }
-    if (accepted > 0) bucket.accepted += accepted;
-    if (rejected > 0) bucket.rejected += rejected;
+    this.slotDeltas.addRecord(timeSlot, { accepted, rejected });
   }
 
   /**
@@ -79,29 +74,12 @@ export class PoolShareStatisticsService {
    * cleared until `confirmFlush()` is called after PG upsert succeeds.
    */
   public drainSlotDeltas(): Map<number, SlotBucket> {
-    const snapshot = new Map<number, SlotBucket>();
-    for (const [slot, bucket] of this.slotDeltas) {
-      if (bucket.accepted > 0 || bucket.rejected > 0) {
-        snapshot.set(slot, { accepted: bucket.accepted, rejected: bucket.rejected });
-      }
-    }
-    return snapshot;
+    return this.slotDeltas.drain();
   }
 
-  /**
-   * Coordinator API — subtract a previously-drained snapshot. Residuals
-   * (concurrent increments during the await) remain.
-   */
+  /** Coordinator API — subtract a previously-drained snapshot. */
   public confirmFlush(flushed: Map<number, SlotBucket>): void {
-    for (const [slot, flushedBucket] of flushed) {
-      const current = this.slotDeltas.get(slot);
-      if (!current) continue;
-      current.accepted -= flushedBucket.accepted;
-      current.rejected -= flushedBucket.rejected;
-      if (current.accepted <= 0 && current.rejected <= 0) {
-        this.slotDeltas.delete(slot);
-      }
-    }
+    this.slotDeltas.confirm(flushed);
   }
 
   // ─── PG-direct API used by some legacy paths and the public chart API ───
@@ -116,7 +94,7 @@ export class PoolShareStatisticsService {
       {
         accepted: stat.accepted,
         rejected: stat.rejected,
-        updatedAt: new Date(),
+        updatedAt: Date.now(),
       },
     );
   }

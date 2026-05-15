@@ -27,7 +27,6 @@ import { NetworkDifficultyTrackerModule } from './ORM/network-difficulty-tracker
 import { AppService } from './services/app.service';
 import { BitcoinRpcService } from './services/bitcoin-rpc.service';
 import { BTCPayService } from './services/btc-pay.service';
-import { DiscordService } from './services/discord.service';
 import { NotificationService } from './services/notification.service';
 import { StratumV1JobsService } from './services/stratum-v1-jobs.service';
 import { StratumV1Service } from './services/stratum-v1.service';
@@ -190,7 +189,6 @@ const ORMModules = [
     ],
     providers: [
         // TimeslotMigrationService, // Disabled - migration incomplete, leaving data in mixed state
-        DiscordService,
         AppService,
         StratumV1Service,
         TelegramService,

@@ -117,7 +117,7 @@ export class AggregationService implements OnModuleInit {
         totalMiners,
         blocksFound,
         fee: 0,
-        _cachedAt: Date.now(),
+        _cachedAt: new Date().toISOString(),
       };
 
       await this.cacheManager.set('POOL_INFO', data, this.poolStatsInterval);
@@ -187,8 +187,8 @@ export class AggregationService implements OnModuleInit {
         blockData,
         userAgents,
         highScores,
-        uptime: new Date(), // This will be overridden by AppController
-        _cachedAt: Date.now(),
+        uptime: new Date().toISOString(), // This will be overridden by AppController
+        _cachedAt: new Date().toISOString(),
       };
 
       await this.cacheManager.set('SITE_INFO', data, 300000); // 5 minute TTL (ms)
@@ -216,7 +216,7 @@ export class AggregationService implements OnModuleInit {
       const now = Date.now();
       const oneDay = 24 * 60 * 60 * 1000;
       const latestBlock = await this.blocksService.getLatestBlock();
-      const sinceBlock = latestBlock?.createdAt ? latestBlock.createdAt.getTime() : 0;
+      const sinceBlock = latestBlock?.createdAt ?? 0;
 
       const [totals1d, totals14d, totals30d, totalsSinceBlock] = await Promise.all([
         this.poolShareStatisticsService.getTotalsSince(now - oneDay),
@@ -234,7 +234,7 @@ export class AggregationService implements OnModuleInit {
         rejected30d: totals30d.rejected,
         acceptedSinceBlock: totalsSinceBlock.accepted,
         rejectedSinceBlock: totalsSinceBlock.rejected,
-        _cachedAt: Date.now(),
+        _cachedAt: new Date().toISOString(),
       };
 
       await this.cacheManager.set('POOL_SHARE_TOTALS', data, 600000); // 10 minute TTL (ms)

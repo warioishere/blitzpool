@@ -32,6 +32,15 @@ export class MinerActiveModeService implements OnModuleInit {
 
     private redis: any = null;
     private static readonly TTL_SECONDS = 5 * 60;
+    /**
+     * In-process debounce: skip the Redis write if the same mode was written
+     * within REFRESH_INTERVAL_MS. TTL is 5 min, so refreshing once/min keeps
+     * the marker fresh with a 4-min safety margin. A mode change always
+     * writes regardless of the interval (port-switch detection is the whole
+     * point of the marker).
+     */
+    private static readonly REFRESH_INTERVAL_MS = 60_000;
+    private readonly lastMark = new Map<string, { mode: MiningMode; refreshedAt: number }>();
 
     constructor(@Inject(CACHE_MANAGER) private readonly cacheManager: Cache) {}
 
@@ -57,15 +66,23 @@ export class MinerActiveModeService implements OnModuleInit {
      */
     async mark(address: string, mode: MiningMode): Promise<void> {
         if (!this.redis || !address) return;
+
+        const now = Date.now();
+        const last = this.lastMark.get(address);
+        if (last && last.mode === mode && now - last.refreshedAt < MinerActiveModeService.REFRESH_INTERVAL_MS) {
+            return;
+        }
+
         try {
-            // node-redis-style options object. Falls Probleme: Fallback set + expire.
             await this.redis.set(this.key(address), mode, { EX: MinerActiveModeService.TTL_SECONDS });
+            this.lastMark.set(address, { mode, refreshedAt: now });
         } catch {
             try {
                 await this.redis.set(this.key(address), mode);
                 if (typeof this.redis.expire === 'function') {
                     await this.redis.expire(this.key(address), MinerActiveModeService.TTL_SECONDS);
                 }
+                this.lastMark.set(address, { mode, refreshedAt: now });
             } catch {
                 // Swallow — not worth crashing a share submit over a marker write.
             }

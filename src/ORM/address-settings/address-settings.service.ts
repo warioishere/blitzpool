@@ -1,8 +1,9 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 
 import { AddressSettingsEntity } from './address-settings.entity';
+import { isoFromEpoch } from '../../utils/epoch-iso';
 
 @Injectable()
 export class AddressSettingsService {
@@ -21,12 +22,15 @@ export class AddressSettingsService {
             .getOne();
 
         if (createIfNotFound === true && settings == null) {
-            // Atomic upsert — no race condition
+            // Atomic upsert — no race condition. createdAt/updatedAt set
+            // explicitly because createQueryBuilder().insert() bypasses
+            // the @BeforeInsert hook on TrackedEntity.
+            const now = Date.now();
             await this.addressSettingsRepository
                 .createQueryBuilder()
                 .insert()
                 .into(AddressSettingsEntity)
-                .values({ address })
+                .values({ address, createdAt: now, updatedAt: now })
                 .orIgnore()
                 .execute();
             settings = await this.addressSettingsRepository
@@ -36,6 +40,72 @@ export class AddressSettingsService {
         }
 
         return settings;
+    }
+
+    /**
+     * Hot-path lookup that returns just the (bestDifficulty,
+     * bestDifficultyUserAgent) pair — what AddressSettingsCacheService
+     * needs on a Redis cache miss. Skips entity hydration; raw SELECT
+     * on Postgres.
+     */
+    public async getBestDifficultyLight(
+        address: string,
+    ): Promise<{ bestDifficulty: number; bestDifficultyUserAgent: string | null } | null> {
+        if (this.addressSettingsRepository.manager.connection.options.type === 'postgres') {
+            const rows: Array<{ bestDifficulty: number | string | null; bestDifficultyUserAgent: string | null }> =
+                await this.addressSettingsRepository.query(
+                    `SELECT "bestDifficulty", "bestDifficultyUserAgent"
+                     FROM address_settings_entity
+                     WHERE address = $1
+                     LIMIT 1`,
+                    [address],
+                );
+            if (!rows[0]) return null;
+            const v = rows[0].bestDifficulty;
+            const n = typeof v === 'number' ? v : (v == null ? 0 : Number(v));
+            return {
+                bestDifficulty: Number.isFinite(n) ? n : 0,
+                bestDifficultyUserAgent: rows[0].bestDifficultyUserAgent ?? null,
+            };
+        }
+        const settings = await this.addressSettingsRepository.findOne({ where: { address } });
+        return settings
+            ? { bestDifficulty: settings.bestDifficulty ?? 0, bestDifficultyUserAgent: settings.bestDifficultyUserAgent ?? null }
+            : null;
+    }
+
+    /**
+     * Hot-path helper for the per-minute push-notification cron. Returns
+     * only the `bestDifficulty` column for the given addresses in a single
+     * raw SELECT on Postgres (no entity hydration), keyed for O(1) lookup
+     * via address. Missing addresses are absent from the map.
+     */
+    public async getBestDifficultiesForAddresses(addresses: string[]): Promise<Map<string, number>> {
+        const out = new Map<string, number>();
+        if (addresses.length === 0) return out;
+        const dbType = this.addressSettingsRepository.manager.connection.options.type;
+        if (dbType === 'postgres') {
+            const rows: Array<{ address: string; bestDifficulty: number | string | null }> =
+                await this.addressSettingsRepository.query(
+                    `SELECT address, "bestDifficulty"
+                     FROM address_settings_entity
+                     WHERE address = ANY($1::text[])`,
+                    [addresses],
+                );
+            for (const row of rows) {
+                const v = row.bestDifficulty;
+                const n = typeof v === 'number' ? v : (v == null ? 0 : Number(v));
+                out.set(row.address, Number.isFinite(n) ? n : 0);
+            }
+            return out;
+        }
+        const rows = await this.addressSettingsRepository.find({
+            where: { address: In(addresses) },
+        });
+        for (const row of rows) {
+            out.set(row.address, row.bestDifficulty ?? 0);
+        }
+        return out;
     }
 
     public async updateBestDifficulty(address: string, bestDifficulty: number, bestDifficultyUserAgent: string) {
@@ -53,7 +123,14 @@ export class AddressSettingsService {
             .orderBy('settings.bestDifficulty', 'DESC')
             .limit(10)
             .getRawMany();
-        return results.map(r => ({ ...r, bestDifficulty: Number(r.bestDifficulty) }));
+        // getRawMany returns bigint columns as strings (pg-types default) —
+        // coerce to ISO at the boundary so /api/info emits real timestamps,
+        // not raw epoch-ms numerals.
+        return results.map(r => ({
+            ...r,
+            bestDifficulty: Number(r.bestDifficulty),
+            updatedAt: isoFromEpoch(r.updatedAt == null ? null : Number(r.updatedAt)),
+        }));
     }
 
     public async createNew(address: string) {
@@ -76,26 +153,18 @@ export class AddressSettingsService {
     }
 
     /**
-     * Bulk update shares for multiple addresses in a single transaction
-     * MUCH faster than calling addShares() individually for each address
-     * @param updates Array of {address, shares} to update
+     * Bulk update shares for multiple addresses in a single transaction.
+     * Parallel-array params (addresses[i] gets deltas[i] added) skip the
+     * record-array allocation step in the caller.
      */
-    public async addSharesBulk(updates: Array<{ address: string; shares: number }>) {
-        if (updates.length === 0) {
+    public async addSharesBulk(addresses: string[], deltas: number[]) {
+        if (addresses.length === 0) {
             return;
         }
 
-        // Detect database type to use correct placeholder syntax
         const databaseType = this.addressSettingsRepository.manager.connection.options.type;
 
         if (databaseType === 'postgres') {
-            // UPDATE … FROM unnest(arrays) — replaces the previous CASE/WHEN
-            // pattern that built a 3N-placeholder WHERE-IN-list per call.
-            // Two array params (addresses + deltas), constant SQL size, much
-            // smaller wire payload. Same atomic UPDATE semantics.
-            const addresses = updates.map(u => u.address);
-            const deltas = updates.map(u => u.shares);
-
             const query = `
                 UPDATE address_settings_entity AS t
                 SET shares = t.shares + d.delta
@@ -105,31 +174,27 @@ export class AddressSettingsService {
 
             await this.addressSettingsRepository.query(query, [addresses, deltas]);
         } else {
-            // SQLite: Use ? placeholders
-            // SQLite 3.40+ supports 32,766 parameters (we use ~800 for 400 addresses)
-            const caseWhenParts: string[] = [];
-            const parameters: any[] = [];
-
-            updates.forEach((update) => {
-                caseWhenParts.push(`WHEN ? THEN ?`);
-                parameters.push(update.address, update.shares);
-            });
-
-            // Add addresses for WHERE IN clause
-            const placeholders = updates.map(() => '?').join(',');
-            const whereAddresses = updates.map(u => u.address);
+            const n = addresses.length;
+            const caseWhenParts: string[] = new Array(n);
+            const placeholders: string[] = new Array(n);
+            const parameters: any[] = new Array(n * 3);
+            for (let i = 0; i < n; i++) {
+                caseWhenParts[i] = 'WHEN ? THEN ?';
+                parameters[i * 2] = addresses[i];
+                parameters[i * 2 + 1] = deltas[i];
+                placeholders[i] = '?';
+            }
+            for (let i = 0; i < n; i++) {
+                parameters[n * 2 + i] = addresses[i];
+            }
 
             const query = `
                 UPDATE address_settings_entity
                 SET shares = shares + CASE address ${caseWhenParts.join(' ')} END
-                WHERE address IN (${placeholders})
+                WHERE address IN (${placeholders.join(',')})
             `;
 
-            // Execute as SINGLE atomic transaction
-            await this.addressSettingsRepository.query(query, [
-                ...parameters,
-                ...whereAddresses
-            ]);
+            await this.addressSettingsRepository.query(query, parameters);
         }
     }
 

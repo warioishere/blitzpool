@@ -50,21 +50,27 @@ export class AddressSettingsCacheService implements OnModuleInit {
     return candidateDifficulty > cached.bestDifficulty;
   }
 
+  /**
+   * Key prefix bumped from `address:settings:` (HASH) to `addrSettings:v2:`
+   * (JSON string with built-in TTL) so the write path can use a single
+   * `SET ... EX 3600` instead of `HSET + EXPIRE`. Old HASH keys orphan
+   * for ≤1 h and then self-expire.
+   */
+  private redisKey(address: string): string {
+    return `addrSettings:v2:${address}`;
+  }
+
   async updateBestDifficulty(
     address: string,
     bestDifficulty: number,
     bestDifficultyUserAgent: string | null,
   ): Promise<void> {
     if (this.useRedis && this.redisClient) {
-      // Redis-backed implementation
-      const key = `address:settings:${address}`;
-      await Promise.all([
-        this.redisClient.hSet(key, {
-          bestDifficulty: bestDifficulty.toString(),
-          bestDifficultyUserAgent: bestDifficultyUserAgent || '',
-        }),
-        this.redisClient.expire(key, 3600),
-      ]);
+      const payload = JSON.stringify({
+        bestDifficulty,
+        bestDifficultyUserAgent: bestDifficultyUserAgent ?? null,
+      });
+      await this.redisClient.set(this.redisKey(address), payload, { EX: 3600 });
     } else {
       // Fallback in-memory implementation
       this.cache.set(address, {
@@ -76,12 +82,10 @@ export class AddressSettingsCacheService implements OnModuleInit {
 
   async clear(address?: string): Promise<void> {
     if (this.useRedis && this.redisClient) {
-      // Redis-backed implementation
       if (address) {
-        const key = `address:settings:${address}`;
-        await this.redisClient.del(key);
+        await this.redisClient.del(this.redisKey(address));
       } else {
-        const pattern = 'address:settings:*';
+        const pattern = 'addrSettings:v2:*';
         let cursor = '0';
         do {
           const result = await this.redisClient.scan(cursor, { MATCH: pattern, COUNT: 1000 });
@@ -92,7 +96,6 @@ export class AddressSettingsCacheService implements OnModuleInit {
         } while (cursor !== '0');
       }
     } else {
-      // Fallback in-memory implementation
       if (address) {
         this.cache.delete(address);
         return;
@@ -103,35 +106,35 @@ export class AddressSettingsCacheService implements OnModuleInit {
 
   private async ensure(address: string): Promise<AddressBestDifficultySnapshot> {
     if (this.useRedis && this.redisClient) {
-      // Redis-backed implementation
-      const key = `address:settings:${address}`;
-      const data = await this.redisClient.hGetAll(key);
-
-      if (data && data.bestDifficulty !== undefined) {
-        return {
-          bestDifficulty: parseFloat(data.bestDifficulty) || 0,
-          bestDifficultyUserAgent: data.bestDifficultyUserAgent || null,
-        };
+      const key = this.redisKey(address);
+      const raw = await this.redisClient.get(key);
+      if (typeof raw === 'string') {
+        try {
+          const parsed = JSON.parse(raw);
+          return {
+            bestDifficulty: parseFloat(parsed.bestDifficulty) || 0,
+            bestDifficultyUserAgent: parsed.bestDifficultyUserAgent ?? null,
+          };
+        } catch {
+          // Corrupted JSON — fall through to PG and overwrite.
+        }
       }
 
-      // Not in cache, load from database
-      const settings = await this.addressSettingsService.getSettings(
-        address,
-        true,
-      );
+      let light = await this.addressSettingsService.getBestDifficultyLight(address);
+      if (!light) {
+        // Row doesn't exist yet — atomic upsert via the entity path, then
+        // re-query Light. createIfNotFound only fires on the cold path
+        // (first share for an address), so the extra round-trip is rare.
+        await this.addressSettingsService.getSettings(address, true);
+        light = await this.addressSettingsService.getBestDifficultyLight(address);
+      }
       const snapshot = {
-        bestDifficulty: settings?.bestDifficulty ?? 0,
-        bestDifficultyUserAgent: settings?.bestDifficultyUserAgent ?? null,
+        bestDifficulty: light?.bestDifficulty ?? 0,
+        bestDifficultyUserAgent: light?.bestDifficultyUserAgent ?? null,
       };
 
-      // Store in Redis
-      await Promise.all([
-        this.redisClient.hSet(key, {
-          bestDifficulty: snapshot.bestDifficulty.toString(),
-          bestDifficultyUserAgent: snapshot.bestDifficultyUserAgent || '',
-        }),
-        this.redisClient.expire(key, 3600),
-      ]);
+      const payload = JSON.stringify(snapshot);
+      await this.redisClient.set(key, payload, { EX: 3600 });
 
       return snapshot;
     } else {

@@ -83,13 +83,12 @@ describe('Bulk-upsert UNNEST: data equivalence', () => {
         it('passes exactly 3 arrays (time, accepted, rejected) aligned by index', async () => {
             const repos = makeRepos();
             const service = buildService(repos);
-            const records = [
-                { time: 1700000000000, accepted: 100.5, rejected: 1.5 },
-                { time: 1700000600000, accepted: 200.0, rejected: 2.0 },
-                { time: 1700001200000, accepted: 300.0, rejected: 3.0 },
-            ];
 
-            await (service as any).bulkUpsertPoolShares(records);
+            await (service as any).bulkUpsertPoolShares(
+                [1700000000000, 1700000600000, 1700001200000],
+                [100.5, 200.0, 300.0],
+                [1.5, 2.0, 3.0],
+            );
 
             expect(repos.poolShare.query).toHaveBeenCalledTimes(1);
             const [sql, params] = repos.poolShare.query.mock.calls[0];
@@ -100,19 +99,14 @@ describe('Bulk-upsert UNNEST: data equivalence', () => {
             expect(params[2]).toEqual([1.5, 2.0, 3.0]);
         });
 
-        it('handles empty record set without sending a query', async () => {
-            // Note: bulkUpsertPoolShares is only called when records.length > 0
-            // already. But the UNNEST path itself should produce empty arrays
-            // gracefully if it ever does.
+        it('handles empty arrays without sending a query', async () => {
+            // bulkUpsertPoolShares is only called when there's something to flush
+            // already. The UNNEST path itself should gracefully no-op on empties.
             const repos = makeRepos();
             const service = buildService(repos);
 
-            await (service as any).bulkUpsertPoolShares([]);
+            await (service as any).bulkUpsertPoolShares([], [], []);
 
-            // The current impl still sends the query with empty arrays —
-            // PG handles `unnest('{}'::bigint[], ...)` fine (zero rows
-            // inserted). We don't assert query NOT called; just that no
-            // exception escapes.
             expect(repos.poolShare.query).toHaveBeenCalled();
             const [, params] = repos.poolShare.query.mock.calls[0];
             expect(params).toEqual([[], [], []]);
@@ -123,13 +117,12 @@ describe('Bulk-upsert UNNEST: data equivalence', () => {
         it('passes 3 aligned arrays (mode, time, diff)', async () => {
             const repos = makeRepos();
             const service = buildService(repos);
-            const records = [
-                { mode: 'solo', time: 1700000000000, diff: 100 },
-                { mode: 'pplns', time: 1700000000000, diff: 50 },
-                { mode: 'group-solo', time: 1700000000000, diff: 25 },
-            ];
 
-            await (service as any).bulkUpsertPoolModeHashrate(records);
+            await (service as any).bulkUpsertPoolModeHashrate(
+                ['solo', 'pplns', 'group-solo'],
+                [1700000000000, 1700000000000, 1700000000000],
+                [100, 50, 25],
+            );
 
             expect(repos.poolModeHashrate.query).toHaveBeenCalledTimes(1);
             const [sql, params] = repos.poolModeHashrate.query.mock.calls[0];
@@ -145,7 +138,7 @@ describe('Bulk-upsert UNNEST: data equivalence', () => {
             const repos = makeRepos();
             const service = buildService(repos);
 
-            await (service as any).bulkUpsertPoolModeHashrate([]);
+            await (service as any).bulkUpsertPoolModeHashrate([], [], []);
 
             expect(repos.poolModeHashrate.query).not.toHaveBeenCalled();
         });
@@ -155,106 +148,80 @@ describe('Bulk-upsert UNNEST: data equivalence', () => {
         it('passes exactly 13 aligned arrays for the 13 columns', async () => {
             const repos = makeRepos();
             const service = buildService(repos);
-            const records = [
-                {
-                    address: 'bc1qa', clientName: 'rig1', sessionId: 's1', time: 1700000000000,
-                    shares: 100.5, acceptedCount: 10, rejectedCount: 1,
-                    rejectedJobNotFoundCount: 0, rejectedJobNotFoundDiff1: 0,
-                    rejectedDuplicateShareCount: 1, rejectedDuplicateShareDiff1: 0.5,
-                    rejectedLowDifficultyShareCount: 0, rejectedLowDifficultyShareDiff1: 0,
-                },
-                {
-                    address: 'bc1qb', clientName: 'rig2', sessionId: 's2', time: 1700000600000,
-                    shares: 200, acceptedCount: 20, rejectedCount: 2,
-                    rejectedJobNotFoundCount: 1, rejectedJobNotFoundDiff1: 0.25,
-                    rejectedDuplicateShareCount: 1, rejectedDuplicateShareDiff1: 0.5,
-                    rejectedLowDifficultyShareCount: 0, rejectedLowDifficultyShareDiff1: 0,
-                },
-            ];
 
-            await (service as any).bulkUpsertClientStatistics(records);
+            await (service as any).bulkUpsertClientStatistics(
+                ['bc1qa', 'bc1qb'],                    // address
+                ['rig1', 'rig2'],                      // clientName
+                ['s1', 's2'],                          // sessionId
+                [1700000000000, 1700000600000],        // time
+                [100.5, 200],                          // shares
+                [10, 20],                              // acceptedCount
+                [1, 2],                                // rejectedCount
+                [0, 1],                                // rejJnfCount
+                [0, 0.25],                             // rejJnfDiff
+                [1, 1],                                // rejDupCount
+                [0.5, 0.5],                            // rejDupDiff
+                [0, 0],                                // rejLowCount
+                [0, 0],                                // rejLowDiff
+            );
 
             expect(repos.clientStats.query).toHaveBeenCalledTimes(1);
             const [sql, params] = repos.clientStats.query.mock.calls[0];
 
-            // 13 array params, in column order matching the INSERT column list.
             expect(params).toHaveLength(13);
-            expect(params[0]).toEqual(['bc1qa', 'bc1qb']);                          // address
-            expect(params[1]).toEqual(['rig1', 'rig2']);                            // clientName
-            expect(params[2]).toEqual(['s1', 's2']);                                // sessionId
-            expect(params[3]).toEqual([1700000000000, 1700000600000]);              // time
-            expect(params[4]).toEqual([100.5, 200]);                                // shares
-            expect(params[5]).toEqual([10, 20]);                                    // acceptedCount
-            expect(params[6]).toEqual([1, 2]);                                      // rejectedCount
-            expect(params[7]).toEqual([0, 1]);                                      // rejectedJobNotFoundCount
-            expect(params[8]).toEqual([0, 0.25]);                                   // rejectedJobNotFoundDiff1
-            expect(params[9]).toEqual([1, 1]);                                      // rejectedDuplicateShareCount
-            expect(params[10]).toEqual([0.5, 0.5]);                                 // rejectedDuplicateShareDiff1
-            expect(params[11]).toEqual([0, 0]);                                     // rejectedLowDifficultyShareCount
-            expect(params[12]).toEqual([0, 0]);                                     // rejectedLowDifficultyShareDiff1
+            expect(params[0]).toEqual(['bc1qa', 'bc1qb']);
+            expect(params[1]).toEqual(['rig1', 'rig2']);
+            expect(params[2]).toEqual(['s1', 's2']);
+            expect(params[3]).toEqual([1700000000000, 1700000600000]);
+            expect(params[4]).toEqual([100.5, 200]);
+            expect(params[5]).toEqual([10, 20]);
+            expect(params[6]).toEqual([1, 2]);
+            expect(params[7]).toEqual([0, 1]);
+            expect(params[8]).toEqual([0, 0.25]);
+            expect(params[9]).toEqual([1, 1]);
+            expect(params[10]).toEqual([0.5, 0.5]);
+            expect(params[11]).toEqual([0, 0]);
+            expect(params[12]).toEqual([0, 0]);
 
             expect(sql).toContain('unnest(');
             expect(sql).toContain('ON CONFLICT (address, "clientName", "sessionId", time)');
         });
 
-        it('substitutes 0 for undefined nullable fields (not the literal undefined)', async () => {
-            // Caller code may build records without all numeric fields set
-            // (e.g. fresh slot with no rejects). Those must land as 0, not
-            // NaN, not "undefined" string, not null.
-            const repos = makeRepos();
-            const service = buildService(repos);
-            const records = [{
-                address: 'bc1qa', clientName: 'rig1', sessionId: 's1', time: 1700000000000,
-                shares: 100,
-                // ALL OTHER NUMERIC FIELDS UNDEFINED:
-            } as any];
-
-            await (service as any).bulkUpsertClientStatistics(records);
-
-            const [, params] = repos.clientStats.query.mock.calls[0];
-            // Indices 4-12 are the numeric columns; with shares=100 and rest
-            // undefined, they should all be [N, 0, 0, 0, 0, 0, 0, 0, 0].
-            expect(params[4]).toEqual([100]);    // shares (provided)
-            expect(params[5]).toEqual([0]);      // acceptedCount default
-            expect(params[6]).toEqual([0]);      // rejectedCount default
-            expect(params[7]).toEqual([0]);
-            expect(params[8]).toEqual([0]);
-            expect(params[9]).toEqual([0]);
-            expect(params[10]).toEqual([0]);
-            expect(params[11]).toEqual([0]);
-            expect(params[12]).toEqual([0]);
-        });
-
         it('preserves order across 1500 records (no off-by-one in array building)', async () => {
-            // Builds 1500 records with index-encoded values; verifies that
-            // params[i] of every array matches records[i] of that field.
-            // Catches any accidental shuffle (e.g. someone using map+filter
-            // would create an array shorter than records.length).
+            // Builds 1500 parallel-array entries with index-encoded values
+            // and verifies that params[i] of every array matches records[i].
             const repos = makeRepos();
             const service = buildService(repos);
-            const records = Array.from({ length: 1500 }, (_, i) => ({
-                address: `bc1q${i}`,
-                clientName: `rig${i}`,
-                sessionId: `s${i}`,
-                time: 1700000000000 + i * 600000,
-                shares: i * 1.5,
-                acceptedCount: i * 10,
-                rejectedCount: i,
-                rejectedJobNotFoundCount: 0,
-                rejectedJobNotFoundDiff1: 0,
-                rejectedDuplicateShareCount: 0,
-                rejectedDuplicateShareDiff1: 0,
-                rejectedLowDifficultyShareCount: 0,
-                rejectedLowDifficultyShareDiff1: 0,
-            }));
 
-            await (service as any).bulkUpsertClientStatistics(records);
+            const n = 1500;
+            const addresses: string[] = new Array(n);
+            const clientNames: string[] = new Array(n);
+            const sessionIds: string[] = new Array(n);
+            const times: number[] = new Array(n);
+            const shares: number[] = new Array(n);
+            const acceptedCount: number[] = new Array(n);
+            const rejectedCount: number[] = new Array(n);
+            const z = new Array(n).fill(0);
+            for (let i = 0; i < n; i++) {
+                addresses[i] = `bc1q${i}`;
+                clientNames[i] = `rig${i}`;
+                sessionIds[i] = `s${i}`;
+                times[i] = 1700000000000 + i * 600000;
+                shares[i] = i * 1.5;
+                acceptedCount[i] = i * 10;
+                rejectedCount[i] = i;
+            }
+
+            await (service as any).bulkUpsertClientStatistics(
+                addresses, clientNames, sessionIds, times,
+                shares, acceptedCount, rejectedCount,
+                z, z, z, z, z, z,
+            );
 
             const [, params] = repos.clientStats.query.mock.calls[0];
             expect(params[0]).toHaveLength(1500);
             expect(params[3]).toHaveLength(1500);
             expect(params[4]).toHaveLength(1500);
-            // Spot-check every 100th index
             for (let i = 0; i < 1500; i += 100) {
                 expect(params[0][i]).toBe(`bc1q${i}`);
                 expect(params[3][i]).toBe(1700000000000 + i * 600000);
@@ -267,13 +234,12 @@ describe('Bulk-upsert UNNEST: data equivalence', () => {
         it('passes 3 aligned arrays (time, reason, count)', async () => {
             const repos = makeRepos();
             const service = buildService(repos);
-            const records = [
-                { time: 1700000000000, reason: 'JobNotFound', count: 5 },
-                { time: 1700000000000, reason: 'DuplicateShare', count: 2 },
-                { time: 1700000600000, reason: 'LowDifficultyShare', count: 1 },
-            ];
 
-            await (service as any).bulkUpsertPoolRejectedStatistics(records);
+            await (service as any).bulkUpsertPoolRejectedStatistics(
+                [1700000000000, 1700000000000, 1700000600000],
+                ['JobNotFound', 'DuplicateShare', 'LowDifficultyShare'],
+                [5, 2, 1],
+            );
 
             const [sql, params] = repos.poolRejected.query.mock.calls[0];
             expect(sql).toContain('unnest($1::bigint[], $2::text[], $3::real[])');
@@ -289,12 +255,14 @@ describe('Bulk-upsert UNNEST: data equivalence', () => {
         it('passes 5 aligned arrays (address, time, reason, count, shares)', async () => {
             const repos = makeRepos();
             const service = buildService(repos);
-            const records = [
-                { address: 'bc1qa', time: 1700000000000, reason: 'JobNotFound', count: 3, shares: 0.75 },
-                { address: 'bc1qb', time: 1700000000000, reason: 'DuplicateShare', count: 2, shares: 0.5 },
-            ];
 
-            await (service as any).bulkUpsertClientRejectedStatistics(records);
+            await (service as any).bulkUpsertClientRejectedStatistics(
+                ['bc1qa', 'bc1qb'],
+                [1700000000000, 1700000000000],
+                ['JobNotFound', 'DuplicateShare'],
+                [3, 2],
+                [0.75, 0.5],
+            );
 
             const [sql, params] = repos.clientRejected.query.mock.calls[0];
             expect(sql).toContain('unnest($1::text[], $2::bigint[], $3::text[], $4::real[], $5::real[])');
@@ -329,11 +297,11 @@ describe('WorkerSharesService.addSharesBulk / addRejectedBulk — UNNEST data eq
     describe('addSharesBulk', () => {
         it('passes 3 aligned arrays (address, clientName, shares)', async () => {
             const { service, queryMock } = makeWorkerSharesService();
-            await service.addSharesBulk([
-                { address: 'bc1qa', clientName: 'rig1', shares: 100 },
-                { address: 'bc1qb', clientName: 'rig2', shares: 50.5 },
-                { address: 'bc1qa', clientName: 'rig3', shares: 25 },
-            ]);
+            await service.addSharesBulk(
+                ['bc1qa', 'bc1qb', 'bc1qa'],
+                ['rig1', 'rig2', 'rig3'],
+                [100, 50.5, 25],
+            );
 
             expect(queryMock).toHaveBeenCalledTimes(1);
             const [sql, params] = queryMock.mock.calls[0];
@@ -350,13 +318,12 @@ describe('WorkerSharesService.addSharesBulk / addRejectedBulk — UNNEST data eq
             // count limit (one array each, regardless of N), so a single
             // call is correct and faster.
             const { service, queryMock } = makeWorkerSharesService();
-            const updates = Array.from({ length: 1500 }, (_, i) => ({
-                address: `bc1q${i}`,
-                clientName: `rig${i}`,
-                shares: i,
-            }));
+            const n = 1500;
+            const addresses = Array.from({ length: n }, (_, i) => `bc1q${i}`);
+            const clientNames = Array.from({ length: n }, (_, i) => `rig${i}`);
+            const shares = Array.from({ length: n }, (_, i) => i);
 
-            await service.addSharesBulk(updates);
+            await service.addSharesBulk(addresses, clientNames, shares);
 
             expect(queryMock).toHaveBeenCalledTimes(1);
             const [, params] = queryMock.mock.calls[0];
@@ -366,22 +333,23 @@ describe('WorkerSharesService.addSharesBulk / addRejectedBulk — UNNEST data eq
 
         it('returns early on empty without sending a query', async () => {
             const { service, queryMock } = makeWorkerSharesService();
-            await service.addSharesBulk([]);
+            await service.addSharesBulk([], [], []);
             expect(queryMock).not.toHaveBeenCalled();
         });
     });
 
     describe('addRejectedBulk', () => {
         it('passes 4 aligned arrays (address, clientName, zero-shares, rejectedShares)', async () => {
-            // The 3rd array is constant zeros — they\'re for the `shares`
-            // column, which we don\'t want to touch on the rejected path.
-            // ON CONFLICT updates only `rejectedShares`, but on cold-row
-            // insert the row needs a non-null `shares` so we send 0.
+            // The 3rd array is constant zeros — for the `shares` column,
+            // which the rejected path must not touch. ON CONFLICT updates
+            // only `rejectedShares`, but on cold-row insert the row needs
+            // a non-null `shares` so we send 0.
             const { service, queryMock } = makeWorkerSharesService();
-            await service.addRejectedBulk([
-                { address: 'bc1qa', clientName: 'rig1', rejectedShares: 5 },
-                { address: 'bc1qb', clientName: 'rig2', rejectedShares: 2.25 },
-            ]);
+            await service.addRejectedBulk(
+                ['bc1qa', 'bc1qb'],
+                ['rig1', 'rig2'],
+                [5, 2.25],
+            );
 
             const [sql, params] = queryMock.mock.calls[0];
             expect(sql).toContain('unnest($1::text[], $2::text[], $3::double precision[], $4::double precision[])');
@@ -411,11 +379,10 @@ describe('AddressSettingsService.addSharesBulk — UNNEST data equivalence', () 
         // pattern that built 3N positional placeholders. Same atomic UPDATE
         // semantics — each address gets its own delta added to shares.
         const { service, queryMock } = makeAddressSettingsService();
-        await service.addSharesBulk([
-            { address: 'bc1qa', shares: 100 },
-            { address: 'bc1qb', shares: 50 },
-            { address: 'bc1qc', shares: 25.5 },
-        ]);
+        await service.addSharesBulk(
+            ['bc1qa', 'bc1qb', 'bc1qc'],
+            [100, 50, 25.5],
+        );
 
         const [sql, params] = queryMock.mock.calls[0];
         expect(sql).toContain('unnest($1::text[]) AS address');
@@ -430,18 +397,17 @@ describe('AddressSettingsService.addSharesBulk — UNNEST data equivalence', () 
 
     it('returns early on empty input', async () => {
         const { service, queryMock } = makeAddressSettingsService();
-        await service.addSharesBulk([]);
+        await service.addSharesBulk([], []);
         expect(queryMock).not.toHaveBeenCalled();
     });
 
     it('preserves order across many records (no shuffling)', async () => {
         const { service, queryMock } = makeAddressSettingsService();
-        const updates = Array.from({ length: 500 }, (_, i) => ({
-            address: `bc1q${i.toString().padStart(4, '0')}`,
-            shares: i * 1.5,
-        }));
+        const n = 500;
+        const addresses = Array.from({ length: n }, (_, i) => `bc1q${i.toString().padStart(4, '0')}`);
+        const shares = Array.from({ length: n }, (_, i) => i * 1.5);
 
-        await service.addSharesBulk(updates);
+        await service.addSharesBulk(addresses, shares);
 
         const [, params] = queryMock.mock.calls[0];
         expect(params[0]).toHaveLength(500);

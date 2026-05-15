@@ -4,6 +4,7 @@ import { Repository, MoreThan, LessThan } from 'typeorm';
 
 import { ClientRejectedStatisticsEntity } from './client-rejected-statistics.entity';
 import { TimeSlotHelper } from '../../utils/time-slot.helper';
+import { RecordDeltaBuffer } from '../../utils/buffers';
 
 /**
  * Per-address rejected-share counts bucketed per 10-min slot per reason.
@@ -14,14 +15,14 @@ import { TimeSlotHelper } from '../../utils/time-slot.helper';
  * of rejects) and `shares` (sum of diff-1 values — the difficulty
  * "wasted" on the reject). PG schema is unchanged.
  */
-type ReasonBucket = { count: number; shares: number };
+const REASON_FIELDS = ['count', 'shares'] as const;
 
 @Injectable()
 export class ClientRejectedStatisticsService {
   // key: `${address}|${slot}|${reason}` — slot in keys to keep flush
   // grouping cheap. Could nest, but this flat shape is friendlier for
   // drain to record arrays.
-  private readonly deltas = new Map<string, { address: string; slot: number; reason: string; bucket: ReasonBucket }>();
+  private readonly deltas = new RecordDeltaBuffer<string, 'count' | 'shares'>(REASON_FIELDS);
 
   constructor(
     @InjectRepository(ClientRejectedStatisticsEntity)
@@ -38,38 +39,31 @@ export class ClientRejectedStatisticsService {
 
     const slot = TimeSlotHelper.getCurrentSlot();
     const k = this.keyOf(address, slot, reason);
-    let entry = this.deltas.get(k);
-    if (!entry) {
-      entry = { address, slot, reason, bucket: { count: 0, shares: 0 } };
-      this.deltas.set(k, entry);
-    }
-    entry.bucket.count += 1;
-    entry.bucket.shares += Math.max(0, diff - 1);
+    this.deltas.addRecord(k, { count: 1, shares: Math.max(0, diff - 1) });
   }
 
   /** Coordinator API — snapshot of pending deltas, in record shape. */
   public drainDeltas(): Array<{ address: string; time: number; reason: string; count: number; shares: number }> {
+    const snap = this.deltas.drain();
     const out: Array<{ address: string; time: number; reason: string; count: number; shares: number }> = [];
-    for (const { address, slot, reason, bucket } of this.deltas.values()) {
-      if (bucket.count > 0 || bucket.shares > 0) {
-        out.push({ address, time: slot, reason, count: bucket.count, shares: bucket.shares });
-      }
+    for (const [key, bucket] of snap) {
+      const idx = key.indexOf('|');
+      const idx2 = key.indexOf('|', idx + 1);
+      const address = key.slice(0, idx);
+      const time = parseInt(key.slice(idx + 1, idx2), 10);
+      const reason = key.slice(idx2 + 1);
+      out.push({ address, time, reason, count: bucket.count, shares: bucket.shares });
     }
     return out;
   }
 
   /** Coordinator API — subtract a previously-drained snapshot. */
   public confirmFlush(flushed: Array<{ address: string; time: number; reason: string; count: number; shares: number }>): void {
+    const snap = new Map<string, Record<'count' | 'shares', number>>();
     for (const { address, time, reason, count, shares } of flushed) {
-      const k = this.keyOf(address, time, reason);
-      const entry = this.deltas.get(k);
-      if (!entry) continue;
-      entry.bucket.count -= count;
-      entry.bucket.shares -= shares;
-      if (entry.bucket.count <= 0 && entry.bucket.shares <= 0) {
-        this.deltas.delete(k);
-      }
+      snap.set(this.keyOf(address, time, reason), { count, shares });
     }
+    this.deltas.confirm(snap);
   }
 
   /**
@@ -79,9 +73,7 @@ export class ClientRejectedStatisticsService {
    */
   public async clearRedisKeysForAddress(address: string): Promise<void> {
     const prefix = `${address}|`;
-    for (const k of this.deltas.keys()) {
-      if (k.startsWith(prefix)) this.deltas.delete(k);
-    }
+    this.deltas.deleteWhere(k => k.startsWith(prefix));
   }
 
   // ─── PG-direct API used by API endpoints ───

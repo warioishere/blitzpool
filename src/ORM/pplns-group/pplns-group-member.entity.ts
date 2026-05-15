@@ -1,4 +1,6 @@
-import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn } from 'typeorm';
+import { BeforeInsert, Column, Entity, Index, PrimaryGeneratedColumn } from 'typeorm';
+
+import { epochMsTransformer } from '../utils/epoch-ms-transformer';
 
 export type PplnsGroupMemberRole = 'creator' | 'member';
 
@@ -19,6 +21,11 @@ export class PplnsGroupMemberEntity {
     @Column({ type: 'varchar', length: 16, default: 'member' })
     role: PplnsGroupMemberRole;
 
-    @CreateDateColumn()
-    joinedAt: Date;
+    @Column({ type: 'bigint', transformer: epochMsTransformer })
+    joinedAt: number;
+
+    @BeforeInsert()
+    private fillJoinedAt(): void {
+        if (this.joinedAt == null) this.joinedAt = Date.now();
+    }
 }

@@ -16,6 +16,7 @@ import { ShareTotalsCacheService } from '../../services/share-totals-cache.servi
 import { WorkerSharesService } from '../../ORM/worker-shares/worker-shares.service';
 import { DifficultyScoresCacheService } from '../../services/difficulty-scores-cache.service';
 import { generateFormattedTimeSlots } from '../../utils/timeslot.utils';
+import { isoFromEpoch } from '../../utils/epoch-iso';
 
 
 @Controller('client')
@@ -62,7 +63,11 @@ export class ClientController {
         }
 
         const [workers, addressSettings, totalShares] = await Promise.all([
-            this.clientService.getByAddress(address),
+            // Hot path — `getByAddressLight` skips TypeORM entity hydration
+            // on Postgres (raw SELECT of only the 7 fields used below).
+            // Saves the per-row `DateTimeTransformer.from` chain that the
+            // 2026-05-13 prod CPU profile flagged at ~25-30 % of non-idle CPU.
+            this.clientService.getByAddressLight(address),
             this.addressSettingsService.getSettings(address, false),
             this.shareTotalsCacheService.getAddressTotal(address),
         ]);
@@ -96,8 +101,8 @@ export class ClientController {
                         bestDifficulty: worker.bestDifficulty.toFixed(2),
                         hashRate: worker.hashRate,
                         currentDifficulty,
-                        startTime: worker.startTime,
-                        lastSeen: worker.updatedAt
+                        startTime: isoFromEpoch(worker.startTime),
+                        lastSeen: isoFromEpoch(worker.updatedAt),
                     };
                 })
             )
@@ -266,7 +271,9 @@ export class ClientController {
 
         const [workerShares, dbWorkerTotals] = await Promise.all([
             this.shareTotalsCacheService.getWorkerTotals(address),
-            this.workerSharesService.getWorkerTotals(address),
+            // Hot path — `getWorkerTotalsLight` returns only (clientName,
+            // rejectedShares) via raw query on Postgres, no entity hydration.
+            this.workerSharesService.getWorkerTotalsLight(address),
         ]);
 
         // Create a map for quick lookup of rejected counts (PK lookup, no full scan)
@@ -446,9 +453,9 @@ export class ClientController {
             return cachedResult;
         }
 
-        const workers = await this.clientService.getByName(address, workerName);
+        const workers = await this.clientService.getByNameLight(address, workerName);
 
-        const bestDifficulty = workers.reduce((pre, cur, idx, arr) => {
+        const bestDifficulty = workers.reduce((pre, cur) => {
             if (cur.bestDifficulty > pre) {
                 return cur.bestDifficulty;
             }
@@ -475,7 +482,7 @@ export class ClientController {
             return cachedResult;
         }
 
-        const worker = await this.clientService.getBySessionId(address, workerName, sessionId);
+        const worker = await this.clientService.getBySessionIdLight(address, workerName, sessionId);
         if (worker == null) {
             return new NotFoundException();
         }
@@ -486,7 +493,7 @@ export class ClientController {
             name: worker.clientName,
             bestDifficulty: Math.floor(worker.bestDifficulty),
             chartData: chartData,
-            startTime: worker.startTime
+            startTime: isoFromEpoch(worker.startTime),
         };
 
         await this.cacheManager.set(CACHE_KEY, result, this.cacheTTL.clientWorkerSession * 1000);

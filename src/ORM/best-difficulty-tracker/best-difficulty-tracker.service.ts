@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 
 import { BestDifficultyTrackerEntity } from './best-difficulty-tracker.entity';
 
@@ -22,7 +22,63 @@ export class BestDifficultyTrackerService {
     }
 
     /**
-     * Update or create tracker (upsert via INSERT ... ON CONFLICT)
+     * Get trackers for many addresses in one round-trip. Returns a Map for
+     * O(1) lookup. Missing addresses are absent from the map (caller uses
+     * .has() to distinguish "never seen" from "tracker = 0").
+     */
+    public async getTrackersForAddresses(addresses: string[]): Promise<Map<string, BestDifficultyTrackerEntity>> {
+        const out = new Map<string, BestDifficultyTrackerEntity>();
+        if (addresses.length === 0) return out;
+        const rows = await this.trackerRepository.find({ where: { address: In(addresses) } });
+        for (const row of rows) out.set(row.address, row);
+        return out;
+    }
+
+    /**
+     * Bulk-upsert trackers in one Postgres statement / per-row inserts on
+     * sqlite. Replaces a sequential `updateTracker` fan-out in the per-
+     * minute checkBestDifficulty cron.
+     */
+    public async updateTrackersBulk(rows: Array<{ address: string; bestDifficulty: number }>): Promise<void> {
+        if (rows.length === 0) return;
+        const now = Date.now();
+        const dbType = this.trackerRepository.manager.connection.options.type;
+
+        if (dbType === 'postgres') {
+            const addresses = rows.map(r => r.address);
+            const diffs = rows.map(r => r.bestDifficulty);
+            await this.trackerRepository.query(
+                `INSERT INTO best_difficulty_tracker_entity (address, "bestDifficulty", "lastCheckedAt", "createdAt", "updatedAt")
+                 SELECT address, "bestDifficulty", $3::bigint, NOW(), NOW()
+                 FROM unnest($1::text[], $2::double precision[]) AS u(address, "bestDifficulty")
+                 ON CONFLICT (address) DO UPDATE SET
+                   "bestDifficulty" = EXCLUDED."bestDifficulty",
+                   "lastCheckedAt" = EXCLUDED."lastCheckedAt",
+                   "updatedAt" = EXCLUDED."updatedAt"`,
+                [addresses, diffs, now],
+            );
+            return;
+        }
+
+        // Sqlite (dev/test): keep the existing upsert per row.
+        for (const r of rows) {
+            await this.trackerRepository
+                .createQueryBuilder()
+                .insert()
+                .into(BestDifficultyTrackerEntity)
+                .values({
+                    address: r.address, bestDifficulty: r.bestDifficulty, lastCheckedAt: now,
+                    createdAt: now, updatedAt: now,
+                })
+                .orUpdate(['bestDifficulty', 'lastCheckedAt'], ['address'])
+                .execute();
+        }
+    }
+
+    /**
+     * Update or create tracker (upsert via INSERT ... ON CONFLICT).
+     * createdAt/updatedAt set explicitly because the @BeforeInsert hook on
+     * TrackedEntity is bypassed by createQueryBuilder().insert().
      */
     public async updateTracker(address: string, bestDifficulty: number): Promise<void> {
         const now = Date.now();
@@ -30,7 +86,7 @@ export class BestDifficultyTrackerService {
             .createQueryBuilder()
             .insert()
             .into(BestDifficultyTrackerEntity)
-            .values({ address, bestDifficulty, lastCheckedAt: now })
+            .values({ address, bestDifficulty, lastCheckedAt: now, createdAt: now, updatedAt: now })
             .orUpdate(['bestDifficulty', 'lastCheckedAt'], ['address'])
             .execute();
     }

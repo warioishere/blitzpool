@@ -4,6 +4,7 @@ import { GroupSoloService } from './group-solo.service';
 import { PplnsGroupBlockHistoryEntity } from '../ORM/pplns-group/pplns-group-block-history.entity';
 import { PplnsGroupBalanceEntity } from '../ORM/pplns-group/pplns-group-balance.entity';
 import { attachMockTxManager } from './__test-helpers__/mock-tx-manager';
+import { readStoredSnapshot } from './coinbase-snapshot';
 
 // ── Mock Redis (sorted set + key-value) ─────────────────────────
 
@@ -61,8 +62,15 @@ function createMockRedis() {
             h.set(field, val.toString());
             return val;
         }),
-        hSet: jest.fn(async (key: string, field: string, value: string) => {
-            getH(key).set(field, value);
+        hSet: jest.fn(async (key: string, fieldOrObj: string | Record<string, string>, value?: string) => {
+            const h = getH(key);
+            if (typeof fieldOrObj === 'string') {
+                h.set(fieldOrObj, value as string);
+            } else {
+                for (const [f, v] of Object.entries(fieldOrObj)) {
+                    h.set(f, v);
+                }
+            }
         }),
         hGet: jest.fn(async (key: string, field: string) => {
             const h = hashes.get(key);
@@ -444,6 +452,70 @@ describe('GroupSoloService', () => {
             await service.getPayoutDistribution('g1', 100_000_000);
             // Cache was invalidated → recompute → balanceRepo.find got called again.
             expect(balanceFindSpy.mock.calls.length).toBe(callsBeforeReset + 1);
+        });
+
+        it('round-best read is served from in-process Map after the first improving share', async () => {
+            const { service, redis, groupService } = makeService();
+            groupService._setMembership('bc1qalice', 'g1', true);
+            groupService._setMembership('bc1qbob', 'g1', true);
+
+            await service.recordShare('bc1qalice', 500);
+            await service.recordShare('bc1qbob', 300);
+            await service.recordShare('bc1qalice', 700); // new best
+            await service.recordShare('bc1qbob', 100);    // not best — no Redis write
+
+            // Three improving moments: first share for alice (cold-start cache
+            // miss), bob (no improvement, no write), alice 700 (improvement).
+            // 100 from bob never beats 700 → no extra hSet.
+            const hSetForBest = (redis.hSet as jest.Mock).mock.calls.filter(
+                c => c[0] === 'groupsolo:g1:best-share',
+            );
+            expect(hSetForBest).toHaveLength(2);
+
+            // getRoundBestDifficulty hits the in-process cache: no HGETALL.
+            (redis.hGetAll as jest.Mock).mockClear();
+            const best = await service.getRoundBestDifficulty('g1');
+            expect(best.bestDifficulty).toBe(700);
+            expect(best.address).toBe('bc1qalice');
+            expect(redis.hGetAll).not.toHaveBeenCalled();
+        });
+
+        it('resetRound drops the in-process round-best cache', async () => {
+            const { service, redis, groupService } = makeService();
+            groupService._setMembership('bc1qalice', 'g1', true);
+            await service.recordShare('bc1qalice', 500);
+            (redis.hGetAll as jest.Mock).mockClear();
+
+            await (service as any).resetRound('g1');
+
+            // After reset, no in-process entry → next read falls back to Redis
+            // (which is also empty here → zSet cold-start, also empty).
+            const best = await service.getRoundBestDifficulty('g1');
+            expect(best.bestDifficulty).toBe(0);
+        });
+
+        it('coalesces concurrent callers for the same (group, reward, finder) into one build', async () => {
+            const { service, balanceRepo, groupService } = makeService();
+            groupService._setMembership('bc1qalice', 'g1', true);
+            groupService._setMembership('bc1qbob', 'g1', true);
+            await service.recordShare('bc1qalice', 500);
+            await service.recordShare('bc1qbob', 500);
+
+            // Drop any caches so the next call would compute.
+            (service as any).distributionCache.invalidate();
+            const balanceFindSpy = jest.spyOn(balanceRepo, 'find');
+            balanceFindSpy.mockClear();
+
+            const results = await Promise.all(
+                Array.from({ length: 50 }, () =>
+                    service.getPayoutDistribution('g1', 100_000_000, 'bc1qalice'),
+                ),
+            );
+            const first = results[0];
+            for (const r of results) {
+                expect(r).toBe(first);
+            }
+            expect(balanceFindSpy).toHaveBeenCalledTimes(1);
         });
     });
 
@@ -870,6 +942,109 @@ describe('GroupSoloService', () => {
     });
 
     /**
+     * bestShare cache — O(1) read for getRoundBestDifficulty, mirrors the
+     * byAddress aggregate pattern. Must stay in lock-step with recordShare.
+     */
+    describe('bestShare cache', () => {
+        const KEY = 'groupsolo:g1:best-share';
+
+        it('recordShare seeds the bestShare cache on the first share', async () => {
+            const { service, redis, groupService } = makeService();
+            groupService._setMembership('bc1qalice', 'g1', true);
+            await service.recordShare('bc1qalice', 750);
+
+            const h = redis._hashes.get(KEY)!;
+            expect(parseFloat(h.get('diff')!)).toBe(750);
+            expect(h.get('address')).toBe('bc1qalice');
+            expect(parseInt(h.get('time')!, 10)).toBeGreaterThan(0);
+        });
+
+        it('recordShare overwrites the cache only when a higher diff arrives', async () => {
+            const { service, redis, groupService } = makeService();
+            groupService._setMembership('bc1qalice', 'g1', true);
+            groupService._setMembership('bc1qbob', 'g1', true);
+            await service.recordShare('bc1qalice', 1000);
+            await service.recordShare('bc1qbob', 500);   // lower → no change
+            await service.recordShare('bc1qbob', 2000);  // higher → wins
+
+            const h = redis._hashes.get(KEY)!;
+            expect(parseFloat(h.get('diff')!)).toBe(2000);
+            expect(h.get('address')).toBe('bc1qbob');
+        });
+
+        it('getRoundBestDifficulty reads from the cache without ZRANGE on the hot path', async () => {
+            const { service, redis, groupService } = makeService();
+            groupService._setMembership('bc1qalice', 'g1', true);
+            await service.recordShare('bc1qalice', 1234);
+
+            (redis.zRange as jest.Mock).mockClear();
+            const best = await service.getRoundBestDifficulty('g1');
+
+            expect(redis.zRange).not.toHaveBeenCalled();
+            expect(best.bestDifficulty).toBe(1234);
+            expect(best.address).toBe('bc1qalice');
+        });
+
+        it('cold-cache fallback: empty hash + populated zSet → reads from zSet and backfills hash', async () => {
+            const { service, redis, groupService } = makeService();
+            groupService._setMembership('bc1qalice', 'g1', true);
+            await service.recordShare('bc1qalice', 100);
+            await service.recordShare('bc1qalice', 500);
+
+            // Simulate pre-deploy state: zSet has the shares, bestShare cache
+            // wasn't maintained at the time.
+            redis._hashes.delete(KEY);
+
+            const first = await service.getRoundBestDifficulty('g1');
+            expect(first.bestDifficulty).toBe(500);
+            expect(first.address).toBe('bc1qalice');
+
+            // Allow the fire-and-forget backfill hSet to complete.
+            await new Promise(resolve => setImmediate(resolve));
+
+            // Second read must NOT touch the zSet — cache is now warm.
+            (redis.zRange as jest.Mock).mockClear();
+            const second = await service.getRoundBestDifficulty('g1');
+            expect(redis.zRange).not.toHaveBeenCalled();
+            expect(second.bestDifficulty).toBe(500);
+        });
+
+        it('removeMemberState clears the cache only if the kicked member held the record', async () => {
+            const { service, redis, groupService } = makeService();
+            groupService._setMembership('bc1qalice', 'g1', true);
+            groupService._setMembership('bc1qbob', 'g1', true);
+            groupService._setMembership('bc1qcharlie', 'g1', true);
+            await service.recordShare('bc1qalice', 100);
+            await service.recordShare('bc1qbob', 5000);   // bob holds the record
+            await service.recordShare('bc1qcharlie', 200);
+
+            // Kicking a non-holder leaves the cache intact.
+            await service.removeMemberState('g1', 'bc1qcharlie', ['bc1qalice', 'bc1qbob']);
+            expect(redis._hashes.get(KEY)?.get('address')).toBe('bc1qbob');
+
+            // Kicking the holder drops the cache → next read falls back to zSet.
+            await service.removeMemberState('g1', 'bc1qbob', ['bc1qalice']);
+            expect(redis._hashes.get(KEY)).toBeUndefined();
+
+            const best = await service.getRoundBestDifficulty('g1');
+            expect(best.address).toBe('bc1qalice');
+            expect(best.bestDifficulty).toBe(100);
+        });
+
+        it('resetRound clears the cache (block-found round wipe)', async () => {
+            const { service, redis, groupService } = makeService();
+            groupService._setMembership('bc1qalice', 'g1', true);
+            await service.recordShare('bc1qalice', 999);
+            expect(redis._hashes.get(KEY)).toBeDefined();
+
+            await service.getPayoutDistribution('g1', 100_000_000);
+            await service.onBlockFound(900_000, 100_000_000, 'bc1qalice');
+
+            expect(redis._hashes.get(KEY)).toBeUndefined();
+        });
+    });
+
+    /**
      * M3 regression (signed-ledger audit finding): Group-Solo routes
      * through the shared `buildCoinbaseDistribution` with
      * `suppressMatchingDebits=true` (the C2 fix). That flag re-routes
@@ -968,7 +1143,7 @@ describe('GroupSoloService', () => {
             // lastRoundResetAt updated
             expect(groupRepo.update).toHaveBeenCalledWith(
                 { id: 'g1' },
-                expect.objectContaining({ lastRoundResetAt: expect.any(Date) }),
+                expect.objectContaining({ lastRoundResetAt: expect.any(Number) }),
             );
         });
 
@@ -996,7 +1171,7 @@ describe('GroupSoloService', () => {
             groupRepo.findOneBy = jest.fn(async () => ({
                 id: 'g1',
                 dissolvedAt: null,
-                lastRoundResetAt: new Date(Date.now() - 30_000),  // 30s ago
+                lastRoundResetAt: Date.now() - 30_000,  // 30s ago
             }));
             groupRepo.update = jest.fn();
 
@@ -1015,7 +1190,7 @@ describe('GroupSoloService', () => {
             const groupRepo = (service as any).groupRepo;
             groupRepo.findOneBy = jest.fn(async () => ({
                 id: 'g1',
-                dissolvedAt: new Date(),
+                dissolvedAt: Date.now(),
                 lastRoundResetAt: null,
             }));
 
@@ -1070,13 +1245,13 @@ describe('GroupSoloService', () => {
         groupService._setMembership('bc1qalice', 'g1', true);
         groupService._setMembership('bc1qbob', 'g1', true);
 
-        const STALE = new Date('2020-01-01T00:00:00Z');
+        const STALE = Date.parse('2020-01-01T00:00:00Z');
 
         // Seed: bob has 900 sats pending; alice has a stale balance row
         // (mined long ago, dust-eligible by timestamp).
         (balanceRepo._rows as any[]).push(
             { address: 'bc1qbob', groupId: 'g1', pendingSats: 900, totalPaidSats: 0,
-              lastAcceptedShareAt: new Date() },
+              lastAcceptedShareAt: Date.now() },
             { address: 'bc1qalice', groupId: 'g1', pendingSats: 100, totalPaidSats: 0,
               lastAcceptedShareAt: STALE },
         );
@@ -1090,9 +1265,9 @@ describe('GroupSoloService', () => {
         // Timestamp must have been refreshed inside the kick window —
         // not left at STALE — otherwise the next sweep cron run would
         // immediately absorb the just-credited 900 sats.
-        expect(aliceRow?.lastAcceptedShareAt).toBeInstanceOf(Date);
-        expect(aliceRow.lastAcceptedShareAt.getTime()).toBeGreaterThanOrEqual(before);
-        expect(aliceRow.lastAcceptedShareAt.getTime()).toBeLessThanOrEqual(after);
+        expect(typeof aliceRow?.lastAcceptedShareAt).toBe('number');
+        expect(aliceRow.lastAcceptedShareAt).toBeGreaterThanOrEqual(before);
+        expect(aliceRow.lastAcceptedShareAt).toBeLessThanOrEqual(after);
     });
 
     // ── Finder-bonus per-miner coinbase ────────────────────────────
@@ -1128,7 +1303,7 @@ describe('GroupSoloService', () => {
                 lastRoundResetAt: null,
                 finderBonusSats,
                 dissolvedAt: null,
-                createdAt: new Date(),
+                createdAt: Date.now(),
             });
         };
 
@@ -1191,14 +1366,14 @@ describe('GroupSoloService', () => {
 
             // Two distinct snapshots persisted in Redis, each with the
             // bonus output to its respective finder.
-            expect(redis._store.has('groupsolo:g1:snapshot:bc1qalice')).toBe(true);
-            expect(redis._store.has('groupsolo:g1:snapshot:bc1qbob')).toBe(true);
+            expect(redis._hashes.has('groupsolo:g1:snapshot:bc1qalice')).toBe(true);
+            expect(redis._hashes.has('groupsolo:g1:snapshot:bc1qbob')).toBe(true);
 
-            const aliceSnap = JSON.parse(redis._store.get('groupsolo:g1:snapshot:bc1qalice')!);
-            const bobSnap = JSON.parse(redis._store.get('groupsolo:g1:snapshot:bc1qbob')!);
+            const aliceSnap = await readStoredSnapshot(redis, 'groupsolo:g1:snapshot:bc1qalice');
+            const bobSnap = await readStoredSnapshot(redis, 'groupsolo:g1:snapshot:bc1qbob');
 
-            const aliceBonus = (aliceSnap.distribution as any[]).find(d => d.address === 'bc1qalice' && d.sats === FINDER_BONUS);
-            const bobBonus   = (bobSnap.distribution as any[]).find(d => d.address === 'bc1qbob'   && d.sats === FINDER_BONUS);
+            const aliceBonus = aliceSnap!.distribution.find(d => d.address === 'bc1qalice' && d.sats === FINDER_BONUS);
+            const bobBonus   = bobSnap!.distribution.find(d => d.address === 'bc1qbob'   && d.sats === FINDER_BONUS);
             expect(aliceBonus).toBeDefined();
             expect(bobBonus).toBeDefined();
         });
@@ -1236,7 +1411,7 @@ describe('GroupSoloService', () => {
             expect(aliceTotalPaid).toBeLessThan(bobTotalPaid);
 
             // Round resets — all per-finder snapshots cleared.
-            for (const k of redis._store.keys()) {
+            for (const k of redis._hashes.keys()) {
                 expect(k).not.toMatch(/^groupsolo:g1:snapshot/);
             }
         });
@@ -1276,7 +1451,7 @@ describe('GroupSoloService', () => {
             // No dedicated bonus output emitted; falls back to fee + prop split.
             // Snapshot is stored under the legacy "__none__" suffix so a
             // legacy onBlockFound caller (or graceful upgrade) can find it.
-            expect(redis._store.has('groupsolo:g1:snapshot:__none__')).toBe(true);
+            expect(redis._hashes.has('groupsolo:g1:snapshot:__none__')).toBe(true);
             const alice = dist.find(d => d.address === 'bc1qalice')!;
             // Same shape as the no-bonus case above — full miner cut to alice.
             expect(alice.percent).toBeCloseTo(98, 1);
@@ -1331,14 +1506,14 @@ describe('GroupSoloService', () => {
             await service.getPayoutDistribution('g1', 100_000_000, 'bc1qbob');
             await service.getPayoutDistribution('g1', 100_000_000, 'bc1qcharlie');
 
-            const snapshotKeysBefore = Array.from(redis._store.keys()).filter(k => k.startsWith('groupsolo:g1:snapshot'));
+            const snapshotKeysBefore = Array.from(redis._hashes.keys()).filter(k => k.startsWith('groupsolo:g1:snapshot'));
             expect(snapshotKeysBefore.length).toBe(3);
 
             // Charlie finds the block.
             await service.onBlockFound(900_000, 100_000_000, 'bc1qcharlie');
 
             // All 3 snapshots are now stale (round reset) → wiped.
-            const snapshotKeysAfter = Array.from(redis._store.keys()).filter(k => k.startsWith('groupsolo:g1:snapshot'));
+            const snapshotKeysAfter = Array.from(redis._hashes.keys()).filter(k => k.startsWith('groupsolo:g1:snapshot'));
             expect(snapshotKeysAfter.length).toBe(0);
         });
     });

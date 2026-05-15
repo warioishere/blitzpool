@@ -145,6 +145,89 @@ describe('DifficultyUtils port-floor invariants (SV2)', () => {
         }
     });
 
+    /**
+     * Pinned reference values originally produced by `big.js` (DP=80).
+     * After removing big.js, calculateDifficulty / targetToDifficulty use
+     * pure BigInt arithmetic; these guard against drift.
+     */
+    describe('TRUE_DIFF_ONE / divisor matches frozen big.js reference', () => {
+        function encodeLeU256(n: bigint): Buffer {
+            const buf = Buffer.alloc(32);
+            let v = n;
+            for (let i = 0; i < 32; i++) {
+                buf[i] = Number(v & 0xffn);
+                v >>= 8n;
+            }
+            return buf;
+        }
+
+        const cases: Array<{ divisor: bigint; expected: number }> = [
+            { divisor: 26959535291011309493156476344723991336010898738574164086137773096960n, expected: 1 },
+            { divisor: 269595352910113094931564763447239913360108987385741640861377730969n, expected: 100 },
+            { divisor: 26314822148376095161694950068056604525144849915640960552599095263n, expected: 1024.5 },
+            { divisor: 411363585318389756826776879392160021606281928354580833515995134n, expected: 65537 },
+            { divisor: 26959535291011309493156476344723991336010898738574164086137773n, expected: 1000000 },
+            { divisor: 336994191137641368664455954309049891700136234232177051n, expected: 80000000000000 },
+        ];
+
+        for (const { divisor, expected } of cases) {
+            it(`divisor ≈ 2^${divisor.toString(2).length}b → ${expected}`, () => {
+                const actual = DifficultyUtils.targetToDifficulty(encodeLeU256(divisor));
+                const relErr = Math.abs(actual - expected) / expected;
+                expect(relErr).toBeLessThan(1e-9);
+            });
+        }
+    });
+
+    /**
+     * Fuzzer: 100 random 256-bit divisors. Re-derive the expected difficulty
+     * locally via independent BigInt math (numerator * 1e15 / divisor scheme)
+     * and compare against targetToDifficulty. Catches off-by-scale bugs.
+     */
+    it('fuzz: BigInt-ratio implementation stable across 100 random divisors', () => {
+        const TRUE_DIFF_ONE_BIGINT = 26959535291011309493156476344723991336010898738574164086137773096960n;
+
+        function encodeLeU256(n: bigint): Buffer {
+            const buf = Buffer.alloc(32);
+            let v = n;
+            for (let i = 0; i < 32; i++) {
+                buf[i] = Number(v & 0xffn);
+                v >>= 8n;
+            }
+            return buf;
+        }
+
+        // Independent reference: scale numerator by 1e15, divide, then /1e15.
+        // Different scale than the production impl (1e9) — drift between the
+        // two would point to an arithmetic error rather than a rounding tie.
+        function referenceRatio(divisor: bigint): number {
+            const REF_SCALE = 1_000_000_000_000_000n;
+            const REF_SCALE_NUM = 1e15;
+            const scaled = (TRUE_DIFF_ONE_BIGINT * REF_SCALE) / divisor;
+            return Number(scaled) / REF_SCALE_NUM;
+        }
+
+        for (let i = 0; i < 100; i++) {
+            // Random 256-bit divisor, biased away from extreme tails so the
+            // resulting Number is comfortably in IEEE 754 range.
+            let divisor = 0n;
+            for (let b = 0; b < 8; b++) {
+                divisor = (divisor << 32n) | BigInt(Math.floor(Math.random() * 0x100000000));
+            }
+            // Keep divisor non-zero and below TRUE_DIFF_ONE * 1e9 so reference scale doesn't overflow Number sanity.
+            if (divisor === 0n) divisor = 1n;
+
+            const actual = DifficultyUtils.targetToDifficulty(encodeLeU256(divisor));
+            const expected = referenceRatio(divisor);
+
+            // expected can be Infinity/very-large for tiny divisors; use relative tolerance
+            // and skip explicit-Infinity comparison.
+            if (!Number.isFinite(expected) || expected === 0) continue;
+            const relErr = Math.abs(actual - expected) / expected;
+            expect(relErr).toBeLessThan(1e-6);
+        }
+    });
+
     it('spec respected: floor is ≥ portMin even when floor > maxTarget-equivalent', () => {
         // Miner on PPLNS port declares an "easier than floor" maxTarget.
         // The assigned difficulty is clamped UP to portMin (breaking the

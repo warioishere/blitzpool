@@ -1,55 +1,36 @@
-import { Expose, Transform } from 'class-transformer';
-import { ArrayMaxSize, ArrayMinSize, IsArray, IsOptional, IsString, MaxLength } from 'class-validator';
-
 import { eRequestMethod } from '../enums/eRequestMethod';
-import { IsBitcoinAddress } from '../validators/bitcoin-address.validator';
 import { StratumBaseMessage } from './StratumBaseMessage';
 
 export class AuthorizationMessage extends StratumBaseMessage {
 
-    @IsArray()
-    @ArrayMinSize(2)
-    @ArrayMaxSize(2)
     params: string[];
 
-    @Expose()
-    @IsString()
-    @Transform(({ value, key, obj, type }) => {
-        return obj.params[0].split('.')[0];
-    })
-    @IsBitcoinAddress()
     public address: string;
-
-    @Expose()
-    @IsString()
-    @MaxLength(64)
-    @Transform(({ value, key, obj, type }) => {
-        return obj.params[0].split('.')[1] == null ? 'worker' : obj.params[0].split('.')[1];
-    })
     public worker: string;
-
-
-    @Expose()
-    @IsString()
-    @Transform(({ value, key, obj, type }) => {
-        return obj.params[1];
-    })
-    @MaxLength(64)
-    @IsOptional()
     public password?: string;
 
     constructor() {
         super();
         this.method = eRequestMethod.AUTHORIZE;
-
     }
 
+    public static parse(plain: { id?: number | string; params: string[] }): AuthorizationMessage {
+        const m = new AuthorizationMessage();
+        m.id = plain.id ?? null;
+        m.params = plain.params;
+        const accountWorker = plain.params[0];
+        const split = accountWorker.split('.');
+        m.address = split[0];
+        m.worker = split[1] == null ? 'worker' : split[1];
+        m.password = plain.params[1];
+        return m;
+    }
 
     public response() {
         return {
             id: this.id,
             error: null,
-            result: true
+            result: true,
         };
     }
 }

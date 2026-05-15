@@ -127,7 +127,7 @@ export class PplnsGroupJoinRequestService {
             order: { decidedAt: 'DESC' },
         });
         if (recentReject?.decidedAt) {
-            const elapsedHours = (Date.now() - recentReject.decidedAt.getTime()) / (60 * 60 * 1000);
+            const elapsedHours = (Date.now() - recentReject.decidedAt) / (60 * 60 * 1000);
             if (elapsedHours < REJECT_COOLDOWN_HOURS) {
                 throw new JoinRequestServiceError(
                     'reject-cooldown',
@@ -203,7 +203,7 @@ export class PplnsGroupJoinRequestService {
             // Mark the request rejected (audit) so it doesn't keep showing up
             // as pending in the admin UI.
             request.status = 'rejected';
-            request.decidedAt = new Date();
+            request.decidedAt = Date.now();
             request.decidedByAdminTokenHash = this.hashToken(adminToken!);
             await this.requestRepo.save(request);
             throw new JoinRequestServiceError('address-in-group', 'Address joined another group in the meantime');
@@ -215,7 +215,7 @@ export class PplnsGroupJoinRequestService {
         //       to mark the request approved so it disappears from the panel.
 
         request.status = 'approved';
-        request.decidedAt = new Date();
+        request.decidedAt = Date.now();
         request.decidedByAdminTokenHash = this.hashToken(adminToken!);
         await this.requestRepo.save(request);
 
@@ -246,7 +246,7 @@ export class PplnsGroupJoinRequestService {
         }
 
         request.status = 'rejected';
-        request.decidedAt = new Date();
+        request.decidedAt = Date.now();
         request.decidedByAdminTokenHash = this.hashToken(adminToken!);
         await this.requestRepo.save(request);
 
@@ -268,7 +268,7 @@ export class PplnsGroupJoinRequestService {
         groupId: string;
         groupName: string;
         status: 'pending';
-        createdAt: Date;
+        createdAt: number;
     }[]> {
         const normalized = normalizeBtcAddress(address);
         if (!normalized) return [];
@@ -298,7 +298,7 @@ export class PplnsGroupJoinRequestService {
     @Interval(24 * 60 * 60 * 1000)
     async expireStale(): Promise<number> {
         try {
-            const cutoff = new Date(Date.now() - PENDING_EXPIRY_DAYS * 24 * 60 * 60 * 1000);
+            const cutoff = Date.now() - PENDING_EXPIRY_DAYS * 24 * 60 * 60 * 1000;
             const result = await this.requestRepo.update(
                 { status: 'pending', createdAt: LessThan(cutoff) },
                 { status: 'expired' },

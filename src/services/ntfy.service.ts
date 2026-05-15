@@ -12,7 +12,21 @@ import { ClientStatisticsService } from '../ORM/client-statistics/client-statist
 import { BestDifficultyTrackerService } from '../ORM/best-difficulty-tracker/best-difficulty-tracker.service';
 import { StratumV1Service } from './stratum-v1.service';
 import { StratumV2Service } from './stratum-v2.service';
-import { buildStatsMessage, buildWorkersOverviewMessage } from './common-command-handlers';
+import { PplnsService } from './pplns.service';
+import { GroupService } from './group.service';
+import { GroupSoloService } from './group-solo.service';
+import {
+  buildStatsMessage,
+  buildWorkersOverviewMessage,
+  buildPoolHashrateMessage,
+  buildCurrentDifficultyMessage,
+  buildNextDifficultyMessage,
+  buildPplnsStatusMessage,
+  buildPplnsTopMessage,
+  buildGroupStatusMessage,
+  buildGroupMembersMessage,
+  buildGroupHistoryMessage,
+} from './common-command-handlers';
 
 @Injectable()
 export class NtfyService implements OnModuleInit {
@@ -40,6 +54,12 @@ export class NtfyService implements OnModuleInit {
     private readonly stratumV1Service: StratumV1Service,
     @Inject(forwardRef(() => StratumV2Service))
     private readonly stratumV2Service: StratumV2Service,
+    @Inject(forwardRef(() => PplnsService))
+    private readonly pplnsService: PplnsService,
+    @Inject(forwardRef(() => GroupService))
+    private readonly groupService: GroupService,
+    @Inject(forwardRef(() => GroupSoloService))
+    private readonly groupSoloService: GroupSoloService,
   ) {
     this.shouldInitialize = true;
 
@@ -164,13 +184,13 @@ export class NtfyService implements OnModuleInit {
     }
     const clientAddresses = await this.clientService.getAllAddresses();
     const addresses = Array.from(new Set(clientAddresses));
-    for (const addr of addresses) {
-      const settings = await this.addressSettingsService.getSettings(
-        addr,
-        false,
-      );
-      this.bestDiffCache.set(addr, settings?.bestDifficulty ?? 0);
-      this.subscribe(addr, false);
+    if (addresses.length > 0) {
+      // Single IN-list read instead of N sequential getSettings round-trips.
+      const diffs = await this.addressSettingsService.getBestDifficultiesForAddresses(addresses);
+      for (const addr of addresses) {
+        this.bestDiffCache.set(addr, diffs.get(addr) ?? 0);
+        this.subscribe(addr, false);
+      }
     }
     this.reconnect();
   }
@@ -401,63 +421,43 @@ export class NtfyService implements OnModuleInit {
         });
       }
     } else if (text.startsWith('/poolhashrate')) {
-      try {
-        const apiPort = process.env.API_PORT || '3334';
-        const res = await fetch(`http://localhost:${apiPort}/api/pool`);
-        const data = await res.json();
-        const hashrateTH = (data.totalHashRate / 1e12).toFixed(2);
-        await this.reply(origin, {
-          de: `Aktuelle Pool-Hashrate: ${hashrateTH} TH/s`,
-          en: `Current pool hashrate: ${hashrateTH} TH/s`
-        });
-      } catch (err) {
-        await this.reply(origin, {
-          de: 'Konnte die Pool-Hashrate nicht abrufen.',
-          en: 'Could not fetch pool hashrate.'
-        });
-        console.error('NTFY /poolhashrate error', err);
-      }
-    } else if (text.startsWith('/difficulty')) {
-      try {
-        const res = await fetch(
-          'https://mempool.space/api/v1/mining/hashrate/3d',
-        );
-        const json = await res.json();
-        const difficulty = (json.currentDifficulty / 1e12).toFixed(2);
-        await this.reply(origin, {
-          de: `Aktuelle Difficulty: ${difficulty} T`,
-          en: `Current difficulty: ${difficulty} T`
-        });
-      } catch (err) {
-        await this.reply(origin, {
-          de: 'Konnte die Difficulty nicht abrufen.',
-          en: 'Could not fetch difficulty.'
-        });
-        console.error('NTFY /difficulty error', err);
-      }
+      await this.reply(origin, await buildPoolHashrateMessage());
     } else if (text.startsWith('/next_difficulty')) {
-      try {
-        const res = await fetch(
-          'https://mempool.space/api/v1/difficulty-adjustment',
-        );
-        const data = await res.json();
-        const progress = data.progressPercent.toFixed(2);
-        const change = data.difficultyChange.toFixed(2);
-        const estimatedDate = new Date(
-          data.estimatedRetargetDate,
-        ).toLocaleString('de-CH');
-        const changeText = change >= 0 ? `📈 +${change}%` : `📉 ${change}%`;
-        await this.reply(origin, {
-          de: `📊 Nächste Difficulty-Anpassung:\n\n• Fortschritt: ${progress}%\n• Geschätzt: ${estimatedDate}\n• Erwartete Änderung: ${changeText}`,
-          en: `📊 Next difficulty adjustment:\n\n• Progress: ${progress}%\n• Estimated: ${estimatedDate}\n• Expected change: ${changeText}`
-        });
-      } catch (err) {
-        await this.reply(origin, {
-          de: 'Konnte die nächste Difficulty-Anpassung nicht abrufen.',
-          en: 'Could not fetch next difficulty adjustment.'
-        });
-        console.error('NTFY /next_difficulty error', err);
-      }
+      await this.reply(origin, await buildNextDifficultyMessage());
+    } else if (text.startsWith('/difficulty')) {
+      await this.reply(origin, await buildCurrentDifficultyMessage());
+    } else if (text.startsWith('/pplns_top')) {
+      await this.reply(origin, await buildPplnsTopMessage(this.pplnsService));
+    } else if (text.startsWith('/pplns_status')) {
+      const raw = text.replace('/pplns_status', '').trim();
+      const address = await this.resolveAddressForChat(origin, raw || undefined);
+      if (!address) return;
+      const msg = await buildPplnsStatusMessage(
+        address, this.pplnsService, this.clientService, this.numberSuffix,
+      );
+      if (msg) await this.reply(origin, msg);
+    } else if (text.startsWith('/group_status')) {
+      const raw = text.replace('/group_status', '').trim();
+      const address = await this.resolveAddressForChat(origin, raw || undefined);
+      if (!address) return;
+      await this.reply(origin, await buildGroupStatusMessage(
+        address, this.groupService, this.groupSoloService, this.clientService, this.numberSuffix,
+      ));
+    } else if (text.startsWith('/group_members')) {
+      const raw = text.replace('/group_members', '').trim();
+      const address = await this.resolveAddressForChat(origin, raw || undefined);
+      if (!address) return;
+      await this.reply(origin, await buildGroupMembersMessage(
+        address, this.groupService, this.groupSoloService, this.numberSuffix,
+      ));
+    } else if (text.startsWith('/group_history')) {
+      const raw = text.replace('/group_history', '').trim();
+      const address = await this.resolveAddressForChat(origin, raw || undefined);
+      if (!address) return;
+      const lang = await this.getLanguage(origin);
+      await this.reply(origin, await buildGroupHistoryMessage(
+        address, this.groupService, this.groupSoloService, lang,
+      ));
     } else if (text.startsWith('/subscribe_bestdiff')) {
       const match = text.match(/\/subscribe_bestdiff\s+(on|off)/i);
       const value = match?.[1]?.toLowerCase();
@@ -742,55 +742,55 @@ export class NtfyService implements OnModuleInit {
 
     try {
       const enabledSubscriptions = await this.ntfySubscriptionsService.getHourlyEnabledAddresses();
+      // Sequential await + per-subscriber HTTP loopback used to block the
+      // whole cron tick behind one slow miner. Parallel fan-out lets the
+      // hourly burst finish in roughly the time of the single slowest send.
+      await Promise.all(enabledSubscriptions.map(sub => this.sendHourlyForOne(sub)));
+    } catch (err) {
+      console.error('NTFY: Fehler beim Ausführen der Stundlich-Benachrichtigungen:', err);
+    }
+  }
 
-      for (const sub of enabledSubscriptions) {
+  private async sendHourlyForOne(sub: { address: string; hourlyStatsEnabled: boolean; hourlyWorkersEnabled: boolean }): Promise<void> {
+    const address = sub.address;
+    try {
+      if (sub.hourlyStatsEnabled) {
         try {
-          const address = sub.address;
-
-          // Send stats if enabled
-          if (sub.hourlyStatsEnabled) {
-            try {
-              const messages = await buildStatsMessage(
-                address,
-                this.clientService,
-                this.addressSettingsService,
-                this.clientStatisticsService,
-                this.numberSuffix
-              );
-              if (messages) {
-                const lang = await this.getLanguage(address);
-                await this.publish(address, messages[lang]);
-              }
-            } catch (err) {
-              console.error(`NTFY: Fehler beim Senden von Stats für ${address}:`, err);
-            }
+          const messages = await buildStatsMessage(
+            address,
+            this.clientService,
+            this.addressSettingsService,
+            this.clientStatisticsService,
+            this.numberSuffix
+          );
+          if (messages) {
+            const lang = await this.getLanguage(address);
+            await this.publish(address, messages[lang]);
           }
+        } catch (err) {
+          console.error(`NTFY: Fehler beim Senden von Stats für ${address}:`, err);
+        }
+      }
 
-          // Send workers overview if enabled
-          if (sub.hourlyWorkersEnabled) {
-            try {
-              const apiPort = process.env.API_PORT ?? '3334';
-              const url = `http://localhost:${apiPort}/api/client/${encodeURIComponent(address)}`;
-              const res = await fetch(url);
-
-              if (res.ok) {
-                const payload = await res.json();
-                if (payload && Array.isArray(payload.workers) && payload.workers.length > 0) {
-                  const messages = buildWorkersOverviewMessage(payload, this.numberSuffix);
-                  const lang = await this.getLanguage(address);
-                  await this.publish(address, messages[lang]);
-                }
-              }
-            } catch (err) {
-              console.error(`NTFY: Fehler beim Senden von Workers für ${address}:`, err);
+      if (sub.hourlyWorkersEnabled) {
+        try {
+          const apiPort = process.env.API_PORT ?? '3334';
+          const url = `http://localhost:${apiPort}/api/client/${encodeURIComponent(address)}`;
+          const res = await fetch(url);
+          if (res.ok) {
+            const payload = await res.json();
+            if (payload && Array.isArray(payload.workers) && payload.workers.length > 0) {
+              const messages = buildWorkersOverviewMessage(payload, this.numberSuffix);
+              const lang = await this.getLanguage(address);
+              await this.publish(address, messages[lang]);
             }
           }
         } catch (err) {
-          console.error(`NTFY: Fehler beim Verarbeiten von Stundlich-Updates für ${sub.address}:`, err);
+          console.error(`NTFY: Fehler beim Senden von Workers für ${address}:`, err);
         }
       }
     } catch (err) {
-      console.error('NTFY: Fehler beim Ausführen der Stundlich-Benachrichtigungen:', err);
+      console.error(`NTFY: Fehler beim Verarbeiten von Stundlich-Updates für ${address}:`, err);
     }
   }
 }

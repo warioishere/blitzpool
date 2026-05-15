@@ -40,6 +40,16 @@ export interface MiningModeResult {
 @Injectable()
 export class MiningModeService {
 
+    /**
+     * Per-address result cache. The endpoint is uncached and polled per UI
+     * dashboard load — without this, every poll did Redis GET + (on miss)
+     * `pplnsService.getCurrentDistribution()` HGETALL over the PPLNS window.
+     * TTL=30 s is shorter than the live-marker TTL (5 min) so a port-switch
+     * still propagates within one poll cycle.
+     */
+    private static readonly CACHE_TTL_MS = 30_000;
+    private readonly cache = new Map<string, { result: MiningModeResult; expiresAt: number }>();
+
     constructor(
         private readonly pplnsService: PplnsService,
         private readonly groupService: GroupService,
@@ -47,6 +57,23 @@ export class MiningModeService {
     ) {}
 
     async getMode(address: string): Promise<MiningModeResult> {
+        const now = Date.now();
+        const cached = this.cache.get(address);
+        if (cached && cached.expiresAt > now) {
+            return cached.result;
+        }
+
+        const result = await this.computeMode(address);
+        this.cache.set(address, { result, expiresAt: now + MiningModeService.CACHE_TTL_MS });
+        return result;
+    }
+
+    /** Drop the cached entry for an address (e.g. after group membership change). */
+    invalidate(address: string): void {
+        this.cache.delete(address);
+    }
+
+    private async computeMode(address: string): Promise<MiningModeResult> {
         // Primary check: live port-marker.
         const liveMode = await this.minerActiveModeService.get(address);
         if (liveMode === 'pplns') {
@@ -66,13 +93,19 @@ export class MiningModeService {
         }
 
         // Fallback: no live marker — legacy state-based detection.
-        const distribution = await this.pplnsService.getCurrentDistribution();
-        if (distribution.some(d => d.address === address)) {
-            return { mode: 'pplns' };
-        }
+        // Group-membership wins over residual PPLNS-window shares: group
+        // join is an intentional admin action while PPLNS shares may
+        // linger in the sliding 4× network-diff window from previous
+        // sessions on a PPLNS port. An address that's an active group
+        // member (creator or otherwise) must surface as group-solo so
+        // the UI routes to /payout-group instead of /payout-pplns.
         const group = this.groupService.getGroupForAddress(address);
         if (group && group.active) {
             return { mode: 'group-solo', groupId: group.groupId };
+        }
+        const distribution = await this.pplnsService.getCurrentDistribution();
+        if (distribution.some(d => d.address === address)) {
+            return { mode: 'pplns' };
         }
         return { mode: 'solo' };
     }

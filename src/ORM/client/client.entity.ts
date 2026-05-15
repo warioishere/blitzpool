@@ -1,6 +1,6 @@
 import { Column, Entity, Index, PrimaryColumn } from 'typeorm';
 
-import { DateTimeTransformer } from '../utils/DateTimeTransformer';
+import { epochMsTransformer } from '../utils/epoch-ms-transformer';
 import { TrackedEntity } from '../utils/TrackedEntity.entity';
 
 @Entity()
@@ -24,11 +24,11 @@ export class ClientEntity extends TrackedEntity {
 
 
 
-    @Column({ transformer: new DateTimeTransformer() })
-    startTime: Date;
+    @Column({ type: 'bigint', transformer: epochMsTransformer })
+    startTime: number;
 
-    @Column({ transformer: new DateTimeTransformer(), nullable: true })
-    firstSeen: Date;
+    @Column({ type: 'bigint', nullable: true, transformer: epochMsTransformer })
+    firstSeen: number;
 
     @Column({ type: 'real', default: 0 })
     bestDifficulty: number

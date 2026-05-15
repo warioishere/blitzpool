@@ -93,13 +93,16 @@ describe('StatisticsCoordinatorService – flushClientStatistics → worker_shar
         await (service as any).flushClientStatistics();
 
         expect(mockWorkerShares.addRejectedBulk).toHaveBeenCalledTimes(1);
-        const call = mockWorkerShares.addRejectedBulk.mock.calls[0][0];
-        const rig1 = call.find((u: any) => u.clientName === 'rig1');
-        const rig2 = call.find((u: any) => u.clientName === 'rig2');
+        const [addresses, clientNames, rejectedShares] = mockWorkerShares.addRejectedBulk.mock.calls[0];
+        // Find each rig by clientName and check its (address, rejectedShares).
+        const rig1Idx = clientNames.indexOf('rig1');
+        const rig2Idx = clientNames.indexOf('rig2');
         // rig1: session1(5) + session2(2) = 7
-        expect(rig1).toEqual({ address: 'addr1', clientName: 'rig1', rejectedShares: 7 });
+        expect(addresses[rig1Idx]).toBe('addr1');
+        expect(rejectedShares[rig1Idx]).toBe(7);
         // rig2: 4
-        expect(rig2).toEqual({ address: 'addr1', clientName: 'rig2', rejectedShares: 4 });
+        expect(addresses[rig2Idx]).toBe('addr1');
+        expect(rejectedShares[rig2Idx]).toBe(4);
     });
 
     it('does not call addRejectedBulk when all rejected totals are zero', async () => {

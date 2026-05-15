@@ -50,7 +50,8 @@ function createMockBalanceBacking() {
                 existing.totalPaidSats += sats;
             }
         },
-        touchLastAcceptedShareAt: async (_addr: string) => undefined,
+        markTouch: (_addr: string) => undefined,
+        flushPendingTouches: async () => undefined,
         _rows: rows,
     };
     const applySave = (row: any) => {
@@ -263,7 +264,7 @@ describe('PPLNS Regtest — pending-out-of-miner-cut invariant', () => {
 
         const distributionA = await svcA.getPayoutDistribution(blockReward);
         // Snapshot must be in Redis now.
-        expect(redis._store.get('pplns:snapshot')).toBeTruthy();
+        expect(redis._hashes.has('pplns:snapshot')).toBe(true);
 
         // Simulate pool restart: new service instance, same Redis.
         const svcB = new PplnsService(
@@ -293,7 +294,7 @@ describe('PPLNS Regtest — pending-out-of-miner-cut invariant', () => {
             .toEqual(distributionA.map(d => d.address).sort());
 
         // Snapshot key consumed.
-        expect(redis._store.get('pplns:snapshot')).toBeUndefined();
+        expect(redis._hashes.has('pplns:snapshot')).toBe(false);
 
         console.log('✅ PPLNS snapshot-persist: fresh service instance consumed Redis snapshot');
     }, 120000);

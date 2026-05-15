@@ -88,7 +88,7 @@ function makeService(opts: { emailEnabled?: boolean } = {}) {
         addMemberWithoutAdmin: jest.fn(async (groupId: string, address: string) => {
             const existing = memberRepo.rows.find((m: any) => m.address === address);
             if (existing) throw new (require('./group.service').GroupServiceError)('address-in-group', 'already in another group');
-            const m = { groupId, address, role: 'member', joinedAt: new Date() };
+            const m = { groupId, address, role: 'member', joinedAt: Date.now() };
             memberRepo.rows.push(m);
             return m;
         }),
@@ -100,7 +100,7 @@ function makeService(opts: { emailEnabled?: boolean } = {}) {
         }),
         _verified: new Map<string, any>(),
         _setVerified: (address: string, email: string) => {
-            (addressEmailService as any)._verified.set(address, { address, email, verifiedAt: new Date() });
+            (addressEmailService as any)._verified.set(address, { address, email, verifiedAt: Date.now() });
         },
     };
     const emailService = {
@@ -141,7 +141,8 @@ describe('PplnsGroupInvitationService', () => {
         const r = await service.createInvitation('g1', 'bc1qbob', 'good-token');
         expect(r.email).toBe('bob@example.com');
         expect(r.token).toBeTruthy();
-        expect(r.expiresAt).toBeInstanceOf(Date);
+        expect(typeof r.expiresAt).toBe('number');
+        expect(r.expiresAt).toBeGreaterThan(Date.now());
 
         expect(emailService.sendInvitation).toHaveBeenCalledTimes(1);
         const sent = (emailService.sendInvitation as jest.Mock).mock.calls[0][0];
@@ -211,7 +212,7 @@ describe('PplnsGroupInvitationService', () => {
         // Admin dissolves the group after the invite but before the accept.
         groupService.getGroup = jest.fn(async (id: string) => ({
             id, name: 'Friends', creatorAddress: 'bc1qadmin',
-            dissolvedAt: new Date(),
+            dissolvedAt: Date.now(),
         }));
 
         await expect(service.accept(r.token)).rejects.toMatchObject({ code: 'group-dissolved' });
@@ -287,7 +288,7 @@ describe('PplnsGroupInvitationService', () => {
         const { service, invitationRepo } = makeService();
         const r = await service.createOpenInvite('g1', '24h', 'good-token');
         expect(r.token).toBeTruthy();
-        expect(r.expiresAt.getTime()).toBeGreaterThan(Date.now());
+        expect(r.expiresAt).toBeGreaterThan(Date.now());
 
         expect(invitationRepo.rows).toHaveLength(1);
         const row = invitationRepo.rows[0];
@@ -364,7 +365,7 @@ describe('PplnsGroupInvitationService', () => {
         await service.createOpenInvite('g1', '7d', 'good-token');
         const live = invitationRepo.rows[invitationRepo.rows.length - 1];
         groupService.getGroup = jest.fn(async (id: string) => ({
-            id, name: 'Friends', creatorAddress: 'bc1qadmin', dissolvedAt: new Date(),
+            id, name: 'Friends', creatorAddress: 'bc1qadmin', dissolvedAt: Date.now(),
         }));
         expect(await service.getOpenInvitePublic(live.token)).toBeNull();
     });

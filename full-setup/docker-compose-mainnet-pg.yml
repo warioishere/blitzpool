@@ -137,6 +137,13 @@ services:
       - "0.0.0.0:3335:3335/tcp"
       # PPLNS stratum port (address-routed payouts, sliding N=4×netdiff window)
       - "0.0.0.0:3340:3340/tcp"
+      # PPLNS HighDiff port — same PPLNS ledger semantics as 3340, but
+      # high starting difficulty (default 1M) + mining.suggest_difficulty
+      # blocked so rentals can't downshift on connect. Pool-side VarDiff
+      # is active and retargets normally. Intended for rented hashpower
+      # (Braiins HashPower, MRR, NiceHash) so PPLNS users can consume
+      # rentals without their shares getting routed to solo on port 3339.
+      - "0.0.0.0:3349:3349/tcp"
       # V8 inspector — host loopback only. Inactive at startup; activate
       # without restart via `docker exec public-pool kill -USR1 1`, then
       # SSH-tunnel from laptop: `ssh -L 9229:127.0.0.1:9229 blitzpool@<host>`

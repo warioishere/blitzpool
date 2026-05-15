@@ -127,6 +127,97 @@ export class MiningJob {
         return bitcoinjs.Transaction.fromBuffer(this.coinbaseTransaction.toBuffer());
     }
 
+    /**
+     * Mutates `this.coinbaseTransaction.ins[0].script` to embed the
+     * miner's extranonce, then returns the resulting coinbase txid (= the
+     * non-witness `hash256` of the serialized coinbase). Common helper
+     * shared by `computeShareHeader`, `computeShareMerkleRoot`, and
+     * `copyAndUpdateBlock` — keeps the script-rewrite logic in one place.
+     */
+    private applyExtranonceAndGetCoinbaseHash(extraNonce: string, extraNonce2: string): Buffer {
+        const nonceScript = this.coinbaseTransaction.ins[0].script.toString('hex');
+        // Strip last 24 hex chars (12 bytes = 4 enonce1 + 8 enonce2 slot),
+        // append the actual nonces. Mirrors the same offset arithmetic
+        // copyAndUpdateBlock uses.
+        this.coinbaseTransaction.ins[0].script = Buffer.from(
+            `${nonceScript.substring(0, nonceScript.length - 24)}${extraNonce}${extraNonce2}`,
+            'hex',
+        );
+        return this.coinbaseTransaction.getHash(false);
+    }
+
+    /**
+     * Per-share hot path: produce the 80-byte block header for hash
+     * validation WITHOUT allocating a full `bitcoinjs.Block` or cloning
+     * the block's transaction array.
+     *
+     * Why this exists: the previous hot path called `copyAndUpdateBlock`
+     * which did `block.transactions.map(tx => Object.assign(new Transaction(), tx))`
+     * — at ~3000 tx per block × hundreds of shares/sec on prod this added
+     * up to ~300k object allocations/sec serving ZERO purpose (the very
+     * next line called `toBuffer(true)` which only writes the 80-byte
+     * header and ignores the transactions array). Replacing the round
+     * trip with direct byte assembly produces the same bytes with O(1)
+     * allocations and no transaction-array work at all.
+     *
+     * Byte-equivalence with `copyAndUpdateBlock(...).toBuffer(true)` is
+     * pinned in MiningJob.spec.ts on real templates.
+     *
+     * Block-found path: callers still need to call `copyAndUpdateBlock`
+     * to get the full `bitcoinjs.Block` for `toHex(false)` →
+     * `bitcoind.submitblock`. That code path is sub-microsecond-relevant
+     * given it fires ~once per ~10h on a small pool.
+     */
+    public computeShareHeader(
+        jobTemplate: IJobTemplate,
+        versionMask: number,
+        nonce: number,
+        extraNonce: string,
+        extraNonce2: string,
+        timestamp: number,
+    ): Buffer {
+        const coinbaseHash = this.applyExtranonceAndGetCoinbaseHash(extraNonce, extraNonce2);
+        const merkleRoot = this.calculateMerkleRootHash(coinbaseHash, jobTemplate.merkle_branch);
+
+        let version = jobTemplate.block.version;
+        if (versionMask !== undefined && versionMask !== 0) {
+            version = version ^ versionMask;
+        }
+
+        // Bitcoin block-header wire layout (matches `bitcoinjs.Block.toBuffer(true)`
+        // byte for byte — invariant verified by MiningJob.spec.ts).
+        //   bytes 0..3   version       (Int32LE)
+        //   bytes 4..35  prevHash      (32 raw bytes, already LE-swapped in jobTemplate)
+        //   bytes 36..67 merkleRoot    (32 raw bytes, LE — same orientation bitcoinjs uses)
+        //   bytes 68..71 timestamp     (UInt32LE)
+        //   bytes 72..75 bits          (UInt32LE)
+        //   bytes 76..79 nonce         (UInt32LE)
+        const header = Buffer.alloc(80);
+        header.writeInt32LE(version, 0);
+        jobTemplate.block.prevHash.copy(header, 4);
+        merkleRoot.copy(header, 36);
+        header.writeUInt32LE(timestamp >>> 0, 68);
+        header.writeUInt32LE(jobTemplate.block.bits >>> 0, 72);
+        header.writeUInt32LE(nonce >>> 0, 76);
+        return header;
+    }
+
+    /**
+     * SV2 NewMiningJob hot-ish path: produces only the 32-byte merkle root
+     * for a given extranonce combination, no Block, no header.
+     *
+     * Same byte-for-byte invariant: result equals
+     * `copyAndUpdateBlock(...).merkleRoot` for identical inputs.
+     */
+    public computeShareMerkleRoot(
+        jobTemplate: IJobTemplate,
+        extraNonce: string,
+        extraNonce2: string,
+    ): Buffer {
+        const coinbaseHash = this.applyExtranonceAndGetCoinbaseHash(extraNonce, extraNonce2);
+        return this.calculateMerkleRootHash(coinbaseHash, jobTemplate.merkle_branch);
+    }
+
     public copyAndUpdateBlock(jobTemplate: IJobTemplate, versionMask: number, nonce: number, extraNonce: string, extraNonce2: string, timestamp: number): bitcoinjs.Block {
 
         const testBlock = Object.assign(new bitcoinjs.Block(), jobTemplate.block);

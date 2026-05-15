@@ -113,13 +113,27 @@ export async function _refreshBanCache(): Promise<void> {
       keys.push(...result.keys);
     } while (cursor !== '0');
 
+    // Pipeline TTL reads into one round-trip per batch (was N sequential
+    // awaits — bad under botnet-scale ban counts).
     const seen = new Set<string>();
-    for (const key of keys) {
-      const ip = key.substring('failban:ban:'.length);
-      seen.add(ip);
-      const ttl = await redisClient.ttl(key);
-      if (ttl > 0) {
-        banCache.set(ip, Date.now() + ttl * 1000);
+    if (keys.length > 0) {
+      const BATCH = 500;
+      for (let i = 0; i < keys.length; i += BATCH) {
+        const batch = keys.slice(i, i + BATCH);
+        const pipeline = redisClient.multi();
+        for (const k of batch) pipeline.ttl(k);
+        const results: any[] = await pipeline.exec();
+        for (let j = 0; j < batch.length; j++) {
+          const ip = batch[j].substring('failban:ban:'.length);
+          seen.add(ip);
+          const raw = results[j];
+          // node-redis v4 returns the raw value (number); guard against the
+          // legacy [err, value] tuple form just in case.
+          const ttl = typeof raw === 'number' ? raw : (Array.isArray(raw) ? Number(raw[1]) : NaN);
+          if (Number.isFinite(ttl) && ttl > 0) {
+            banCache.set(ip, Date.now() + ttl * 1000);
+          }
+        }
       }
     }
     // Drop cached entries that no longer exist in Redis (admin removed them)
@@ -278,6 +292,69 @@ export class ProtocolDetectorService implements OnModuleInit {
           + `initialDiff=${clampedInitialDiff}, minDiff=${pplnsMinDifficulty}, `
           + `warmup=${pplnsWarmup} shares`,
         );
+
+        // PPLNS HighDiff sibling port (auto-enabled alongside the regular
+        // PPLNS port). Same `payoutMode: 'pplns'` so shares land in the
+        // PPLNS window. Differs from the regular PPLNS port (3340) in two
+        // ways that matter for rented hashrate:
+        //   1. High starting difficulty (default 1M, vs. ~16k on 3340) —
+        //      the first ~60s before pool-side VarDiff retargets aren't
+        //      flooded with sub-min-diff shares.
+        //   2. `allowSuggestedDifficulty: false` — rental endpoints
+        //      (Braiins HashPower etc.) often send `mining.suggest_difficulty`
+        //      with a low value on connect; on 3340 that'd be honored, on
+        //      3349 it's ignored and the high initial diff stands until
+        //      pool VarDiff adjusts.
+        // Pool-side VarDiff (`checkDifficulty()` retarget every
+        // DIFFICULTY_CHECK_INTERVAL_MS) is ACTIVE on this port — same as
+        // every other port. After the first retarget cycle, this port's
+        // session diff converges on what the actual hashrate demands.
+        // Intended audience: rented hashrate (Braiins HashPower, MRR,
+        // NiceHash) for PPLNS miners. Without this port, PPLNS users had
+        // no PPLNS-credit-preserving rental target: pointing rentals at
+        // 3339 routed shares to solo (no PPLNS credit, see bc1q...8n0
+        // incident 2026-05-13); pointing them at 3340 worked correctness-
+        // wise but the first minute of high-hashrate traffic produced
+        // wasted shares under the start-low VarDiff cycle.
+        const pplnsHighDiffPort = parseInt(
+          this.configService.get<string>('PPLNS_HIGH_DIFF_PORT') ?? '3349',
+          10,
+        );
+        if (
+          !Number.isNaN(pplnsHighDiffPort)
+          && pplnsHighDiffPort !== normalizedDefaultPort
+          && pplnsHighDiffPort !== highDiffPort
+          && pplnsHighDiffPort !== pplnsPort
+        ) {
+          // Reuse the existing STRATUM_HIGH_DIFF_* env vars for initial
+          // difficulty and target shares — the "high diff" semantics are
+          // the same as the solo HighDiff port, only the payout routing
+          // differs. Warmup stays the PPLNS ledger value because warmup
+          // is a PPLNS-ledger-gate concept, not a "high diff" concept.
+          const pplnsHighDiffInitial = Math.max(
+            Number.isNaN(highDiffDifficulty) ? 1000000 : highDiffDifficulty,
+            pplnsMinDifficulty,
+          );
+          const pplnsHighDiffTargetShares = Number.isNaN(highDiffTargetShares)
+            ? normalizedDefaultTargetShares
+            : highDiffTargetShares;
+
+          this.startUnifiedServer({
+            port: pplnsHighDiffPort,
+            initialDifficulty: pplnsHighDiffInitial,
+            allowSuggestedDifficulty: false,
+            targetSharesPerMinute: pplnsHighDiffTargetShares,
+            payoutMode: 'pplns',
+            minimumDifficulty: pplnsMinDifficulty,
+            ledgerWarmupShares: pplnsWarmup,
+          });
+          console.log(
+            `[ProtocolDetector] PPLNS HighDiff port ${pplnsHighDiffPort} configured: `
+            + `initialDiff=${pplnsHighDiffInitial}, target=${pplnsHighDiffTargetShares}/min, `
+            + `suggest_difficulty blocked, pool VarDiff active, `
+            + `warmup=${pplnsWarmup} shares`,
+          );
+        }
       }
     }
 

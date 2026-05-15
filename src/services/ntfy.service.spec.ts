@@ -28,6 +28,7 @@ describe('NtfyService', () => {
 
     const addressSettingsService = {
         getSettings: jest.fn(),
+        getBestDifficultiesForAddresses: jest.fn(async (_addrs: string[]) => new Map<string, number>()),
     };
 
     const clientStatisticsService = {};
@@ -46,6 +47,9 @@ describe('NtfyService', () => {
             clientService as any,
             addressSettingsService as any,
             clientStatisticsService as any,
+            {} as any,
+            {} as any,
+            {} as any,
             {} as any,
             {} as any,
             {} as any,
@@ -89,6 +93,9 @@ describe('NtfyService', () => {
             {} as any,
             {} as any,
             {} as any,
+            {} as any,
+            {} as any,
+            {} as any,
         );
 
         const secondaryService = new NtfyService(
@@ -97,6 +104,9 @@ describe('NtfyService', () => {
             clientService as any,
             addressSettingsService as any,
             clientStatisticsService as any,
+            {} as any,
+            {} as any,
+            {} as any,
             {} as any,
             {} as any,
             {} as any,
@@ -123,5 +133,46 @@ describe('NtfyService', () => {
             })
         );
         expect((secondaryService as any).bestDiffCache.get(address)).toBe(80);
+    });
+
+    it('onModuleInit issues exactly one bulk read for bestDifficulty across all addresses', async () => {
+        configServiceGetMock.mockImplementation((key: string) => {
+            if (key === 'NTFY_SERVER_URL') return 'https://ntfy.example';
+            return null;
+        });
+
+        const addresses = ['addr-1', 'addr-2', 'addr-3'];
+        clientService.getAllAddresses.mockResolvedValue(addresses);
+        addressSettingsService.getBestDifficultiesForAddresses.mockResolvedValue(
+            new Map([['addr-1', 100], ['addr-2', 200]]),
+        );
+        addressSettingsService.getSettings.mockResolvedValue({ bestDifficulty: 999 });
+
+        const service = new NtfyService(
+            configService,
+            telegramSubscriptionsService as any,
+            clientService as any,
+            addressSettingsService as any,
+            clientStatisticsService as any,
+            {} as any,
+            {} as any,
+            {} as any,
+            {} as any,
+            {} as any,
+            {} as any,
+        );
+        // Stub reconnect() to avoid the SSE attempt.
+        (service as any).reconnect = jest.fn();
+
+        await service.onModuleInit();
+
+        expect(addressSettingsService.getBestDifficultiesForAddresses).toHaveBeenCalledTimes(1);
+        expect(addressSettingsService.getBestDifficultiesForAddresses).toHaveBeenCalledWith(addresses);
+        // Old per-address getSettings path is no longer used in init.
+        expect(addressSettingsService.getSettings).not.toHaveBeenCalled();
+        // bestDiffCache populated from the bulk-fetch map (addr-3 → 0 default).
+        expect((service as any).bestDiffCache.get('addr-1')).toBe(100);
+        expect((service as any).bestDiffCache.get('addr-2')).toBe(200);
+        expect((service as any).bestDiffCache.get('addr-3')).toBe(0);
     });
 });

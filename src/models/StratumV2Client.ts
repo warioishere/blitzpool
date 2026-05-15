@@ -685,6 +685,7 @@ export class StratumV2Client {
       extranonceSize: 0,
       sessionDifficulty: channelDifficulty,
       jobIdToDifficulty: new Map(),
+      jobIdToMerkleRoot: new Map(),
       extendedJobs: new Map(),
       latestExtendedPrevHash: Buffer.alloc(32),
       latestExtendedNBits: 0,
@@ -884,6 +885,7 @@ export class StratumV2Client {
       extranonceSize: rollableExtranonceSize,
       sessionDifficulty: channelDifficulty,
       jobIdToDifficulty: new Map(),
+      jobIdToMerkleRoot: new Map(),
       extendedJobs: new Map(),
       latestExtendedPrevHash: Buffer.alloc(32),
       latestExtendedNBits: 0,
@@ -1585,6 +1587,25 @@ export class StratumV2Client {
       );
     } else {
       console.warn(`[SV2 ${this.sessionId}] ❌ Extended share rejected: difficulty-too-low (${submissionDifficulty.toFixed(2)} < ${jobDifficulty.toFixed(2)})`);
+      if (this.debugMessages) {
+        const hadJobDiff = channel.jobIdToDifficulty.has(submission.jobId);
+        console.warn(
+          `[SV2 ${this.sessionId}]    reject-detail: ` +
+          `jobId=${submission.jobId} ` +
+          `jobDiff=${jobDifficulty} (${hadJobDiff ? 'from-store' : 'session-fallback'}) ` +
+          `sessionDiff=${channel.sessionDifficulty} ` +
+          `submitted{version=0x${submission.version.toString(16).padStart(8, '0')} ` +
+          `nonce=0x${submission.nonce.toString(16).padStart(8, '0')} ` +
+          `ntime=${submission.ntime} ` +
+          `extranonce=${submission.extranonce.toString('hex')}} ` +
+          `header{bits=0x${extJob.nBits.toString(16)} ` +
+          `prevHash=${extJob.prevHash.toString('hex').substring(0, 16)}... ` +
+          `merkleRoot=${merkleRoot.toString('hex').substring(0, 16)}...} ` +
+          `hash=${hashBuffer.toString('hex').substring(0, 16)}... ` +
+          `prefixLen=${extJob.coinbasePrefix.length} suffixLen=${extJob.coinbaseSuffix.length} ` +
+          `extranoncePrefix=${channel.extranoncePrefix?.toString('hex') ?? '(none)'}`,
+        );
+      }
       await this.recordRejectedShare('LowDifficultyShare', jobDifficulty);
       await this.sendShareError(submission.channelId, submission.sequenceNumber, 'difficulty-too-low');
     }
@@ -1777,8 +1798,8 @@ export class StratumV2Client {
         jobDifficulty,
       );
 
-      const now = new Date();
-      if (!this.entity!.updatedAt || now.getTime() - this.entity!.updatedAt.getTime() > 60000) {
+      const now = Date.now();
+      if (!this.entity!.updatedAt || now - this.entity!.updatedAt > 60000) {
         await this.clientService.heartbeat(
           this.entity!.address,
           this.entity!.clientName,
@@ -1793,11 +1814,11 @@ export class StratumV2Client {
       await this.clientDifficultyStatisticsService.recordShareDifficulty({
         address: this.address!,
         clientName: shareWorkerName,
-        timestamp: now.getTime(),
+        timestamp: now,
         difficulty: submissionDifficulty,
       });
 
-      if (now.getTime() - this.lastDifficultyCheck >= this.difficultyCheckIntervalMs) {
+      if (now - this.lastDifficultyCheck >= this.difficultyCheckIntervalMs) {
         if (channel.isJdClient) {
           await this.checkJdClientDifficulty(submissionDifficulty);
         } else {
@@ -2146,17 +2167,9 @@ export class StratumV2Client {
     // (4-byte enonce1 + 8-byte enonce2). Standard channels don't put anything
     // user-controlled here — only the channel's prefix differentiates merkle roots.
     const extraNonce2 = '0000000000000000';
-    const updatedBlock = job.copyAndUpdateBlock(
-      jobTemplate,
-      0,             // no version mask (doesn't affect merkle root)
-      0,             // nonce doesn't affect merkle root
-      extraNonce1,
-      extraNonce2,
-      jobTemplate.block.timestamp,
-    );
-    const merkleRoot = updatedBlock.merkleRoot
-      ? Buffer.from(updatedBlock.merkleRoot)
-      : Buffer.alloc(32);
+    // Only the merkle root is needed for NewMiningJob — `computeShareMerkleRoot`
+    // skips the full Block allocation that `copyAndUpdateBlock` would do.
+    const merkleRoot = job.computeShareMerkleRoot(jobTemplate, extraNonce1, extraNonce2);
 
     const jobPayload = serializeNewMiningJob({
       channelId: targetChannelId,
@@ -2178,9 +2191,20 @@ export class StratumV2Client {
 
     // Store job-specific difficulty (SV2 spec: shares validated against target from when job was sent)
     channel.jobIdToDifficulty.set(parseInt(job.jobId, 16), channel.sessionDifficulty);
+    // Store the merkle root we sent so share validation hashes the exact same
+    // 80-byte header — see jobIdToMerkleRoot doc on StratumV2ChannelState.
+    channel.jobIdToMerkleRoot.set(parseInt(job.jobId, 16), Buffer.from(merkleRoot));
 
     if (this.debugMessages) {
-      console.log(`[SV2 ${this.sessionId}] 📨 NewMiningJob: channel=${targetChannelId}, jobId=0x${job.jobId}, height=${jobTemplate.blockData.height}, version=0x${jobTemplate.block.version.toString(16)}, futureJob=${!sendPrevHash}, merkleRoot=${merkleRoot.toString('hex').substring(0, 16)}...`);
+      console.log(
+        `[SV2 ${this.sessionId}] 📨 NewMiningJob: channel=${targetChannelId}, jobId=0x${job.jobId}, ` +
+        `templateId=${jobTemplate.blockData.id}, height=${jobTemplate.blockData.height}, ` +
+        `futureJob=${!sendPrevHash}, version=0x${jobTemplate.block.version.toString(16).padStart(8, '0')}, ` +
+        `bits=0x${jobTemplate.block.bits.toString(16).padStart(8, '0')}, ` +
+        `prevHash=${jobTemplate.block.prevHash.toString('hex')}, ` +
+        `merkleRoot=${merkleRoot.toString('hex')}, ` +
+        `en1=${extraNonce1}, en2=${extraNonce2}`,
+      );
     }
 
     // Send SetNewPrevHash if clearing jobs (new block)
@@ -2199,7 +2223,13 @@ export class StratumV2Client {
       await this.sendFrame(Sv2MsgType.SET_NEW_PREV_HASH, prevHashPayload, SV2_CHANNEL_MSG_FLAG);
 
       if (this.debugMessages) {
-        console.log(`[SV2 ${this.sessionId}] 🔗 SetNewPrevHash: channel=${targetChannelId}, jobId=0x${job.jobId}, height=${jobTemplate.blockData.height}, prevHash=${prevHash.toString('hex').substring(0, 16)}..., nBits=0x${jobTemplate.block.bits.toString(16)}, minNtime=${jobTemplate.block.timestamp}`);
+        console.log(
+          `[SV2 ${this.sessionId}] 🔗 SetNewPrevHash: channel=${targetChannelId}, jobId=0x${job.jobId}, ` +
+          `templateId=${jobTemplate.blockData.id}, height=${jobTemplate.blockData.height}, ` +
+          `prevHash=${prevHash.toString('hex')}, ` +
+          `nBits=0x${jobTemplate.block.bits.toString(16).padStart(8, '0')}, ` +
+          `minNtime=${jobTemplate.block.timestamp}`,
+        );
       }
     }
   }
@@ -2260,34 +2290,58 @@ export class StratumV2Client {
       return;
     }
 
-    // Reconstruct block
-    // versionMask = submitted version XOR base version
-    const versionMask = submission.version ^ jobTemplate.block.version;
-    const extraNonce1 = channel.extranoncePrefix.toString('hex');
-    // Zero-pad extraNonce2 to fill remaining extranonce space (12-byte slot:
-    // 4-byte prefix + 8-byte enonce2). Must match the value used in
-    // sendNewMiningJob to produce the same merkleRoot for share validation.
-    const extraNonce2 = '0000000000000000';
+    // SV2 Standard channels: hash exactly the 80-byte header the miner did.
+    // Use the merkle root we stored at NewMiningJob send time — recomputing
+    // via MiningJob.applyExtranonceAndGetCoinbaseHash mutates the coinbase
+    // script and is fragile under message-ordering edge cases (BraiinsOS
+    // Standard SV2 was rejecting ~19% of shares as 0.00-diff before this fix
+    // because the recomputed merkleRoot diverged from the one sent).
+    // Pattern mirrors SRI's channels-sv2 server/standard.rs:595 — store the
+    // merkleRoot at send time, use it byte-for-byte at validate time.
+    const sentMerkleRoot = channel.jobIdToMerkleRoot.get(submission.jobId);
+    if (!sentMerkleRoot) {
+      // Should not happen: jobIdToDifficulty resolved above means the job
+      // is active. Defensive — same treatment as a stale job.
+      await this.recordRejectedShare('JobNotFound', channel.sessionDifficulty);
+      await this.sendShareError(submission.channelId, submission.sequenceNumber, 'invalid-job-id');
+      return;
+    }
 
-    const updatedJobBlock = job.copyAndUpdateBlock(
-      jobTemplate,
-      versionMask,
-      submission.nonce,
-      extraNonce1,
-      extraNonce2,
-      submission.ntime,
-    );
-    const header = updatedJobBlock.toBuffer(true);
+    // Header reconstruction — same layout as MiningJob.computeShareHeader,
+    // but driven by the stored merkleRoot instead of re-applying extranonce.
+    let version = jobTemplate.block.version;
+    const versionMask = submission.version ^ jobTemplate.block.version;
+    if (versionMask !== 0) {
+      version = version ^ versionMask;
+    }
+    const header = Buffer.alloc(80);
+    header.writeInt32LE(version, 0);
+    jobTemplate.block.prevHash.copy(header, 4);
+    sentMerkleRoot.copy(header, 36);
+    header.writeUInt32LE(submission.ntime >>> 0, 68);
+    header.writeUInt32LE(jobTemplate.block.bits >>> 0, 72);
+    header.writeUInt32LE(submission.nonce >>> 0, 76);
+
     const { submissionDifficulty, hashBuffer } = DifficultyUtils.calculateDifficulty(header);
 
     // Look up job-specific difficulty (SV2 spec: validate against target from when job was sent)
     const jobDifficulty = channel.jobIdToDifficulty.get(submission.jobId) ?? channel.sessionDifficulty;
+    // Used below only for block reconstruction on network-diff hits.
+    const extraNonce1 = channel.extranoncePrefix.toString('hex');
+    const extraNonce2 = '0000000000000000';
 
     if (this.debugMessages) console.log(`[SV2 ${this.sessionId}] 🎯 Share difficulty: ${submissionDifficulty.toFixed(2)} (target: ${jobDifficulty.toFixed(2)})`);
 
     // Exact accept/reject via direct hash≤target compare — see meetsTarget().
     const jobTarget = DifficultyUtils.difficultyToTarget(jobDifficulty);
     if (DifficultyUtils.meetsTarget(hashBuffer, jobTarget)) {
+      // Build full Block lazily, only when we have a block-finder.
+      let updatedJobBlock: bitcoinjs.Block | null = null;
+      if (submissionDifficulty >= jobTemplate.blockData.networkDifficulty) {
+        updatedJobBlock = job.copyAndUpdateBlock(
+          jobTemplate, versionMask, submission.nonce, extraNonce1, extraNonce2, submission.ntime,
+        );
+      }
       await this.handleValidShare(
         submission,
         submissionDifficulty,
@@ -2301,6 +2355,37 @@ export class StratumV2Client {
     } else {
       // Low difficulty
       console.warn(`[SV2 ${this.sessionId}] ❌ Share rejected: difficulty-too-low (${submissionDifficulty.toFixed(2)} < ${jobDifficulty.toFixed(2)})`);
+      if (this.debugMessages) {
+        const hadJobDiff = channel.jobIdToDifficulty.has(submission.jobId);
+        // Recompute the merkle root with the SAME en1/en2 that sendNewMiningJob
+        // would have used. If this differs from the stored sentMerkleRoot,
+        // it means the MiningJob's coinbase script was mutated between
+        // send and validate (state-mutation bug). If it's identical to
+        // sentMerkleRoot but the miner's hash still mismatches, the bug
+        // is elsewhere (e.g., the miner is using a different prevHash).
+        let recomputedMerkle: string;
+        try {
+          recomputedMerkle = job.computeShareMerkleRoot(jobTemplate, extraNonce1, extraNonce2).toString('hex');
+        } catch (e) {
+          recomputedMerkle = `<error: ${(e as Error).message}>`;
+        }
+        console.warn(
+          `[SV2 ${this.sessionId}]    reject-detail: ` +
+          `jobId=0x${submission.jobId.toString(16)} ` +
+          `jobDiff=${jobDifficulty} (${hadJobDiff ? 'from-store' : 'session-fallback'}) ` +
+          `sessionDiff=${channel.sessionDifficulty} ` +
+          `submitted{version=0x${submission.version.toString(16).padStart(8, '0')} ` +
+          `nonce=0x${submission.nonce.toString(16).padStart(8, '0')} ` +
+          `ntime=${submission.ntime}} ` +
+          `template{id=${jobTemplate.blockData.id} height=${jobTemplate.blockData.height} retiredAt=${jobTemplate.blockData.retiredAt ?? 'active'} ` +
+          `prevHash=${jobTemplate.block.prevHash.toString('hex')} ` +
+          `bits=0x${jobTemplate.block.bits.toString(16).padStart(8, '0')} ` +
+          `tplVersion=0x${jobTemplate.block.version.toString(16).padStart(8, '0')}} ` +
+          `merkle{sent=${sentMerkleRoot.toString('hex')} recomputed=${recomputedMerkle} match=${sentMerkleRoot.toString('hex') === recomputedMerkle}} ` +
+          `header80=${header.toString('hex')} ` +
+          `hash=${hashBuffer.toString('hex')}`,
+        );
+      }
       await this.recordRejectedShare('LowDifficultyShare', jobDifficulty);
       await this.sendShareError(submission.channelId, submission.sequenceNumber, 'difficulty-too-low');
     }
@@ -2314,7 +2399,16 @@ export class StratumV2Client {
     if (targetDiff == null || !Number.isFinite(targetDiff)) return;
 
     if (targetDiff !== this.sessionDifficulty) {
+      const previousDiff = this.sessionDifficulty;
       this.sessionDifficulty = targetDiff;
+
+      if (this.debugMessages) {
+        console.log(
+          `[SV2 ${this.sessionId}] 🔧 Vardiff ratchet: ${previousDiff.toFixed(4)} → ${targetDiff.toFixed(4)} ` +
+          `(${targetDiff > previousDiff ? 'up' : 'down'} ×${(targetDiff / previousDiff).toFixed(2)}, ` +
+          `channels=${this.channels.size})`,
+        );
+      }
 
       if (this.entity) {
         try {
@@ -2327,6 +2421,7 @@ export class StratumV2Client {
 
       // Send SetTarget to all channels (clamped per-channel against declared maxTarget)
       for (const channel of this.channels.values()) {
+        const previousChannelDiff = channel.sessionDifficulty;
         const clampedDiff = DifficultyUtils.clampDifficultyToMaxTarget(targetDiff, channel.declaredMaxTarget);
         channel.sessionDifficulty = clampedDiff;
         const target = DifficultyUtils.difficultyToTarget(clampedDiff);
@@ -2337,7 +2432,13 @@ export class StratumV2Client {
         await this.sendFrame(Sv2MsgType.SET_TARGET, targetPayload, SV2_CHANNEL_MSG_FLAG);
 
         if (this.debugMessages) {
-          console.log(`[SV2 ${this.sessionId}] 🎯 SetTarget: channel=${channel.channelId}, difficulty=${clampedDiff.toFixed(4)}, target=${target.toString('hex').substring(0, 16)}...`);
+          const wasClamped = clampedDiff !== targetDiff;
+          console.log(
+            `[SV2 ${this.sessionId}] 🎯 SetTarget: channel=${channel.channelId}, ` +
+            `diff=${previousChannelDiff.toFixed(4)} → ${clampedDiff.toFixed(4)}${wasClamped ? ' (clamped to declared max)' : ''}, ` +
+            `target=${target.toString('hex').substring(0, 16)}..., ` +
+            `inflight={jobs=${channel.jobIdToDifficulty.size}, merkleRoots=${channel.jobIdToMerkleRoot.size}, extendedJobs=${channel.extendedJobs.size}}`,
+          );
         }
       }
 
@@ -2528,6 +2629,7 @@ export class StratumV2Client {
               }
             }
             ch.jobIdToDifficulty.clear();
+            ch.jobIdToMerkleRoot.clear();
           }
         }
         await this.broadcastNewJobToAllChannels(jt, jt.blockData.clearJobs);
@@ -2634,7 +2736,7 @@ export class StratumV2Client {
     this.creatingEntity = (async () => {
       try {
         const firstSeen = await this.clientService.getFirstSeenIfRecent(this.address!, this.workerName);
-        const startTime = new Date();
+        const startTime = Date.now();
         this.entity = await this.clientService.insert({
           sessionId: this.sessionId,
           address: this.address!,

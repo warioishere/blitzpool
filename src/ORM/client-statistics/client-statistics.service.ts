@@ -1,45 +1,32 @@
 import { Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
+import { DataSource, Repository } from 'typeorm';
 
 import { ClientStatisticsEntity } from './client-statistics.entity';
 import { ClientEntity } from '../client/client.entity';
 import { PoolShareStatisticsEntity } from '../pool-share-statistics/pool-share-statistics.entity';
 import { DIFFICULTY_1, MAX_REASONABLE_DIFFICULTY } from '../../constants/mining.constants';
 import { TimeSlotHelper } from '../../utils/time-slot.helper';
+import { RecordDeltaBuffer } from '../../utils/buffers';
 
-/**
- * In-memory bucket for an (address, clientName, sessionId, slot) tuple.
- * Mirrors the field set of the PG `client_statistics_entity` row.
- */
-interface ClientSlotBucket {
-  shares: number;
-  acceptedCount: number;
-  rejectedCount: number;
-  rejectedJobNotFoundCount: number;
-  rejectedJobNotFoundDiff1: number;
-  rejectedDuplicateShareCount: number;
-  rejectedDuplicateShareDiff1: number;
-  rejectedLowDifficultyShareCount: number;
-  rejectedLowDifficultyShareDiff1: number;
-}
+/** Bucket field set — mirrors the PG row's numeric columns. */
+type BucketField =
+  | 'shares'
+  | 'acceptedCount'
+  | 'rejectedCount'
+  | 'rejectedJobNotFoundCount'
+  | 'rejectedJobNotFoundDiff1'
+  | 'rejectedDuplicateShareCount'
+  | 'rejectedDuplicateShareDiff1'
+  | 'rejectedLowDifficultyShareCount'
+  | 'rejectedLowDifficultyShareDiff1';
 
-interface ClientSlotEntry {
-  address: string;
-  clientName: string;
-  sessionId: string;
-  time: number;
-  bucket: ClientSlotBucket;
-}
-
-function emptyBucket(): ClientSlotBucket {
-  return {
-    shares: 0, acceptedCount: 0, rejectedCount: 0,
-    rejectedJobNotFoundCount: 0, rejectedJobNotFoundDiff1: 0,
-    rejectedDuplicateShareCount: 0, rejectedDuplicateShareDiff1: 0,
-    rejectedLowDifficultyShareCount: 0, rejectedLowDifficultyShareDiff1: 0,
-  };
-}
+const BUCKET_FIELDS: readonly BucketField[] = [
+  'shares', 'acceptedCount', 'rejectedCount',
+  'rejectedJobNotFoundCount', 'rejectedJobNotFoundDiff1',
+  'rejectedDuplicateShareCount', 'rejectedDuplicateShareDiff1',
+  'rejectedLowDifficultyShareCount', 'rejectedLowDifficultyShareDiff1',
+];
 
 @Injectable()
 export class ClientStatisticsService {
@@ -49,6 +36,8 @@ export class ClientStatisticsService {
     private clientStatisticsRepository: Repository<ClientStatisticsEntity>,
     @InjectRepository(PoolShareStatisticsEntity)
     private poolShareStatisticsRepository: Repository<PoolShareStatisticsEntity>,
+    @InjectDataSource()
+    private readonly dataSource: DataSource,
   ) {}
 
   /**
@@ -58,7 +47,7 @@ export class ClientStatisticsService {
    * The bucket carries a copy of the key components so drain can produce flat
    * records without re-parsing.
    */
-  private readonly deltas = new Map<string, ClientSlotEntry>();
+  private readonly deltas = new RecordDeltaBuffer<string, BucketField>(BUCKET_FIELDS);
 
   private keyOf(address: string, clientName: string, sessionId: string, slot: number): string {
     return `${address}|${clientName}|${sessionId}|${slot}`;
@@ -73,13 +62,6 @@ export class ClientStatisticsService {
       console.warn(`[ClientStatisticsService] Discarded non-finite share: difficulty=${difficulty}`);
       return;
     }
-    // Defense-in-depth ceiling. `client_statistics_entity.shares` and the
-    // four rejected*Diff1 columns are PG `real` (max ~3.4e38). The upstream
-    // stratum channel-diff clamp normally prevents per-share values from
-    // exceeding ~3× netdiff, but a misconfigured SV2 client opening a channel
-    // with absurdly small maxTarget could slip through. Discard at write
-    // time so the bucket stays flushable. Mirrors the guard in
-    // PoolShareStatistics/PoolModeHashrate.
     if (difficulty > MAX_REASONABLE_DIFFICULTY) {
       console.warn(
         `[ClientStatisticsService] Discarded out-of-range accepted share: difficulty=${difficulty} (limit ${MAX_REASONABLE_DIFFICULTY})`,
@@ -88,13 +70,7 @@ export class ClientStatisticsService {
     }
     const slot = TimeSlotHelper.getCurrentSlot();
     const k = this.keyOf(client.address, client.clientName, client.sessionId, slot);
-    let entry = this.deltas.get(k);
-    if (!entry) {
-      entry = { address: client.address, clientName: client.clientName, sessionId: client.sessionId, time: slot, bucket: emptyBucket() };
-      this.deltas.set(k, entry);
-    }
-    entry.bucket.shares += difficulty;
-    entry.bucket.acceptedCount += 1;
+    this.deltas.addRecord(k, { shares: difficulty, acceptedCount: 1 });
   }
 
   /**
@@ -120,34 +96,26 @@ export class ClientStatisticsService {
 
     const slot = TimeSlotHelper.getCurrentSlot();
     const k = this.keyOf(client.address, client.clientName, client.sessionId, slot);
-    let entry = this.deltas.get(k);
-    if (!entry) {
-      entry = { address: client.address, clientName: client.clientName, sessionId: client.sessionId, time: slot, bucket: emptyBucket() };
-      this.deltas.set(k, entry);
-    }
-    const b = entry.bucket;
-    b.rejectedCount += 1;
+    const partial: Partial<Record<BucketField, number>> = { rejectedCount: 1 };
     switch (reason) {
       case 'JobNotFound':
       case 'Stale':
-        b.rejectedJobNotFoundCount += 1;
-        b.rejectedJobNotFoundDiff1 += difficulty;
+        partial.rejectedJobNotFoundCount = 1;
+        partial.rejectedJobNotFoundDiff1 = difficulty;
         break;
       case 'DuplicateShare':
-        b.rejectedDuplicateShareCount += 1;
-        b.rejectedDuplicateShareDiff1 += difficulty;
+        partial.rejectedDuplicateShareCount = 1;
+        partial.rejectedDuplicateShareDiff1 = difficulty;
         break;
       case 'LowDifficultyShare':
-        b.rejectedLowDifficultyShareCount += 1;
-        b.rejectedLowDifficultyShareDiff1 += difficulty;
+        partial.rejectedLowDifficultyShareCount = 1;
+        partial.rejectedLowDifficultyShareDiff1 = difficulty;
         break;
     }
+    this.deltas.addRecord(k, partial);
   }
 
-  /**
-   * Coordinator API — snapshot of pending bucket deltas in record shape
-   * compatible with the existing `bulkUpsertClientStatistics` UNNEST upsert.
-   */
+  /** Drain rows: flat record shape consumed by `bulkUpsertClientStatistics`. */
   public drainDeltas(): Array<{
     address: string; clientName: string; sessionId: string; time: number;
     shares: number; acceptedCount: number; rejectedCount: number;
@@ -155,56 +123,44 @@ export class ClientStatisticsService {
     rejectedDuplicateShareCount: number; rejectedDuplicateShareDiff1: number;
     rejectedLowDifficultyShareCount: number; rejectedLowDifficultyShareDiff1: number;
   }> {
+    const snap = this.deltas.drain();
     const out: Array<any> = [];
-    for (const { address, clientName, sessionId, time, bucket: b } of this.deltas.values()) {
-      // Skip buckets that have nothing pending.
-      if (b.shares === 0 && b.acceptedCount === 0 && b.rejectedCount === 0) continue;
-      out.push({
-        address, clientName, sessionId, time,
-        shares: b.shares,
-        acceptedCount: b.acceptedCount,
-        rejectedCount: b.rejectedCount,
-        rejectedJobNotFoundCount: b.rejectedJobNotFoundCount,
-        rejectedJobNotFoundDiff1: b.rejectedJobNotFoundDiff1,
-        rejectedDuplicateShareCount: b.rejectedDuplicateShareCount,
-        rejectedDuplicateShareDiff1: b.rejectedDuplicateShareDiff1,
-        rejectedLowDifficultyShareCount: b.rejectedLowDifficultyShareCount,
-        rejectedLowDifficultyShareDiff1: b.rejectedLowDifficultyShareDiff1,
-      });
+    for (const [key, bucket] of snap) {
+      const idx = key.indexOf('|');
+      const idx2 = key.indexOf('|', idx + 1);
+      const idx3 = key.indexOf('|', idx2 + 1);
+      const address = key.slice(0, idx);
+      const clientName = key.slice(idx + 1, idx2);
+      const sessionId = key.slice(idx2 + 1, idx3);
+      const time = parseInt(key.slice(idx3 + 1), 10);
+      out.push({ address, clientName, sessionId, time, ...bucket });
     }
     return out;
   }
 
-  /**
-   * Coordinator API — subtract a previously-drained snapshot. Buckets that
-   * end up fully empty are removed from the map.
-   */
+  /** Subtract a previously-drained snapshot. */
   public confirmFlush(flushed: Array<{ address: string; clientName: string; sessionId: string; time: number;
     shares: number; acceptedCount: number; rejectedCount: number;
     rejectedJobNotFoundCount: number; rejectedJobNotFoundDiff1: number;
     rejectedDuplicateShareCount: number; rejectedDuplicateShareDiff1: number;
     rejectedLowDifficultyShareCount: number; rejectedLowDifficultyShareDiff1: number;
   }>): void {
+    const snap = new Map<string, Record<BucketField, number>>();
     for (const f of flushed) {
       const k = this.keyOf(f.address, f.clientName, f.sessionId, f.time);
-      const entry = this.deltas.get(k);
-      if (!entry) continue;
-      const b = entry.bucket;
-      b.shares -= f.shares;
-      b.acceptedCount -= f.acceptedCount;
-      b.rejectedCount -= f.rejectedCount;
-      b.rejectedJobNotFoundCount -= f.rejectedJobNotFoundCount;
-      b.rejectedJobNotFoundDiff1 -= f.rejectedJobNotFoundDiff1;
-      b.rejectedDuplicateShareCount -= f.rejectedDuplicateShareCount;
-      b.rejectedDuplicateShareDiff1 -= f.rejectedDuplicateShareDiff1;
-      b.rejectedLowDifficultyShareCount -= f.rejectedLowDifficultyShareCount;
-      b.rejectedLowDifficultyShareDiff1 -= f.rejectedLowDifficultyShareDiff1;
-      if (b.shares <= 0 && b.acceptedCount <= 0 && b.rejectedCount <= 0
-          && b.rejectedJobNotFoundCount <= 0 && b.rejectedDuplicateShareCount <= 0
-          && b.rejectedLowDifficultyShareCount <= 0) {
-        this.deltas.delete(k);
-      }
+      snap.set(k, {
+        shares: f.shares,
+        acceptedCount: f.acceptedCount,
+        rejectedCount: f.rejectedCount,
+        rejectedJobNotFoundCount: f.rejectedJobNotFoundCount,
+        rejectedJobNotFoundDiff1: f.rejectedJobNotFoundDiff1,
+        rejectedDuplicateShareCount: f.rejectedDuplicateShareCount,
+        rejectedDuplicateShareDiff1: f.rejectedDuplicateShareDiff1,
+        rejectedLowDifficultyShareCount: f.rejectedLowDifficultyShareCount,
+        rejectedLowDifficultyShareDiff1: f.rejectedLowDifficultyShareDiff1,
+      });
     }
+    this.deltas.confirm(snap);
   }
 
   private calcHashRate(shares: number) {
@@ -231,7 +187,7 @@ export class ClientStatisticsService {
           clientStatistic.rejectedLowDifficultyShareCount,
         rejectedLowDifficultyShareDiff1:
           clientStatistic.rejectedLowDifficultyShareDiff1,
-        updatedAt: new Date(),
+        updatedAt: Date.now(),
       },
     );
   }
@@ -284,7 +240,7 @@ export class ClientStatisticsService {
           "rejectedDuplicateShareDiff1" = EXCLUDED."rejectedDuplicateShareDiff1",
           "rejectedLowDifficultyShareCount" = EXCLUDED."rejectedLowDifficultyShareCount",
           "rejectedLowDifficultyShareDiff1" = EXCLUDED."rejectedLowDifficultyShareDiff1",
-          "updatedAt" = NOW()
+          "updatedAt" = (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint
       `;
 
       await this.clientStatisticsRepository.query(query, values);
@@ -370,7 +326,7 @@ export class ClientStatisticsService {
 
       const query = `
         UPDATE client_statistics_entity
-        SET ${setClauses}, "updatedAt" = NOW()
+        SET ${setClauses}, "updatedAt" = (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint
         WHERE (address, "clientName", "sessionId", time) IN (${whereTuples})
       `;
 
@@ -413,144 +369,21 @@ export class ClientStatisticsService {
   }
 
   public async deleteOldStatistics() {
-    const now = Date.now();
-    const detailCutoffTimestamp = new Date(now - 7 * 24 * 60 * 60 * 1000).getTime();
-    const halfYearCutoffTimestamp = new Date(now - 180 * 24 * 60 * 60 * 1000).getTime();
-    const monthCutoffTimestamp = new Date(now - 30 * 24 * 60 * 60 * 1000).getTime();
-
-    const baseFilters = {
-      detailCutoff: detailCutoffTimestamp,
-      pool: 'POOL',
-      agg: 'AGG',
-    } as const;
-
-    const poolAggregates = await this.clientStatisticsRepository
-      .createQueryBuilder('stat')
-      .select('stat.time', 'time')
-      .addSelect('SUM(stat.shares)', 'shares')
-      .addSelect('SUM(stat.acceptedCount)', 'acceptedCount')
-      .addSelect('SUM(stat.rejectedCount)', 'rejectedCount')
-      .addSelect('SUM(stat.rejectedJobNotFoundCount)', 'rejectedJobNotFoundCount')
-      .addSelect('SUM(stat.rejectedJobNotFoundDiff1)', 'rejectedJobNotFoundDiff1')
-      .addSelect('SUM(stat.rejectedDuplicateShareCount)', 'rejectedDuplicateShareCount')
-      .addSelect('SUM(stat.rejectedDuplicateShareDiff1)', 'rejectedDuplicateShareDiff1')
-      .addSelect('SUM(stat.rejectedLowDifficultyShareCount)', 'rejectedLowDifficultyShareCount')
-      .addSelect('SUM(stat.rejectedLowDifficultyShareDiff1)', 'rejectedLowDifficultyShareDiff1')
-      .where('stat.time < :detailCutoff', baseFilters)
-      .andWhere(
-        'NOT (stat.address = :pool AND stat.clientName = :pool AND stat.sessionId = :pool)',
-        baseFilters,
-      )
-      .andWhere('stat.sessionId != :agg', baseFilters)
-      .groupBy('stat.time')
-      .getRawMany();
-
-    if (poolAggregates.length > 0) {
-      const insertedAt = new Date();
-      await this.clientStatisticsRepository
-        .createQueryBuilder()
-        .insert()
-        .into(ClientStatisticsEntity)
-        .values(
-          poolAggregates.map((row) => ({
-            address: 'POOL',
-            clientName: 'POOL',
-            sessionId: 'POOL',
-            time: Number(row.time),
-            shares: Number(row.shares ?? 0),
-            acceptedCount: Number(row.acceptedCount ?? 0),
-            rejectedCount: Number(row.rejectedCount ?? 0),
-            rejectedJobNotFoundCount: Number(row.rejectedJobNotFoundCount ?? 0),
-            rejectedJobNotFoundDiff1: Number(row.rejectedJobNotFoundDiff1 ?? 0),
-            rejectedDuplicateShareCount: Number(row.rejectedDuplicateShareCount ?? 0),
-            rejectedDuplicateShareDiff1: Number(row.rejectedDuplicateShareDiff1 ?? 0),
-            rejectedLowDifficultyShareCount: Number(row.rejectedLowDifficultyShareCount ?? 0),
-            rejectedLowDifficultyShareDiff1: Number(row.rejectedLowDifficultyShareDiff1 ?? 0),
-            createdAt: insertedAt,
-            updatedAt: insertedAt,
-          })),
-        )
-        .execute();
-    }
-
-    const workerAggregates = await this.clientStatisticsRepository
-      .createQueryBuilder('stat')
-      .select('stat.address', 'address')
-      .addSelect('stat.clientName', 'clientName')
-      .addSelect('SUM(stat.shares)', 'shares')
-      .addSelect('SUM(stat.acceptedCount)', 'acceptedCount')
-      .addSelect('SUM(stat.rejectedCount)', 'rejectedCount')
-      .addSelect('SUM(stat.rejectedJobNotFoundCount)', 'rejectedJobNotFoundCount')
-      .addSelect('SUM(stat.rejectedJobNotFoundDiff1)', 'rejectedJobNotFoundDiff1')
-      .addSelect('SUM(stat.rejectedDuplicateShareCount)', 'rejectedDuplicateShareCount')
-      .addSelect('SUM(stat.rejectedDuplicateShareDiff1)', 'rejectedDuplicateShareDiff1')
-      .addSelect('SUM(stat.rejectedLowDifficultyShareCount)', 'rejectedLowDifficultyShareCount')
-      .addSelect('SUM(stat.rejectedLowDifficultyShareDiff1)', 'rejectedLowDifficultyShareDiff1')
-      .where('stat.time < :detailCutoff', baseFilters)
-      .andWhere('stat.sessionId != :agg', baseFilters)
-      .andWhere(
-        'NOT (stat.address = :pool AND stat.clientName = :pool AND stat.sessionId = :pool)',
-        baseFilters,
-      )
-      .groupBy('stat.address')
-      .addGroupBy('stat.clientName')
-      .getRawMany();
-
-    if (workerAggregates.length > 0) {
-      const insertedAt = new Date();
-      await this.clientStatisticsRepository
-        .createQueryBuilder()
-        .insert()
-        .into(ClientStatisticsEntity)
-        .values(
-          workerAggregates.map((row) => ({
-            address: row.address,
-            clientName: row.clientName,
-            sessionId: 'AGG',
-            time: detailCutoffTimestamp,
-            shares: Number(row.shares ?? 0),
-            acceptedCount: Number(row.acceptedCount ?? 0),
-            rejectedCount: Number(row.rejectedCount ?? 0),
-            rejectedJobNotFoundCount: Number(row.rejectedJobNotFoundCount ?? 0),
-            rejectedJobNotFoundDiff1: Number(row.rejectedJobNotFoundDiff1 ?? 0),
-            rejectedDuplicateShareCount: Number(row.rejectedDuplicateShareCount ?? 0),
-            rejectedDuplicateShareDiff1: Number(row.rejectedDuplicateShareDiff1 ?? 0),
-            rejectedLowDifficultyShareCount: Number(row.rejectedLowDifficultyShareCount ?? 0),
-            rejectedLowDifficultyShareDiff1: Number(row.rejectedLowDifficultyShareDiff1 ?? 0),
-            createdAt: insertedAt,
-            updatedAt: insertedAt,
-          })),
-        )
-        .execute();
-    }
-
+    // Simple flat 14-day retention. The old code rolled detail rows >7d
+    // into per-worker (sessionId='AGG') and pool-wide (address/clientName/
+    // sessionId='POOL') aggregate rows, then aged those at 180d / 30d
+    // respectively. That existed for chart views older than 7d (per-worker
+    // and pool-wide '1m' = 30d). The UI now shows nothing older than 14d
+    // for these tables — pool-wide 30d / sinceBlock totals come from the
+    // separate pool_share_statistics_entity which is intentionally
+    // exempt from cleanup. Lifetime per-(address, worker) running totals
+    // live in worker_shares_entity. So no rollup is needed here — detail
+    // rows just expire at the 14-day boundary.
+    const cutoff = Date.now() - 14 * 24 * 60 * 60 * 1000;
     await this.clientStatisticsRepository
       .createQueryBuilder()
       .delete()
-      .from(ClientStatisticsEntity)
-      .where('time < :detailCutoff', { detailCutoff: detailCutoffTimestamp })
-      .andWhere(
-        'NOT (sessionId = :agg OR (address = :pool AND clientName = :pool AND sessionId = :pool))',
-        { agg: 'AGG', pool: 'POOL' },
-      )
-      .execute();
-
-    await this.clientStatisticsRepository
-      .createQueryBuilder()
-      .delete()
-      .from(ClientStatisticsEntity)
-      .where('time < :halfYearCutoff', { halfYearCutoff: halfYearCutoffTimestamp })
-      .andWhere('sessionId = :agg', { agg: 'AGG' })
-      .execute();
-
-    await this.clientStatisticsRepository
-      .createQueryBuilder()
-      .delete()
-      .from(ClientStatisticsEntity)
-      .where('time < :monthCutoff', { monthCutoff: monthCutoffTimestamp })
-      .andWhere('address = :pool', { pool: 'POOL' })
-      .andWhere('clientName = :pool', { pool: 'POOL' })
-      .andWhere('sessionId = :pool', { pool: 'POOL' })
+      .where('time < :cutoff', { cutoff })
       .execute();
   }
 
@@ -951,8 +784,6 @@ export class ClientStatisticsService {
    */
   public async clearRedisKeysForAddress(address: string): Promise<void> {
     const prefix = `${address}|`;
-    for (const k of this.deltas.keys()) {
-      if (k.startsWith(prefix)) this.deltas.delete(k);
-    }
+    this.deltas.deleteWhere(k => k.startsWith(prefix));
   }
 }

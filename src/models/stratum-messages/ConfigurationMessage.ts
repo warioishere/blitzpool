@@ -1,16 +1,20 @@
-import { IsArray } from 'class-validator';
-
 import { eRequestMethod } from '../enums/eRequestMethod';
 import { StratumBaseMessage } from './StratumBaseMessage';
 
 export class ConfigurationMessage extends StratumBaseMessage {
 
-    @IsArray()
     params: string[];
 
     constructor() {
         super();
         this.method = eRequestMethod.CONFIGURE;
+    }
+
+    public static parse(plain: { id?: number | string; params: string[] }): ConfigurationMessage {
+        const m = new ConfigurationMessage();
+        m.id = plain.id ?? null;
+        m.params = plain.params;
+        return m;
     }
 
     public response() {
@@ -19,7 +23,7 @@ export class ConfigurationMessage extends StratumBaseMessage {
             error: null,
             result: {
                 'version-rolling': true,
-                'version-rolling.mask': '1fffe000'
+                'version-rolling.mask': '1fffe000',
             },
         };
     }

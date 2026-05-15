@@ -1,8 +1,6 @@
 import { ConfigService } from '@nestjs/config';
 import * as bitcoinjs from 'bitcoinjs-lib';
 import { getAddressInfo } from 'bitcoin-address-validation';
-import { plainToInstance } from 'class-transformer';
-import { validate, ValidatorOptions } from 'class-validator';
 import * as crypto from 'crypto';
 import { Socket } from 'net';
 import { firstValueFrom, Subscription } from 'rxjs';
@@ -124,6 +122,7 @@ export class StratumV1Client {
     private authorizeResponse?: string;
     private difficultyCheckIntervalMs: number;
     private lastDifficultyCheck = 0;
+    private readonly debugMessages: boolean = process.env.SV1_DEBUG_MESSAGES === 'true';
 
     /**
      * Accepted-share counter for the payout-mode warmup gate. Shares
@@ -414,10 +413,7 @@ export class StratumV1Client {
                     break;
                 }
 
-                const subscriptionMessage = plainToInstance(
-                    SubscriptionMessage,
-                    parsedMessage,
-                );
+                const subscriptionMessage = SubscriptionMessage.parse(parsedMessage);
 
                 {
 
@@ -483,10 +479,7 @@ export class StratumV1Client {
                     break;
                 }
 
-                const configurationMessage = plainToInstance(
-                    ConfigurationMessage,
-                    parsedMessage,
-                );
+                const configurationMessage = ConfigurationMessage.parse(parsedMessage);
 
                 {
                     this.clientConfiguration = configurationMessage;
@@ -511,10 +504,7 @@ export class StratumV1Client {
                     break;
                 }
 
-                const authorizationMessage = plainToInstance(
-                    AuthorizationMessage,
-                    parsedMessage,
-                );
+                const authorizationMessage = AuthorizationMessage.parse(parsedMessage);
 
                 // Trim + normalise bech32 (lowercase) before accepting. Without
                 // this, every downstream lookup (PPLNS window aggregate, group
@@ -605,10 +595,7 @@ export class StratumV1Client {
                     break;
                 }
 
-                const suggestDifficultyMessage = plainToInstance(
-                    SuggestDifficulty,
-                    parsedMessage
-                );
+                const suggestDifficultyMessage = SuggestDifficulty.parse(parsedMessage);
 
                 if (!this.allowSuggestedDifficulty) {
                     const err = new StratumErrorMessage(
@@ -631,9 +618,21 @@ export class StratumV1Client {
                 // Clamp the client's suggestion to the port's floor. A
                 // PPLNS-port connection suggesting diff 64 would otherwise
                 // succeed and pollute the ledger with sub-dust shares.
-                this.sessionDifficulty = this.minimumDifficulty > 0
+                const newDiff = this.minimumDifficulty > 0
                     ? Math.max(suggestDifficultyMessage.suggestedDifficulty, this.minimumDifficulty)
                     : suggestDifficultyMessage.suggestedDifficulty;
+                // Snapshot the boundary so the CK-style clamp covers any
+                // in-flight shares from jobs issued before this suggest.
+                // ckpool does the same on every diff-changing event
+                // (stratifier.c:6661). Without this, a miner that calls
+                // mining.suggest_difficulty AFTER the first mining.notify
+                // would have its pre-suggest shares validated against the
+                // new diff with no old-diff fallback.
+                if (newDiff !== this.sessionDifficulty) {
+                    this.oldSessionDifficulty = this.sessionDifficulty;
+                    this.diffChangeJobId = parseInt(this.stratumV1JobsService.getNextId(), 16);
+                }
+                this.sessionDifficulty = newDiff;
                 await this.recordSessionDifficulty();
                 const success = await this.write(JSON.stringify(this.clientSuggestedDifficulty.response(this.sessionDifficulty)) + '\n');
                 if (!success) {
@@ -654,10 +653,7 @@ export class StratumV1Client {
                     break;
                 }
 
-                const miningSubmitMessage = plainToInstance(
-                    MiningSubmitMessage,
-                    parsedMessage,
-                );
+                const miningSubmitMessage = MiningSubmitMessage.parse(parsedMessage);
 
                 if (this.stratumInitialized && this.clientAuthorization) {
                     await this.handleMiningSubmission(miningSubmitMessage);
@@ -930,7 +926,7 @@ export class StratumV1Client {
                             this.clientAuthorization.address,
                             this.clientAuthorization.worker
                         );
-                        const startTime = new Date();
+                        const startTime = Date.now();
                         const firstSeenValue = firstSeen ?? startTime;
                         this.entity = await this.clientService.insert({
                             sessionId: this.sessionId,
@@ -1100,15 +1096,33 @@ export class StratumV1Client {
             return false;
         }
 
-        const updatedJobBlock = job.copyAndUpdateBlock(
+        // Hot path: compute only the 80-byte block header for hash
+        // validation. Skipping the full `Block` clone + `transactions.map`
+        // saves ~3000 object allocations per share at production block
+        // density. See `MiningJob.computeShareHeader` for the invariant
+        // pinned against `copyAndUpdateBlock(...).toBuffer(true)`.
+        const versionMask = parseInt(submission.versionMask, 16);
+        const nonce = parseInt(submission.nonce, 16);
+        const extraNonce2 = submission.extraNonce2;
+        const ntime = parseInt(submission.ntime, 16);
+
+        if (this.debugMessages) {
+            console.log(
+                `[SV1 ${this.sessionId}] 📤 mining.submit: ` +
+                `jobId=0x${submission.jobId}, nonce=0x${submission.nonce}, ` +
+                `ntime=${ntime}, extraNonce2=${submission.extraNonce2}, ` +
+                `versionMask=0x${(submission.versionMask ?? '0').padStart(8, '0')}, ` +
+                `worker=${this.clientAuthorization.worker}`,
+            );
+        }
+        const header = job.computeShareHeader(
             jobTemplate,
-            parseInt(submission.versionMask, 16),
-            parseInt(submission.nonce, 16),
+            versionMask,
+            nonce,
             this.extraNonce,
-            submission.extraNonce2,
-            parseInt(submission.ntime, 16)
+            extraNonce2,
+            ntime,
         );
-        const header = updatedJobBlock.toBuffer(true);
         const { submissionDifficulty, hashBuffer } = DifficultyUtils.calculateDifficulty(header);
 
         // ckpool-style per-job clamp: a share for a job that predates the
@@ -1135,6 +1149,15 @@ export class StratumV1Client {
         // the boundary so float is fine there).
         const effectiveTarget = DifficultyUtils.difficultyToTarget(effectiveDiff);
         if (DifficultyUtils.meetsTarget(hashBuffer, effectiveTarget)) {
+            if (this.debugMessages) {
+                const inRaceWindow = this.diffChangeJobId != null && submittedJobIdInt < this.diffChangeJobId;
+                console.log(
+                    `[SV1 ${this.sessionId}] ✅ Share accepted: ` +
+                    `submitted=${submissionDifficulty.toFixed(2)} ≥ effective=${effectiveDiff}` +
+                    `${inRaceWindow ? ` (race-window: clamped from sessionDiff=${this.sessionDifficulty} to oldSessionDiff=${this.oldSessionDifficulty})` : ''}, ` +
+                    `jobId=0x${submission.jobId}, worker=${this.clientAuthorization.worker}`,
+                );
+            }
             // Send success response immediately for minimum latency
             this.write(JSON.stringify(submission.response()) + '\n');
 
@@ -1153,6 +1176,11 @@ export class StratumV1Client {
                 // so a rejected block does NOT write a phantom row to
                 // `blocks_entity` or push a "block found" notification.
                 console.log('!!! BLOCK FOUND !!!');
+                // Block-found path is rare (~once per ~10h on this pool size)
+                // — build the full Block now, only when actually needed.
+                const updatedJobBlock = job.copyAndUpdateBlock(
+                    jobTemplate, versionMask, nonce, this.extraNonce, extraNonce2, ntime,
+                );
                 const blockHex = updatedJobBlock.toHex(false);
                 const result = await this.bitcoinRpcService.SUBMIT_BLOCK(blockHex);
 
@@ -1201,8 +1229,10 @@ export class StratumV1Client {
                 }
             }
             try {
-                // Update live hashrate calculation
-                this.statistics.updateHashRate(effectiveDiff);
+                // Update live hashrate calculation. The vardiff cache
+                // gates on isCurrentDiff to avoid post-ratchet flapping
+                // when the in-flight stale-diff wave drains.
+                this.statistics.updateHashRate(effectiveDiff, effectiveDiff === this.sessionDifficulty);
 
                 // Persist to Redis atomically (stateless service)
                 await this.clientStatisticsService.addAcceptedShare(this.entity, effectiveDiff);
@@ -1252,9 +1282,9 @@ export class StratumV1Client {
                     this.clientAuthorization.worker,
                     effectiveDiff,
                 );
-                const now = new Date();
+                const now = Date.now();
                 // only update every minute
-                if (this.entity.updatedAt == null || now.getTime() - this.entity.updatedAt.getTime() > 1000 * 60) {
+                if (this.entity.updatedAt == null || now - this.entity.updatedAt > 1000 * 60) {
                     await this.clientService.heartbeat(
                         this.entity.address,
                         this.entity.clientName,
@@ -1269,11 +1299,16 @@ export class StratumV1Client {
                 await this.clientDifficultyStatisticsService.recordShareDifficulty({
                     address: this.clientAuthorization.address,
                     clientName: this.clientAuthorization.worker,
-                    timestamp: now.getTime(),
+                    timestamp: now,
                     difficulty: submissionDifficulty,
                 });
 
-                if (now.getTime() - this.lastDifficultyCheck >= this.difficultyCheckIntervalMs) {
+                // Gate vardiff calc on current-diff shares only — ckpool
+                // stratifier.c:5781-5783 pattern. Stale-diff (clamped)
+                // shares would otherwise trigger a ratchet decision based
+                // on a polluted cache mix.
+                if (effectiveDiff === this.sessionDifficulty &&
+                    now - this.lastDifficultyCheck >= this.difficultyCheckIntervalMs) {
                     await this.checkDifficulty();
                 }
 
@@ -1316,6 +1351,47 @@ export class StratumV1Client {
             }
 
         } else {
+            if (this.debugMessages) {
+                const inRaceWindow = this.diffChangeJobId != null && submittedJobIdInt < this.diffChangeJobId;
+                console.warn(
+                    `[SV1 ${this.sessionId}] ❌ Share rejected: difficulty-too-low ` +
+                    `(submitted=${submissionDifficulty.toFixed(2)} < effective=${effectiveDiff})`,
+                );
+                // Cross-check: what coinbase tx-hex did our header use vs
+                // what the miner would have built from coinb1+en1+en2+coinb2.
+                // If these differ, MiningJob.applyExtranonceAndGetCoinbaseHash
+                // wrote a different script than the constructor's
+                // coinbasePart1/2 boundary implied — state-mutation drift.
+                const cbPrefix = job.getCoinbasePrefixBuffer().toString('hex');
+                const cbSuffix = job.getCoinbaseSuffixBuffer().toString('hex');
+                const en1Hex = this.extraNonce;
+                const en2Hex = submission.extraNonce2;
+                const reconstructed = `${cbPrefix}${en1Hex}${en2Hex}${cbSuffix}`;
+                const actual = (job as any).coinbaseTransaction.__toBuffer().toString('hex');
+                console.warn(
+                    `[SV1 ${this.sessionId}]    reject-detail: ` +
+                    `jobId=0x${submission.jobId} (int=${submittedJobIdInt}) ` +
+                    `sessionDiff=${this.sessionDifficulty} ` +
+                    `oldSessionDiff=${this.oldSessionDifficulty} ` +
+                    `diffChangeJobId=${this.diffChangeJobId} ` +
+                    `inRaceWindow=${inRaceWindow} ` +
+                    `submitted{versionMask=0x${(submission.versionMask ?? '0').toString().padStart(8, '0')} ` +
+                    `nonce=0x${submission.nonce} ` +
+                    `ntime=${parseInt(submission.ntime, 16)} ` +
+                    `extranonce2=${submission.extraNonce2}} ` +
+                    `template{id=${jobTemplate.blockData.id} height=${jobTemplate.blockData.height} retiredAt=${jobTemplate.blockData.retiredAt ?? 'active'} ` +
+                    `prevHash=${jobTemplate.block.prevHash.toString('hex')} ` +
+                    `bits=0x${jobTemplate.block.bits.toString(16).padStart(8, '0')} ` +
+                    `tplVersion=0x${jobTemplate.block.version.toString(16).padStart(8, '0')} ` +
+                    `tplTimestamp=${jobTemplate.block.timestamp}} ` +
+                    `extraNonce=${this.extraNonce} ` +
+                    `coinbase{reconstructed=${reconstructed} actual=${actual} match=${reconstructed === actual}} ` +
+                    `header80=${header.toString('hex')} ` +
+                    `hash=${hashBuffer.toString('hex')} ` +
+                    `userAgent=${this.entity?.userAgent ?? '?'} ` +
+                    `worker=${this.clientAuthorization.worker}`,
+                );
+            }
             await this.poolRejectedStatisticsService.addRejectedShare(
                 eStratumErrorCode[eStratumErrorCode.LowDifficultyShare],
                 this.sessionDifficulty
@@ -1366,9 +1442,19 @@ export class StratumV1Client {
             // getNextId() returns the current counter value; addJob()
             // bumps it, so this is exactly the id the next sendNewMiningJob
             // call will assign (stratum-v1-jobs.service.ts:185-188).
+            const previousDiff = this.sessionDifficulty;
             this.oldSessionDifficulty = this.sessionDifficulty;
             this.diffChangeJobId = parseInt(this.stratumV1JobsService.getNextId(), 16);
             this.sessionDifficulty = targetDiff;
+            if (this.debugMessages) {
+                console.log(
+                    `[SV1 ${this.sessionId}] 🔧 Vardiff ratchet: ${previousDiff} → ${targetDiff} ` +
+                    `(${targetDiff > previousDiff ? 'up' : 'down'} ×${(targetDiff / previousDiff).toFixed(2)}, ` +
+                    `diffChangeJobId=0x${this.diffChangeJobId.toString(16)}, ` +
+                    `worker=${this.clientAuthorization?.worker ?? '?'}, ` +
+                    `userAgent=${this.entity?.userAgent ?? '?'})`,
+                );
+            }
             await this.recordSessionDifficulty();
 
             const data = JSON.stringify({
@@ -1383,9 +1469,20 @@ export class StratumV1Client {
                 return;
             }
 
+            // No forced clean_jobs=true on diff change — ckpool runs this
+            // way and the right cover for in-flight stale-diff shares is
+            // the CK-style clamp (effectiveJobDifficulty above), not a
+            // miner-queue flush. The clean_jobs=true line was added in
+            // public-pool issue #39 as the wrong fix: it does nothing for
+            // the ASIC chips already mining the previous job — those
+            // shares still come in with the old jobId and old diff, and
+            // only the clamp handles them. Forcing a clean_jobs notify
+            // here CONCENTRATES the in-flight reject wave at the ratchet
+            // boundary, which is exactly what BraiinsOS's deep pipeline
+            // hit. Next regular notify (block change or periodic refresh)
+            // carries the new diff implicitly; old jobs continue at old
+            // diff until they age out of the registry.
             const jobTemplate = await firstValueFrom(this.stratumV1JobsService.newMiningJob$);
-            // we need to clear the jobs so that the difficulty set takes effect. Otherwise the different miner implementations can cause issues
-            jobTemplate.blockData.clearJobs = true;
             await this.sendNewMiningJob(jobTemplate);
 
         }
@@ -1421,7 +1518,18 @@ export class StratumV1Client {
             } else if (!this.socket.destroyed) {
                 this.socket.destroy();
             }
-            console.error(`Error occurred while writing to socket: ${this.sessionId}`, error);
+            // ECONNRESET / EPIPE / ETIMEDOUT are routine ungraceful-disconnect
+            // signals from the miner side (power blip, WiFi drop, miner reboot).
+            // Socket is fully cleaned up above; the error is informational only.
+            // Prod sees ~225 of these per day — dumping a full Error stack each
+            // time drowns out signal in the logs. Compact one-liner for the
+            // routine cases, full Error object preserved for anything else.
+            const code = (error as NodeJS.ErrnoException)?.code;
+            if (code === 'ECONNRESET' || code === 'EPIPE' || code === 'ETIMEDOUT') {
+                console.log(`Socket write failed (${code}): ${this.sessionId}`);
+            } else {
+                console.error(`Error occurred while writing to socket: ${this.sessionId}`, error);
+            }
             return false;
         }
     }

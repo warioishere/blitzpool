@@ -61,8 +61,20 @@ export { STALE_GRACE_MS };
 @Injectable()
 export class StratumV1JobsService {
 
-    private lastIntervalCount: number;
-    private skipNext: boolean = false;
+    /**
+     * The previousblockhash from the most recent emission. Detects a block
+     * change by comparing this against bitcoind's current
+     * `blockTemplate.previousblockhash`. Replaces the old interval-counter
+     * trick that lost block detections under combineLatest+switchMap race
+     * conditions: when `newBlock$` and the interval ticked close in time,
+     * switchMap cancelled the in-flight getBlockTemplate call and re-issued
+     * it with the newer interval counter, so the downstream `interval`
+     * value no longer equalled the previous one. `clearJobs` stayed false,
+     * no SetNewPrevHash went out to standard channels, and miners hashed
+     * with the stale prev_hash producing 0.00-diff shares until the next
+     * (luckier-timed) block change settled them.
+     */
+    private lastPrevHashHex: string | undefined;
     public newMiningJob$: Observable<IJobTemplate>;
 
     public latestJobId: number = 1;
@@ -91,32 +103,28 @@ export class StratumV1JobsService {
     ) {
 
         this.newMiningJob$ = combineLatest([this.bitcoinRpcService.newBlock$, interval(this.block_template_interval).pipe(startWith(-1))]).pipe(
-            switchMap(([miningInfo, interval]) => {
+            switchMap(([miningInfo]) => {
                 return from(this.bitcoinRpcService.getBlockTemplate(miningInfo.blocks)).pipe(
-                    map((blockTemplate) => {
-                        return {
-                            blockTemplate,
-                            interval
-                        }
-                    })
-                )
+                    map((blockTemplate) => ({ blockTemplate })),
+                );
             }),
-            map(({ blockTemplate, interval }) => {
+            map(({ blockTemplate }) => {
                 const processingStartTime = Date.now();
 
+                // Detect block change by previousblockhash. The fetched
+                // template is authoritative — its `previousblockhash` is
+                // whatever bitcoind reported AT THE getBlockTemplate call,
+                // which is robust to combineLatest+switchMap timing races
+                // that broke the old interval-counter trick.
                 let clearJobs = false;
-                if (this.lastIntervalCount === interval) {
+                if (this.lastPrevHashHex !== undefined &&
+                    this.lastPrevHashHex !== blockTemplate.previousblockhash) {
                     clearJobs = true;
-                    this.skipNext = true;
-                    console.log('new block')
+                    console.log(
+                        `new block: ${this.lastPrevHashHex.substring(0, 16)}... → ${blockTemplate.previousblockhash.substring(0, 16)}... (height=${blockTemplate.height})`,
+                    );
                 }
-
-                if (this.skipNext == true && clearJobs == false) {
-                    this.skipNext = false;
-                    return null;
-                }
-
-                this.lastIntervalCount = interval;
+                this.lastPrevHashHex = blockTemplate.previousblockhash;
 
                 const currentTime = Math.floor(new Date().getTime() / 1000);
                 const result = {
