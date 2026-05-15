@@ -14,7 +14,7 @@ import {
   SV2_NOISE_ACT1_SIZE,
   Sv2Protocol,
   SV2_EXTENSION_TYPE_NEGOTIATION,
-  SV2_EXTENSION_TYPE_COINBASE_OUTPUT_WEIGHTS,
+  SV2_EXTENSION_TYPE_DYNAMIC_COINBASE_OUTPUTS,
 } from './sv2/sv2-constants';
 import {
   deserializeSetupConnection,
@@ -36,27 +36,31 @@ import {
   deserializeRequestExtensions,
   serializeRequestExtensionsSuccess,
   serializeRequestExtensionsError,
-  encodeCoinbaseOutputWeightsTlv,
+  deserializeRequestCoinbaseOutputs,
+  serializeRequestCoinbaseOutputsSuccess,
+  serializeRequestCoinbaseOutputsError,
+  Sv2RequestCoinbaseOutputsSuccess,
+  Sv2RequestCoinbaseOutputsError,
 } from './sv2/sv2-extensions-messages';
 import { DifficultyUtils } from '../utils/difficulty.utils';
 
 /** Set of extensions this JDS is willing to negotiate. */
 const SUPPORTED_EXTENSIONS = new Set<number>([
-  SV2_EXTENSION_TYPE_COINBASE_OUTPUT_WEIGHTS,
+  SV2_EXTENSION_TYPE_DYNAMIC_COINBASE_OUTPUTS,
 ]);
 
 /**
- * Pool-side payout description for a JDP token. The base-spec single-output
- * case is `{ addresses: [miner], weights: null }`; ext 0x0003 produces
- * `{ addresses: [fee, miner1, miner2, …], weights: [w0, w1, w2, …] }`.
+ * Pool-side payout description for the `AllocateMiningJobToken.Success`
+ * payload. Always single-output ({ addresses: [miner], weights: null }) —
+ * vanilla JDP §6.4.3, or the 0x0003 §3.4 fallback when the per-job
+ * RequestCoinbaseOutputs path is unavailable. The `weights` field is
+ * retained in the interface only for ABI stability; it must be null.
  */
 export interface Sv2PoolPayout {
   /** BTC addresses (network-validated) in coinbase output order. */
   addresses: string[];
   /**
-   * Per-output integer weights to advertise via the ext 0x0003 TLV.
-   * `null` ⇒ no TLV is emitted (base-spec single-output behaviour).
-   * When non-null, length MUST equal `addresses.length`.
+   * Reserved for future extensions. Must be null in the current spec.
    */
   weights: number[] | null;
 }
@@ -78,6 +82,26 @@ export interface JobDeclarationServiceRef {
    */
   resolveCoinbasePayout(minerAddress: string, negotiatedExtensions: ReadonlySet<number>): Promise<Sv2PoolPayout>;
   encodeCoinbaseOutputs(addresses: string[]): Buffer;
+  /**
+   * Handle a `RequestCoinbaseOutputs` from a 0x0003-negotiated JDC.
+   * Returns either a Success (with the consensus-serialized output list)
+   * or an Error (with a spec-§2.3 error code). The JDC then carries the
+   * output set into its DeclareMiningJob coinbase.
+   */
+  handleRequestCoinbaseOutputs(
+    req: import('./sv2/sv2-extensions-messages').Sv2RequestCoinbaseOutputs,
+    minerAddress: string,
+  ): Promise<
+    | { kind: 'success'; success: Sv2RequestCoinbaseOutputsSuccess }
+    | { kind: 'error'; error: Sv2RequestCoinbaseOutputsError }
+  >;
+  /**
+   * Look up the previously-emitted `RequestCoinbaseOutputs.Success` payload
+   * for `(token, prev_hash)` so DeclareMiningJob can be validated against
+   * the exact output bytes the JDS committed to. Null when no matching
+   * emission is cached (fall back to base-spec §6.4.3 presence check).
+   */
+  findEmittedOutputsForJob(token: Buffer, prevHash: Buffer): Buffer | null;
   getTemplateTransactions(): Map<string, Buffer>;
   getCurrentPrevHash(): Buffer | null;
   getRawTransaction(txid: string): Promise<Buffer | null>;
@@ -98,14 +122,9 @@ export class JobDeclarationClient {
   private allocatedTokens = new Map<string, {
     token: Buffer;
     expiresAt: number;
-    coinbaseOutputs: Buffer; // Pool payout outputs sent with this token
-    /**
-     * Per-output weights advertised via the ext 0x0003 TLV, or null if
-     * the base-spec single-output rule applies. Retained alongside the
-     * outputs buffer so DeclareMiningJob validation can re-derive the
-     * exact pool-output amounts the JDC must have allocated.
-     */
-    weights: number[] | null;
+    coinbaseOutputs: Buffer; // §6.4.3 fallback single-output payload
+    minerAddress: string;    // Bound at allocation time, used for
+                             // RequestCoinbaseOutputs distribution lookup.
   }>();
 
   // Connection state: tracks SetupConnection negotiation (spec 6.4.1/6.4.2)
@@ -221,6 +240,20 @@ export class JobDeclarationClient {
           return;
         default:
           console.warn(`[JDP ${this.clientId}] Unknown ext 0x0001 message type: 0x${msgType.toString(16)}`);
+          return;
+      }
+    }
+
+    // ext 0x0003 — Dynamic Coinbase Outputs. Owns msgType 0x00–0x02
+    // (the JDS only ever receives 0x00 from the JDC; 0x01/0x02 are
+    // server→client and would indicate a misbehaving JDC).
+    if (ext === SV2_EXTENSION_TYPE_DYNAMIC_COINBASE_OUTPUTS) {
+      switch (msgType) {
+        case Sv2MsgType.EXT_REQUEST_COINBASE_OUTPUTS:
+          await this.handleRequestCoinbaseOutputs(payload);
+          return;
+        default:
+          console.warn(`[JDP ${this.clientId}] Unexpected ext 0x0003 message type: 0x${msgType.toString(16)}`);
           return;
       }
     }
@@ -407,45 +440,104 @@ export class JobDeclarationClient {
     // Generate unique opaque token
     const token = this.generateToken();
 
-    // Resolve the pool's payout for this miner. JDS picks single- vs
-    // multi-output based on the miner's mining mode AND on whether
-    // the JDC negotiated ext 0x0003. Without 0x0003 we MUST stay
-    // single-output (base spec §6.4.3).
+    // §6.4.3 single-output payload. Vanilla JDCs use this directly;
+    // 0x0003-aware JDCs treat it as the §3.4 fallback. No weights TLV
+    // — the dynamic distribution flows through RequestCoinbaseOutputs
+    // when the JDC asks per declared job.
     const payout = await this.service.resolveCoinbasePayout(minerAddress, this.negotiatedExtensions);
     const coinbaseOutputs = this.service.encodeCoinbaseOutputs(payout.addresses);
-
-    // Build the per-token weights TLV when the extension is active.
-    // Spec §1.3: "If the extension is not negotiated, the TLV MUST
-    // NOT be included." Also skip the TLV when there's only one
-    // pool output — the implicit [1, 0, …, 0] rule is equivalent
-    // and saves a few bytes.
-    const wantsWeightsTlv =
-      this.negotiatedExtensions.has(SV2_EXTENSION_TYPE_COINBASE_OUTPUT_WEIGHTS) &&
-      payout.weights !== null &&
-      payout.weights.length > 1;
-    const weightsTlv = wantsWeightsTlv
-      ? encodeCoinbaseOutputWeightsTlv(payout.weights!)
-      : null;
 
     const tokenHex = token.toString('hex');
     this.allocatedTokens.set(tokenHex, {
       token,
       expiresAt: Date.now() + 3600000,
       coinbaseOutputs,
-      weights: wantsWeightsTlv ? payout.weights : null,
+      minerAddress,
     });
 
-    const baseSuccessPayload = serializeAllocateMiningJobTokenSuccess({
+    const successPayload = serializeAllocateMiningJobTokenSuccess({
       requestId: msg.requestId,
       miningJobToken: token,
       coinbaseOutputs,
     });
-    const successPayload = weightsTlv
-      ? Buffer.concat([baseSuccessPayload, weightsTlv])
-      : baseSuccessPayload;
     await this.sendFrame(Sv2MsgType.JDP_ALLOCATE_MINING_JOB_TOKEN_SUCCESS, successPayload);
 
-    console.log(`[JDP ${this.clientId}] ✅ AllocateMiningJobTokenSuccess: token=${tokenHex.substring(0, 16)}..., minerAddress=${minerAddress}, outputs=${payout.addresses.length}, weightsTlv=${weightsTlv ? 'yes' : 'no'}`);
+    console.log(`[JDP ${this.clientId}] ✅ AllocateMiningJobTokenSuccess: token=${tokenHex.substring(0, 16)}..., minerAddress=${minerAddress}, outputs=${payout.addresses.length}`);
+  }
+
+  /**
+   * Handle ext 0x0003 `RequestCoinbaseOutputs` (msg_type=0x00 on
+   * extension_type=0x0003). The JDS computes a dynamic per-job output
+   * distribution from current pool state and the JDC-reported revenue,
+   * caches it for later DeclareMiningJob validation, and emits a Success
+   * or Error frame back.
+   *
+   * Spec ext 0x0003 §1.3: requires prior negotiation. Frames arriving
+   * before the extension was negotiated are dropped silently — answering
+   * would let a misbehaving JDC bypass the 0x0001 gate.
+   */
+  private async handleRequestCoinbaseOutputs(payload: Buffer): Promise<void> {
+    if (!this.negotiatedExtensions.has(SV2_EXTENSION_TYPE_DYNAMIC_COINBASE_OUTPUTS)) {
+      console.warn(`[JDP ${this.clientId}] ⚠️  RequestCoinbaseOutputs without 0x0003 negotiation, dropping`);
+      return;
+    }
+
+    const reader = new BufferReader(payload);
+    const req = deserializeRequestCoinbaseOutputs(reader);
+
+    const tokenHex = req.miningJobToken.toString('hex');
+    const tokenEntry = this.allocatedTokens.get(tokenHex);
+
+    // Unknown token → spec §2.3 invalid-mining-job-token.
+    if (!tokenEntry) {
+      console.warn(`[JDP ${this.clientId}] ❌ RequestCoinbaseOutputs: unknown token ${tokenHex.substring(0, 16)}...`);
+      const errorPayload = serializeRequestCoinbaseOutputsError({
+        requestId: req.requestId,
+        errorCode: 'invalid-mining-job-token',
+      });
+      await this.sendFrame(
+        Sv2MsgType.EXT_REQUEST_COINBASE_OUTPUTS_ERROR,
+        errorPayload,
+        SV2_EXTENSION_TYPE_DYNAMIC_COINBASE_OUTPUTS,
+      );
+      return;
+    }
+
+    if (Date.now() > tokenEntry.expiresAt) {
+      this.allocatedTokens.delete(tokenHex);
+      console.warn(`[JDP ${this.clientId}] ❌ RequestCoinbaseOutputs: token expired ${tokenHex.substring(0, 16)}...`);
+      const errorPayload = serializeRequestCoinbaseOutputsError({
+        requestId: req.requestId,
+        errorCode: 'invalid-mining-job-token',
+      });
+      await this.sendFrame(
+        Sv2MsgType.EXT_REQUEST_COINBASE_OUTPUTS_ERROR,
+        errorPayload,
+        SV2_EXTENSION_TYPE_DYNAMIC_COINBASE_OUTPUTS,
+      );
+      return;
+    }
+
+    const result = await this.service.handleRequestCoinbaseOutputs(req, tokenEntry.minerAddress);
+
+    if (result.kind === 'error') {
+      console.warn(`[JDP ${this.clientId}] ❌ RequestCoinbaseOutputs error: ${result.error.errorCode}`);
+      const errorPayload = serializeRequestCoinbaseOutputsError(result.error);
+      await this.sendFrame(
+        Sv2MsgType.EXT_REQUEST_COINBASE_OUTPUTS_ERROR,
+        errorPayload,
+        SV2_EXTENSION_TYPE_DYNAMIC_COINBASE_OUTPUTS,
+      );
+      return;
+    }
+
+    const successPayload = serializeRequestCoinbaseOutputsSuccess(result.success);
+    await this.sendFrame(
+      Sv2MsgType.EXT_REQUEST_COINBASE_OUTPUTS_SUCCESS,
+      successPayload,
+      SV2_EXTENSION_TYPE_DYNAMIC_COINBASE_OUTPUTS,
+    );
+    console.log(`[JDP ${this.clientId}] ✅ RequestCoinbaseOutputs.Success: token=${tokenHex.substring(0, 16)}..., outputs=${result.success.coinbaseTxOutputs.length} bytes`);
   }
 
   private async handleDeclareMiningJob(payload: Buffer): Promise<void> {
@@ -769,13 +861,24 @@ export class JobDeclarationClient {
   }
 
   /**
-   * Validate that the declared coinbase includes the pool's payout output script.
-   * Per spec 6.4.3: "JDS and Pool SHOULD reject custom jobs that fail to
-   * [allocate sats into the pool payout output]."
+   * Validate that the declared coinbase carries the pool's payout outputs.
    *
-   * We extract the pool payout locking script (first output from AllocateMiningJobToken.Success)
-   * and verify it appears in the coinbaseTxSuffix of the declared job.
-   * Returns error message if invalid, null if valid.
+   * Two acceptance paths:
+   *
+   * 1. **Dynamic outputs match** (ext 0x0003 negotiated, recent cached
+   *    emission for this token + current prev_hash exists): the declared
+   *    coinbase MUST contain every `(script, amount)` pair from a cached
+   *    emission, in any order, as permitted by §6.4.3.
+   *
+   * 2. **§6.4.3 fallback presence check**: the pool payout output script
+   *    from `AllocateMiningJobToken.Success` MUST appear in the declared
+   *    coinbase. Strict amount validation is out of scope here — the JDC
+   *    fills in `template_revenue` minus its own added outputs; we'd
+   *    need the full template view to enforce the exact value.
+   *
+   * Path 1 is tried first when 0x0003 is active. If no cached emission
+   * matches (e.g. JDC fell back to §3.4 single-output mode), path 2
+   * still accepts the declaration.
    */
   private validateCoinbaseOutputs(job: Sv2DeclareMiningJob, tokenHex: string): string | null {
     if (job.coinbaseTxPrefix.length === 0 && job.coinbaseTxSuffix.length === 0) {
@@ -787,6 +890,18 @@ export class JobDeclarationClient {
       return null;
     }
 
+    // Try the dynamic-outputs path first when 0x0003 is negotiated.
+    if (this.negotiatedExtensions.has(SV2_EXTENSION_TYPE_DYNAMIC_COINBASE_OUTPUTS)) {
+      const currentPrevHash = this.service.getCurrentPrevHash();
+      if (currentPrevHash) {
+        const cached = this.service.findEmittedOutputsForJob(tokenEntry.token, currentPrevHash);
+        if (cached && this.declaredCoinbaseContainsAllOutputs(job.coinbaseTxSuffix, cached)) {
+          return null; // dynamic path accepted
+        }
+      }
+      // Fall through to §3.4 fallback validation.
+    }
+
     let scripts: Buffer[];
     try {
       scripts = JobDeclarationClient.extractPoolOutputScripts(tokenEntry.coinbaseOutputs);
@@ -796,14 +911,6 @@ export class JobDeclarationClient {
     }
     if (scripts.length === 0) return null;
 
-    // Spec §6.4.3 (base) + ext 0x0003 §2.1: every JDS-provided pool
-    // output script MUST appear in the declared coinbase. Strict
-    // amount validation per the weighted formula (Section 2) is out
-    // of scope here — we'd need to know J (JDC's own outputs), which
-    // the JDS can't determine without fully parsing the declared
-    // coinbase outputs against `template_revenue`. Presence-check is
-    // the minimum spec-required validation; amount-validation is
-    // tracked as a follow-up.
     for (const script of scripts) {
       if (job.coinbaseTxSuffix.indexOf(script) === -1) {
         return 'Pool payout output script(s) not found in coinbase — JDC must include all pool payout outputs';
@@ -814,9 +921,53 @@ export class JobDeclarationClient {
   }
 
   /**
+   * Check that every `(script, amount)` pair encoded in `emittedOutputs`
+   * (consensus-serialized Vec<TxOut>) appears at least once in
+   * `coinbaseTxSuffix`. Order-independent per §6.4.3.
+   */
+  private declaredCoinbaseContainsAllOutputs(coinbaseTxSuffix: Buffer, emittedOutputs: Buffer): boolean {
+    let emittedPairs: Array<{ script: Buffer; amount: bigint }>;
+    try {
+      emittedPairs = JobDeclarationClient.extractPoolOutputPairs(emittedOutputs);
+    } catch {
+      return false;
+    }
+    if (emittedPairs.length === 0) return true;
+
+    for (const { script, amount } of emittedPairs) {
+      let idx = 0;
+      let found = false;
+      while ((idx = coinbaseTxSuffix.indexOf(script, idx)) !== -1) {
+        const valueStart = idx - 9; // 8 bytes value + 1 byte VarInt script_len
+        const scriptLenAt = idx - 1;
+        // Bounds check + value alignment: a TxOut here would have its
+        // 8-byte LE value immediately before a 1-byte VarInt script length
+        // (we only verify the short VarInt form; longer forms would put
+        // the script length 3 or 5 bytes back). Script lengths from the
+        // pool's own encoder are ≤ 0xFC, so this matches all production
+        // distributions.
+        if (
+          valueStart >= 0 &&
+          scriptLenAt >= 0 &&
+          coinbaseTxSuffix.readUInt8(scriptLenAt) === script.length
+        ) {
+          const value = coinbaseTxSuffix.readBigUInt64LE(valueStart);
+          if (value === amount) {
+            found = true;
+            break;
+          }
+        }
+        idx += script.length; // continue scanning for another occurrence
+      }
+      if (!found) return false;
+    }
+    return true;
+  }
+
+  /**
    * Parse a Bitcoin consensus-encoded Vec<TxOut> buffer (as produced by
-   * JobDeclarationService.encodeCoinbaseOutputs) and return the locking
-   * scripts in original output order.
+   * JobDeclarationService.encodeCoinbaseOutputs or encodeDynamicCoinbaseOutputs)
+   * and return the locking scripts in original output order.
    *
    * Exposed as static so tests can exercise the parser directly.
    */
@@ -855,6 +1006,54 @@ export class JobDeclarationClient {
       }
 
       out.push(buf.subarray(offset, offset + scriptLen));
+      offset += scriptLen;
+    }
+    return out;
+  }
+
+  /**
+   * Parse a consensus-encoded Vec<TxOut> buffer into `(script, amount)`
+   * pairs. Same wire shape as `extractPoolOutputScripts` but also yields
+   * the U64 LE value for each output. Used by the ext 0x0003 dynamic-
+   * outputs validation path where amounts MUST match the JDS's emitted
+   * response, not just the script.
+   */
+  static extractPoolOutputPairs(buf: Buffer): Array<{ script: Buffer; amount: bigint }> {
+    let offset = 0;
+    let count: number;
+    const first = buf[offset];
+    if (first < 0xfd) {
+      count = first;
+      offset += 1;
+    } else if (first === 0xfd) {
+      count = buf.readUInt16LE(offset + 1);
+      offset += 3;
+    } else if (first === 0xfe) {
+      count = buf.readUInt32LE(offset + 1);
+      offset += 5;
+    } else {
+      throw new Error('unsupported VarInt length encoding');
+    }
+    if (count === 0) return [];
+
+    const out: Array<{ script: Buffer; amount: bigint }> = [];
+    for (let i = 0; i < count; i++) {
+      const amount = buf.readBigUInt64LE(offset);
+      offset += 8;
+
+      let scriptLen: number;
+      const sl = buf[offset];
+      if (sl < 0xfd) {
+        scriptLen = sl;
+        offset += 1;
+      } else if (sl === 0xfd) {
+        scriptLen = buf.readUInt16LE(offset + 1);
+        offset += 3;
+      } else {
+        throw new Error('script length VarInt too large');
+      }
+
+      out.push({ script: buf.subarray(offset, offset + scriptLen), amount });
       offset += scriptLen;
     }
     return out;

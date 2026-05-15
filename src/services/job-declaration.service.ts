@@ -13,8 +13,13 @@ import {
   Sv2PoolPayout,
 } from '../models/JobDeclarationClient';
 import { Sv2DeclareMiningJob } from '../models/sv2/sv2-jdp-messages';
+import {
+  Sv2RequestCoinbaseOutputs,
+  Sv2RequestCoinbaseOutputsSuccess,
+  Sv2RequestCoinbaseOutputsError,
+} from '../models/sv2/sv2-extensions-messages';
 import { Sv2NoiseConfig } from '../models/sv2/sv2-noise';
-import { SV2_EXTENSION_TYPE_COINBASE_OUTPUT_WEIGHTS } from '../models/sv2/sv2-constants';
+import { SV2_EXTENSION_TYPE_DYNAMIC_COINBASE_OUTPUTS } from '../models/sv2/sv2-constants';
 import { BitcoinRpcService } from './bitcoin-rpc.service';
 import { StratumV2Service } from './stratum-v2.service';
 import { TemplateDistributionService } from './template-distribution.service';
@@ -30,10 +35,41 @@ import { normalizeIp } from '../utils/network.utils';
 // first NewTemplate. Real value flows from latestTemplate.coinbasevalue.
 const FALLBACK_BLOCK_REWARD_SATS = 312_500_000;
 
+// Multiplier on the latest template's coinbasevalue beyond which a
+// `RequestCoinbaseOutputs.pool_revenue` is treated as implausible.
+// Real templates rarely move > 50 % from one to the next; 1.5x leaves
+// headroom for legitimate fee spikes while catching obvious abuse.
+const POOL_REVENUE_PLAUSIBILITY_MULTIPLIER = 1.5;
+
+// Bitcoin's standard dust threshold for P2WPKH outputs (~ 294 sats);
+// outputs computed below this go into the pool's pending ledger
+// instead of an on-chain output. Pool's own ledger handles the
+// accumulation off-band.
+const DUST_THRESHOLD_SATS = 294;
+
+interface EmittedCoinbaseResponse {
+  requestId: number;
+  prevHash: Buffer;       // template binding
+  outputs: Buffer;        // consensus-serialized Vec<TxOut>
+  emittedAt: number;      // epoch-ms
+}
+
 @Injectable()
 export class JobDeclarationService implements OnModuleInit, JobDeclarationServiceRef {
   private readonly clients = new Map<string, JobDeclarationClient>();
   private readonly declaredJobs = new Map<string, { job: Sv2DeclareMiningJob; token: Buffer; clientId: string }>();
+
+  // Validation cache for ext 0x0003 (Dynamic Coinbase Outputs).
+  // Keyed by tokenHex, holds a short list of responses we've emitted
+  // for that token. Each entry binds to a prev_hash; when the pool
+  // observes a new prev_hash internally the old entries are evicted
+  // (template-bound TTL, see evictStaleEmittedResponses()).
+  private readonly emittedResponses = new Map<string, EmittedCoinbaseResponse[]>();
+
+  // Pool's current prev_hash view (updated from TDP). Used to detect
+  // template changes for cache invalidation.
+  private lastObservedPrevHash: Buffer | null = null;
+
   private server: Server | null = null;
   private jdpPort: number;
 
@@ -197,31 +233,129 @@ export class JobDeclarationService implements OnModuleInit, JobDeclarationServic
   }
 
   /**
-   * Resolve the pool's coinbase payout for a JDP token.
+   * Resolve the pool's coinbase payout for `AllocateMiningJobToken.Success`.
    *
-   * Base JDP (no extensions negotiated) follows §6.4.3: a single TxOut
-   * paying the miner directly. This matches the reference jd-server
-   * and SRI JDC behaviour and is the spec-compliant default.
+   * The Success message carries the §6.4.3 single-output fallback regardless
+   * of whether ext 0x0003 (Dynamic Coinbase Outputs) is negotiated. Vanilla
+   * JDCs that haven't negotiated 0x0003 use these outputs directly per §6.4.3.
+   * 0x0003-aware JDCs treat them as the spec-§3.4 fallback distribution to
+   * fall back to if a per-job `RequestCoinbaseOutputs` cannot be served.
    *
-   * When the JDC has negotiated ext 0x0003 (Coinbase Output Weights),
-   * the JDS MAY return a multi-output coinbase plus a per-output
-   * weights vector. The JDC then allocates `floor(T * weight_i / S)`
-   * sats per output (§2). This is how PPLNS / Group-Solo distribute
-   * payouts via JDP without custody hand-off.
-   *
-   * Failure modes (mode-detect error, distribution fetch error) fall
-   * back to single-output paying the miner — a transient Redis/PG
-   * blip never breaks JDP block production.
+   * `negotiatedExtensions` is currently unused — the AllocateMiningJobToken.Success
+   * payload doesn't carry any extension-conditional TLVs since the old static
+   * coinbase_tx_output_weights TLV was removed in favor of the per-job request
+   * flow. Kept in the signature so the interface stays stable for future
+   * extensions that might layer TLVs back onto the Success message.
    */
   async resolveCoinbasePayout(
     minerAddress: string,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     negotiatedExtensions: ReadonlySet<number>,
   ): Promise<Sv2PoolPayout> {
-    // Base spec only — JDC didn't negotiate weights. Spec MUST: stay
-    // single-output. No need to even hit MiningModeService.
-    if (!negotiatedExtensions.has(SV2_EXTENSION_TYPE_COINBASE_OUTPUT_WEIGHTS)) {
-      return { addresses: [minerAddress], weights: null };
+    return { addresses: [minerAddress], weights: null };
+  }
+
+  /**
+   * Handle ext 0x0003 `RequestCoinbaseOutputs` (JDC → JDS).
+   *
+   * Computes the pool's multi-output distribution from current state (PPLNS
+   * window, Group-Solo state, or solo fallback) using the JDC-reported
+   * `pool_revenue` to size amounts, applies the pool's dust-pending policy,
+   * encodes as a Bitcoin-consensus `Vec<TxOut>`, and caches the response
+   * keyed by `(token, request_id)` so a later `DeclareMiningJob` can be
+   * validated against it.
+   *
+   * Returns `{ kind: 'success' }` with the serialized outputs ready to be
+   * written into a Success frame, or `{ kind: 'error' }` with a spec-§2.3
+   * error code.
+   */
+  async handleRequestCoinbaseOutputs(
+    req: Sv2RequestCoinbaseOutputs,
+    minerAddress: string,
+  ): Promise<
+    | { kind: 'success'; success: Sv2RequestCoinbaseOutputsSuccess }
+    | { kind: 'error'; error: Sv2RequestCoinbaseOutputsError }
+  > {
+    // 1. prev_hash plausibility. The pool's view advances strictly
+    //    monotonically (new block found → new prev_hash); if the JDC's
+    //    template references a prev_hash we no longer consider current,
+    //    we refuse rather than emit outputs for an obsolete payout window.
+    const currentPrevHash = this.getCurrentPrevHash();
+    if (currentPrevHash && !currentPrevHash.equals(req.prevHash)) {
+      // Evict old cache entries opportunistically while we're here.
+      this.observePrevHash(currentPrevHash);
+      return {
+        kind: 'error',
+        error: { requestId: req.requestId, errorCode: 'stale-prev-hash' },
+      };
     }
+
+    // Refresh template-bound cache binding if needed.
+    if (currentPrevHash) {
+      this.observePrevHash(currentPrevHash);
+    }
+
+    // 2. Revenue plausibility — clamp against current template + multiplier.
+    const latestCoinbaseValue = this.getBlockRewardSats();
+    const maxPlausible = Math.floor(latestCoinbaseValue * POOL_REVENUE_PLAUSIBILITY_MULTIPLIER);
+    if (req.poolRevenue > BigInt(maxPlausible)) {
+      return {
+        kind: 'error',
+        error: { requestId: req.requestId, errorCode: 'revenue-too-large' },
+      };
+    }
+
+    // 3. Compute the distribution from current PPLNS / Group-Solo / solo state.
+    let outputs: Array<{ address: string; sats: number }>;
+    try {
+      outputs = await this.computeDynamicOutputs(minerAddress, Number(req.poolRevenue));
+    } catch (err) {
+      console.warn(
+        `[JobDeclaration] computeDynamicOutputs failed for ${minerAddress}, returning internal error: ${(err as Error).message}`,
+      );
+      return {
+        kind: 'error',
+        error: { requestId: req.requestId, errorCode: 'internal' },
+      };
+    }
+
+    // 4. Encode as consensus-serialized Vec<TxOut>.
+    const coinbaseTxOutputs = this.encodeDynamicCoinbaseOutputs(outputs);
+
+    // 5. Cache for later validation.
+    const tokenHex = req.miningJobToken.toString('hex');
+    const cache = this.emittedResponses.get(tokenHex) ?? [];
+    cache.push({
+      requestId: req.requestId,
+      prevHash: Buffer.from(req.prevHash),
+      outputs: coinbaseTxOutputs,
+      emittedAt: Date.now(),
+    });
+    this.emittedResponses.set(tokenHex, cache);
+
+    return {
+      kind: 'success',
+      success: { requestId: req.requestId, coinbaseTxOutputs },
+    };
+  }
+
+  /**
+   * Compute the dynamic coinbase output list for a miner at a given
+   * `pool_revenue`, applying:
+   *   - mode detection (solo / pplns / group-solo)
+   *   - the matching pool service's payout distribution
+   *   - dust suppression (sub-294-sat outputs go to pending, not on chain)
+   *   - solo fallback on any transient error
+   *
+   * Returns the list of `{ address, sats }` pairs the coinbase should carry.
+   * The list is NEVER empty — at minimum the miner gets a single output for
+   * the full revenue (solo behaviour).
+   */
+  private async computeDynamicOutputs(
+    minerAddress: string,
+    poolRevenue: number,
+  ): Promise<Array<{ address: string; sats: number }>> {
+    const soloFallback = [{ address: minerAddress, sats: poolRevenue }];
 
     let mode: 'solo' | 'pplns' | 'group-solo' = 'solo';
     let groupId: string | undefined;
@@ -230,60 +364,125 @@ export class JobDeclarationService implements OnModuleInit, JobDeclarationServic
       mode = m.mode;
       groupId = m.groupId;
     } catch (err) {
-      console.warn(`[JobDeclaration] Mode resolution failed for ${minerAddress}, falling back to solo: ${(err as Error).message}`);
+      console.warn(
+        `[JobDeclaration] Mode resolution failed for ${minerAddress}, using solo: ${(err as Error).message}`,
+      );
+      return soloFallback;
     }
 
     if (mode === 'pplns' && this.pplnsService.isEnabled()) {
       try {
-        const reward = this.getBlockRewardSats();
-        const dist = await this.pplnsService.getPayoutDistribution(reward);
-        if (dist.length > 0) {
-          return {
-            addresses: dist.map((d) => d.address),
-            // Spec §2: amount_i ∝ weight_i / S. Using the sats array
-            // directly makes amount_i = sats_i exactly (S = T when JDC
-            // adds no own outputs); when JDC adds J > 0 sats of its
-            // own, every miner is scaled by (T-J)/T — the same dilution
-            // policy the base spec already permits.
-            weights: dist.map((d) => Math.max(1, Math.floor(d.sats))),
-          };
-        }
+        const dist = await this.pplnsService.getPayoutDistribution(poolRevenue);
+        const filtered = this.applyDustPolicy(dist);
+        if (filtered.length > 0) return filtered;
       } catch (err) {
-        console.warn(`[JobDeclaration] PPLNS distribution fetch failed, falling back to solo: ${(err as Error).message}`);
+        console.warn(
+          `[JobDeclaration] PPLNS distribution fetch failed: ${(err as Error).message}`,
+        );
       }
     }
 
     if (mode === 'group-solo' && groupId && this.groupSoloService.isEnabled()) {
       try {
-        const reward = this.getBlockRewardSats();
-        // Pass minerAddress as finder — the JDP miner IS the block
-        // finder by construction (they own the token, they declare
-        // the job, they push the solution). Group-Solo emits an
-        // additional finder-bonus output keyed to that address,
-        // which the JDC will fund via the weights TLV like any other
-        // pool output.
-        const dist = await this.groupSoloService.getPayoutDistribution(groupId, reward, minerAddress);
-        if (dist.length > 0) {
-          return {
-            addresses: dist.map((d) => d.address),
-            weights: dist.map((d) => Math.max(1, Math.floor(d.sats))),
-          };
-        }
+        // The JDP miner IS the block-finder by construction (their token,
+        // their declared job, their pushed solution) — pass them as the
+        // finderAddress so the Group-Solo finder bonus lands in the coinbase.
+        const dist = await this.groupSoloService.getPayoutDistribution(
+          groupId,
+          poolRevenue,
+          minerAddress,
+        );
+        const filtered = this.applyDustPolicy(dist);
+        if (filtered.length > 0) return filtered;
       } catch (err) {
-        console.warn(`[JobDeclaration] Group-Solo distribution fetch failed, falling back to solo: ${(err as Error).message}`);
+        console.warn(
+          `[JobDeclaration] Group-Solo distribution fetch failed: ${(err as Error).message}`,
+        );
       }
     }
 
-    // Solo (or fallback): single output to the miner. weights=null
-    // means the client won't emit a TLV — implicit [1,0,…,0] applies.
-    return { addresses: [minerAddress], weights: null };
+    return soloFallback;
+  }
+
+  /**
+   * Drop sub-dust outputs from a distribution. Amounts below the dust
+   * threshold accumulate in the pool's internal pending ledger and pay
+   * out in a later block when the per-miner balance crosses the threshold.
+   * The dropped sats are NOT redistributed across the remaining outputs —
+   * they stay in pending, which means `sum(emitted) ≤ pool_revenue` (spec
+   * §2.2). The JDC will see a slightly under-allocated coinbase, which is
+   * allowed under §6.4.3 ("Pool MAY pay proportionally smaller rewards").
+   */
+  private applyDustPolicy(
+    dist: ReadonlyArray<{ address: string; sats: number }>,
+  ): Array<{ address: string; sats: number }> {
+    const out: Array<{ address: string; sats: number }> = [];
+    for (const d of dist) {
+      const sats = Math.floor(d.sats);
+      if (sats >= DUST_THRESHOLD_SATS) {
+        out.push({ address: d.address, sats });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Look up the previously-emitted `RequestCoinbaseOutputs.Success`
+   * response for this `(token, prev_hash)`, returning the serialized
+   * outputs buffer if one matches. Used during `DeclareMiningJob`
+   * validation to reject coinbases that don't match any emitted response.
+   *
+   * Returns the buffer if a cached emission exists; null otherwise. The
+   * caller is responsible for the multiset-match check (the cached buffer
+   * is the consensus-serialized output list).
+   */
+  findEmittedOutputsForJob(token: Buffer, prevHash: Buffer): Buffer | null {
+    const cache = this.emittedResponses.get(token.toString('hex'));
+    if (!cache || cache.length === 0) return null;
+    for (let i = cache.length - 1; i >= 0; i--) {
+      if (cache[i].prevHash.equals(prevHash)) {
+        return cache[i].outputs;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Note the pool's current prev_hash. If it differs from the previously
+   * observed one, all cached responses bound to the old prev_hash are
+   * dropped — they reference a payout window that's no longer "current"
+   * from the pool's perspective.
+   */
+  observePrevHash(prevHash: Buffer): void {
+    if (this.lastObservedPrevHash && this.lastObservedPrevHash.equals(prevHash)) {
+      return; // unchanged
+    }
+    this.lastObservedPrevHash = Buffer.from(prevHash);
+    // Evict stale entries from every token's cache list.
+    for (const [tokenHex, list] of this.emittedResponses.entries()) {
+      const fresh = list.filter((e) => e.prevHash.equals(prevHash));
+      if (fresh.length === 0) {
+        this.emittedResponses.delete(tokenHex);
+      } else if (fresh.length !== list.length) {
+        this.emittedResponses.set(tokenHex, fresh);
+      }
+    }
+  }
+
+  /** Test-only: number of cache entries currently retained for a token. */
+  __emittedResponsesCountForToken(tokenHex: string): number {
+    return this.emittedResponses.get(tokenHex)?.length ?? 0;
   }
 
   /**
    * Encode an ordered list of pay-to-script addresses as a Bitcoin
-   * consensus Vec<TxOut>. All outputs carry value=0 (spec 6.4.3 — the
-   * JDC fills in real sats per the implicit single-output rule or the
-   * ext-0x0003 weighted rule, depending on negotiation).
+   * consensus Vec<TxOut>. All outputs carry value=0 — used for the
+   * §6.4.3 single-output payload in AllocateMiningJobToken.Success
+   * (vanilla JDP path; the JDC fills in the real reward at coinbase
+   * construction).
+   *
+   * The dynamic-outputs flow (ext 0x0003 §2) uses encodeDynamicCoinbaseOutputs
+   * instead, which carries real sats values.
    *
    * Public so JobDeclarationClient can produce the buffer for token
    * caches and so tests can exercise the encoder in isolation.
@@ -316,6 +515,60 @@ export class JobDeclarationService implements OnModuleInit, JobDeclarationServic
 
       // value: u64 LE, always 0 — JDC fills in real reward.
       parts.push(Buffer.alloc(8, 0));
+
+      // script length (VarInt) + script bytes
+      if (scriptPubKey.length < 0xfd) {
+        parts.push(Buffer.from([scriptPubKey.length]));
+      } else {
+        const lenBuf = Buffer.alloc(3);
+        lenBuf[0] = 0xfd;
+        lenBuf.writeUInt16LE(scriptPubKey.length, 1);
+        parts.push(lenBuf);
+      }
+      parts.push(scriptPubKey);
+    }
+
+    return Buffer.concat(parts);
+  }
+
+  /**
+   * Encode an ordered list of `{ address, sats }` pairs as a Bitcoin
+   * consensus `Vec<TxOut>`. Used in the ext 0x0003 `RequestCoinbaseOutputs.Success`
+   * payload where the JDS commits to exact per-output amounts.
+   *
+   * Each output: u64 value LE + VarInt script_len + scriptPubKey bytes.
+   * Output count is VarInt-encoded.
+   */
+  encodeDynamicCoinbaseOutputs(outputs: ReadonlyArray<{ address: string; sats: number }>): Buffer {
+    const network = this.resolveNetwork();
+    if (outputs.length === 0) {
+      return Buffer.from([0x00]);
+    }
+
+    const parts: Buffer[] = [];
+
+    // VarInt: output count
+    if (outputs.length < 0xfd) {
+      parts.push(Buffer.from([outputs.length]));
+    } else if (outputs.length <= 0xffff) {
+      const lenBuf = Buffer.alloc(3);
+      lenBuf[0] = 0xfd;
+      lenBuf.writeUInt16LE(outputs.length, 1);
+      parts.push(lenBuf);
+    } else {
+      const lenBuf = Buffer.alloc(5);
+      lenBuf[0] = 0xfe;
+      lenBuf.writeUInt32LE(outputs.length, 1);
+      parts.push(lenBuf);
+    }
+
+    for (const out of outputs) {
+      const scriptPubKey = bitcoinjs.address.toOutputScript(out.address, network);
+
+      // value: u64 LE
+      const valueBuf = Buffer.alloc(8);
+      valueBuf.writeBigUInt64LE(BigInt(Math.floor(out.sats)));
+      parts.push(valueBuf);
 
       // script length (VarInt) + script bytes
       if (scriptPubKey.length < 0xfd) {

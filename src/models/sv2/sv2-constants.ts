@@ -40,11 +40,10 @@ export const SV2_FIELD_TYPE_USER_IDENTITY = 0x01;
 /** Max bytes for the 0x0002 user_identity TLV value (spec §1.1). */
 export const SV2_USER_IDENTITY_MAX_BYTES = 32;
 
-/** Extension 0x0003 — Coinbase Output Weights (TLV on AllocateMiningJobToken.Success) */
-export const SV2_EXTENSION_TYPE_COINBASE_OUTPUT_WEIGHTS = 0x0003;
-
-/** Field type ID inside the 0x0003 TLV (only field currently defined). */
-export const SV2_FIELD_TYPE_COINBASE_TX_OUTPUT_WEIGHTS = 0x01;
+/** Extension 0x0003 — Dynamic Coinbase Outputs.
+ *  Introduces three new messages (RequestCoinbaseOutputs / .Success / .Error)
+ *  in the 0x0003 namespace; frame extension_type = 0x0003 for all three. */
+export const SV2_EXTENSION_TYPE_DYNAMIC_COINBASE_OUTPUTS = 0x0003;
 
 // ── Noise NX Handshake Constants ────────────────────────────────────
 
@@ -116,6 +115,13 @@ export enum Sv2MsgType {
   EXT_REQUEST_EXTENSIONS = 0x00,
   EXT_REQUEST_EXTENSIONS_SUCCESS = 0x01,
   EXT_REQUEST_EXTENSIONS_ERROR = 0x02,
+
+  // Dynamic Coinbase Outputs (sv2-spec extension 0x0003)
+  // Messages carry extension_type = SV2_EXTENSION_TYPE_DYNAMIC_COINBASE_OUTPUTS.
+  // Message-type codes are extension-local (0x00/0x01/0x02).
+  EXT_REQUEST_COINBASE_OUTPUTS = 0x00,
+  EXT_REQUEST_COINBASE_OUTPUTS_SUCCESS = 0x01,
+  EXT_REQUEST_COINBASE_OUTPUTS_ERROR = 0x02,
 
   // Job Declaration Protocol
   JDP_ALLOCATE_MINING_JOB_TOKEN = 0x50,

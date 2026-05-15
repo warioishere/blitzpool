@@ -348,9 +348,12 @@ describe('JobDeclarationService', () => {
   });
 
   describe('resolveCoinbasePayout', () => {
+    // resolveCoinbasePayout now always returns the §6.4.3 single-output
+    // fallback; the dynamic distribution flows through handleRequestCoinbaseOutputs.
+    // Both negotiated and non-negotiated paths return the same shape.
     const SV2_EXT_0x0003 = 0x0003;
 
-    it('should return single-output (no weights) when ext 0x0003 not negotiated', async () => {
+    it('returns single-output paying the miner when ext 0x0003 not negotiated', async () => {
       const { service } = createService();
       const result = await service.resolveCoinbasePayout(
         'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4',
@@ -360,7 +363,7 @@ describe('JobDeclarationService', () => {
       expect(result.weights).toBeNull();
     });
 
-    it('should ignore PPLNS distribution when ext 0x0003 not negotiated (spec-purity)', async () => {
+    it('returns single-output paying the miner even when ext 0x0003 IS negotiated (fallback only)', async () => {
       const { service, pplnsService, miningModeService } = createService();
       miningModeService.getMode.mockResolvedValue({ mode: 'pplns' });
       pplnsService.isEnabled.mockReturnValue(true);
@@ -371,17 +374,33 @@ describe('JobDeclarationService', () => {
 
       const result = await service.resolveCoinbasePayout(
         'bc1qminer1',
-        new Set(), // no extensions negotiated
+        new Set([SV2_EXT_0x0003]),
       );
 
-      // Spec compliance: base JDP MUST stay single-output.
+      // The §3.4 fallback distribution lives here; the dynamic
+      // multi-output set is delivered per-job via handleRequestCoinbaseOutputs.
       expect(result.addresses).toEqual(['bc1qminer1']);
       expect(result.weights).toBeNull();
+      // PPLNS distribution is NOT fetched here — it's fetched in
+      // handleRequestCoinbaseOutputs when the JDC asks.
       expect(pplnsService.getPayoutDistribution).not.toHaveBeenCalled();
     });
+  });
 
-    it('should emit multi-output + weights for PPLNS when ext 0x0003 negotiated', async () => {
-      const { service, pplnsService, miningModeService } = createService();
+  describe('handleRequestCoinbaseOutputs', () => {
+    const PREV_HASH = Buffer.alloc(32, 0xAB);
+    const TOKEN = Buffer.from('abcdef0123456789', 'hex');
+
+    function templateWithPrevHash(prevHash: Buffer, coinbasevalue = 312_500_000) {
+      return {
+        prevHash: { prevHash },
+        jobTemplate: { blockData: { coinbasevalue } },
+      };
+    }
+
+    it('PPLNS path: returns multi-output distribution with real sats and caches it', async () => {
+      const { service, pplnsService, miningModeService, templateDistributionService } = createService();
+      templateDistributionService.getLatestTemplate.mockReturnValue(templateWithPrevHash(PREV_HASH));
       miningModeService.getMode.mockResolvedValue({ mode: 'pplns' });
       pplnsService.isEnabled.mockReturnValue(true);
       pplnsService.getPayoutDistribution.mockResolvedValue([
@@ -389,56 +408,188 @@ describe('JobDeclarationService', () => {
         { address: 'bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq', percent: 0.99, sats: 309_375_000 },
       ]);
 
-      const result = await service.resolveCoinbasePayout(
+      const out = await service.handleRequestCoinbaseOutputs(
+        {
+          requestId: 1,
+          miningJobToken: TOKEN,
+          prevHash: PREV_HASH,
+          poolRevenue: 312_500_000n,
+        },
         'bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq',
-        new Set([SV2_EXT_0x0003]),
       );
 
-      expect(result.addresses).toEqual([
-        'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4',
-        'bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq',
-      ]);
-      expect(result.weights).toEqual([3_125_000, 309_375_000]);
+      expect(out.kind).toBe('success');
+      if (out.kind !== 'success') throw new Error('expected success');
+      expect(out.success.requestId).toBe(1);
+      expect(out.success.coinbaseTxOutputs.length).toBeGreaterThan(0);
+      // First byte = output count VarInt = 2.
+      expect(out.success.coinbaseTxOutputs[0]).toBe(0x02);
+      // Pool distribution actually queried with the JDC-reported revenue.
+      expect(pplnsService.getPayoutDistribution).toHaveBeenCalledWith(312_500_000);
+      // Cached for later validation.
+      expect(service.__emittedResponsesCountForToken(TOKEN.toString('hex'))).toBe(1);
     });
 
-    it('should emit multi-output + weights for Group-Solo with finder bonus', async () => {
-      const { service, groupSoloService, miningModeService } = createService();
+    it('Group-Solo path: passes minerAddress as finder, returns finder-bonus distribution', async () => {
+      const FEE_ADDR = 'bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq';
+      const FINDER_ADDR = 'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4';
+      const MEMBER2_ADDR = 'bc1q0xcqpzrky6eff2g52qdye53xkk9jxkvrh6yhyw';
+      const { service, groupSoloService, miningModeService, templateDistributionService } = createService();
+      templateDistributionService.getLatestTemplate.mockReturnValue(templateWithPrevHash(PREV_HASH));
       miningModeService.getMode.mockResolvedValue({ mode: 'group-solo', groupId: 'g42' });
       groupSoloService.isEnabled.mockReturnValue(true);
       groupSoloService.getPayoutDistribution.mockResolvedValue([
-        { address: 'bc1qfee',     percent: 0.01, sats: 3_125_000 },
-        { address: 'bc1qfinder',  percent: 0.40, sats: 125_000_000 }, // higher because finder bonus
-        { address: 'bc1qmember2', percent: 0.59, sats: 184_375_000 },
+        { address: FEE_ADDR,     percent: 0.01, sats: 3_125_000 },
+        { address: FINDER_ADDR,  percent: 0.40, sats: 125_000_000 },
+        { address: MEMBER2_ADDR, percent: 0.59, sats: 184_375_000 },
       ]);
 
-      const result = await service.resolveCoinbasePayout(
-        'bc1qfinder',
-        new Set([SV2_EXT_0x0003]),
+      await service.handleRequestCoinbaseOutputs(
+        {
+          requestId: 2,
+          miningJobToken: TOKEN,
+          prevHash: PREV_HASH,
+          poolRevenue: 312_500_000n,
+        },
+        FINDER_ADDR,
       );
 
-      expect(result.addresses).toEqual(['bc1qfee', 'bc1qfinder', 'bc1qmember2']);
-      expect(result.weights).toEqual([3_125_000, 125_000_000, 184_375_000]);
-      // Finder address MUST be passed through so finder-bonus output is included.
-      expect(groupSoloService.getPayoutDistribution).toHaveBeenCalledWith(
-        'g42',
-        expect.any(Number),
-        'bc1qfinder',
-      );
+      expect(groupSoloService.getPayoutDistribution).toHaveBeenCalledWith('g42', 312_500_000, FINDER_ADDR);
     });
 
-    it('should fall back to solo when PPLNS distribution fetch throws', async () => {
-      const { service, pplnsService, miningModeService } = createService();
-      miningModeService.getMode.mockResolvedValue({ mode: 'pplns' });
-      pplnsService.isEnabled.mockReturnValue(true);
-      pplnsService.getPayoutDistribution.mockRejectedValue(new Error('redis down'));
+    it('Solo / no PPLNS-window match: falls back to single-output paying the miner', async () => {
+      const { service, miningModeService, templateDistributionService } = createService();
+      templateDistributionService.getLatestTemplate.mockReturnValue(templateWithPrevHash(PREV_HASH));
+      miningModeService.getMode.mockResolvedValue({ mode: 'solo' });
 
-      const result = await service.resolveCoinbasePayout(
-        'bc1qminer',
-        new Set([SV2_EXT_0x0003]),
+      const out = await service.handleRequestCoinbaseOutputs(
+        {
+          requestId: 3,
+          miningJobToken: TOKEN,
+          prevHash: PREV_HASH,
+          poolRevenue: 312_500_000n,
+        },
+        'bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq',
+      );
+      expect(out.kind).toBe('success');
+      if (out.kind !== 'success') throw new Error('expected success');
+      // Single output for the miner.
+      expect(out.success.coinbaseTxOutputs[0]).toBe(0x01);
+    });
+
+    it('stale-prev-hash: pool view differs from request → returns error, no cache write', async () => {
+      const { service, templateDistributionService } = createService();
+      templateDistributionService.getLatestTemplate.mockReturnValue(templateWithPrevHash(PREV_HASH));
+
+      const out = await service.handleRequestCoinbaseOutputs(
+        {
+          requestId: 4,
+          miningJobToken: TOKEN,
+          prevHash: Buffer.alloc(32, 0xCD), // wrong prev_hash
+          poolRevenue: 312_500_000n,
+        },
+        'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4',
       );
 
-      expect(result.addresses).toEqual(['bc1qminer']);
-      expect(result.weights).toBeNull();
+      expect(out.kind).toBe('error');
+      if (out.kind !== 'error') throw new Error('expected error');
+      expect(out.error.errorCode).toBe('stale-prev-hash');
+      expect(service.__emittedResponsesCountForToken(TOKEN.toString('hex'))).toBe(0);
+    });
+
+    it('revenue-too-large: pool_revenue > 1.5× template coinbasevalue → error, no cache write', async () => {
+      const { service, templateDistributionService } = createService();
+      templateDistributionService.getLatestTemplate.mockReturnValue(templateWithPrevHash(PREV_HASH, 312_500_000));
+
+      const out = await service.handleRequestCoinbaseOutputs(
+        {
+          requestId: 5,
+          miningJobToken: TOKEN,
+          prevHash: PREV_HASH,
+          poolRevenue: 10_000_000_000n, // 100× the legitimate value
+        },
+        'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4',
+      );
+
+      expect(out.kind).toBe('error');
+      if (out.kind !== 'error') throw new Error('expected error');
+      expect(out.error.errorCode).toBe('revenue-too-large');
+      expect(service.__emittedResponsesCountForToken(TOKEN.toString('hex'))).toBe(0);
+    });
+
+    it('dust suppression: sub-dust amounts are dropped from the output list', async () => {
+      const { service, pplnsService, miningModeService, templateDistributionService } = createService();
+      templateDistributionService.getLatestTemplate.mockReturnValue(templateWithPrevHash(PREV_HASH));
+      miningModeService.getMode.mockResolvedValue({ mode: 'pplns' });
+      pplnsService.isEnabled.mockReturnValue(true);
+      // One legitimate output and one dust output.
+      pplnsService.getPayoutDistribution.mockResolvedValue([
+        { address: 'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4', percent: 0.999, sats: 312_500_000 },
+        { address: 'bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq', percent: 0.001, sats: 50 }, // dust
+      ]);
+
+      const out = await service.handleRequestCoinbaseOutputs(
+        {
+          requestId: 6,
+          miningJobToken: TOKEN,
+          prevHash: PREV_HASH,
+          poolRevenue: 312_500_050n,
+        },
+        'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4',
+      );
+
+      if (out.kind !== 'success') throw new Error('expected success');
+      // Only one output survives the dust filter.
+      expect(out.success.coinbaseTxOutputs[0]).toBe(0x01);
+    });
+
+    it('observePrevHash evicts cache entries bound to the old prev_hash', async () => {
+      const { service, miningModeService, templateDistributionService } = createService();
+      templateDistributionService.getLatestTemplate.mockReturnValue(templateWithPrevHash(PREV_HASH));
+      miningModeService.getMode.mockResolvedValue({ mode: 'solo' });
+
+      // Emit one response bound to PREV_HASH.
+      await service.handleRequestCoinbaseOutputs(
+        {
+          requestId: 10,
+          miningJobToken: TOKEN,
+          prevHash: PREV_HASH,
+          poolRevenue: 312_500_000n,
+        },
+        'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4',
+      );
+      expect(service.__emittedResponsesCountForToken(TOKEN.toString('hex'))).toBe(1);
+
+      // Pool advances to a new prev_hash.
+      const NEW_PREV = Buffer.alloc(32, 0xEF);
+      service.observePrevHash(NEW_PREV);
+
+      // Old cache entry was evicted.
+      expect(service.__emittedResponsesCountForToken(TOKEN.toString('hex'))).toBe(0);
+    });
+
+    it('findEmittedOutputsForJob returns the cached buffer for (token, prev_hash)', async () => {
+      const { service, miningModeService, templateDistributionService } = createService();
+      templateDistributionService.getLatestTemplate.mockReturnValue(templateWithPrevHash(PREV_HASH));
+      miningModeService.getMode.mockResolvedValue({ mode: 'solo' });
+
+      const out = await service.handleRequestCoinbaseOutputs(
+        {
+          requestId: 11,
+          miningJobToken: TOKEN,
+          prevHash: PREV_HASH,
+          poolRevenue: 312_500_000n,
+        },
+        'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4',
+      );
+      if (out.kind !== 'success') throw new Error('expected success');
+
+      const cached = service.findEmittedOutputsForJob(TOKEN, PREV_HASH);
+      expect(cached).not.toBeNull();
+      expect(cached!.equals(out.success.coinbaseTxOutputs)).toBe(true);
+
+      // Different prev_hash → no match.
+      expect(service.findEmittedOutputsForJob(TOKEN, Buffer.alloc(32, 0xFF))).toBeNull();
     });
   });
 

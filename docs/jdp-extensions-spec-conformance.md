@@ -9,7 +9,7 @@ Reviewed against:
 - sv2-spec `main` at commit `eb7ecc6` (Merge pull request #139 from
   plebhash/2025-06-03-remove-prev-hash-from-declare-mining-job)
 - ext 0x0003 spec on branch `add-extension-0x0003-coinbase-output-weights`,
-  commit `336a238` ("0x0003: add §4.5 on coinbase space and output count")
+  commit `69dcc08` ("0x0003: refactor to dynamic per-job coinbase outputs")
 
 Code reviewed:
 

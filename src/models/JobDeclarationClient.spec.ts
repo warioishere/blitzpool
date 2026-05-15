@@ -1,10 +1,10 @@
 // JobDeclarationClient — end-to-end state-machine tests.
 //
 // These exercise the post-handshake dispatch path: SetupConnection →
-// RequestExtensions → AllocateMiningJobToken, observing the exact
-// bytes that go out on the wire. We mock the Socket and the Noise
-// session (since real Noise needs valid keys + remote Act1 from
-// libsecp256k1) but use the REAL frame writer, REAL message
+// RequestExtensions → AllocateMiningJobToken → RequestCoinbaseOutputs,
+// observing the exact bytes that go out on the wire. We mock the Socket
+// and the Noise session (since real Noise needs valid keys + remote
+// Act1 from libsecp256k1) but use the REAL frame writer, REAL message
 // (de)serializers, and REAL handleFrame dispatcher.
 
 import { Socket } from 'net';
@@ -12,15 +12,16 @@ import { JobDeclarationClient, JobDeclarationServiceRef, Sv2PoolPayout } from '.
 import {
   Sv2MsgType,
   SV2_EXTENSION_TYPE_NEGOTIATION,
-  SV2_EXTENSION_TYPE_COINBASE_OUTPUT_WEIGHTS,
+  SV2_EXTENSION_TYPE_DYNAMIC_COINBASE_OUTPUTS,
 } from './sv2/sv2-constants';
 import {
   serializeAllocateMiningJobToken,
 } from './sv2/sv2-jdp-messages';
 import { BufferWriter, BufferReader } from './sv2/sv2-binary-codec';
 import {
-  deserializeRequestExtensions,
-  parseCoinbaseOutputWeightsTlv,
+  serializeRequestCoinbaseOutputs,
+  deserializeRequestCoinbaseOutputsSuccess,
+  deserializeRequestCoinbaseOutputsError,
 } from './sv2/sv2-extensions-messages';
 
 // We don't run Noise here — we set encryption to identity (no-op) and
@@ -90,6 +91,8 @@ function makeReadyClient(serviceOverrides: Partial<JobDeclarationServiceRef> = {
       weights: null,
     } satisfies Sv2PoolPayout),
     encodeCoinbaseOutputs: jest.fn().mockReturnValue(Buffer.from([0x01, 0, 0, 0, 0, 0, 0, 0, 0, 22])), // 1 dummy output
+    handleRequestCoinbaseOutputs: jest.fn(),
+    findEmittedOutputsForJob: jest.fn().mockReturnValue(null),
     getTemplateTransactions: () => new Map(),
     getCurrentPrevHash: () => null,
     getRawTransaction: jest.fn().mockResolvedValue(null),
@@ -157,7 +160,7 @@ describe('JobDeclarationClient — extensions negotiation (ext 0x0001)', () => {
       const w = new BufferWriter();
       w.writeU16(0xCAFE);              // request_id
       w.writeU16(1);                    // SEQ count
-      w.writeU16(SV2_EXTENSION_TYPE_COINBASE_OUTPUT_WEIGHTS);
+      w.writeU16(SV2_EXTENSION_TYPE_DYNAMIC_COINBASE_OUTPUTS);
       return w.toBuffer();
     })();
 
@@ -177,11 +180,11 @@ describe('JobDeclarationClient — extensions negotiation (ext 0x0001)', () => {
     const count = reader.readU16();
     expect(requestId).toBe(0xCAFE);
     expect(count).toBe(1);
-    expect(reader.readU16()).toBe(SV2_EXTENSION_TYPE_COINBASE_OUTPUT_WEIGHTS);
+    expect(reader.readU16()).toBe(SV2_EXTENSION_TYPE_DYNAMIC_COINBASE_OUTPUTS);
 
     // Client's internal negotiation state was updated.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    expect((client as any).negotiatedExtensions.has(SV2_EXTENSION_TYPE_COINBASE_OUTPUT_WEIGHTS)).toBe(true);
+    expect((client as any).negotiatedExtensions.has(SV2_EXTENSION_TYPE_DYNAMIC_COINBASE_OUTPUTS)).toBe(true);
   });
 
   test('RequestExtensions[unknown-ext] → .Error listing it as unsupported (spec §4.1)', async () => {
@@ -222,7 +225,7 @@ describe('JobDeclarationClient — extensions negotiation (ext 0x0001)', () => {
       w.writeU16(7);
       w.writeU16(3);
       w.writeU16(0x9999);                              // unknown
-      w.writeU16(SV2_EXTENSION_TYPE_COINBASE_OUTPUT_WEIGHTS);
+      w.writeU16(SV2_EXTENSION_TYPE_DYNAMIC_COINBASE_OUTPUTS);
       w.writeU16(0xAAAA);                              // unknown
       return w.toBuffer();
     })();
@@ -236,7 +239,7 @@ describe('JobDeclarationClient — extensions negotiation (ext 0x0001)', () => {
     const reader = new BufferReader(frame.payload);
     expect(reader.readU16()).toBe(7); // requestId
     expect(reader.readU16()).toBe(1); // 1 supported
-    expect(reader.readU16()).toBe(SV2_EXTENSION_TYPE_COINBASE_OUTPUT_WEIGHTS);
+    expect(reader.readU16()).toBe(SV2_EXTENSION_TYPE_DYNAMIC_COINBASE_OUTPUTS);
   });
 
   test('RequestExtensions before SetupConnection → ignored, no response', async () => {
@@ -249,7 +252,7 @@ describe('JobDeclarationClient — extensions negotiation (ext 0x0001)', () => {
       const w = new BufferWriter();
       w.writeU16(3);
       w.writeU16(1);
-      w.writeU16(SV2_EXTENSION_TYPE_COINBASE_OUTPUT_WEIGHTS);
+      w.writeU16(SV2_EXTENSION_TYPE_DYNAMIC_COINBASE_OUTPUTS);
       return w.toBuffer();
     })();
 
@@ -260,8 +263,8 @@ describe('JobDeclarationClient — extensions negotiation (ext 0x0001)', () => {
   });
 });
 
-describe('JobDeclarationClient — AllocateMiningJobToken.Success TLV emission', () => {
-  test('without ext 0x0003: response carries NO weights TLV (base spec, single output)', async () => {
+describe('JobDeclarationClient — AllocateMiningJobToken.Success payload shape', () => {
+  test('without ext 0x0003: Success carries the §6.4.3 single-output payload, nothing else', async () => {
     const { client, socketWrites, service, ready } = makeReadyClient();
     await ready();
 
@@ -279,82 +282,23 @@ describe('JobDeclarationClient — AllocateMiningJobToken.Success TLV emission',
     const frame = parseFrame(socketWrites[0]);
     expect(frame.msgType).toBe(Sv2MsgType.JDP_ALLOCATE_MINING_JOB_TOKEN_SUCCESS);
 
-    // Parse the base AllocateMiningJobTokenSuccess (request_id U32 +
-    // mining_job_token B0_255 + coinbase_outputs B0_64K), then check
-    // that nothing follows.
+    // request_id U32 + mining_job_token B0_255 + coinbase_outputs B0_64K
+    // — and nothing else. The static-weights TLV is gone.
     const reader = new BufferReader(frame.payload);
-    reader.readU32();           // request_id
-    reader.readB0_255();         // token
-    reader.readB0_64K();         // coinbaseOutputs
-    expect(reader.remaining).toBe(0); // ← no trailing TLV when ext not negotiated
-    // resolveCoinbasePayout was called with empty extension set.
+    reader.readU32();
+    reader.readB0_255();
+    reader.readB0_64K();
+    expect(reader.remaining).toBe(0);
+
     const callArgs = (service.resolveCoinbasePayout as jest.Mock).mock.calls[0];
     expect(callArgs[1].size).toBe(0);
   });
 
-  test('with ext 0x0003 + multi-output payout: response carries weights TLV at tail', async () => {
-    const { client, socketWrites, service, ready } = makeReadyClient({
-      resolveCoinbasePayout: jest.fn().mockResolvedValue({
-        addresses: ['bc1qfee', 'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4', 'bc1qminer2'],
-        weights: [3_125_000, 156_437_500, 153_312_500],
-      }),
-      encodeCoinbaseOutputs: jest.fn().mockReturnValue(Buffer.from('cafebabe', 'hex')),
-    });
-    await ready();
-
-    // Step 1: negotiate ext 0x0003.
-    const reqPayload = (() => {
-      const w = new BufferWriter();
-      w.writeU16(99);
-      w.writeU16(1);
-      w.writeU16(SV2_EXTENSION_TYPE_COINBASE_OUTPUT_WEIGHTS);
-      return w.toBuffer();
-    })();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await (client as any).handleFrame(SV2_EXTENSION_TYPE_NEGOTIATION, Sv2MsgType.EXT_REQUEST_EXTENSIONS, reqPayload);
-    expect(socketWrites).toHaveLength(1); // RequestExtensions.Success
-
-    // Step 2: AllocateMiningJobToken.
-    const allocPayload = serializeAllocateMiningJobToken({
-      userIdentifier: 'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4',
-      requestId: 42,
-    });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await (client as any).handleFrame(0, Sv2MsgType.JDP_ALLOCATE_MINING_JOB_TOKEN, allocPayload);
-
-    expect(socketWrites).toHaveLength(2);
-    const frame = parseFrame(socketWrites[1]);
-    expect(frame.msgType).toBe(Sv2MsgType.JDP_ALLOCATE_MINING_JOB_TOKEN_SUCCESS);
-
-    // Skip the base struct fields, capture the tail.
-    const reader = new BufferReader(frame.payload);
-    reader.readU32();
-    reader.readB0_255();
-    const coinbaseOutputs = reader.readB0_64K();
-    expect(coinbaseOutputs).toEqual(Buffer.from('cafebabe', 'hex'));
-
-    const tail = frame.payload.subarray(reader.position);
-    expect(tail.length).toBeGreaterThan(0);
-
-    // Parse the TLV at the tail — it must carry the weights we set.
-    expect(parseCoinbaseOutputWeightsTlv(tail)).toEqual([3_125_000, 156_437_500, 153_312_500]);
-
-    // And resolveCoinbasePayout was called with the negotiated extension set.
-    const callArgs = (service.resolveCoinbasePayout as jest.Mock).mock.calls[0];
-    expect(callArgs[0]).toBe('bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4');
-    expect(callArgs[1].has(SV2_EXTENSION_TYPE_COINBASE_OUTPUT_WEIGHTS)).toBe(true);
-  });
-
-  test('with ext 0x0003 negotiated but single-output (solo): NO TLV emitted', async () => {
-    // Spec §1.3: "When absent or empty, the implicit weight vector
-    // [1, 0, …, 0] applies." With one pool output the TLV is redundant.
-    const { client, socketWrites, ready } = makeReadyClient({
-      resolveCoinbasePayout: jest.fn().mockResolvedValue({
-        addresses: ['bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq'],
-        weights: null,
-      }),
-      encodeCoinbaseOutputs: jest.fn().mockReturnValue(Buffer.from('ff', 'hex')),
-    });
+  test('with ext 0x0003 negotiated: Success STILL carries no TLV (§3.4 fallback path only)', async () => {
+    // Ext 0x0003 moved the dynamic distribution to RequestCoinbaseOutputs;
+    // AllocateMiningJobToken.Success now only carries the §6.4.3 fallback
+    // outputs regardless of negotiation, and nothing trailing.
+    const { client, socketWrites, ready } = makeReadyClient();
     await ready();
 
     // Negotiate.
@@ -362,11 +306,12 @@ describe('JobDeclarationClient — AllocateMiningJobToken.Success TLV emission',
       const w = new BufferWriter();
       w.writeU16(1);
       w.writeU16(1);
-      w.writeU16(SV2_EXTENSION_TYPE_COINBASE_OUTPUT_WEIGHTS);
+      w.writeU16(SV2_EXTENSION_TYPE_DYNAMIC_COINBASE_OUTPUTS);
       return w.toBuffer();
     })();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await (client as any).handleFrame(SV2_EXTENSION_TYPE_NEGOTIATION, Sv2MsgType.EXT_REQUEST_EXTENSIONS, reqPayload);
+    expect(socketWrites).toHaveLength(1);
 
     const allocPayload = serializeAllocateMiningJobToken({
       userIdentifier: 'bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq',
@@ -381,5 +326,177 @@ describe('JobDeclarationClient — AllocateMiningJobToken.Success TLV emission',
     reader.readB0_255();
     reader.readB0_64K();
     expect(reader.remaining).toBe(0);
+  });
+});
+
+describe('JobDeclarationClient — RequestCoinbaseOutputs (ext 0x0003)', () => {
+  /** Helper: negotiate 0x0003, allocate a token, return the token bytes. */
+  async function negotiateAndAllocate(
+    client: JobDeclarationClient,
+    socketWrites: Buffer[],
+    minerAddress = 'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4',
+  ): Promise<Buffer> {
+    const reqPayload = (() => {
+      const w = new BufferWriter();
+      w.writeU16(1);
+      w.writeU16(1);
+      w.writeU16(SV2_EXTENSION_TYPE_DYNAMIC_COINBASE_OUTPUTS);
+      return w.toBuffer();
+    })();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (client as any).handleFrame(SV2_EXTENSION_TYPE_NEGOTIATION, Sv2MsgType.EXT_REQUEST_EXTENSIONS, reqPayload);
+
+    const allocPayload = serializeAllocateMiningJobToken({
+      userIdentifier: minerAddress,
+      requestId: 1,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (client as any).handleFrame(0, Sv2MsgType.JDP_ALLOCATE_MINING_JOB_TOKEN, allocPayload);
+
+    // Extract the issued token from the AllocateMiningJobToken.Success frame.
+    const allocSuccessFrame = parseFrame(socketWrites[socketWrites.length - 1]);
+    const r = new BufferReader(allocSuccessFrame.payload);
+    r.readU32();
+    return r.readB0_255();
+  }
+
+  test('happy path: Request → Success frame with outputs from service', async () => {
+    const stubOutputs = Buffer.from('01' + '0000000000000000' + '02' + '0123', 'hex');
+    const { client, socketWrites, service, ready } = makeReadyClient({
+      handleRequestCoinbaseOutputs: jest.fn().mockResolvedValue({
+        kind: 'success',
+        success: { requestId: 7, coinbaseTxOutputs: stubOutputs },
+      }),
+    });
+    await ready();
+
+    const token = await negotiateAndAllocate(client, socketWrites);
+    socketWrites.length = 0;
+
+    const prevHash = Buffer.alloc(32, 0x11);
+    const reqPayload = serializeRequestCoinbaseOutputs({
+      requestId: 7,
+      miningJobToken: token,
+      prevHash,
+      poolRevenue: 312_500_000n,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (client as any).handleFrame(
+      SV2_EXTENSION_TYPE_DYNAMIC_COINBASE_OUTPUTS,
+      Sv2MsgType.EXT_REQUEST_COINBASE_OUTPUTS,
+      reqPayload,
+    );
+
+    expect(socketWrites).toHaveLength(1);
+    const frame = parseFrame(socketWrites[0]);
+    expect(frame.extensionType).toBe(SV2_EXTENSION_TYPE_DYNAMIC_COINBASE_OUTPUTS);
+    expect(frame.msgType).toBe(Sv2MsgType.EXT_REQUEST_COINBASE_OUTPUTS_SUCCESS);
+
+    const parsed = deserializeRequestCoinbaseOutputsSuccess(new BufferReader(frame.payload));
+    expect(parsed.requestId).toBe(7);
+    expect(parsed.coinbaseTxOutputs).toEqual(stubOutputs);
+
+    // Service was called with the correct miner address (bound at allocation).
+    const callArgs = (service.handleRequestCoinbaseOutputs as jest.Mock).mock.calls[0];
+    expect(callArgs[1]).toBe('bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4');
+  });
+
+  test('unknown token → invalid-mining-job-token error frame (without calling service)', async () => {
+    const handler = jest.fn();
+    const { client, socketWrites, ready } = makeReadyClient({
+      handleRequestCoinbaseOutputs: handler,
+    });
+    await ready();
+
+    // Negotiate but DON'T allocate — the request will reference a bogus token.
+    const reqExtPayload = (() => {
+      const w = new BufferWriter();
+      w.writeU16(1);
+      w.writeU16(1);
+      w.writeU16(SV2_EXTENSION_TYPE_DYNAMIC_COINBASE_OUTPUTS);
+      return w.toBuffer();
+    })();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (client as any).handleFrame(SV2_EXTENSION_TYPE_NEGOTIATION, Sv2MsgType.EXT_REQUEST_EXTENSIONS, reqExtPayload);
+    socketWrites.length = 0;
+
+    const reqPayload = serializeRequestCoinbaseOutputs({
+      requestId: 42,
+      miningJobToken: Buffer.from('deadbeef', 'hex'),
+      prevHash: Buffer.alloc(32),
+      poolRevenue: 100n,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (client as any).handleFrame(
+      SV2_EXTENSION_TYPE_DYNAMIC_COINBASE_OUTPUTS,
+      Sv2MsgType.EXT_REQUEST_COINBASE_OUTPUTS,
+      reqPayload,
+    );
+
+    expect(handler).not.toHaveBeenCalled();
+    expect(socketWrites).toHaveLength(1);
+    const frame = parseFrame(socketWrites[0]);
+    expect(frame.msgType).toBe(Sv2MsgType.EXT_REQUEST_COINBASE_OUTPUTS_ERROR);
+
+    const parsed = deserializeRequestCoinbaseOutputsError(new BufferReader(frame.payload));
+    expect(parsed.requestId).toBe(42);
+    expect(parsed.errorCode).toBe('invalid-mining-job-token');
+  });
+
+  test('service returns error → propagated to wire as Error frame', async () => {
+    const { client, socketWrites, ready } = makeReadyClient({
+      handleRequestCoinbaseOutputs: jest.fn().mockResolvedValue({
+        kind: 'error',
+        error: { requestId: 9, errorCode: 'stale-prev-hash' },
+      }),
+    });
+    await ready();
+
+    const token = await negotiateAndAllocate(client, socketWrites);
+    socketWrites.length = 0;
+
+    const reqPayload = serializeRequestCoinbaseOutputs({
+      requestId: 9,
+      miningJobToken: token,
+      prevHash: Buffer.alloc(32, 0xAA),
+      poolRevenue: 312_500_000n,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (client as any).handleFrame(
+      SV2_EXTENSION_TYPE_DYNAMIC_COINBASE_OUTPUTS,
+      Sv2MsgType.EXT_REQUEST_COINBASE_OUTPUTS,
+      reqPayload,
+    );
+
+    const frame = parseFrame(socketWrites[0]);
+    expect(frame.extensionType).toBe(SV2_EXTENSION_TYPE_DYNAMIC_COINBASE_OUTPUTS);
+    expect(frame.msgType).toBe(Sv2MsgType.EXT_REQUEST_COINBASE_OUTPUTS_ERROR);
+
+    const parsed = deserializeRequestCoinbaseOutputsError(new BufferReader(frame.payload));
+    expect(parsed.errorCode).toBe('stale-prev-hash');
+  });
+
+  test('frame arrives before 0x0003 was negotiated → silently dropped (no response)', async () => {
+    const handler = jest.fn();
+    const { client, socketWrites, ready } = makeReadyClient({
+      handleRequestCoinbaseOutputs: handler,
+    });
+    await ready();
+
+    const reqPayload = serializeRequestCoinbaseOutputs({
+      requestId: 1,
+      miningJobToken: Buffer.from('00', 'hex'),
+      prevHash: Buffer.alloc(32),
+      poolRevenue: 0n,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (client as any).handleFrame(
+      SV2_EXTENSION_TYPE_DYNAMIC_COINBASE_OUTPUTS,
+      Sv2MsgType.EXT_REQUEST_COINBASE_OUTPUTS,
+      reqPayload,
+    );
+
+    expect(handler).not.toHaveBeenCalled();
+    expect(socketWrites).toHaveLength(0);
   });
 });

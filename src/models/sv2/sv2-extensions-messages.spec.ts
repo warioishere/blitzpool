@@ -1,13 +1,17 @@
-// Tests for sv2-extensions-messages.ts — extensions negotiation (ext 0x0001)
-// and Coinbase Output Weights TLV (ext 0x0003).
+// Tests for sv2-extensions-messages.ts — extensions negotiation (ext 0x0001),
+// Worker-ID TLV (ext 0x0002), and Dynamic Coinbase Outputs messages (ext 0x0003).
 
 import { BufferReader } from './sv2-binary-codec';
 import {
   deserializeRequestExtensions,
   serializeRequestExtensionsSuccess,
   serializeRequestExtensionsError,
-  encodeCoinbaseOutputWeightsTlv,
-  parseCoinbaseOutputWeightsTlv,
+  deserializeRequestCoinbaseOutputs,
+  serializeRequestCoinbaseOutputs,
+  serializeRequestCoinbaseOutputsSuccess,
+  deserializeRequestCoinbaseOutputsSuccess,
+  serializeRequestCoinbaseOutputsError,
+  deserializeRequestCoinbaseOutputsError,
   encodeWorkerIdTlv,
   parseWorkerIdTlv,
   resolveShareWorkerNameFromTlv,
@@ -58,59 +62,111 @@ describe('RequestExtensions (de)serialization', () => {
   });
 });
 
-describe('Coinbase Output Weights TLV (ext 0x0003)', () => {
-  it('matches the spec example: weights=[200, 4900, 4900]', () => {
-    // Per extensions/0x0003-coinbase-output-weights.md §1.1:
-    //   00 03 01 00 0E 03 00 C8 00 00 00 24 13 00 00 24 13 00 00
-    const tlv = encodeCoinbaseOutputWeightsTlv([200, 4900, 4900]);
-    expect(tlv.toString('hex')).toBe('000301000e0300c80000002413000024130000');
+describe('RequestCoinbaseOutputs (ext 0x0003) — Request codec', () => {
+  it('round-trips request_id, token, prev_hash, pool_revenue', () => {
+    const prevHash = Buffer.alloc(32, 0);
+    // Mark a few bytes to verify they survive the round-trip in raw order.
+    prevHash[0] = 0xaa; prevHash[1] = 0xbb; prevHash[31] = 0xff;
+
+    const original = {
+      requestId: 0xdeadbeef,
+      miningJobToken: Buffer.from('jdp-token-42', 'utf8'),
+      prevHash,
+      poolRevenue: 312_500_000n, // 3.125 BTC in sats (subsidy + fees)
+    };
+
+    const wire = serializeRequestCoinbaseOutputs(original);
+    const parsed = deserializeRequestCoinbaseOutputs(new BufferReader(wire));
+
+    expect(parsed.requestId).toBe(original.requestId);
+    expect(parsed.miningJobToken).toEqual(original.miningJobToken);
+    expect(parsed.prevHash).toEqual(prevHash);
+    expect(parsed.poolRevenue).toBe(original.poolRevenue);
   });
 
-  it('encodes a 2-weight TLV with correct length and headers', () => {
-    const tlv = encodeCoinbaseOutputWeightsTlv([1, 99]);
-    // Per spec §3.4.3: TLV header is BIG-ENDIAN, value internals LE.
-    // Type 0x0003 + field 0x01           → 00 03 01 (BE)
-    // Length: U16 = 2 (count) + 4*2 = 10 → 00 0a   (BE)
-    // Value: count=2 (LE), then U32 LE 1, then U32 LE 99
-    expect(tlv).toEqual(Buffer.from([
-      0x00, 0x03, 0x01,                   // type (BE)
-      0x00, 0x0a,                         // length = 10 (BE)
-      0x02, 0x00,                         // count = 2 (LE)
-      0x01, 0x00, 0x00, 0x00,             // weight 1 (LE)
-      0x63, 0x00, 0x00, 0x00,             // weight 99 (LE)
+  it('wire layout: U32-LE request_id, B0_255 token, U256 prev_hash, U64-LE pool_revenue', () => {
+    const token = Buffer.from([0xde, 0xad]);                  // 2 bytes
+    const prevHash = Buffer.alloc(32, 0x11);                  // 32x 0x11
+    const wire = serializeRequestCoinbaseOutputs({
+      requestId: 0x01020304,
+      miningJobToken: token,
+      prevHash,
+      poolRevenue: 0x0000000099887766n,
+    });
+
+    // 4 (U32) + 1 (token length prefix) + 2 (token bytes) + 32 (prev_hash) + 8 (U64) = 47
+    expect(wire.length).toBe(47);
+    expect(wire.subarray(0, 4)).toEqual(Buffer.from([0x04, 0x03, 0x02, 0x01])); // request_id LE
+    expect(wire[4]).toBe(0x02);                                                  // token length prefix
+    expect(wire.subarray(5, 7)).toEqual(token);                                  // token bytes
+    expect(wire.subarray(7, 39)).toEqual(prevHash);                              // prev_hash 32 bytes
+    expect(wire.subarray(39, 47)).toEqual(Buffer.from([
+      0x66, 0x77, 0x88, 0x99, 0x00, 0x00, 0x00, 0x00,                            // pool_revenue LE
     ]));
   });
+});
 
-  it('rejects zero weights (sum must be > 0 per §1.1)', () => {
-    expect(() => encodeCoinbaseOutputWeightsTlv([0, 0])).toThrow(/sum of weights/);
+describe('RequestCoinbaseOutputs.Success (ext 0x0003) — Response codec', () => {
+  it('round-trips request_id and consensus-serialized outputs', () => {
+    // Minimal valid Vec<TxOut>: 1 output, value=0, empty script
+    // VarInt count=1, U64 value=0, VarInt script_len=0
+    const coinbaseTxOutputs = Buffer.from([
+      0x01,                                                  // VarInt count = 1
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,        // U64 value = 0
+      0x00,                                                  // VarInt script_len = 0
+    ]);
+
+    const wire = serializeRequestCoinbaseOutputsSuccess({
+      requestId: 7,
+      coinbaseTxOutputs,
+    });
+    const parsed = deserializeRequestCoinbaseOutputsSuccess(new BufferReader(wire));
+    expect(parsed.requestId).toBe(7);
+    expect(parsed.coinbaseTxOutputs).toEqual(coinbaseTxOutputs);
   });
 
-  it('rejects empty input (caller should omit TLV altogether)', () => {
-    expect(() => encodeCoinbaseOutputWeightsTlv([])).toThrow(/at least one weight/);
+  it('wire layout: U32-LE request_id followed by B0_64K outputs', () => {
+    const outputs = Buffer.from([0xAA, 0xBB, 0xCC]);
+    const wire = serializeRequestCoinbaseOutputsSuccess({
+      requestId: 0x42,
+      coinbaseTxOutputs: outputs,
+    });
+    // 4 (U32) + 2 (B0_64K length prefix) + 3 (outputs) = 9
+    expect(wire.length).toBe(9);
+    expect(wire.subarray(0, 4)).toEqual(Buffer.from([0x42, 0x00, 0x00, 0x00])); // request_id LE
+    expect(wire.subarray(4, 6)).toEqual(Buffer.from([0x03, 0x00]));             // length = 3 LE
+    expect(wire.subarray(6, 9)).toEqual(outputs);
+  });
+});
+
+describe('RequestCoinbaseOutputs.Error (ext 0x0003) — Error codec', () => {
+  it('round-trips each defined error code', () => {
+    const codes = [
+      'invalid-mining-job-token',
+      'stale-prev-hash',
+      'revenue-too-large',
+      'coinbase-size-budget-exceeded',
+      'internal',
+    ] as const;
+
+    for (const code of codes) {
+      const wire = serializeRequestCoinbaseOutputsError({ requestId: 1, errorCode: code });
+      const parsed = deserializeRequestCoinbaseOutputsError(new BufferReader(wire));
+      expect(parsed.requestId).toBe(1);
+      expect(parsed.errorCode).toBe(code);
+    }
   });
 
-  it('rejects non-U32 weight', () => {
-    expect(() => encodeCoinbaseOutputWeightsTlv([1, -1])).toThrow(/invalid weight/);
-    expect(() => encodeCoinbaseOutputWeightsTlv([1, 1.5])).toThrow(/invalid weight/);
-    expect(() => encodeCoinbaseOutputWeightsTlv([0x1_0000_0000])).toThrow(/invalid weight/);
-  });
-
-  it('parses a TLV back to the original weights', () => {
-    const tlv = encodeCoinbaseOutputWeightsTlv([200, 4900, 4900]);
-    expect(parseCoinbaseOutputWeightsTlv(tlv)).toEqual([200, 4900, 4900]);
-  });
-
-  it('returns null when no 0x0003 TLV is present', () => {
-    expect(parseCoinbaseOutputWeightsTlv(Buffer.alloc(0))).toBeNull();
-    // An unrelated TLV: extType=0x0009 BE, fieldType=0x01, length=2 BE, value=0x0000
-    const unrelated = Buffer.from([0x00, 0x09, 0x01, 0x00, 0x02, 0x00, 0x00]);
-    expect(parseCoinbaseOutputWeightsTlv(unrelated)).toBeNull();
-  });
-
-  it('parses the spec wire example back to weights=[200, 4900, 4900]', () => {
-    // Verbatim from extensions/0x0003-coinbase-output-weights.md §1.1:
-    const wire = Buffer.from('000301000e0300c80000002413000024130000', 'hex');
-    expect(parseCoinbaseOutputWeightsTlv(wire)).toEqual([200, 4900, 4900]);
+  it('wire layout: U32-LE request_id followed by STR0_255 error_code', () => {
+    const wire = serializeRequestCoinbaseOutputsError({
+      requestId: 0xCAFEBABE,
+      errorCode: 'stale-prev-hash',
+    });
+    // 4 (U32) + 1 (STR length prefix) + 15 ("stale-prev-hash") = 20
+    expect(wire.length).toBe(20);
+    expect(wire.subarray(0, 4)).toEqual(Buffer.from([0xBE, 0xBA, 0xFE, 0xCA])); // LE
+    expect(wire[4]).toBe(15);                                                    // string length
+    expect(wire.subarray(5, 20).toString('utf8')).toBe('stale-prev-hash');
   });
 });
 
@@ -262,40 +318,5 @@ describe('resolveShareWorkerNameFromTlv', () => {
       ext0x0002Negotiated: true,
     });
     expect(r).toBe(channelWorker);
-  });
-});
-
-// ── Integration: full AllocateMiningJobToken.Success + ext 0x0003 TLV ──
-// Exercises the prod-code wire shape: serialize base success message,
-// append the 0x0003 weights TLV (when negotiated), then parse both back.
-// Catches any regression where the TLV gets corrupted by being concatenated
-// onto the base payload.
-describe('AllocateMiningJobToken.Success + 0x0003 TLV roundtrip', () => {
-  // Production serializers used directly — no fakes.
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const jdp = require('./sv2-jdp-messages');
-
-  it('client can split base payload from trailing TLV bytes', () => {
-    const baseMsg = {
-      requestId: 0xdeadbeef,
-      miningJobToken: Buffer.from('mytoken1234', 'utf8'),
-      coinbaseOutputs: Buffer.from('00', 'hex'), // empty Vec<TxOut>
-    };
-    const baseBuf: Buffer = jdp.serializeAllocateMiningJobTokenSuccess(baseMsg);
-    const tlvBuf = encodeCoinbaseOutputWeightsTlv([1, 99, 4_000_000_000]);
-    const combined = Buffer.concat([baseBuf, tlvBuf]);
-
-    // Re-parse the base portion. It should consume exactly baseBuf.length
-    // bytes and leave the TLV intact at the tail.
-    const reader = new BufferReader(combined);
-    const parsedBase = jdp.deserializeAllocateMiningJobTokenSuccess(reader);
-    expect(parsedBase.requestId).toBe(baseMsg.requestId);
-    expect(parsedBase.miningJobToken).toEqual(baseMsg.miningJobToken);
-    expect(parsedBase.coinbaseOutputs).toEqual(baseMsg.coinbaseOutputs);
-
-    // The remaining bytes after base-parse should be exactly the TLV.
-    const tail = combined.subarray(reader.position);
-    expect(tail).toEqual(tlvBuf);
-    expect(parseCoinbaseOutputWeightsTlv(tail)).toEqual([1, 99, 4_000_000_000]);
   });
 });
