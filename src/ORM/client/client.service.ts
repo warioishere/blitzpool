@@ -60,10 +60,11 @@ export class ClientService implements OnModuleDestroy {
     public async killDeadClients() {
         const cutoffMs = Date.now() - 5 * 60 * 1000;
 
+        const now = Date.now();
         return await this.clientRepository
             .createQueryBuilder()
             .update(ClientEntity)
-            .set({ deletedAt: Date.now() })
+            .set({ deletedAt: now, updatedAt: now })
             .where('deletedAt IS NULL')
             .andWhere('updatedAt < :cutoffMs', { cutoffMs })
             .execute();
@@ -237,7 +238,7 @@ export class ClientService implements OnModuleDestroy {
         const result = await this.clientRepository
             .createQueryBuilder()
             .update(ClientEntity)
-            .set({ userAgent: newUserAgent })
+            .set({ userAgent: newUserAgent, updatedAt: Date.now() })
             .where('address = :address AND userAgent = :oldUserAgent', { address, oldUserAgent })
             .execute();
         return result.affected || 0;
@@ -251,7 +252,7 @@ export class ClientService implements OnModuleDestroy {
         const result = await this.clientRepository
             .createQueryBuilder()
             .update(ClientEntity)
-            .set({ userAgent: newUserAgent })
+            .set({ userAgent: newUserAgent, updatedAt: Date.now() })
             .where('address = :address AND userAgent IN (:...agents)', { address, agents: ['jd-client/sv2', '/sv2'] })
             .execute();
         return result.affected || 0;
@@ -261,7 +262,7 @@ export class ClientService implements OnModuleDestroy {
         await this.clientRepository
             .createQueryBuilder()
             .update(ClientEntity)
-            .set({ bestDifficulty: 0 })
+            .set({ bestDifficulty: 0, updatedAt: Date.now() })
             .where('address = :address', { address })
             .execute();
     }
@@ -269,7 +270,7 @@ export class ClientService implements OnModuleDestroy {
     public async updateSessionId(address: string, clientName: string, oldSessionId: string, newSessionId: string) {
         return await this.clientRepository.createQueryBuilder()
             .update(ClientEntity)
-            .set({ sessionId: newSessionId })
+            .set({ sessionId: newSessionId, updatedAt: Date.now() })
             .where('address = :address AND clientName = :clientName AND sessionId = :oldSessionId', {
                 address,
                 clientName,
@@ -520,10 +521,11 @@ export class ClientService implements OnModuleDestroy {
     }
 
     public async deleteAll() {
+        const now = Date.now();
         return await this.clientRepository
             .createQueryBuilder()
             .update(ClientEntity)
-            .set({ deletedAt: Date.now() })
+            .set({ deletedAt: now, updatedAt: now })
             .where('deletedAt IS NULL')
             .execute();
     }
