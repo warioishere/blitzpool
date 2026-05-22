@@ -1,12 +1,12 @@
 # ⚡ Blitzpool – Non-Custodial Bitcoin Mining Pool
 
-**Blitzpool** is an open-source Bitcoin mining pool with a single distinguishing feature: **every payout — Solo, PPLNS, Group-Solo — is written directly into the coinbase transaction of the block that earned it**. No pool wallet, no custody period, no FPPS-style intermediate. Your sats arrive at your address with the block itself.
+**Blitzpool** is an open-source Bitcoin mining pool with a single distinguishing feature: **every payout — Solo, PPLNS, Group-Solo, Blockparty — is written directly into the coinbase transaction of the block that earned it**. No pool wallet, no custody period, no FPPS-style intermediate. Your sats arrive at your address with the block itself.
 
-Current version: **v2.1.2**
+Current version: **v2.1.7**
 
 🌐 Live pool: **https://blitzpool.yourdevice.ch**
 
-Fork of [public-pool](https://github.com/benjamin-wilson/public-pool), rebuilt around three coinbase-payout modes and a full Stratum V2 stack.
+Fork of [public-pool](https://github.com/benjamin-wilson/public-pool), rebuilt around four coinbase-payout modes and a full Stratum V2 stack.
 
 ---
 
@@ -21,12 +21,13 @@ Fork of [public-pool](https://github.com/benjamin-wilson/public-pool), rebuilt a
 | Stratum V1 | ✅ | ✅ | ✅ |
 | Stratum V2 (Noise + TDP + JDP + extended channels) | ✅ | rare | almost never |
 | Non-custodial Group-Solo (friends mine together, reward split on-chain) | ✅ **unique worldwide** | — | — |
+| Non-custodial Blockparty (co-funded rentals, fixed-% on-chain split per member) | ✅ **unique worldwide** | — | — |
 
-Blitzpool is (to the operator's knowledge) the first Bitcoin pool that offers **all three payout modes non-custodially over both SV1 and SV2**.
+Blitzpool is (to the operator's knowledge) the first Bitcoin pool that offers **all four payout modes non-custodially over both SV1 and SV2**.
 
 ---
 
-## The three payout modes
+## The four payout modes
 
 ### 🎯 Solo
 
@@ -73,6 +74,19 @@ Friends mine together as a closed group. Every block a group finds is split prop
 
 **When it fits:** small crew of friends wants to combine hashrate against higher variance than pure Solo, but keeps full on-chain custody.
 
+### 🎉 Blockparty
+
+A directed group sharing the cost of a hashpower rental. Every member contributes to a single rental-administrator address; the rented miners point at that address; when a block is found, the coinbase carries one output per member with their **fixed cut** (basis points, not work-weighted). Splits are agreed up front and signed off by every member before the party goes live.
+
+- Fixed % per member (basis points summing to 100 % of the miner cut)
+- Email-verified directed invitations; per-member token for re-confirm after admin edits splits
+- Same `PPLNS_FEE_ADDRESS` + `PPLNS_FEE_PERCENT` apply
+- Routing is address-driven: any miner / rental session whose address is the party's admin gets a Blockparty coinbase on any port
+- State machine: DRAFT → CONFIRMING → READY → ACTIVE → DISSOLVED (7-day dissolve cooldown so admins can't yank rentals mid-flight)
+- Verified end-to-end against Bitcoin Core 29 with mixed address types (P2WPKH / P2PKH / P2TR / P2WSH / P2SH)
+
+**When it fits:** a group co-funds a Braiins / NiceHash / MRR rental and wants the on-chain payout to land in each member's address in agreed proportions, not into a treasury wallet that someone has to redistribute.
+
 ---
 
 ## Stratum V2 support
@@ -96,18 +110,19 @@ SV2 listens on the same TCP ports as SV1; protocol detection on the first byte r
 
 | Port | Protocol | Starting difficulty | Purpose |
 |---|---|---|---|
-| `3333` | SV1 / SV2 | `STRATUM_START_DIFFICULTY` (default 1000) | Default entry — Solo, Group-Solo |
-| `3339` | SV1 / SV2 | `STRATUM_HIGH_DIFF_START_DIFFICULTY` (default 1,000,000) | Mining-rental endpoint (NiceHash, MRR) |
+| `3333` | SV1 / SV2 | `STRATUM_START_DIFFICULTY` (default 1000) | Default entry — Solo, Group-Solo, Blockparty |
+| `3339` | SV1 / SV2 | `STRATUM_HIGH_DIFF_START_DIFFICULTY` (default 1,000,000) | Mining-rental endpoint (NiceHash, MRR, Braiins) — also the canonical Blockparty rental port |
 | `3340` | SV1 / SV2 | adaptive | **PPLNS** — explicit opt-in to PPLNS payout |
 | `6666` | SV1 TLS | adaptive | Encrypted Stratum (SV1 only) |
 | `3337` | SV2 JDP | — | Job Declaration Protocol, when `SV2_JDP_ENABLED=true` |
 
 Routing priority for a connecting miner:
-1. **Explicit PPLNS port (3340)** → PPLNS, regardless of group membership
-2. **Active group membership** for the miner's BTC address → Group-Solo (any non-PPLNS port)
-3. **Neither** → Solo
+1. **Explicit PPLNS port (3340)** → PPLNS, regardless of group / Blockparty membership
+2. **Active Blockparty admin address** → Blockparty (any non-PPLNS port)
+3. **Active Group-Solo membership** for the miner's BTC address → Group-Solo (any non-PPLNS port)
+4. **None of the above** → Solo
 
-Address-driven Group-Solo means a miner who is a member of a group doesn't have to reconfigure anything — the pool looks them up by BTC address on connect and routes accordingly.
+Blockparty + Group-Solo are mutually exclusive per address (an address is in one or the other, never both — bidirectional collision check at create / addMember time). Address-driven means neither requires the miner to reconfigure anything; the pool looks them up by BTC address on connect and routes accordingly.
 
 ---
 
@@ -117,9 +132,9 @@ Address-driven Group-Solo means a miner who is a member of a group doesn't have 
 
 The pool's production wallets do not exist. Every block that is mined on Blitzpool has the miner-address(es) as the direct destination in the coinbase transaction. An operator can't withhold payouts — they'd have to refuse to relay the block at all, and the miner would simply submit it elsewhere.
 
-### Email-required group invitations
+### Email-required group + Blockparty invitations
 
-Adding a miner to a Group-Solo group is a two-phase invitation flow:
+Adding a miner to a Group-Solo group OR a Blockparty is a two-phase invitation flow:
 
 1. Admin requests an invitation for a BTC address
 2. Pool sends a token-ified link to the **verified email** bound to that address
@@ -211,7 +226,7 @@ See [Running Blitzpool with Postgres](#running-blitzpool-with-postgres).
 | `GET /api/info` | Block data, user agents, high scores, uptime |
 | `GET /api/network` | Bitcoin Core `getmininginfo` (difficulty, network hashrate, …) |
 | `GET /api/info/chart?range=1d\|1m` | Pool hashrate time-series |
-| `GET /api/info/chart/mode/:mode?range=7d` | Per-mode (`solo` / `pplns` / `group-solo`) hashrate time-series |
+| `GET /api/info/chart/mode/:mode?range=7d` | Per-mode (`solo` / `pplns` / `group-solo` / `blockparty`) hashrate time-series |
 | `GET /api/info/chart/live?range=1h\|6h\|12h\|24h` | Live 1-min hashrate |
 | `GET /api/info/shares` | Σ accepted + rejected diff-1 work, incl. `acceptedSinceBlock` (mode-agnostic, all three modes) |
 | `GET /api/info/accepted?range=1d\|3d\|7d` | Accepted share counts per 10-min slot |
@@ -228,7 +243,7 @@ See [Running Blitzpool with Postgres](#running-blitzpool-with-postgres).
 | `GET /api/client/:address/accepted?range=1d\|3d\|7d` | Per-10-min diff-1 accepted |
 | `GET /api/client/:address/rejected?range=1d\|3d\|7d` | Per-reason rejects |
 | `GET /api/client/:address/block-template` | Mode-aware block template (solo / pplns-shaped / group-solo-shaped coinbase depending on the miner's mode) |
-| `GET /api/pplns/mode/:address` | Which mode the miner is currently routed to: `{ mode: 'solo' \| 'pplns' \| 'group-solo', groupId? }` |
+| `GET /api/pplns/mode/:address` | Which mode the miner is currently routed to: `{ mode: 'solo' \| 'pplns' \| 'group-solo' \| 'blockparty', groupId? }` |
 
 ### PPLNS
 
@@ -266,6 +281,28 @@ See [Running Blitzpool with Postgres](#running-blitzpool-with-postgres).
 | `GET /api/pplns/invitations/:token` | Public invitation detail (token = auth) |
 | `POST /api/pplns/invitations/:token/accept` | Accept invitation |
 | `POST /api/pplns/invitations/:token/decline` | Decline invitation |
+
+### Blockparty
+
+| Endpoint | Returns / does |
+|---|---|
+| `GET /api/blockparty` | List of non-dissolved parties |
+| `GET /api/blockparty/public` | Public discoverable parties |
+| `GET /api/blockparty/by-address/:address` | Party this address admins or is a member of |
+| `GET /api/blockparty/:id` | Party details (members, splits, state, status badge) |
+| `GET /api/blockparty/:id/history` | Block-find history for the party |
+| `POST /api/blockparty` | Create — returns admin token (shown **once**) + party id |
+| `PATCH /api/blockparty/:id/splits` | Admin: update splits (resets non-admin confirmations) |
+| `POST /api/blockparty/:id/members` | Admin: add member + send invitation email |
+| `POST /api/blockparty/:id/members/batch` | Admin: batch invite |
+| `POST /api/blockparty/:id/members/:address/resend-invitation` | Admin: re-send invitation (lost-token recovery — clears the member's onboarding state so the next accept mints a fresh `BPM-…` token) |
+| `DELETE /api/blockparty/:id/members/:address` | Admin: remove member |
+| `GET /api/blockparty/:id/invitations` | Admin: list pending invitations |
+| `DELETE /api/blockparty/:id/invitations/:token` | Admin: revoke invitation |
+| `DELETE /api/blockparty/:id` | Dissolve (gated by 7-day post-share cooldown) |
+| `GET /api/blockparty/invitations/:token` | Public invitation detail (token = auth) |
+| `POST /api/blockparty/invitations/:token/accept` | Accept — mints a one-time `BPM-…` member token for re-confirm flows |
+| `POST /api/blockparty/invitations/:token/decline` | Decline invitation |
 
 ### Email binding (miner self-service)
 
@@ -379,9 +416,10 @@ The frontend lives in its own repo: **[blitzpool-ui](https://github.com/warioish
 
 It talks to the pool's HTTP API (port 3334 by default) and exposes:
 
-- Splash page with pool hashrate + Block-Luck card + mining-mode showcase
-- Per-miner dashboard (mode-aware: solo / pplns / group-solo)
+- Splash page with pool hashrate + Block-Luck card + mining-mode showcase (4 modes incl. Blockparty)
+- Per-miner dashboard (mode-aware: solo / pplns / group-solo / blockparty)
 - Payout-group create/manage flow (invitations, member list, round stats)
+- Blockparty admin dashboard with built-in Braiins quick-rental widget + member re-confirm flow
 - Mining-modes explainer page
 - Push-notifications, language toggle EN / DE, dark theme
 
