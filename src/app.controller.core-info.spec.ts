@@ -20,6 +20,7 @@ import { MetricsService } from './services/metrics.service';
 import { MiningModeService } from './services/mining-mode.service';
 import { PplnsService } from './services/pplns.service';
 import { GroupSoloService } from './services/group-solo.service';
+import { BlockpartyService } from './services/blockparty.service';
 import { PoolModeHashrateService } from './ORM/pool-mode-hashrate/pool-mode-hashrate.service';
 
 describe('AppController /api/info/core', () => {
@@ -48,6 +49,7 @@ describe('AppController /api/info/core', () => {
         { provide: MiningModeService, useValue: { getMode: jest.fn().mockResolvedValue({ mode: 'solo' }) } },
         { provide: PplnsService, useValue: { isEnabled: () => false, getPayoutDistribution: jest.fn() } },
         { provide: GroupSoloService, useValue: { isEnabled: () => false, getPayoutDistribution: jest.fn() } },
+        { provide: BlockpartyService, useValue: { getPayoutDistribution: jest.fn().mockResolvedValue({ payouts: [], poolFeeSats: 0, splits: [] }) } },
         { provide: PoolModeHashrateService, useValue: { getChart: jest.fn().mockResolvedValue([]), incrementAccepted: jest.fn() } },
       ],
     }).compile();

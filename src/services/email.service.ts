@@ -379,6 +379,18 @@ function renderVerificationText(ctx: VerificationEmailContext): string {
     ].join('\n');
 }
 
+/**
+ * Shorten a BTC address for display ("bc1q…3kd9"). Mirrors the UI's
+ * `formatBtcAddress` helper so members see the same shape across
+ * email + dashboard. Pure cosmetic — the canonical full address still
+ * lives in the DB row and on the actual coinbase output.
+ */
+function obfuscateBtcAddress(address: string): string {
+    const trimmed = address?.trim() ?? '';
+    if (trimmed.length <= 9) return trimmed;
+    return `${trimmed.slice(0, 4)}…${trimmed.slice(-5)}`;
+}
+
 function renderInvitationHtml(ctx: InvitationEmailContext): string {
     const expires = ctx.expiresAt.toUTCString();
     const body = `
@@ -394,7 +406,7 @@ function renderInvitationHtml(ctx: InvitationEmailContext): string {
     </p>
     <p style="margin:0 0 8px;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:${COLOR_MUTED};">Invited by</p>
     <p style="margin:0;font-family:'Roboto Mono',monospace;font-size:13px;color:${COLOR_TEXT};word-break:break-all;">
-      ${escapeHtml(ctx.inviterAddress)}
+      ${escapeHtml(obfuscateBtcAddress(ctx.inviterAddress))}
     </p>
   </td></tr>
 </table>
@@ -422,7 +434,7 @@ function renderInvitationText(ctx: InvitationEmailContext): string {
         `You've been invited to join the payout group "${sanitizeHeader(ctx.groupName)}" on Blitz Pool.`,
         ``,
         `Your address: ${ctx.address}`,
-        `Invited by:   ${ctx.inviterAddress}`,
+        `Invited by:   ${obfuscateBtcAddress(ctx.inviterAddress)}`,
         ``,
         `Open the invitation: ${ctx.inviteUrl}`,
         ``,

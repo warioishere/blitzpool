@@ -66,6 +66,7 @@ function createService(envOverrides: Record<string, string> = {}) {
     {} as any, // jobDeclarationService
     { isEnabled: () => false } as any, // pplnsService
     { isEnabled: () => false, getGroupForAddress: () => undefined } as any, // groupSoloService
+    { getRoutableGroupIdForAdmin: () => undefined } as any, // blockpartyService
     { mark: jest.fn(), get: jest.fn() } as any, // minerActiveModeService
     { incrementAccepted: jest.fn(), getChart: jest.fn() } as any, // poolModeHashrateService
   );
@@ -302,6 +303,7 @@ describe('StratumV2Service', () => {
         expect.anything(), // templateDistributionService
         expect.anything(), // pplnsService
         expect.anything(), // groupSoloService
+        expect.anything(), // blockpartyService
         expect.anything(), // minerActiveModeService
         expect.anything(), // poolModeHashrateService
       );

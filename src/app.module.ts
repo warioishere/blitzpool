@@ -61,6 +61,7 @@ import { EmailService } from './services/email.service';
 import { AddressEmailService } from './services/address-email.service';
 import { CoinbaseCapacityMonitorService } from './services/coinbase-capacity-monitor.service';
 import { PplnsGroupInvitationService } from './services/pplns-group-invitation.service';
+import { BlockpartyService } from './services/blockparty.service';
 import { PplnsGroupJoinRequestService } from './services/pplns-group-join-request.service';
 import { MiningModeService } from './services/mining-mode.service';
 import { MinerActiveModeService } from './services/miner-active-mode.service';
@@ -73,6 +74,12 @@ import { PplnsGroupInvitationEntity } from './ORM/pplns-group/pplns-group-invita
 import { PplnsGroupJoinRequestEntity } from './ORM/pplns-group/pplns-group-join-request.entity';
 import { AddressEmailEntity } from './ORM/address-email/address-email.entity';
 import { EmailVerificationEntity } from './ORM/address-email/email-verification.entity';
+import { BlockpartyGroupEntity } from './ORM/blockparty/blockparty-group.entity';
+import { BlockpartyMemberEntity } from './ORM/blockparty/blockparty-member.entity';
+import { BlockpartyBlockHistoryEntity } from './ORM/blockparty/blockparty-block-history.entity';
+import { BlockpartyInvitationEntity } from './ORM/blockparty/blockparty-invitation.entity';
+import { BlockpartyController } from './controllers/blockparty/blockparty.controller';
+import { BlockpartyInvitationService } from './services/blockparty-invitation.service';
 import { PplnsGroupController } from './controllers/pplns-group/pplns-group.controller';
 import { PplnsInvitationController } from './controllers/pplns-invitation/pplns-invitation.controller';
 import { EmailController } from './controllers/email/email.controller';
@@ -171,6 +178,10 @@ const ORMModules = [
             PplnsGroupJoinRequestEntity,
             AddressEmailEntity,
             EmailVerificationEntity,
+            BlockpartyGroupEntity,
+            BlockpartyMemberEntity,
+            BlockpartyBlockHistoryEntity,
+            BlockpartyInvitationEntity,
         ]),
         ...ORMModules
     ],
@@ -186,6 +197,7 @@ const ORMModules = [
         PplnsGroupController,
         PplnsInvitationController,
         EmailController,
+        BlockpartyController,
     ],
     providers: [
         // TimeslotMigrationService, // Disabled - migration incomplete, leaving data in mixed state
@@ -227,6 +239,8 @@ const ORMModules = [
         PplnsGroupInvitationService,
         PplnsGroupJoinRequestService,
         CoinbaseCapacityMonitorService,
+        BlockpartyService,
+        BlockpartyInvitationService,
     ],
 })
 export class AppModule {

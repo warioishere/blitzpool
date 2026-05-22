@@ -98,7 +98,7 @@ export class MinerActiveModeService implements OnModuleInit {
         if (!this.redis || !address) return null;
         try {
             const raw = await this.redis.get(this.key(address));
-            if (raw === 'solo' || raw === 'pplns' || raw === 'group-solo') {
+            if (raw === 'solo' || raw === 'pplns' || raw === 'group-solo' || raw === 'blockparty') {
                 return raw;
             }
             return null;

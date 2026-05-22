@@ -26,6 +26,7 @@ import { ClientDifficultyStatisticsService } from '../ORM/client-difficulty-stat
 import { ShareTotalsCacheService } from '../services/share-totals-cache.service';
 import { PplnsService } from '../services/pplns.service';
 import { GroupSoloService } from '../services/group-solo.service';
+import { BlockpartyService } from '../services/blockparty.service';
 import { MinerActiveModeService } from '../services/miner-active-mode.service';
 import { patchCoinbasePrefixVarint } from '../utils/coinbase-prefix.utils';
 import { PoolModeHashrateService } from '../ORM/pool-mode-hashrate/pool-mode-hashrate.service';
@@ -241,6 +242,7 @@ export class StratumV2Client {
     private readonly templateDistributionService?: TemplateDistributionService,
     private readonly pplnsService?: PplnsService,
     private readonly groupSoloService?: GroupSoloService,
+    private readonly blockpartyService?: BlockpartyService,
     private readonly minerActiveModeService?: MinerActiveModeService,
     private readonly poolModeHashrateService?: PoolModeHashrateService,
   ) {
@@ -1673,11 +1675,19 @@ export class StratumV2Client {
         // Mirror of StratumV1Client — bewusster Port-Wahl des Miners schlägt
         // die Default-Address-Driven-Group-Routing.
         const foundGroupId = this.activeGroupId();
+        const foundBlockpartyId = this.activeBlockpartyGroupId();
         if (this.portConfig.payoutMode === 'pplns' && this.pplnsService?.isEnabled() && jobTemplate) {
           await this.pplnsService.onBlockFound(
             jobTemplate.blockData.height,
             jobTemplate.blockData.coinbasevalue,
           );
+        } else if (foundBlockpartyId && jobTemplate) {
+          await this.blockpartyService!.onBlockFound({
+            groupId: foundBlockpartyId,
+            blockHeight: jobTemplate.blockData.height,
+            blockHash: updatedJobBlock.getId(),
+            coinbaseValueSats: jobTemplate.blockData.coinbasevalue,
+          });
         } else if (foundGroupId && jobTemplate) {
           await this.groupSoloService!.onBlockFound(
             jobTemplate.blockData.height,
@@ -1702,13 +1712,20 @@ export class StratumV2Client {
       // applies to the PPLNS port; group-solo / solo always record.
       this.acceptedShareCount++;
       const shareGroupId = this.activeGroupId();
+      const shareBlockpartyId = this.activeBlockpartyGroupId();
       const warmupThreshold = this.portConfig.ledgerWarmupShares ?? 0;
-      let effectiveMode: 'solo' | 'pplns' | 'group-solo';
+      let effectiveMode: 'solo' | 'pplns' | 'group-solo' | 'blockparty';
       if (this.portConfig.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
         if (this.acceptedShareCount > warmupThreshold) {
           await this.pplnsService.recordShare(this.address!, jobDifficulty);
         }
         effectiveMode = 'pplns';
+      } else if (shareBlockpartyId) {
+        // Notify the service so it can refresh lastShareAt and transition
+        // READY → ACTIVE on the very first share, permanently freezing splits.
+        // No ledger write — Blockparty doesn't count shares.
+        await this.blockpartyService!.onShareAccepted(this.address!);
+        effectiveMode = 'blockparty';
       } else if (shareGroupId) {
         await this.groupSoloService!.recordShare(this.address!, jobDifficulty);
         effectiveMode = 'group-solo';
@@ -1850,10 +1867,18 @@ export class StratumV2Client {
     // group) gets the block accepted on-chain but no payout
     // snapshot is taken — the round / window is never reset and
     // no one is credited. Mirror of the extended-channel routing
-    // (PPLNS port > group-membership > solo).
+    // (PPLNS port > blockparty > group-solo > solo).
     const foundGroupId = this.activeGroupId();
+    const foundBlockpartyId = this.activeBlockpartyGroupId();
     if (this.portConfig.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
       await this.pplnsService.onBlockFound(height, coinbasevalue);
+    } else if (foundBlockpartyId) {
+      await this.blockpartyService!.onBlockFound({
+        groupId: foundBlockpartyId,
+        blockHeight: height,
+        blockHash: bitcoinjs.Block.fromHex(blockHex).getId(),
+        coinbaseValueSats: coinbasevalue,
+      });
     } else if (foundGroupId) {
       await this.groupSoloService!.onBlockFound(height, coinbasevalue, this.address!);
     }
@@ -2023,6 +2048,23 @@ export class StratumV2Client {
       );
       return null;
     }
+    const asyncBlockpartyId = this.activeBlockpartyGroupId();
+    if (asyncBlockpartyId) {
+      // Blockparty: fixed-% multi-output coinbase, no shares involved.
+      // Distribution is purely a function of member percentBp values.
+      const distribution = await this.blockpartyService!.getPayoutDistribution(
+        asyncBlockpartyId,
+        blockRewardSats,
+      );
+      if (distribution.payouts.length > 0) {
+        this.noFee = false;
+        return distribution.payouts.map(p => ({ address: p.address, percent: p.percent }));
+      }
+      console.warn(
+        `[StratumV2Client] Blockparty distribution empty — skipping job for ${this.address ?? '<unauth>'}`,
+      );
+      return null;
+    }
     const asyncGroupId = this.activeGroupId();
     if (asyncGroupId) {
       // Per-miner coinbase: pass this session's address as finderAddress
@@ -2064,6 +2106,17 @@ export class StratumV2Client {
     if (!this.address) return null;
     const entry = this.groupSoloService.getGroupForAddress(this.address);
     return entry?.active ? entry.groupId : null;
+  }
+
+  /**
+   * Live lookup of the Blockparty group-id for this session's address,
+   * routable only when status is confirming / ready / active. Mirrors
+   * StratumV1Client.activeBlockpartyGroupId.
+   */
+  private activeBlockpartyGroupId(): string | null {
+    if (!this.blockpartyService) return null;
+    if (!this.address) return null;
+    return this.blockpartyService.getRoutableGroupIdForAdmin(this.address) ?? null;
   }
 
   private async sendNewMiningJob(jobTemplate: IJobTemplate, sendPrevHash: boolean, channelId?: number): Promise<void> {

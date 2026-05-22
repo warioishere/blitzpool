@@ -7,6 +7,8 @@ describe('MiningModeService.getMode', () => {
     function setup(opts: {
         distribution?: { address: string; difficulty: number; percent: number }[];
         groupForAddress?: Record<string, { groupId: string; active: boolean } | undefined>;
+        /** Admin-address → groupId map for Blockparty lookup. */
+        blockpartyAdmins?: Record<string, string>;
         /** Simulates the Redis port-marker set by the stratum layer. */
         liveMarker?: Record<string, MiningMode>;
     }) {
@@ -16,6 +18,9 @@ describe('MiningModeService.getMode', () => {
         const groupService = {
             getGroupForAddress: jest.fn((address: string) => opts.groupForAddress?.[address]),
         };
+        const blockpartyService = {
+            getGroupIdForAdminAddress: jest.fn((address: string) => opts.blockpartyAdmins?.[address]),
+        };
         const minerActiveModeService = {
             get: jest.fn(async (address: string) => opts.liveMarker?.[address] ?? null),
             mark: jest.fn(),
@@ -23,6 +28,7 @@ describe('MiningModeService.getMode', () => {
         return new MiningModeService(
             pplnsService as any,
             groupService as any,
+            blockpartyService as any,
             minerActiveModeService as any,
         );
     }
@@ -140,6 +146,39 @@ describe('MiningModeService.getMode', () => {
         expect(await svc.getMode('bc1qalice')).toEqual({ mode: 'group-solo', groupId: 'grp-1' });
     });
 
+    // ── Blockparty precedence ─────────────────────────────────────────
+
+    it('blockparty admin address resolves to blockparty mode via live marker', async () => {
+        const svc = setup({
+            blockpartyAdmins: { 'bc1qadmin': 'bp-1' },
+            liveMarker: { 'bc1qadmin': 'blockparty' },
+        });
+        expect(await svc.getMode('bc1qadmin')).toEqual({ mode: 'blockparty', groupId: 'bp-1' });
+    });
+
+    it('blockparty wins over group-solo and pplns in the legacy fallback', async () => {
+        // Same address is somehow listed in all three modes (impossible in
+        // practice with bidirectional collision checks, but the precedence
+        // must be deterministic if it ever happens — e.g. stale state).
+        const svc = setup({
+            blockpartyAdmins: { 'bc1qadmin': 'bp-1' },
+            groupForAddress: { 'bc1qadmin': { groupId: 'gs-1', active: true } },
+            distribution: [{ address: 'bc1qadmin', difficulty: 500, percent: 50 }],
+        });
+        expect(await svc.getMode('bc1qadmin')).toEqual({ mode: 'blockparty', groupId: 'bp-1' });
+    });
+
+    it('blockparty live marker falls through when the party was dissolved', async () => {
+        // Marker still in Redis for 5min but the party is gone — fallback
+        // to whatever the address ALSO matches in the legacy chain.
+        const svc = setup({
+            blockpartyAdmins: {}, // no live blockparty for this admin anymore
+            groupForAddress: { 'bc1qadmin': { groupId: 'gs-1', active: true } },
+            liveMarker: { 'bc1qadmin': 'blockparty' },
+        });
+        expect(await svc.getMode('bc1qadmin')).toEqual({ mode: 'group-solo', groupId: 'gs-1' });
+    });
+
     // ── Per-address result cache ──────────────────────────────────────
     // /api/pplns/mode/:address is uncached and polled per dashboard view.
     // Without the cache, every poll did Redis GET + (on miss) HGETALL over
@@ -153,6 +192,9 @@ describe('MiningModeService.getMode', () => {
         const groupService = {
             getGroupForAddress: jest.fn((address: string) => opts.groupForAddress?.[address]),
         };
+        const blockpartyService = {
+            getGroupIdForAdminAddress: jest.fn((address: string) => opts.blockpartyAdmins?.[address]),
+        };
         const minerActiveModeService = {
             get: jest.fn(async (address: string) => opts.liveMarker?.[address] ?? null),
             mark: jest.fn(),
@@ -160,9 +202,10 @@ describe('MiningModeService.getMode', () => {
         const svc = new MiningModeService(
             pplnsService as any,
             groupService as any,
+            blockpartyService as any,
             minerActiveModeService as any,
         );
-        return { svc, pplnsService, groupService, minerActiveModeService };
+        return { svc, pplnsService, groupService, blockpartyService, minerActiveModeService };
     }
 
     it('caches subsequent calls for the same address within 30s', async () => {
