@@ -35,6 +35,7 @@ import { ClientDifficultyStatisticsService } from '../ORM/client-difficulty-stat
 import { ShareTotalsCacheService } from './share-totals-cache.service';
 import { PplnsService } from './pplns.service';
 import { GroupSoloService } from './group-solo.service';
+import { BlockpartyService } from './blockparty.service';
 import { MinerActiveModeService } from './miner-active-mode.service';
 import { PoolModeHashrateService } from '../ORM/pool-mode-hashrate/pool-mode-hashrate.service';
 import { DifficultyScoresCacheService } from './difficulty-scores-cache.service';
@@ -87,6 +88,7 @@ export class StratumV2Service implements OnModuleInit, IProtocolHandler {
     private readonly jobDeclarationService: JobDeclarationService,
     private readonly pplnsService: PplnsService,
     private readonly groupSoloService: GroupSoloService,
+    private readonly blockpartyService: BlockpartyService,
     private readonly minerActiveModeService: MinerActiveModeService,
     private readonly poolModeHashrateService: PoolModeHashrateService,
   ) {}
@@ -191,6 +193,7 @@ export class StratumV2Service implements OnModuleInit, IProtocolHandler {
       this.templateDistributionService,
       this.pplnsService,
       this.groupSoloService,
+      this.blockpartyService,
       this.minerActiveModeService,
       this.poolModeHashrateService,
     );

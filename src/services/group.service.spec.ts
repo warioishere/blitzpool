@@ -106,6 +106,7 @@ describe('GroupService', () => {
     let memberRepo: ReturnType<typeof createMockRepo>;
     let groupSolo: ReturnType<typeof createMockGroupSolo>;
     let roundReset: { applyConfig: jest.Mock; unschedule: jest.Mock };
+    let blockpartyService: { getGroupIdForAddress: jest.Mock };
     let service: GroupService;
 
     beforeEach(async () => {
@@ -113,6 +114,7 @@ describe('GroupService', () => {
         memberRepo = createMockRepo('member');
         groupSolo = createMockGroupSolo();
         roundReset = { applyConfig: jest.fn(), unschedule: jest.fn() };
+        blockpartyService = { getGroupIdForAddress: jest.fn(() => undefined) };
 
         // Simulated EntityManager: every getRepository(target) hands back
         // the SAME mock instance keyed by `target`, so writes inside the
@@ -139,6 +141,7 @@ describe('GroupService', () => {
             config as any,
             groupSolo as any,
             roundReset as any,
+            blockpartyService as any,
         );
         await service.onModuleInit();
     });
@@ -170,6 +173,23 @@ describe('GroupService', () => {
         await service.createGroup('group-one', 'bc1qalice');
         await expect(service.createGroup('group-two', 'bc1qalice'))
             .rejects.toMatchObject({ code: 'address-in-group' });
+    });
+
+    it('rejects createGroup when the creator address is in a Blockparty', async () => {
+        blockpartyService.getGroupIdForAddress.mockImplementation(
+            (addr: string) => addr === 'bc1qalice' ? 'bp-1' : undefined,
+        );
+        await expect(service.createGroup('group-x', 'bc1qalice'))
+            .rejects.toMatchObject({ code: 'address-in-blockparty' });
+    });
+
+    it('rejects addMember when the candidate address is in a Blockparty', async () => {
+        const { group, adminToken } = await service.createGroup('group-x', 'bc1qalice');
+        blockpartyService.getGroupIdForAddress.mockImplementation(
+            (addr: string) => addr === 'bc1qbob' ? 'bp-1' : undefined,
+        );
+        await expect(service.addMember(group.id, 'bc1qbob', adminToken))
+            .rejects.toMatchObject({ code: 'address-in-blockparty' });
     });
 
     // ── Token auth ──────────────────────────────────────────────

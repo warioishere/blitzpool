@@ -23,6 +23,7 @@ import { AddressSettingsCacheService } from './address-settings-cache.service';
 import { DifficultyScoresCacheService } from './difficulty-scores-cache.service';
 import { PplnsService } from './pplns.service';
 import { GroupSoloService } from './group-solo.service';
+import { BlockpartyService } from './blockparty.service';
 import { MinerActiveModeService } from './miner-active-mode.service';
 import { PoolModeHashrateService } from '../ORM/pool-mode-hashrate/pool-mode-hashrate.service';
 
@@ -51,6 +52,7 @@ export class StratumV1Service implements OnModuleInit {
     @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
     private readonly pplnsService: PplnsService,
     private readonly groupSoloService: GroupSoloService,
+    private readonly blockpartyService: BlockpartyService,
     private readonly minerActiveModeService: MinerActiveModeService,
     private readonly poolModeHashrateService: PoolModeHashrateService,
   ) {}
@@ -115,6 +117,7 @@ export class StratumV1Service implements OnModuleInit {
       portConfig.payoutMode ?? 'solo',
       this.pplnsService,
       this.groupSoloService,
+      this.blockpartyService,
       this.minerActiveModeService,
       this.poolModeHashrateService,
       portConfig.minimumDifficulty ?? 0,

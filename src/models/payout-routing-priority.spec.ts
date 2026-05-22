@@ -75,6 +75,7 @@ function makeMiningModeAwareSv1(opts: {
         opts.payoutMode,
         undefined,                // pplnsService — not needed for reject path
         groupSoloService as any,
+        undefined,                // blockpartyService — reject path doesn't touch it
         undefined,                // minerActiveModeService — reject path doesn't mark mode
     );
 

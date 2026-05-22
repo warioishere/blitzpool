@@ -38,6 +38,7 @@ import { ShareTotalsCacheService } from '../services/share-totals-cache.service'
 import { AddressSettingsCacheService } from '../services/address-settings-cache.service';
 import { PplnsService } from '../services/pplns.service';
 import { GroupSoloService } from '../services/group-solo.service';
+import { BlockpartyService } from '../services/blockparty.service';
 import { MinerActiveModeService } from '../services/miner-active-mode.service';
 import { PoolModeHashrateService } from '../ORM/pool-mode-hashrate/pool-mode-hashrate.service';
 import { PayoutMode } from './interfaces/unified-stratum.interfaces';
@@ -169,6 +170,7 @@ export class StratumV1Client {
         private readonly payoutMode: PayoutMode = 'solo',
         private readonly pplnsService?: PplnsService,
         private readonly groupSoloService?: GroupSoloService,
+        private readonly blockpartyService?: BlockpartyService,
         private readonly minerActiveModeService?: MinerActiveModeService,
         private readonly poolModeHashrateService?: PoolModeHashrateService,
         /** VarDiff floor passed through from StratumPortConfig. */
@@ -778,6 +780,18 @@ export class StratumV1Client {
     }
 
     /**
+     * Live lookup of the Blockparty group-id for this session's address,
+     * but only when the party is routable (status confirming / ready /
+     * active). Mirrors `activeGroupId()` for the Group-Solo path.
+     */
+    private activeBlockpartyGroupId(): string | null {
+        if (!this.blockpartyService) return null;
+        const address = this.clientAuthorization?.address;
+        if (!address) return null;
+        return this.blockpartyService.getRoutableGroupIdForAdmin(address) ?? null;
+    }
+
+    /**
      * Dispatch a rejected share to group-solo if the miner is currently in an
      * active group AND not connected on the PPLNS port. A miner who deliberately
      * chose the PPLNS port has opted out of group bookkeeping for this session,
@@ -816,6 +830,7 @@ export class StratumV1Client {
         // Reverse order (group first) kept pre-PR for the Solo port, where
         // address-driven group-solo is the whole point of that feature.
         const jobGroupId = this.activeGroupId();
+        const jobBlockpartyId = this.activeBlockpartyGroupId();
         if (this.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
             // PPLNS: Shared coinbase with proportional payouts
             // Network difficulty is synced centrally via PplnsService's job subscription
@@ -832,6 +847,25 @@ export class StratumV1Client {
                 );
                 return;
             }
+        } else if (jobBlockpartyId) {
+            // Blockparty: rental-driven multi-output coinbase, splits are
+            // fixed per-member basis points. Distribution is purely a
+            // function of current membership — no share snapshot required.
+            // Sub-min-payout members fold into the pool-fee output (no
+            // pending ledger, no carry-forward).
+            const distribution = await this.blockpartyService!.getPayoutDistribution(
+                jobBlockpartyId,
+                jobTemplate.blockData.coinbasevalue,
+            );
+            this.noFee = false;
+            if (distribution.payouts.length === 0) {
+                console.warn(
+                    `[StratumV1Client] Blockparty distribution empty — skipping job for ` +
+                    `${this.clientAuthorization?.address ?? '<unauth>'}`,
+                );
+                return;
+            }
+            payoutInformation = distribution.payouts.map(p => ({ address: p.address, percent: p.percent }));
         } else if (jobGroupId) {
             // Group-solo on non-PPLNS port: per-miner coinbase, PROP-style
             // split + finder-bonus output to THIS connection's address.
@@ -1214,11 +1248,19 @@ export class StratumV1Client {
                     // Route block-found bookkeeping the same way the coinbase
                     // was built — PPLNS port overrides group membership.
                     const foundGroupId = this.activeGroupId();
+                    const foundBlockpartyId = this.activeBlockpartyGroupId();
                     if (this.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
                         await this.pplnsService.onBlockFound(
                             jobTemplate.blockData.height,
                             jobTemplate.blockData.coinbasevalue,
                         );
+                    } else if (foundBlockpartyId) {
+                        await this.blockpartyService!.onBlockFound({
+                            groupId: foundBlockpartyId,
+                            blockHeight: jobTemplate.blockData.height,
+                            blockHash: updatedJobBlock.getId(),
+                            coinbaseValueSats: jobTemplate.blockData.coinbasevalue,
+                        });
                     } else if (foundGroupId) {
                         await this.groupSoloService!.onBlockFound(
                             jobTemplate.blockData.height,
@@ -1253,7 +1295,8 @@ export class StratumV1Client {
                 // every share (no min-diff / warmup configured there).
                 this.acceptedShareCount++;
                 const shareGroupId = this.activeGroupId();
-                let effectiveMode: 'solo' | 'pplns' | 'group-solo';
+                const shareBlockpartyId = this.activeBlockpartyGroupId();
+                let effectiveMode: 'solo' | 'pplns' | 'group-solo' | 'blockparty';
                 if (this.payoutMode === 'pplns' && this.pplnsService?.isEnabled()) {
                     const warmupCleared = this.acceptedShareCount > this.ledgerWarmupShares;
                     if (warmupCleared) {
@@ -1263,6 +1306,14 @@ export class StratumV1Client {
                         );
                     }
                     effectiveMode = 'pplns';
+                } else if (shareBlockpartyId) {
+                    // No per-share ledger write (Blockparty has no share-
+                    // counting — splits are fixed per percentBp). Still
+                    // notify the service so it can refresh lastShareAt
+                    // and transition READY → ACTIVE on the very first
+                    // share, permanently freezing the splits.
+                    await this.blockpartyService!.onShareAccepted(this.clientAuthorization.address);
+                    effectiveMode = 'blockparty';
                 } else if (shareGroupId) {
                     await this.groupSoloService!.recordShare(
                         this.clientAuthorization.address,

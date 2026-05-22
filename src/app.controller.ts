@@ -25,6 +25,7 @@ import { generateFormattedTimeSlots } from './utils/timeslot.utils';
 import { MiningModeService } from './services/mining-mode.service';
 import { PplnsService } from './services/pplns.service';
 import { GroupSoloService } from './services/group-solo.service';
+import { BlockpartyService } from './services/blockparty.service';
 import { PoolModeHashrateService } from './ORM/pool-mode-hashrate/pool-mode-hashrate.service';
 import type { MiningMode } from './services/mining-mode.service';
 
@@ -92,6 +93,7 @@ export class AppController {
     private readonly miningModeService: MiningModeService,
     private readonly pplnsService: PplnsService,
     private readonly groupSoloService: GroupSoloService,
+    private readonly blockpartyService: BlockpartyService,
     private readonly poolModeHashrateService: PoolModeHashrateService,
   ) {
     const packagePath = join(__dirname, '..', 'package.json');
@@ -167,9 +169,17 @@ export class AppController {
     // would mislead the miner.
     const modeResult = await this.miningModeService.getMode(address);
     let payoutInformation;
-    let mode: 'solo' | 'pplns' | 'group-solo' = modeResult.mode;
+    let mode: 'solo' | 'pplns' | 'group-solo' | 'blockparty' = modeResult.mode;
 
-    if (modeResult.mode === 'group-solo' && modeResult.groupId && this.groupSoloService.isEnabled()) {
+    if (modeResult.mode === 'blockparty' && modeResult.groupId) {
+      const distribution = await this.blockpartyService.getPayoutDistribution(
+        modeResult.groupId,
+        tpl.blockData.coinbasevalue,
+      );
+      if (distribution.payouts.length > 0) {
+        payoutInformation = distribution.payouts.map(p => ({ address: p.address, percent: p.percent }));
+      }
+    } else if (modeResult.mode === 'group-solo' && modeResult.groupId && this.groupSoloService.isEnabled()) {
       // Pass the requesting address as finderAddress so the UI's block-template
       // preview shows THIS miner's coinbase (with their bonus output), matching
       // the per-miner template the stratum layer would actually send them.
@@ -248,7 +258,7 @@ export class AppController {
       coinbaseTxHex: job.getCoinbaseTxHex(),
       mode,
       payoutInformation,
-      ...(modeResult.mode === 'group-solo' && modeResult.groupId
+      ...((modeResult.mode === 'group-solo' || modeResult.mode === 'blockparty') && modeResult.groupId
         ? { groupId: modeResult.groupId }
         : {}),
     };
@@ -373,7 +383,7 @@ export class AppController {
     @Param('mode') mode: string,
     @Query('range') range: '1d' | '3d' | '7d' = '7d',
   ) {
-    const validModes: MiningMode[] = ['solo', 'pplns', 'group-solo'];
+    const validModes: MiningMode[] = ['solo', 'pplns', 'group-solo', 'blockparty'];
     if (!validModes.includes(mode as MiningMode)) {
       return [];
     }

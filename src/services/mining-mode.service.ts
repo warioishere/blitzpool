@@ -2,13 +2,14 @@ import { Injectable } from '@nestjs/common';
 
 import { PplnsService } from './pplns.service';
 import { GroupService } from './group.service';
+import { BlockpartyService } from './blockparty.service';
 import { MinerActiveModeService } from './miner-active-mode.service';
 
-export type MiningMode = 'solo' | 'pplns' | 'group-solo';
+export type MiningMode = 'solo' | 'pplns' | 'group-solo' | 'blockparty';
 
 export interface MiningModeResult {
     mode: MiningMode;
-    /** Present only when mode === 'group-solo'. */
+    /** Present when mode === 'group-solo' or mode === 'blockparty'. */
     groupId?: string;
 }
 
@@ -24,9 +25,13 @@ export interface MiningModeResult {
  *
  *   2. Legacy state-based detection — for addresses without a live
  *      marker (offline miner, never mined here, etc.):
- *         a) PPLNS window shares → 'pplns'
+ *         a) Blockparty admin address → 'blockparty' (admin treasury
+ *            is the only address that triggers blockparty mining; regular
+ *            blockparty members aren't mining for the party, they're
+ *            passive payout recipients)
  *         b) Active group membership → 'group-solo'
- *         c) Otherwise → 'solo'
+ *         c) PPLNS window shares → 'pplns'
+ *         d) Otherwise → 'solo'
  *
  * Why the port-marker takes precedence: PPLNS window shares can linger
  * for hours after a miner switches ports, so state-based detection lags
@@ -53,6 +58,7 @@ export class MiningModeService {
     constructor(
         private readonly pplnsService: PplnsService,
         private readonly groupService: GroupService,
+        private readonly blockpartyService: BlockpartyService,
         private readonly minerActiveModeService: MinerActiveModeService,
     ) {}
 
@@ -76,6 +82,13 @@ export class MiningModeService {
     private async computeMode(address: string): Promise<MiningModeResult> {
         // Primary check: live port-marker.
         const liveMode = await this.minerActiveModeService.get(address);
+        if (liveMode === 'blockparty') {
+            const groupId = this.blockpartyService.getGroupIdForAdminAddress(address);
+            if (groupId) {
+                return { mode: 'blockparty', groupId };
+            }
+            // Marker still live but the party was dissolved meanwhile — fall through.
+        }
         if (liveMode === 'pplns') {
             return { mode: 'pplns' };
         }
@@ -93,12 +106,14 @@ export class MiningModeService {
         }
 
         // Fallback: no live marker — legacy state-based detection.
-        // Group-membership wins over residual PPLNS-window shares: group
-        // join is an intentional admin action while PPLNS shares may
-        // linger in the sliding 4× network-diff window from previous
-        // sessions on a PPLNS port. An address that's an active group
-        // member (creator or otherwise) must surface as group-solo so
-        // the UI routes to /payout-group instead of /payout-pplns.
+        // Blockparty wins over group-solo wins over residual PPLNS-window shares:
+        // both blockparty-admin and group membership are explicit opt-in actions
+        // while PPLNS shares may linger in the sliding 4× network-diff window
+        // from previous sessions on a PPLNS port.
+        const blockpartyId = this.blockpartyService.getGroupIdForAdminAddress(address);
+        if (blockpartyId) {
+            return { mode: 'blockparty', groupId: blockpartyId };
+        }
         const group = this.groupService.getGroupForAddress(address);
         if (group && group.active) {
             return { mode: 'group-solo', groupId: group.groupId };

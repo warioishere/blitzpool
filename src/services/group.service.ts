@@ -7,6 +7,7 @@ import { PplnsGroupEntity } from '../ORM/pplns-group/pplns-group.entity';
 import { PplnsGroupMemberEntity } from '../ORM/pplns-group/pplns-group-member.entity';
 import { GroupSoloService } from './group-solo.service';
 import { GroupRoundResetService } from './group-round-reset.service';
+import { BlockpartyService } from './blockparty.service';
 import { normalizeBtcAddress } from '../utils/btc-address.utils';
 
 /**
@@ -107,6 +108,8 @@ export class GroupService implements OnModuleInit {
         private readonly groupSoloService: GroupSoloService,
         @Inject(forwardRef(() => GroupRoundResetService))
         private readonly roundResetService: GroupRoundResetService,
+        @Inject(forwardRef(() => BlockpartyService))
+        private readonly blockpartyService: BlockpartyService,
     ) {
         const raw = this.configService.get<string>('GROUP_INACTIVITY_KICK_DAYS');
         const parsed = raw ? parseInt(raw, 10) : NaN;
@@ -212,6 +215,7 @@ export class GroupService implements OnModuleInit {
         if (existingMember) {
             throw new GroupServiceError('address-in-group', 'Address is already a member of another group');
         }
+        this.assertNotInBlockparty(normalizedAddress);
 
         const adminToken = this.generateToken();
         const group = await this.groupRepo.save(this.groupRepo.create({
@@ -258,6 +262,7 @@ export class GroupService implements OnModuleInit {
             }
             throw new GroupServiceError('address-in-group', 'Address is already a member of another group');
         }
+        this.assertNotInBlockparty(normalizedAddress);
 
         const member = await this.memberRepo.save(this.memberRepo.create({
             groupId,
@@ -610,6 +615,21 @@ export class GroupService implements OnModuleInit {
             await this.groupRepo.save(group);
         }
         await this.rebuildCache();
+    }
+
+    /**
+     * Reject the address if it's already a member (admin or otherwise)
+     * of any active Blockparty. An address can only be in one
+     * membership-driven mode at a time.
+     */
+    private assertNotInBlockparty(address: string): void {
+        const blockpartyId = this.blockpartyService.getGroupIdForAddress(address);
+        if (blockpartyId) {
+            throw new GroupServiceError(
+                'address-in-blockparty',
+                'Address is already a member of a Blockparty — leave that party first',
+            );
+        }
     }
 
     private async recomputeActive(groupId: string): Promise<void> {

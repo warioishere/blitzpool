@@ -23,7 +23,7 @@ export class PoolModeHashrateEntity {
 
     @Index()
     @Column({ length: 16, type: 'varchar' })
-    mode: 'solo' | 'pplns' | 'group-solo';
+    mode: 'solo' | 'pplns' | 'group-solo' | 'blockparty';
 
     /** 10-min bucket start, epoch-ms. */
     @Index()
