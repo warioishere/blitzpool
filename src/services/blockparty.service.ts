@@ -178,7 +178,15 @@ export class BlockpartyService implements OnModuleInit {
     getRoutableGroupIdForAdmin(address: string): string | undefined {
         const entry = this.adminAddressCache.get(normalizeBtcAddress(address));
         if (!entry) return undefined;
-        if (entry.status === 'draft' || entry.status === 'dissolved') return undefined;
+        // Only READY (all confirmed, awaiting first share) and ACTIVE
+        // (work flowing) route to a Blockparty coinbase. CONFIRMING
+        // (some members still unconfirmed) and DRAFT fall through to
+        // solo — sats land in the pool-fee output rather than getting
+        // distributed against splits the party hasn't fully signed off
+        // on yet. Closes the "hashpower drift / early rental" hole
+        // where an unconfirmed member would otherwise still receive
+        // on-chain payouts.
+        if (entry.status !== 'ready' && entry.status !== 'active') return undefined;
         return entry.groupId;
     }
 
@@ -622,7 +630,13 @@ export class BlockpartyService implements OnModuleInit {
         if (!group || group.status === 'dissolved') return;
 
         const now = Date.now();
-        const shouldActivate = group.status === 'ready' || group.status === 'confirming' || group.status === 'draft';
+        // Only READY → ACTIVE. Shares only reach this handler at all
+        // when getRoutableGroupIdForAdmin returned a groupId, which now
+        // requires status ∈ {ready, active}. CONFIRMING/DRAFT shouldn't
+        // route here in the first place; the explicit check below is
+        // defensive against race conditions where status changes
+        // between route-decision and share-accept.
+        const shouldActivate = group.status === 'ready';
 
         group.lastShareAt = now;
         if (shouldActivate) {
