@@ -160,8 +160,15 @@ export class GroupSoloService implements OnModuleInit {
         @Inject(forwardRef(() => GroupService))
         private readonly groupService: GroupService,
     ) {
-        this.feeAddress = this.configService.get('PPLNS_FEE_ADDRESS') ?? '';
-        this.feePercent = parseFloat(this.configService.get('PPLNS_FEE_PERCENT') ?? '2');
+        // Group-Solo + Blockparty share the same fee config (GROUP_FEE_*),
+        // independent from PPLNS. Existing deployments that only set
+        // PPLNS_FEE_* keep working via the fallback.
+        this.feeAddress = this.configService.get('GROUP_FEE_ADDRESS')
+            ?? this.configService.get('PPLNS_FEE_ADDRESS') ?? '';
+        this.feePercent = parseFloat(
+            this.configService.get('GROUP_FEE_PERCENT')
+            ?? this.configService.get('PPLNS_FEE_PERCENT') ?? '2',
+        );
         this.coinbaseWeightBudget = parseInt(
             this.configService.get('PPLNS_COINBASE_WEIGHT_BUDGET') ?? DEFAULT_COINBASE_WEIGHT_BUDGET.toString(),
             10,
@@ -172,6 +179,16 @@ export class GroupSoloService implements OnModuleInit {
         // Group-solo is always enabled if the service is loaded — routing is
         // address-driven via the GroupService's address→group cache.
         this.enabled = true;
+    }
+
+    /** Read-only access to the configured group-lane pool fee percent. */
+    public getFeePercent(): number {
+        return this.feePercent;
+    }
+
+    /** Read-only access to the configured group-lane pool fee address. */
+    public getFeeAddress(): string {
+        return this.feeAddress;
     }
 
     async onModuleInit(): Promise<void> {

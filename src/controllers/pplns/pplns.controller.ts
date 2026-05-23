@@ -1,5 +1,6 @@
-import { Controller, Get, Param, Query } from '@nestjs/common';
+import { Controller, Get, Param, Query, Optional } from '@nestjs/common';
 import { PplnsService } from '../../services/pplns.service';
+import { GroupSoloService } from '../../services/group-solo.service';
 import { isoFromEpoch } from '../../utils/epoch-iso';
 import { ClientStatisticsService } from '../../ORM/client-statistics/client-statistics.service';
 import { ClientService } from '../../ORM/client/client.service';
@@ -23,6 +24,10 @@ export class PplnsController {
         private readonly miningModeService: MiningModeService,
         private readonly poolModeHashrateService: PoolModeHashrateService,
         private readonly dustSweepService: DustSweepService,
+        // Optional so existing PplnsController tests that don't wire
+        // GroupSoloService still construct. When absent, getFees falls
+        // back to the PPLNS lane values for the group-fee fields.
+        @Optional() private readonly groupSoloService?: GroupSoloService,
     ) {}
 
     /**
@@ -99,8 +104,17 @@ export class PplnsController {
     @Get('fees')
     getFees() {
         const gate = this.pplnsService.getPortGateConfig();
+        const pplnsFees = this.pplnsService.getFeeConfig();
+        // Group-Solo + Blockparty share their own GROUP_FEE_* config
+        // independent from PPLNS. UI reads both so the right number is
+        // shown next to each mode card. Falls back to the PPLNS values
+        // for old deployments that only set PPLNS_FEE_*.
+        const groupFeePercent = this.groupSoloService?.getFeePercent() ?? pplnsFees.feePercent;
+        const groupFeeAddress = this.groupSoloService?.getFeeAddress() ?? pplnsFees.feeAddress;
         return {
-            ...this.pplnsService.getFeeConfig(),
+            ...pplnsFees,
+            groupFeePercent,
+            groupFeeAddress,
             // Bitcoin Core's relay-policy dust floor (P2PKH @ 3000 sat/kvB).
             // Outputs below this are always rejected; kept in the
             // response for transparency / debugging.

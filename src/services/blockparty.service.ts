@@ -84,8 +84,16 @@ export class BlockpartyService implements OnModuleInit {
         private readonly groupService: GroupService,
         private readonly addressEmailService: AddressEmailService,
     ) {
-        this.feeAddress = this.configService.get('PPLNS_FEE_ADDRESS') ?? '';
-        this.feePercent = parseFloat(this.configService.get('PPLNS_FEE_PERCENT') ?? '2');
+        // Group-Solo + Blockparty share a fee config that is independent
+        // from the PPLNS lane (PPLNS keeps its own PPLNS_FEE_*). New
+        // operators set GROUP_FEE_*; existing deployments that only set
+        // PPLNS_FEE_* keep working because of the fallback.
+        this.feeAddress = this.configService.get('GROUP_FEE_ADDRESS')
+            ?? this.configService.get('PPLNS_FEE_ADDRESS') ?? '';
+        this.feePercent = parseFloat(
+            this.configService.get('GROUP_FEE_PERCENT')
+            ?? this.configService.get('PPLNS_FEE_PERCENT') ?? '2',
+        );
         this.minPayoutSats = resolveMinPayoutSats(this.configService.get('PPLNS_MIN_PAYOUT_SATS'));
     }
 

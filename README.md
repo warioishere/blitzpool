@@ -80,7 +80,7 @@ A directed group sharing the cost of a hashpower rental. Every member contribute
 
 - Fixed % per member (basis points summing to 100 % of the miner cut)
 - Email-verified directed invitations; per-member token for re-confirm after admin edits splits
-- Same `PPLNS_FEE_ADDRESS` + `PPLNS_FEE_PERCENT` apply
+- Uses the shared `GROUP_FEE_ADDRESS` + `GROUP_FEE_PERCENT` lane (same as Group-Solo, independent from PPLNS)
 - Routing is address-driven: any miner / rental session whose address is the party's admin gets a Blockparty coinbase on any port
 - State machine: DRAFT → CONFIRMING → READY → ACTIVE → DISSOLVED (7-day dissolve cooldown so admins can't yank rentals mid-flight)
 - Verified end-to-end against Bitcoin Core 29 with mixed address types (P2WPKH / P2PKH / P2TR / P2WSH / P2SH)
@@ -177,8 +177,10 @@ Mainnet `bitcoin.conf` ships with `blockreservedweight=50000` WU. Blitzpool fits
 |---|---|---|
 | `PPLNS_PORT` | — | Enables PPLNS when set (suggested `3340`) |
 | `PPLNS_HIGH_DIFF_PORT` | `3349` | High-difficulty PPLNS listener for rentals — auto-enabled when `PPLNS_PORT` is set. Reuses `STRATUM_HIGH_DIFF_START_DIFFICULTY` + `STRATUM_HIGH_DIFF_TARGET_SHARES_PER_MINUTE` for diff/target, `PPLNS_WARMUP_SHARES` + `PPLNS_MIN_DIFFICULTY` for ledger gates. Blocks miner-suggested-difficulty so rentals start at the configured high diff |
-| `PPLNS_FEE_ADDRESS` | — | Pool fee output destination |
-| `PPLNS_FEE_PERCENT` | `2` | Pool fee % |
+| `PPLNS_FEE_ADDRESS` | — | PPLNS-lane pool fee output destination |
+| `PPLNS_FEE_PERCENT` | `2` | PPLNS-lane pool fee % |
+| `GROUP_FEE_ADDRESS` | falls back to `PPLNS_FEE_ADDRESS` | Group-Solo + Blockparty shared-lane fee destination |
+| `GROUP_FEE_PERCENT` | falls back to `PPLNS_FEE_PERCENT` | Group-Solo + Blockparty shared-lane fee % |
 | `PPLNS_COINBASE_WEIGHT_BUDGET` | `50000` | Max WU reserved for coinbase outputs (must match `bitcoin.conf:blockreservedweight`) |
 
 ### Capacity monitor (email alerts)
