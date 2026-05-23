@@ -504,4 +504,84 @@ describe('BlockpartyService', () => {
         await service.dissolveGroup(group.id, adminToken);
         expect(service.getGroupIdForAdminAddress('bc1qadmin')).toBeUndefined();
     });
+
+    // ── Pending-party fee-routing defensive guard ────────────────────
+    //
+    // When an admin's address belongs to a Blockparty that isn't yet
+    // READY (i.e. some members still need to confirm their splits), any
+    // shares submitted on that address must NOT pay the admin a Solo
+    // coinbase — they must redirect 100 % to the pool fee output. The
+    // Stratum layer calls getPendingPartyFeeRoute() in its Solo
+    // fallback to enforce this.
+
+    it('getPendingPartyFeeRoute: DRAFT admin → fee-only route', async () => {
+        const { service } = await buildService();
+        // createGroup → DRAFT (admin is sole member)
+        await service.createGroup({
+            name: 'pending-draft', adminAddress: 'bc1qadmin', adminEmail: 'a@b.c', adminPercentBp: 5000,
+        });
+        const route = service.getPendingPartyFeeRoute('bc1qadmin');
+        expect(route).toEqual([{ address: FEE_ADDR, percent: 100 }]);
+    });
+
+    it('getPendingPartyFeeRoute: CONFIRMING admin (member pending) → fee-only route', async () => {
+        const { service } = await buildService();
+        const { group, adminToken } = await service.createGroup({
+            name: 'pending-confirming', adminAddress: 'bc1qadmin', adminEmail: 'a@b.c', adminPercentBp: 5000,
+        });
+        // Add Bob but don't confirm yet → addMember auto-flips DRAFT → CONFIRMING.
+        await service.addMember(group.id, {
+            address: 'bc1qbob', email: 'bob@b.c', percentBp: 5000,
+        }, adminToken);
+        const route = service.getPendingPartyFeeRoute('bc1qadmin');
+        expect(route).toEqual([{ address: FEE_ADDR, percent: 100 }]);
+    });
+
+    it('getPendingPartyFeeRoute: READY admin → null (normal Blockparty routing takes over)', async () => {
+        const { service } = await buildService();
+        const { group, adminToken } = await service.createGroup({
+            name: 'ready', adminAddress: 'bc1qadmin', adminEmail: 'a@b.c', adminPercentBp: 5000,
+        });
+        await service.addMember(group.id, {
+            address: 'bc1qbob', email: 'bob@b.c', percentBp: 5000,
+        }, adminToken);
+        await service.markMemberConfirmed(group.id, 'bc1qbob');
+        // All members confirmed → recomputeStatus flips to READY.
+        const route = service.getPendingPartyFeeRoute('bc1qadmin');
+        expect(route).toBeNull();
+    });
+
+    it('getPendingPartyFeeRoute: ACTIVE admin → null (party is mining)', async () => {
+        const { service } = await buildService();
+        const { group, adminToken } = await service.createGroup({
+            name: 'active', adminAddress: 'bc1qadmin', adminEmail: 'a@b.c', adminPercentBp: 5000,
+        });
+        await service.addMember(group.id, {
+            address: 'bc1qbob', email: 'bob@b.c', percentBp: 5000,
+        }, adminToken);
+        await service.markMemberConfirmed(group.id, 'bc1qbob');
+        await service.onShareAccepted('bc1qadmin');
+        // READY → ACTIVE on first share.
+        const route = service.getPendingPartyFeeRoute('bc1qadmin');
+        expect(route).toBeNull();
+    });
+
+    it('getPendingPartyFeeRoute: non-admin address → null', async () => {
+        const { service } = await buildService();
+        await service.createGroup({
+            name: 'unrelated', adminAddress: 'bc1qadmin', adminEmail: 'a@b.c', adminPercentBp: 5000,
+        });
+        expect(service.getPendingPartyFeeRoute('bc1qstranger')).toBeNull();
+    });
+
+    it('getPendingPartyFeeRoute: returns null when fee address is unconfigured', async () => {
+        const { service } = await buildService({ PPLNS_FEE_ADDRESS: '' });
+        await service.createGroup({
+            name: 'no-fee', adminAddress: 'bc1qadmin', adminEmail: 'a@b.c', adminPercentBp: 5000,
+        });
+        // Without a fee address there's nowhere to route — the regular
+        // Solo fallback handles the share. Pool operator misconfig
+        // shouldn't crash the Stratum layer.
+        expect(service.getPendingPartyFeeRoute('bc1qadmin')).toBeNull();
+    });
 });

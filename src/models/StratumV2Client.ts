@@ -2092,6 +2092,17 @@ export class StratumV2Client {
       );
       return null;
     }
+    // Defensive: address is admin of a CONFIRMING / DRAFT Blockparty —
+    // status didn't clear the routing guard above (READY/ACTIVE only),
+    // so the share is heading for the Solo fallback. Override to a
+    // fee-only coinbase so the admin can't collect the whole reward
+    // before members had confirmed their splits. Mirror of the SV1
+    // branch in StratumV1Client.sendNewMiningJob.
+    const pendingFeeRoute = this.blockpartyService?.getPendingPartyFeeRoute(this.address);
+    if (pendingFeeRoute) {
+      this.noFee = false;
+      return pendingFeeRoute;
+    }
     return this.buildPayoutInformation();
   }
 

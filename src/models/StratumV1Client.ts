@@ -881,34 +881,50 @@ export class StratumV1Client {
             this.noFee = false;
             if (!payoutInformation || payoutInformation.length === 0) return;
         } else {
-            // Solo: Existing behavior
-            const devFeeAddress = this.configService.get('DEV_FEE_ADDRESS');
-            const devFeePercent = parseFloat(
-                this.configService.get('DEV_FEE_PERCENT') ?? '1.5',
+            // Defensive: address is the admin of a CONFIRMING / DRAFT
+            // Blockparty. The Blockparty routing guard above (which
+            // requires READY/ACTIVE) intentionally drops the share to
+            // the Solo fallback — but Solo would pay the admin 100 %,
+            // letting them collect the whole reward before members had
+            // confirmed their splits. Override to a single fee-only
+            // coinbase output so a premature rental costs the admin
+            // the work instead.
+            const pendingFeeRoute = this.blockpartyService?.getPendingPartyFeeRoute(
+                this.clientAuthorization?.address,
             );
-
-            if (!this.clientAuthorization) {
-                if (!devFeeAddress) {
-                    return;
-                }
+            if (pendingFeeRoute) {
+                payoutInformation = pendingFeeRoute;
                 this.noFee = false;
-                payoutInformation = [
-                    { address: devFeeAddress, percent: 100 },
-                ];
             } else {
-                this.noFee = devFeeAddress == null || devFeeAddress.length < 1;
-                if (this.noFee) {
+                // Solo: Existing behavior
+                const devFeeAddress = this.configService.get('DEV_FEE_ADDRESS');
+                const devFeePercent = parseFloat(
+                    this.configService.get('DEV_FEE_PERCENT') ?? '1.5',
+                );
+
+                if (!this.clientAuthorization) {
+                    if (!devFeeAddress) {
+                        return;
+                    }
+                    this.noFee = false;
                     payoutInformation = [
-                        { address: this.clientAuthorization.address, percent: 100 },
+                        { address: devFeeAddress, percent: 100 },
                     ];
                 } else {
-                    payoutInformation = [
-                        { address: devFeeAddress, percent: devFeePercent },
-                        {
-                            address: this.clientAuthorization.address,
-                            percent: 100 - devFeePercent,
-                        },
-                    ];
+                    this.noFee = devFeeAddress == null || devFeeAddress.length < 1;
+                    if (this.noFee) {
+                        payoutInformation = [
+                            { address: this.clientAuthorization.address, percent: 100 },
+                        ];
+                    } else {
+                        payoutInformation = [
+                            { address: devFeeAddress, percent: devFeePercent },
+                            {
+                                address: this.clientAuthorization.address,
+                                percent: 100 - devFeePercent,
+                            },
+                        ];
+                    }
                 }
             }
         }

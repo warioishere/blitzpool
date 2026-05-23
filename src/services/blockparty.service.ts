@@ -211,6 +211,34 @@ export class BlockpartyService implements OnModuleInit {
         return this.feePercent;
     }
 
+    /** Read-only access to the configured Blockparty pool fee address. */
+    getFeeAddress(): string {
+        return this.feeAddress;
+    }
+
+    /**
+     * Defensive coinbase override for the Stratum fallback path. When an
+     * address is the admin of a CONFIRMING or DRAFT Blockparty (status
+     * not yet routable above), block-found shares would otherwise fall
+     * through to a Solo coinbase that pays the admin 100 % — closing
+     * the "premature rental" hole where the admin could collect the
+     * whole reward before members had signed off on their splits. We
+     * route the block to the pool-fee address instead.
+     *
+     * Returns null when the address isn't an admin, the party is
+     * ready/active/dissolved, or no fee address is configured (in which
+     * case the regular Solo fallback handles it).
+     */
+    getPendingPartyFeeRoute(address: string | undefined): { address: string; percent: number }[] | null {
+        if (!address || !this.feeAddress) return null;
+        const normalized = normalizeBtcAddress(address);
+        if (!normalized) return null;
+        const entry = this.adminAddressCache.get(normalized);
+        if (!entry) return null;
+        if (entry.status !== 'draft' && entry.status !== 'confirming') return null;
+        return [{ address: this.feeAddress, percent: 100 }];
+    }
+
     // ── Lifecycle ────────────────────────────────────────────────
 
     /**
@@ -821,6 +849,12 @@ export class BlockpartyService implements OnModuleInit {
             group.status = target;
             group.updatedAt = Date.now();
             await this.groupRepo.save(group);
+            // Keep the in-memory routing cache in sync — otherwise
+            // getRoutableGroupIdForAdmin + getPendingPartyFeeRoute see
+            // a stale CONFIRMING status after the DB has already
+            // promoted the party to READY, and shares keep falling
+            // through to the pool-fee fallback.
+            this.adminAddressCache.set(group.adminAddress, { groupId: group.id, status: target });
         }
     }
 }
