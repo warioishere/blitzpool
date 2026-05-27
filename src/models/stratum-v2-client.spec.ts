@@ -1270,9 +1270,6 @@ describe('StratumV2Client', () => {
       const blocksSave = jest.fn().mockResolvedValue(undefined);
       services.blocksService = { save: blocksSave } as any;
       services.notificationService.notifySubscribersBlockFound.mockClear();
-      services.addressSettingsService = {
-        resetBestDifficultyAndShares: jest.fn().mockResolvedValue(undefined),
-      } as any;
 
       const { Subject } = require('rxjs');
       const jobSubject = new Subject();
@@ -1356,7 +1353,6 @@ describe('StratumV2Client', () => {
         }),
       );
       expect(services.notificationService.notifySubscribersBlockFound).toHaveBeenCalledTimes(1);
-      expect(services.addressSettingsService.resetBestDifficultyAndShares).toHaveBeenCalledTimes(1);
 
       socket.destroy();
     });

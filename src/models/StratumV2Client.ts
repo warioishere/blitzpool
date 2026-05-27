@@ -1668,9 +1668,6 @@ export class StratumV2Client {
           result,
         );
 
-        await this.addressSettingsService.resetBestDifficultyAndShares();
-        await this.addressSettingsCacheService.clear();
-
         // Routing priority: explicit PPLNS port trumps group membership.
         // Mirror of StratumV1Client — bewusster Port-Wahl des Miners schlägt
         // die Default-Address-Driven-Group-Routing.
@@ -1858,9 +1855,6 @@ export class StratumV2Client {
     );
 
     console.log(`[SV2 ${this.sessionId}] SubmitSolution: block accepted by network!`);
-    await this.addressSettingsService.resetBestDifficultyAndShares();
-    await this.addressSettingsCacheService.clear();
-
     // K5: TDP block submission was missing the PPLNS / group-solo
     // onBlockFound dispatch. Without this, a TDP-path miner that
     // finds a block while on the PPLNS port (or in an active

@@ -1258,9 +1258,6 @@ export class StratumV1Client {
                         result,
                     );
 
-                    await this.addressSettingsService.resetBestDifficultyAndShares();
-                    await this.addressSettingsCacheService.clear();
-
                     // Route block-found bookkeeping the same way the coinbase
                     // was built — PPLNS port overrides group membership.
                     const foundGroupId = this.activeGroupId();

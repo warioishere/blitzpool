@@ -198,13 +198,6 @@ export class AddressSettingsService {
         }
     }
 
-    public async resetBestDifficultyAndShares() {
-        return await this.addressSettingsRepository.update({}, {
-            shares: 0,
-            bestDifficulty: 0
-        });
-    }
-
     public async deleteForAddress(address: string) {
         return await this.addressSettingsRepository.delete({ address });
     }
