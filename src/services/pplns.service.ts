@@ -54,6 +54,14 @@ const REDIS_KEY_WINDOW_TOTAL = 'pplns:window:total';
 // failsafe as REDIS_KEY_WINDOW_TOTAL — every 1000 trims we do a full
 // recalculate from REDIS_KEY_SHARES to reset accumulated drift.
 const REDIS_KEY_WINDOW_BY_ADDRESS = 'pplns:window:by-address';
+// Temp key the window recalc builds into before an atomic RENAME swap, so the
+// live aggregate is never observed empty/partial during a rebuild.
+const REDIS_KEY_WINDOW_REBUILD = 'pplns:window:by-address:rebuild';
+// Index-window size for the streamed recalc read. Bounds memory + Redis block
+// time: instead of one ZRANGE 0 -1 pulling the whole multi-million-entry set
+// (~1 GB of JS strings, multi-second single-thread block), we walk it in
+// chunks and aggregate incrementally.
+const REBUILD_CHUNK_SIZE = 100_000;
 
 // Coinbase snapshot — the distribution that was actually used to build
 // the latest coinbase, plus the signed balance state we committed to at
@@ -159,7 +167,7 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
                     : (await this.redis.zRange(REDIS_KEY_SHARES, 0, -1) ?? []).length;
                 if (aggEmpty && rawCount > 0) {
                     console.log(`[PPLNS] Rebuilding window-by-address aggregate from ${rawCount} raw shares (deployment migration or post-flush cold start)`);
-                    await this.recalculateWindowByAddress();
+                    await this.recalculateWindow();
                 }
             } catch (error) {
                 console.warn('[PPLNS] Aggregate bootstrap check failed:', (error as Error).message);
@@ -402,35 +410,86 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         // float-rounding × N shares (sub-percent), negligible for chart
         // alignment and far below the cost of the recalc itself.
         if (this.trimCounter % 100000 === 0) {
-            total = await this.recalculateWindowTotal();
-            await this.recalculateWindowByAddress();
+            const rebuiltTotal = await this.recalculateWindow();
+            if (rebuiltTotal !== null) total = rebuiltTotal;
         }
 
         await this.redis.set(REDIS_KEY_WINDOW_TOTAL, total.toString());
     }
 
-    private async recalculateWindowByAddress(): Promise<void> {
-        const entries = await this.redis.zRange(REDIS_KEY_SHARES, 0, -1);
-        const byAddr = new Map<string, number>();
-        for (const entry of (entries ?? [])) {
-            const parts = entry.split(':');
-            const diff = parseFloat(parts[1]) || 0;
-            byAddr.set(parts[0], (byAddr.get(parts[0]) ?? 0) + diff);
-        }
-        await this.redis.del(REDIS_KEY_WINDOW_BY_ADDRESS);
-        for (const [addr, diff] of byAddr) {
-            if (diff > 0) {
-                await this.redis.hIncrByFloat(REDIS_KEY_WINDOW_BY_ADDRESS, addr, diff);
-            }
-        }
-    }
+    /**
+     * Rebuild the per-address window aggregate AND recompute the window total
+     * from the raw share zSet, in a single streamed pass, then atomically
+     * swap the result over the live hash.
+     *
+     * Replaces the previous design — two separate `ZRANGE 0 -1` reads (each
+     * pulling the whole multi-million-entry set into memory) plus a
+     * `DEL`-then-rebuild-in-place. That was non-atomic: a single transient or
+     * partial read after the DEL left the live hash empty, and recordShare
+     * then silently repopulated it from new shares only, dropping established
+     * miners from the payout (prod incident: 37 → 18 PPLNS miners, shares
+     * massively shifted). It also read the giant set twice.
+     *
+     * Safety + efficiency here:
+     *  - ONE streamed pass in REBUILD_CHUNK_SIZE index windows → bounded
+     *    memory, no multi-second Redis block, total computed alongside.
+     *  - Build into a temp key, swap via atomic RENAME → the live aggregate is
+     *    never observed empty/partial.
+     *  - Guard: if the streamed read didn't cover ~the whole set (partial /
+     *    interrupted, or concurrent front-trim shifting indices), ABORT the
+     *    swap and keep the live aggregate. A transient read can no longer turn
+     *    into persistent corruption.
+     *
+     * Returns the recomputed total, or null when the rebuild was skipped
+     * (empty source or aborted read) — caller keeps the running total.
+     */
+    private async recalculateWindow(): Promise<number | null> {
+        const expected = await this.redis.zCard(REDIS_KEY_SHARES);
+        if (!expected || expected <= 0) return null; // nothing to rebuild from
 
-    private async recalculateWindowTotal(): Promise<number> {
-        const entries = await this.redis.zRange(REDIS_KEY_SHARES, 0, -1);
+        const byAddr = new Map<string, number>();
         let total = 0;
-        for (const entry of (entries ?? [])) {
-            total += parseFloat(entry.split(':')[1]) || 0;
+        let seen = 0;
+        for (let start = 0; start < expected; start += REBUILD_CHUNK_SIZE) {
+            const entries = await this.redis.zRange(REDIS_KEY_SHARES, start, start + REBUILD_CHUNK_SIZE - 1);
+            if (!entries || entries.length === 0) break;
+            for (const entry of entries) {
+                const c1 = entry.indexOf(':');
+                if (c1 <= 0) continue;
+                const c2 = entry.indexOf(':', c1 + 1);
+                const diff = parseFloat(c2 === -1 ? entry.slice(c1 + 1) : entry.slice(c1 + 1, c2)) || 0;
+                if (diff > 0) {
+                    const addr = entry.slice(0, c1);
+                    byAddr.set(addr, (byAddr.get(addr) ?? 0) + diff);
+                    total += diff;
+                }
+            }
+            seen += entries.length;
         }
+
+        // Never swap in a partial aggregate over good live data. Tolerate a 1 %
+        // shortfall (concurrent trim removing oldest entries shifts indices
+        // during the streamed read); reject anything grossly truncated.
+        if (seen < expected * 0.99) {
+            console.warn(`[PPLNS] window recalc aborted — read ${seen}/${expected} shares (partial); keeping live aggregate`);
+            return null;
+        }
+
+        // Build into the temp key, then atomically swap it over the live hash.
+        await this.redis.del(REDIS_KEY_WINDOW_REBUILD);
+        if (byAddr.size === 0) {
+            // Source had only non-positive diffs — clear the live hash to match.
+            await this.redis.del(REDIS_KEY_WINDOW_BY_ADDRESS);
+            return total;
+        }
+        // Single hSet with the whole field map — one round-trip, no per-field
+        // pipeline. RENAME then swaps it in atomically.
+        const fields: Record<string, string> = {};
+        for (const [addr, diff] of byAddr) {
+            fields[addr] = diff.toString();
+        }
+        await this.redis.hSet(REDIS_KEY_WINDOW_REBUILD, fields);
+        await this.redis.rename(REDIS_KEY_WINDOW_REBUILD, REDIS_KEY_WINDOW_BY_ADDRESS);
         return total;
     }
 

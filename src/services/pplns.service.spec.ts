@@ -71,6 +71,15 @@ function createMockRedis() {
       return Object.keys(fields).length;
     }),
     hIncrByFloat: jest.fn(hIncrByFloatImpl),
+    rename: jest.fn(async (src: string, dst: string) => {
+      // Atomic key swap — move hash + string value from src to dst, drop src.
+      const h = hashes.get(src);
+      hashes.delete(dst);
+      if (h) { hashes.set(dst, h); hashes.delete(src); }
+      const s = store.get(src);
+      if (s !== undefined) { store.set(dst, s); store.delete(src); }
+      if (h === undefined && s === undefined) throw new Error('ERR no such key');
+    }),
     multi: jest.fn(() => {
       const ops: Array<() => Promise<any>> = [];
       const builder: any = {
@@ -484,6 +493,76 @@ describe('PplnsService', () => {
       const dist2 = await service.getPayoutDistribution(100_000_001); // miss cache
       expect(dist2.find(d => d.address === 'bc1qa')).toBeDefined();
       expect(dist2.find(d => d.address === 'bc1qb')).toBeDefined();
+    });
+  });
+
+  describe('recalculateWindow (atomic rebuild)', () => {
+    it('rebuilds the aggregate + total from the raw zset', async () => {
+      const { service, redis } = createService();
+      service.setNetworkDifficulty(10_000_000); // huge window → no trim
+      await recordShares(service, [
+        { address: 'bc1qa', difficulty: 100 },
+        { address: 'bc1qa', difficulty: 50 },
+        { address: 'bc1qb', difficulty: 200 },
+      ]);
+
+      const total = await (service as any).recalculateWindow();
+      expect(total).toBeCloseTo(350);
+
+      const hash = redis._getHash('pplns:window:by-address');
+      expect(parseFloat(hash!.get('bc1qa') ?? '0')).toBeCloseTo(150);
+      expect(parseFloat(hash!.get('bc1qb') ?? '0')).toBeCloseTo(200);
+      // Temp rebuild key swapped away by the atomic RENAME.
+      expect(redis._getHash('pplns:window:by-address:rebuild')).toBeUndefined();
+    });
+
+    it('replaces a corrupted aggregate with the full set (incident regression)', async () => {
+      const { service, redis } = createService();
+      service.setNetworkDifficulty(10_000_000);
+      await recordShares(service, [
+        { address: 'bc1qa', difficulty: 1000 },
+        { address: 'bc1qb', difficulty: 2000 },
+        { address: 'bc1qc', difficulty: 3000 },
+      ]);
+
+      // Simulate the prod corruption: hash wiped + repopulated from one
+      // recently-active miner only, with a tiny wrong value.
+      await redis.del('pplns:window:by-address');
+      await redis.hSet('pplns:window:by-address', { bc1qc: '5' });
+
+      await (service as any).recalculateWindow();
+
+      const hash = redis._getHash('pplns:window:by-address');
+      expect(hash!.size).toBe(3); // all three miners restored from the raw zset
+      expect(parseFloat(hash!.get('bc1qa') ?? '0')).toBeCloseTo(1000);
+      expect(parseFloat(hash!.get('bc1qb') ?? '0')).toBeCloseTo(2000);
+      expect(parseFloat(hash!.get('bc1qc') ?? '0')).toBeCloseTo(3000);
+    });
+
+    it('aborts and keeps the live aggregate when the read is partial', async () => {
+      const { service, redis } = createService();
+      service.setNetworkDifficulty(10_000_000);
+      await recordShares(service, [
+        { address: 'bc1qa', difficulty: 100 },
+        { address: 'bc1qb', difficulty: 200 },
+      ]);
+
+      // A known-good live hash that MUST remain untouched on a partial read.
+      await redis.del('pplns:window:by-address');
+      await redis.hSet('pplns:window:by-address', { bc1qa: '100', bc1qb: '200' });
+
+      // Force the guard: zCard reports far more than zRange can return, so the
+      // streamed read covers < 99 % of the claimed set.
+      redis.zCard.mockResolvedValueOnce(1000);
+
+      const result = await (service as any).recalculateWindow();
+      expect(result).toBeNull();
+
+      // No DEL, no partial swap — the live aggregate is exactly as seeded.
+      const hash = redis._getHash('pplns:window:by-address');
+      expect(hash!.size).toBe(2);
+      expect(parseFloat(hash!.get('bc1qa') ?? '0')).toBeCloseTo(100);
+      expect(parseFloat(hash!.get('bc1qb') ?? '0')).toBeCloseTo(200);
     });
   });
 
