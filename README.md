@@ -2,7 +2,7 @@
 
 **Blitzpool** is an open-source Bitcoin mining pool with a single distinguishing feature: **every payout — Solo, PPLNS, Group-Solo, Blockparty — is written directly into the coinbase transaction of the block that earned it**. No pool wallet, no custody period, no FPPS-style intermediate. Your sats arrive at your address with the block itself.
 
-Current version: **v2.1.8**
+Current version: **v2.1.9**
 
 🌐 Live pool: **https://blitzpool.yourdevice.ch**
 
