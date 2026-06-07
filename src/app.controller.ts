@@ -57,6 +57,19 @@ function isPublicIp(ip: string): boolean {
   return false;
 }
 
+/**
+ * Block subsidy in sats for `height` per the standard halving schedule
+ * (50 BTC, halving every 210 000 blocks; 0 after 64 halvings). Used by the
+ * next-block-reward endpoint to split the template's coinbase value into
+ * subsidy + fees so the UI doesn't hard-code the subsidy or fetch fees from
+ * a third party.
+ */
+function blockSubsidySats(height: number): number {
+  const halvings = Math.floor(height / 210_000);
+  if (halvings >= 64) return 0;
+  return Math.floor(5_000_000_000 / Math.pow(2, halvings));
+}
+
 @Controller()
 export class AppController {
 
@@ -133,6 +146,23 @@ export class AppController {
   public async blockTemplate() {
     const height = (await firstValueFrom(this.bitcoinRpcService.newBlock$)).blocks;
     return this.bitcoinRpcService.getBlockTemplate(height);
+  }
+
+  /**
+   * Next-block reward estimate, server-side. Reads the pool's current job
+   * template — `coinbasevalue` is the authoritative subsidy + real mempool
+   * fees the pool would actually mine (same value the live coinbase payout is
+   * built from), so the UI no longer hard-codes the subsidy or fetches fees
+   * from mempool.space per client.
+   */
+  @Get('info/next-block-reward')
+  public async nextBlockReward() {
+    const tpl = await firstValueFrom(this.stratumV1JobsService.newMiningJob$);
+    const rewardSats = tpl.blockData.coinbasevalue;
+    const height = tpl.blockData.height;
+    const subsidySats = blockSubsidySats(height);
+    const feeSats = Math.max(0, rewardSats - subsidySats);
+    return { rewardSats, subsidySats, feeSats, height };
   }
 
   @Get('info/core')
