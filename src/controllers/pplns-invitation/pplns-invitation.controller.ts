@@ -1,6 +1,7 @@
 import { Body, Controller, Get, HttpException, HttpStatus, Param, Post, UseGuards } from '@nestjs/common';
 import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 import { InvitationServiceError, PplnsGroupInvitationService } from '../../services/pplns-group-invitation.service';
+import { GroupServiceError } from '../../services/group.service';
 import { isoFromEpoch } from '../../utils/epoch-iso';
 
 @Controller('pplns/invitations')
@@ -133,6 +134,16 @@ export class PplnsInvitationController {
     }
 
     private toHttp(e: any): HttpException {
+        // The member-cap check lives at the GroupService add-member chokepoint,
+        // so a still-valid invite link that's redeemed when the group is full
+        // surfaces here as a GroupServiceError — map it so the accept page can
+        // show "this group is full" instead of a generic 500.
+        if (e instanceof GroupServiceError) {
+            const status = e.code === 'group-full' || e.code === 'already-member' || e.code === 'address-in-group'
+                ? HttpStatus.CONFLICT
+                : HttpStatus.BAD_REQUEST;
+            return new HttpException({ code: e.code, message: e.message }, status);
+        }
         if (e instanceof InvitationServiceError) {
             const status = e.code === 'not-found' ? HttpStatus.NOT_FOUND
                 : e.code === 'expired' || e.code === 'group-dissolved' ? HttpStatus.GONE

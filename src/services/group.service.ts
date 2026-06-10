@@ -87,6 +87,11 @@ export interface GroupRoundResetSettings {
      * public directory and accepts join-requests. Omit to leave unchanged.
      */
     isPublic?: boolean;
+    /**
+     * Hard member cap. Positive integer to set, `null` to clear (no limit),
+     * omit to leave unchanged. Enforced across all add-member paths.
+     */
+    maxMembers?: number | null;
 }
 
 export type RoundResetPreset = 'daily' | 'weekly' | 'monthly' | 'custom';
@@ -263,6 +268,17 @@ export class GroupService implements OnModuleInit {
             throw new GroupServiceError('address-in-group', 'Address is already a member of another group');
         }
         this.assertNotInBlockparty(normalizedAddress);
+
+        // Member cap — the single chokepoint every add path funnels through
+        // (directed invite, open invite link, approved join request). NULL =
+        // no limit. Enforced server-side so a UI-only block can't be bypassed.
+        const group = await this.groupRepo.findOneBy({ id: groupId });
+        if (group?.maxMembers != null) {
+            const count = await this.memberRepo.countBy({ groupId });
+            if (count >= group.maxMembers) {
+                throw new GroupServiceError('group-full', 'This group has reached its maximum number of members');
+            }
+        }
 
         const member = await this.memberRepo.save(this.memberRepo.create({
             groupId,
@@ -554,6 +570,24 @@ export class GroupService implements OnModuleInit {
         // into a Postgres BOOLEAN column.
         if (settings.isPublic !== undefined) {
             group.isPublic = settings.isPublic === true;
+        }
+
+        // maxMembers — hard member cap. null clears it; a positive integer
+        // (min 2, the group floor) sets it. Setting below the current member
+        // count is allowed: no one is kicked, growth is just frozen.
+        if (settings.maxMembers !== undefined) {
+            if (settings.maxMembers === null) {
+                group.maxMembers = null;
+            } else {
+                const v = settings.maxMembers;
+                if (!Number.isInteger(v) || v < 2 || v > 100000) {
+                    throw new GroupServiceError(
+                        'invalid-max-members',
+                        'maxMembers must be an integer >= 2 (or null to remove the limit)',
+                    );
+                }
+                group.maxMembers = v;
+            }
         }
 
         // If a preset is configured we need a TZ on the entity — either

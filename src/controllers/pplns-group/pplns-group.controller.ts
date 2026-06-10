@@ -780,6 +780,7 @@ export class PplnsGroupController {
                 lastRoundResetAt: isoFromEpoch(updated.lastRoundResetAt),
                 nextResetAt: computeNextResetAt(updated as PplnsGroupEntity)?.toISOString() ?? null,
                 isPublic: updated.isPublic ?? false,
+                maxMembers: updated.maxMembers ?? null,
             };
         } catch (e) {
             throw this.toHttpError(e);
@@ -825,6 +826,7 @@ export class PplnsGroupController {
         lastRoundResetAt?: number | null;
         dissolvedAt?: number | null;
         isPublic?: boolean;
+        maxMembers?: number | null;
     }) {
         // Round-reset config + finder bonus are intentionally exposed on the
         // public view — every member needs them to render the "next reset in
@@ -844,6 +846,7 @@ export class PplnsGroupController {
             lastRoundResetAt: isoFromEpoch(group.lastRoundResetAt),
             nextResetAt: computeNextResetAt(group as PplnsGroupEntity)?.toISOString() ?? null,
             isPublic: group.isPublic ?? false,
+            maxMembers: group.maxMembers ?? null,
         };
     }
 
@@ -860,11 +863,13 @@ export class PplnsGroupController {
                 'invalid-hour': HttpStatus.BAD_REQUEST,
                 'invalid-timezone': HttpStatus.BAD_REQUEST,
                 'invalid-bonus': HttpStatus.BAD_REQUEST,
+                'invalid-max-members': HttpStatus.BAD_REQUEST,
                 'incomplete-schedule': HttpStatus.BAD_REQUEST,
                 'name-taken': HttpStatus.CONFLICT,
                 'address-in-group': HttpStatus.CONFLICT,
                 'already-member': HttpStatus.CONFLICT,
                 'already-creator': HttpStatus.CONFLICT,
+                'group-full': HttpStatus.CONFLICT,
                 'member-still-active': HttpStatus.FORBIDDEN,
             }[e.code] ?? HttpStatus.BAD_REQUEST;
             return new HttpException({ code: e.code, message: e.message }, status);

@@ -31,6 +31,14 @@ export class PplnsGroupEntity {
     @Column({ type: 'boolean', default: false })
     isPublic: boolean;
 
+    /**
+     * Hard cap on member count. NULL = no limit. When set, every add-member
+     * path is rejected once the group already has this many members (enforced
+     * in GroupService.addMemberWithoutAdmin).
+     */
+    @Column({ type: 'int', nullable: true })
+    maxMembers: number | null;
+
     @Column({ type: 'bigint', transformer: epochMsTransformer })
     createdAt: number;
 
