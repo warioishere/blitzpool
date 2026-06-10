@@ -96,6 +96,9 @@ describe('Group-Solo Regtest — End-to-End with Bitcoin Core', () => {
 
   it('records shares, builds coinbase from real distribution, submits block, and resets round', async () => {
     const { service, redis } = makeService();
+    // This e2e asserts the legacy per-block round wipe. That's now opt-in
+    // (resetRoundOnBlock); the default is accumulate. Enable it for this group.
+    (service as any).groupRepo.findOneBy = async () => ({ id: 'grp-1', resetRoundOnBlock: true, dissolvedAt: null });
 
     // Simulate mining: Alice & Bob submit shares, Charlie hasn't yet
     await service.recordShare(ADDR_ALICE, 600);

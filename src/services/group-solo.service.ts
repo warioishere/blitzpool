@@ -566,9 +566,10 @@ export class GroupSoloService implements OnModuleInit {
             // soon-to-be-cleared shares could outlive resetRound and trip
             // the next block's mismatch guard.
             //
-            // includeLastShareAt: false — block-found wipes the round but
-            // preserves the cross-round inactivity clock (PROP semantics).
-            await this.wipeRoundState(groupId, { includeSnapshots: true, includeLastShareAt: false });
+            // Per-block round wipe is opt-in (resetRoundOnBlock); snapshots are
+            // always dropped. The inactivity clock (lastAcceptedShareAt) always
+            // survives across rounds (PROP semantics).
+            await this.wipeRoundStateOnBlockFound(groupId);
         } finally {
             this.blockFoundLocks.delete(groupId);
         }
@@ -601,7 +602,7 @@ export class GroupSoloService implements OnModuleInit {
         const keys = redisKeys(groupId);
         const entries = await this.redis.zRange(keys.shares, 0, -1);
         if (!entries || entries.length === 0) {
-            await this.wipeRoundState(groupId, { includeSnapshots: true, includeLastShareAt: false });
+            await this.wipeRoundStateOnBlockFound(groupId);
             return;
         }
 
@@ -616,7 +617,7 @@ export class GroupSoloService implements OnModuleInit {
             totalDiffRound += diff;
         }
         if (totalDiffRound <= 0) {
-            await this.wipeRoundState(groupId, { includeSnapshots: true, includeLastShareAt: false });
+            await this.wipeRoundStateOnBlockFound(groupId);
             return;
         }
 
@@ -648,9 +649,9 @@ export class GroupSoloService implements OnModuleInit {
 
         if (result.payouts.length === 0) {
             // Degenerate edge: no fee configured AND no eligible miners.
-            // Nothing to record; just clear the round so the next block
-            // starts fresh.
-            await this.wipeRoundState(groupId, { includeSnapshots: true, includeLastShareAt: false });
+            // Nothing to record; clear per-block state (round wipe still
+            // gated on resetRoundOnBlock).
+            await this.wipeRoundStateOnBlockFound(groupId);
             return;
         }
 
@@ -690,7 +691,7 @@ export class GroupSoloService implements OnModuleInit {
         });
         if (!ok) return;
 
-        await this.wipeRoundState(groupId, { includeSnapshots: true, includeLastShareAt: false });
+        await this.wipeRoundStateOnBlockFound(groupId);
     }
 
     /**
@@ -914,6 +915,38 @@ export class GroupSoloService implements OnModuleInit {
             await this.redis.del(redisKeys(groupId).lastAcceptedShareAt);
         }
         if (opts.includeSnapshots) {
+            await this.deleteAllSnapshots(groupId);
+        }
+    }
+
+    /**
+     * Post-payout cleanup for a block-found event. The per-block round wipe is
+     * opt-in via the group's `resetRoundOnBlock` flag:
+     *
+     *   - true  → wipe the share window (legacy behaviour): the round restarts
+     *             empty after every block.
+     *   - false → keep the share window (default): shares accumulate across
+     *             blocks until a calendar preset / manual reset fires, so each
+     *             block during the round pays the full reward split by the
+     *             accumulated shares.
+     *
+     * Per-finder coinbase snapshots are ALWAYS dropped — they're built per
+     * block and must not survive into the next one regardless of the flag.
+     * A failed flag read defaults to NO wipe (the safe default: never silently
+     * discard accumulated shares). `lastAcceptedShareAt` always survives (PROP
+     * inactivity clock spans rounds).
+     */
+    private async wipeRoundStateOnBlockFound(groupId: string): Promise<void> {
+        let resetOnBlock = false;
+        try {
+            const group = await this.groupRepo.findOneBy({ id: groupId });
+            resetOnBlock = group?.resetRoundOnBlock === true;
+        } catch (err) {
+            console.warn(`[GroupSolo] resetRoundOnBlock read failed for ${groupId}, keeping round:`, (err as Error).message);
+        }
+        if (resetOnBlock) {
+            await this.wipeRoundState(groupId, { includeSnapshots: true, includeLastShareAt: false });
+        } else {
             await this.deleteAllSnapshots(groupId);
         }
     }

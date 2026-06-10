@@ -32,6 +32,16 @@ export class PplnsGroupEntity {
     isPublic: boolean;
 
     /**
+     * When true, the Group-Solo round (share window) is wiped on every
+     * block-found. Default false: shares accumulate across blocks until a
+     * calendar preset or manual reset fires — each block during the round
+     * pays the full reward split by the accumulated shares. Per-finder
+     * coinbase snapshots are always dropped on block-found regardless.
+     */
+    @Column({ type: 'boolean', default: false })
+    resetRoundOnBlock: boolean;
+
+    /**
      * Hard cap on member count. NULL = no limit. When set, every add-member
      * path is rejected once the group already has this many members (enforced
      * in GroupService.addMemberWithoutAdmin).

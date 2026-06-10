@@ -92,6 +92,12 @@ export interface GroupRoundResetSettings {
      * omit to leave unchanged. Enforced across all add-member paths.
      */
     maxMembers?: number | null;
+    /**
+     * When true, the Group-Solo round is wiped on every block-found. When
+     * false (default), shares accumulate across blocks until a calendar
+     * preset / manual reset fires. Omit to leave unchanged.
+     */
+    resetRoundOnBlock?: boolean;
 }
 
 export type RoundResetPreset = 'daily' | 'weekly' | 'monthly' | 'custom';
@@ -230,6 +236,7 @@ export class GroupService implements OnModuleInit {
             adminTokenHash: this.hashToken(adminToken),
             active: false,
             isPublic: false,
+            resetRoundOnBlock: false,
         }));
 
         await this.memberRepo.save(this.memberRepo.create({
@@ -588,6 +595,12 @@ export class GroupService implements OnModuleInit {
                 }
                 group.maxMembers = v;
             }
+        }
+
+        // resetRoundOnBlock — opt-in per-block round wipe. Strict boolean
+        // coercion so malformed JSON doesn't slip into the BOOLEAN column.
+        if (settings.resetRoundOnBlock !== undefined) {
+            group.resetRoundOnBlock = settings.resetRoundOnBlock === true;
         }
 
         // If a preset is configured we need a TZ on the entity — either

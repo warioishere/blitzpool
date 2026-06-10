@@ -781,6 +781,7 @@ export class PplnsGroupController {
                 nextResetAt: computeNextResetAt(updated as PplnsGroupEntity)?.toISOString() ?? null,
                 isPublic: updated.isPublic ?? false,
                 maxMembers: updated.maxMembers ?? null,
+                resetRoundOnBlock: updated.resetRoundOnBlock ?? false,
             };
         } catch (e) {
             throw this.toHttpError(e);
@@ -827,6 +828,7 @@ export class PplnsGroupController {
         dissolvedAt?: number | null;
         isPublic?: boolean;
         maxMembers?: number | null;
+        resetRoundOnBlock?: boolean;
     }) {
         // Round-reset config + finder bonus are intentionally exposed on the
         // public view — every member needs them to render the "next reset in
@@ -847,6 +849,7 @@ export class PplnsGroupController {
             nextResetAt: computeNextResetAt(group as PplnsGroupEntity)?.toISOString() ?? null,
             isPublic: group.isPublic ?? false,
             maxMembers: group.maxMembers ?? null,
+            resetRoundOnBlock: group.resetRoundOnBlock ?? false,
         };
     }
 

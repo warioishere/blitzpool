@@ -280,6 +280,18 @@ function makeService(envOverrides: Record<string, string> = {}) {
     return { service, redis, historyRepo, balanceRepo, groupRepo, groupService };
 }
 
+/**
+ * Opt a group into per-block round reset (resetRoundOnBlock=true). The default
+ * is now false (accumulate across blocks), so tests that assert the round is
+ * WIPED on block-found must enable the legacy reset behaviour explicitly.
+ */
+function enablePerBlockReset(service: GroupSoloService, groupId = 'g1'): void {
+    const repo = (service as any).groupRepo;
+    const existing = (repo._rows as any[]).find((r) => r.id === groupId);
+    if (existing) existing.resetRoundOnBlock = true;
+    else (repo._rows as any[]).push({ id: groupId, resetRoundOnBlock: true });
+}
+
 // ── Tests ────────────────────────────────────────────────────────
 
 describe('GroupSoloService', () => {
@@ -523,6 +535,7 @@ describe('GroupSoloService', () => {
         const { service, redis, historyRepo, groupService } = makeService();
         groupService._setMembership('bc1qalice', 'g1', true);
         groupService._setMembership('bc1qbob', 'g1', true);
+        enablePerBlockReset(service);
         await service.recordShare('bc1qalice', 500);
         await service.recordShare('bc1qbob', 500);
         await service.getPayoutDistribution('g1', 100_000_000); // populate snapshot
@@ -538,6 +551,27 @@ describe('GroupSoloService', () => {
         expect(redis._zsets.size).toBe(0);
         for (const [key] of redis._store) {
             expect(key).not.toMatch(/^groupsolo:g1:/);
+        }
+    });
+
+    it('onBlockFound keeps the round when resetRoundOnBlock is false (default — accumulate)', async () => {
+        const { service, redis, historyRepo, groupService } = makeService();
+        groupService._setMembership('bc1qalice', 'g1', true);
+        // No enablePerBlockReset() → default false → shares accumulate.
+        await service.recordShare('bc1qalice', 500);
+        await service.getPayoutDistribution('g1', 100_000_000);
+
+        await service.onBlockFound(900_000, 100_000_000, 'bc1qalice');
+
+        // History was still written (the block paid out)…
+        expect((historyRepo._rows as any[]).length).toBeGreaterThanOrEqual(1);
+        // …but the share window survives for the next block.
+        const stats = await service.getRoundStats('g1');
+        expect(stats.totalShares).toBe(500);
+        expect(redis._zsets.get('groupsolo:g1:shares')?.length ?? 0).toBeGreaterThan(0);
+        // Per-finder snapshots are dropped regardless of the flag.
+        for (const [key] of redis._store) {
+            expect(key).not.toMatch(/^groupsolo:g1:snapshot:/);
         }
     });
 
@@ -569,6 +603,7 @@ describe('GroupSoloService', () => {
         const BLOCK_REWARD = 10_000; // 10k sats
         groupService._setMembership('bc1qbig', 'g1', true);
         groupService._setMembership('bc1qtiny', 'g1', true);
+        enablePerBlockReset(service);
 
         // ── Round 1 ────────────────────────────────────────────────
         await service.recordShare('bc1qbig', 999);
@@ -798,6 +833,7 @@ describe('GroupSoloService', () => {
     it('onBlockFound also clears rejected counters', async () => {
         const { service, redis, groupService } = makeService();
         groupService._setMembership('bc1qalice', 'g1', true);
+        enablePerBlockReset(service);
         await service.recordShare('bc1qalice', 100);
         await service.recordReject('bc1qalice', 50);
         await service.getPayoutDistribution('g1', 100_000_000);
@@ -835,6 +871,7 @@ describe('GroupSoloService', () => {
     it('getRoundBestDifficulty resets after onBlockFound', async () => {
         const { service, groupService } = makeService();
         groupService._setMembership('bc1qalice', 'g1', true);
+        enablePerBlockReset(service);
         await service.recordShare('bc1qalice', 100);
         await service.getPayoutDistribution('g1', 100_000_000);
         await service.onBlockFound(900_000, 100_000_000, 'bc1qalice');
@@ -915,6 +952,7 @@ describe('GroupSoloService', () => {
         it('onBlockFound clears the byAddress hash with the rest of the round', async () => {
             const { service, redis, groupService } = makeService();
             groupService._setMembership('bc1qalice', 'g1', true);
+            enablePerBlockReset(service);
             await service.recordShare('bc1qalice', 100);
             await service.getPayoutDistribution('g1', 100_000_000);
             await service.onBlockFound(900_000, 100_000_000, 'bc1qalice');
@@ -1034,6 +1072,7 @@ describe('GroupSoloService', () => {
         it('resetRound clears the cache (block-found round wipe)', async () => {
             const { service, redis, groupService } = makeService();
             groupService._setMembership('bc1qalice', 'g1', true);
+            enablePerBlockReset(service);
             await service.recordShare('bc1qalice', 999);
             expect(redis._hashes.get(KEY)).toBeDefined();
 
