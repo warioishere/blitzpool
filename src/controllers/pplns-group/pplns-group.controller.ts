@@ -16,6 +16,9 @@ import { ClientRejectedStatisticsService } from '../../ORM/client-rejected-stati
 import { eStratumErrorCode, STRATUM_REJECT_STALE } from '../../models/enums/eStratumErrorCode';
 import { generateFormattedTimeSlots } from '../../utils/timeslot.utils';
 import { isoFromEpoch } from '../../utils/epoch-iso';
+import { PplnsService } from '../../services/pplns.service';
+import { BitcoinRpcService } from '../../services/bitcoin-rpc.service';
+import { blockSubsidySats } from '../../utils/block-subsidy.utils';
 
 interface CreateGroupDto {
     name?: string;
@@ -47,6 +50,8 @@ export class PplnsGroupController {
         private readonly clientRejectedStatisticsService: ClientRejectedStatisticsService,
         private readonly configService: ConfigService,
         private readonly joinRequestService: PplnsGroupJoinRequestService,
+        private readonly pplnsService: PplnsService,
+        private readonly bitcoinRpcService: BitcoinRpcService,
     ) {}
 
     /** Sum of live hashrates across all workers of an address. Matches /api/client/:address. */
@@ -110,6 +115,47 @@ export class PplnsGroupController {
             pageSize,
             total,
             items,
+        };
+    }
+
+    /**
+     * GET /pplns/groups/finder-bonus-cap
+     *
+     * Current block subsidy in sats — the admin UI uses it as the finder-bonus
+     * input ceiling + hint. `height` is the next block (current tip + 1), the
+     * block the subsidy applies to. Public, no auth.
+     *
+     * MUST be declared before `@Get(':id')` so 'finder-bonus-cap' isn't
+     * captured as a group id.
+     */
+    @Get('finder-bonus-cap')
+    finderBonusCap() {
+        const height = this.bitcoinRpcService.getBlockHeight() + 1;
+        return { height, subsidySats: blockSubsidySats(height) };
+    }
+
+    /**
+     * GET /pplns/groups/coinbase-capacity
+     *
+     * How many members fit in the fixed group-solo coinbase weight budget.
+     * Engine-wide (the budget is the same for every group), so the UI subtracts
+     * a group's own member count to show its remaining headroom. `maxMembers`
+     * is the worst-case ceiling (pessimistic P2TR weight, fee output reserved)
+     * from the same `getMaxCoinbaseOutputs()` the operator capacity-alert uses.
+     * Public, no auth.
+     *
+     * MUST be declared before `@Get(':id')` so 'coinbase-capacity' isn't
+     * captured as a group id.
+     */
+    @Get('coinbase-capacity')
+    coinbaseCapacity() {
+        const { coinbaseWeightBudget, feeAddress } = this.pplnsService.getFeeConfig();
+        return {
+            maxMembers: this.pplnsService.getMaxCoinbaseOutputs(),
+            weightBudget: coinbaseWeightBudget,
+            // Mirrors what getMaxCoinbaseOutputs() reserves: a fee output slot
+            // exists iff a fee address is configured.
+            hasFeeOutput: !!feeAddress,
         };
     }
 

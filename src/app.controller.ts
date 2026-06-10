@@ -21,6 +21,7 @@ import { MetricsService } from './services/metrics.service';
 import { MiningJob } from './models/MiningJob';
 import * as bitcoinjs from 'bitcoinjs-lib';
 import { generateFormattedTimeSlots } from './utils/timeslot.utils';
+import { blockSubsidySats } from './utils/block-subsidy.utils';
 
 import { MiningModeService } from './services/mining-mode.service';
 import { PplnsService } from './services/pplns.service';
@@ -55,19 +56,6 @@ function isPublicIp(ip: string): boolean {
     return true;
   }
   return false;
-}
-
-/**
- * Block subsidy in sats for `height` per the standard halving schedule
- * (50 BTC, halving every 210 000 blocks; 0 after 64 halvings). Used by the
- * next-block-reward endpoint to split the template's coinbase value into
- * subsidy + fees so the UI doesn't hard-code the subsidy or fetch fees from
- * a third party.
- */
-function blockSubsidySats(height: number): number {
-  const halvings = Math.floor(height / 210_000);
-  if (halvings >= 64) return 0;
-  return Math.floor(5_000_000_000 / Math.pow(2, halvings));
 }
 
 @Controller()

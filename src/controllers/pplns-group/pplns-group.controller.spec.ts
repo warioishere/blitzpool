@@ -26,6 +26,11 @@ describe('PplnsGroupController.chart', () => {
         const clientRejectedStatisticsService = {} as any;
         const configService = { get: jest.fn(() => undefined) } as any;
         const joinRequestService = {} as any;
+        const pplnsService = {
+            getFeeConfig: jest.fn(() => ({ feePercent: 2, feeAddress: 'bc1qfee', coinbaseWeightBudget: 36000 })),
+            getMaxCoinbaseOutputs: jest.fn(() => 200),
+        } as any;
+        const bitcoinRpcService = { getBlockHeight: jest.fn(() => 800_000) } as any;
         const controller = new PplnsGroupController(
             groupService as any,
             groupSoloService,
@@ -36,6 +41,8 @@ describe('PplnsGroupController.chart', () => {
             clientRejectedStatisticsService,
             configService,
             joinRequestService,
+            pplnsService,
+            bitcoinRpcService,
         );
         return { controller, groupService, clientStatisticsService };
     }
@@ -129,5 +136,49 @@ describe('PplnsGroupController.chart', () => {
         await controller.chart('g1', 'unsupported' as any);
 
         expect(clientStatisticsService.getChartDataForAddress).toHaveBeenCalledWith('bc1qa', '1d');
+    });
+});
+
+describe('PplnsGroupController capacity endpoints', () => {
+    function make(opts: {
+        feeAddress?: string;
+        coinbaseWeightBudget?: number;
+        maxOutputs?: number;
+        blockHeight?: number;
+    } = {}) {
+        const pplnsService = {
+            getFeeConfig: jest.fn(() => ({
+                feePercent: 2,
+                feeAddress: opts.feeAddress ?? 'bc1qfee',
+                coinbaseWeightBudget: opts.coinbaseWeightBudget ?? 36000,
+            })),
+            getMaxCoinbaseOutputs: jest.fn(() => opts.maxOutputs ?? 200),
+        } as any;
+        const bitcoinRpcService = { getBlockHeight: jest.fn(() => opts.blockHeight ?? 800_000) } as any;
+        const noop = {} as any;
+        return new PplnsGroupController(
+            noop, noop, noop, noop, noop, noop, noop, noop, noop,
+            pplnsService, bitcoinRpcService,
+        );
+    }
+
+    it('coinbase-capacity returns maxMembers + weightBudget + hasFeeOutput', () => {
+        const c = make({ maxOutputs: 287, coinbaseWeightBudget: 50000 });
+        expect(c.coinbaseCapacity()).toEqual({
+            maxMembers: 287,
+            weightBudget: 50000,
+            hasFeeOutput: true,
+        });
+    });
+
+    it('coinbase-capacity reports hasFeeOutput=false when no fee address is set', () => {
+        const c = make({ feeAddress: '' });
+        expect(c.coinbaseCapacity().hasFeeOutput).toBe(false);
+    });
+
+    it('finder-bonus-cap returns next-block height + its subsidy', () => {
+        // height 800001 → 3 halvings → 5e9 / 8 = 625_000_000 sats.
+        const c = make({ blockHeight: 800_000 });
+        expect(c.finderBonusCap()).toEqual({ height: 800_001, subsidySats: 625_000_000 });
     });
 });
