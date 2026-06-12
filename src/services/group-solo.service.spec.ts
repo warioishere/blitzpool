@@ -317,10 +317,10 @@ describe('GroupSoloService', () => {
         const { service, redis, groupService } = makeService();
         groupService._setMembership('bc1qalice', 'g1', true);
         await service.recordShare('bc1qalice', 100);
-        expect(redis._zsets.size).toBe(1);
-        const zset = Array.from(redis._zsets.values())[0];
-        expect(zset).toHaveLength(1);
-        expect(zset[0].value).toMatch(/^bc1qalice:100:/);
+        // Round state is a per-address aggregate hash (no per-share zSet).
+        const byAddr = redis._hashes.get('groupsolo:g1:by-address');
+        expect(byAddr).toBeDefined();
+        expect(parseFloat(byAddr!.get('bc1qalice')!)).toBe(100);
     });
 
     it('distribution splits proportionally to round shares (PROP)', async () => {
@@ -565,10 +565,10 @@ describe('GroupSoloService', () => {
 
         // History was still written (the block paid out)…
         expect((historyRepo._rows as any[]).length).toBeGreaterThanOrEqual(1);
-        // …but the share window survives for the next block.
+        // …but the round aggregate survives for the next block.
         const stats = await service.getRoundStats('g1');
         expect(stats.totalShares).toBe(500);
-        expect(redis._zsets.get('groupsolo:g1:shares')?.length ?? 0).toBeGreaterThan(0);
+        expect(parseFloat(redis._hashes.get('groupsolo:g1:by-address')?.get('bc1qalice') ?? '0')).toBe(500);
         // Per-finder snapshots are dropped regardless of the flag.
         for (const [key] of redis._store) {
             expect(key).not.toMatch(/^groupsolo:g1:snapshot:/);
@@ -929,26 +929,6 @@ describe('GroupSoloService', () => {
             expect(alice.percent).toBeCloseTo(75, 5);
         });
 
-        it('cold-cache fallback: empty hash + populated zSet → reads from zSet and backfills hash', async () => {
-            const { service, redis, groupService } = makeService();
-            groupService._setMembership('bc1qalice', 'g1', true);
-            await service.recordShare('bc1qalice', 100);
-            await service.recordShare('bc1qalice', 200);
-
-            // Simulate a pre-deploy round where the byAddress hash didn't
-            // exist yet — wipe just the hash, leave the zSet authoritative.
-            redis._hashes.delete(KEY);
-
-            const stats = await service.getRoundStats('g1');
-            expect(stats.totalShares).toBe(300);
-
-            // Backfill ran on the way out — second read must NOT need zRange.
-            (redis.zRange as jest.Mock).mockClear();
-            const second = await service.getRoundStats('g1');
-            expect(redis.zRange).not.toHaveBeenCalled();
-            expect(second.totalShares).toBe(300);
-        });
-
         it('onBlockFound clears the byAddress hash with the rest of the round', async () => {
             const { service, redis, groupService } = makeService();
             groupService._setMembership('bc1qalice', 'g1', true);
@@ -1023,30 +1003,6 @@ describe('GroupSoloService', () => {
             expect(best.address).toBe('bc1qalice');
         });
 
-        it('cold-cache fallback: empty hash + populated zSet → reads from zSet and backfills hash', async () => {
-            const { service, redis, groupService } = makeService();
-            groupService._setMembership('bc1qalice', 'g1', true);
-            await service.recordShare('bc1qalice', 100);
-            await service.recordShare('bc1qalice', 500);
-
-            // Simulate pre-deploy state: zSet has the shares, bestShare cache
-            // wasn't maintained at the time.
-            redis._hashes.delete(KEY);
-
-            const first = await service.getRoundBestDifficulty('g1');
-            expect(first.bestDifficulty).toBe(500);
-            expect(first.address).toBe('bc1qalice');
-
-            // Allow the fire-and-forget backfill hSet to complete.
-            await new Promise(resolve => setImmediate(resolve));
-
-            // Second read must NOT touch the zSet — cache is now warm.
-            (redis.zRange as jest.Mock).mockClear();
-            const second = await service.getRoundBestDifficulty('g1');
-            expect(redis.zRange).not.toHaveBeenCalled();
-            expect(second.bestDifficulty).toBe(500);
-        });
-
         it('removeMemberState clears the cache only if the kicked member held the record', async () => {
             const { service, redis, groupService } = makeService();
             groupService._setMembership('bc1qalice', 'g1', true);
@@ -1060,13 +1016,15 @@ describe('GroupSoloService', () => {
             await service.removeMemberState('g1', 'bc1qcharlie', ['bc1qalice', 'bc1qbob']);
             expect(redis._hashes.get(KEY)?.get('address')).toBe('bc1qbob');
 
-            // Kicking the holder drops the cache → next read falls back to zSet.
+            // Kicking the holder drops the cache. With no per-share zSet to
+            // recompute from, best-share reads empty until the next share
+            // re-seeds it (acceptable: a transient 0 after kicking the leader).
             await service.removeMemberState('g1', 'bc1qbob', ['bc1qalice']);
             expect(redis._hashes.get(KEY)).toBeUndefined();
 
             const best = await service.getRoundBestDifficulty('g1');
-            expect(best.address).toBe('bc1qalice');
-            expect(best.bestDifficulty).toBe(100);
+            expect(best.bestDifficulty).toBe(0);
+            expect(best.address).toBeNull();
         });
 
         it('resetRound clears the cache (block-found round wipe)', async () => {

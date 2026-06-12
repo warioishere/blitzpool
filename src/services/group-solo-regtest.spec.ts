@@ -139,11 +139,12 @@ describe('Group-Solo Regtest — End-to-End with Bitcoin Core', () => {
     // Now call the service's onBlockFound — should reset the round
     await service.onBlockFound(height, blockReward, ADDR_ALICE);
 
-    // Round reset: no more group-1 Redis keys
-    expect(redis._zsets.size).toBe(0);
+    // Round reset: no more group-1 round keys (the per-address aggregate +
+    // total are wiped; lastAcceptedShareAt persists across rounds by design).
     for (const [key] of redis._store) {
       expect(key).not.toMatch(/^groupsolo:grp-1:/);
     }
+    expect(redis._hashes.get('groupsolo:grp-1:by-address')).toBeUndefined();
 
     // A fresh distribution call should now return the fee-only fallback.
     // Shape changed with the signed-ledger refactor: entries now carry a
