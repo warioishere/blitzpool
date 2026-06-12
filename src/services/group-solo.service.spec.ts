@@ -34,6 +34,10 @@ function createMockRedis() {
             const ks = Array.isArray(keyOrKeys) ? keyOrKeys : [keyOrKeys];
             for (const k of ks) { store.delete(k); zsets.delete(k); hashes.delete(k); }
         }),
+        unlink: jest.fn(async (keyOrKeys: string | string[]) => {
+            const ks = Array.isArray(keyOrKeys) ? keyOrKeys : [keyOrKeys];
+            for (const k of ks) { store.delete(k); zsets.delete(k); hashes.delete(k); }
+        }),
         incrByFloat: jest.fn(async (key: string, amount: number) => {
             const val = parseFloat(store.get(key) ?? '0') + amount;
             store.set(key, val.toString());
@@ -1512,6 +1516,40 @@ describe('GroupSoloService', () => {
             // All 3 snapshots are now stale (round reset) → wiped.
             const snapshotKeysAfter = Array.from(redis._hashes.keys()).filter(k => k.startsWith('groupsolo:g1:snapshot'));
             expect(snapshotKeysAfter.length).toBe(0);
+        });
+    });
+
+    describe('legacy per-share key cleanup', () => {
+        it('reclaims orphaned :shares + :counter on startup, keeps live keys', async () => {
+            const { service, redis } = makeService();
+
+            // Orphaned legacy keys (no longer written/read by the new code).
+            redis._zsets.set('groupsolo:g1:shares', [{ score: 1, value: 'bc1qa:100' }]);
+            redis._zsets.set('groupsolo:g2:shares', [{ score: 1, value: 'bc1qb:200' }]);
+            redis._store.set('groupsolo:g1:counter', '5');
+            // Live keys that MUST survive — note rejected-shares ends in
+            // `-shares`, so the `*:shares` glob must NOT catch it.
+            redis._hashes.set('groupsolo:g1:by-address', new Map([['bc1qa', '100']]));
+            redis._hashes.set('groupsolo:g1:rejected-shares', new Map([['bc1qa', '5']]));
+            redis._store.set('groupsolo:g1:total', '100');
+
+            await (service as any).cleanupLegacyShareKeys();
+
+            // Orphans gone.
+            expect(redis._zsets.has('groupsolo:g1:shares')).toBe(false);
+            expect(redis._zsets.has('groupsolo:g2:shares')).toBe(false);
+            expect(redis._store.has('groupsolo:g1:counter')).toBe(false);
+            // Live keys untouched.
+            expect(redis._hashes.has('groupsolo:g1:by-address')).toBe(true);
+            expect(redis._hashes.has('groupsolo:g1:rejected-shares')).toBe(true);
+            expect(redis._store.has('groupsolo:g1:total')).toBe(true);
+        });
+
+        it('is a no-op when there are no legacy keys', async () => {
+            const { service, redis } = makeService();
+            redis._hashes.set('groupsolo:g1:by-address', new Map([['bc1qa', '100']]));
+            await (service as any).cleanupLegacyShareKeys();
+            expect(redis._hashes.has('groupsolo:g1:by-address')).toBe(true);
         });
     });
 });

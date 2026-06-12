@@ -194,11 +194,50 @@ export class GroupSoloService implements OnModuleInit {
             if (store?.client) {
                 this.redis = store.client;
                 console.log('[GroupSolo] Service initialized with Redis');
+                // One-time: reclaim memory from the legacy per-share keys.
+                await this.cleanupLegacyShareKeys();
             } else {
                 console.error('[GroupSolo] Redis not available — group-solo will not function!');
             }
         } catch (error) {
             console.error('[GroupSolo] Failed to access Redis client:', error);
+        }
+    }
+
+    /**
+     * One-time cleanup of legacy per-share keys orphaned by the move to the
+     * by-address aggregate. `groupsolo:<id>:shares` (formerly the per-share
+     * zSet — up to GBs for a group that mines without finding a block and has
+     * no reset) and `groupsolo:<id>:counter` are no longer written or read;
+     * nothing else deletes them and they carry no TTL. Scan + UNLINK
+     * (non-blocking) on startup so the freed memory is reclaimed without a
+     * manual operator step. The `*:shares` glob ends in `:shares`, so it can't
+     * match the live `*:rejected-shares` hashes. Idempotent: a no-op once gone.
+     */
+    private async cleanupLegacyShareKeys(): Promise<void> {
+        if (!this.redis) return;
+        for (const pattern of ['groupsolo:*:shares', 'groupsolo:*:counter']) {
+            try {
+                let cursor = 0;
+                let removed = 0;
+                do {
+                    const result = await this.redis.scan(cursor, { MATCH: pattern, COUNT: 1000 });
+                    cursor = result.cursor;
+                    if (result.keys && result.keys.length > 0) {
+                        if (typeof this.redis.unlink === 'function') {
+                            await this.redis.unlink(result.keys);
+                        } else {
+                            await this.redis.del(result.keys);
+                        }
+                        removed += result.keys.length;
+                    }
+                } while (cursor !== 0);
+                if (removed > 0) {
+                    console.log(`[GroupSolo] Reclaimed ${removed} orphaned legacy key(s) matching ${pattern}`);
+                }
+            } catch (err) {
+                console.warn(`[GroupSolo] legacy key cleanup (${pattern}) failed:`, (err as Error).message);
+            }
         }
     }
 
