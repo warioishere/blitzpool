@@ -9,8 +9,20 @@ import { attachMockTxManager } from './__test-helpers__/mock-tx-manager';
 
 function createMockRedis() {
   const store = new Map<string, string>();
-  // Sorted set: array of { score, value } sorted by score
-  let zset: { score: number; value: string }[] = [];
+  // Keyed sorted sets: key → (member → score). ZADD dedups by member (same
+  // member updates its score), mirroring real Redis — essential for the
+  // bucket-index zset, which recordShare re-ZADDs the same bucketId per share.
+  const zsets = new Map<string, Map<string, number>>();
+  const getZ = (key: string) => {
+    let z = zsets.get(key);
+    if (!z) { z = new Map(); zsets.set(key, z); }
+    return z;
+  };
+  // Members of a zset sorted by score (ties broken lexicographically, as Redis).
+  const sortedMembers = (key: string): string[] =>
+    Array.from(getZ(key).entries())
+      .sort((a, b) => (a[1] - b[1]) || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+      .map(([m]) => m);
   // Hash store: key → { field → value }
   const hashes = new Map<string, Map<string, string>>();
   const getHash = (key: string) => {
@@ -24,9 +36,8 @@ function createMockRedis() {
     store.set(key, val.toString());
     return val;
   };
-  const zAddImpl = async (_key: string, entry: { score: number; value: string }) => {
-    zset.push(entry);
-    zset.sort((a, b) => a.score - b.score);
+  const zAddImpl = async (key: string, entry: { score: number; value: string }) => {
+    getZ(key).set(entry.value, entry.score);
   };
   const hIncrByFloatImpl = async (key: string, field: string, amount: number) => {
     const h = getHash(key);
@@ -43,18 +54,25 @@ function createMockRedis() {
     }),
     get: jest.fn(async (key: string) => store.get(key) ?? null),
     set: jest.fn(async (key: string, value: string, _opts?: any) => { store.set(key, value); }),
-    del: jest.fn(async (key: string) => { store.delete(key); hashes.delete(key); }),
+    del: jest.fn(async (key: string) => { store.delete(key); hashes.delete(key); zsets.delete(key); }),
     expire: jest.fn(async (_key: string, _seconds: number) => 1),
     incrByFloat: jest.fn(incrByFloatImpl),
     zAdd: jest.fn(zAddImpl),
-    zRange: jest.fn(async (_key: string, start: number, end: number) => {
-      if (end === -1) end = zset.length - 1;
-      return zset.slice(start, end + 1).map(e => e.value);
+    zRange: jest.fn(async (key: string, start: number, end: number) => {
+      const members = sortedMembers(key);
+      if (end === -1) end = members.length - 1;
+      return members.slice(start, end + 1);
     }),
-    zRemRangeByRank: jest.fn(async (_key: string, start: number, end: number) => {
-      zset.splice(start, end - start + 1);
+    zRem: jest.fn(async (key: string, member: string | string[]) => {
+      const z = getZ(key);
+      for (const m of Array.isArray(member) ? member : [member]) z.delete(m);
     }),
-    zCard: jest.fn(async () => zset.length),
+    zRemRangeByRank: jest.fn(async (key: string, start: number, end: number) => {
+      const members = sortedMembers(key);
+      const z = getZ(key);
+      for (const m of members.slice(start, end + 1)) z.delete(m);
+    }),
+    zCard: jest.fn(async (key: string) => getZ(key).size),
     hGetAll: jest.fn(async (key: string) => {
       const h = hashes.get(key);
       if (!h) return {};
@@ -71,6 +89,10 @@ function createMockRedis() {
       return Object.keys(fields).length;
     }),
     hIncrByFloat: jest.fn(hIncrByFloatImpl),
+    hDel: jest.fn(async (key: string, field: string) => {
+      const h = hashes.get(key);
+      if (h) h.delete(field);
+    }),
     rename: jest.fn(async (src: string, dst: string) => {
       // Atomic key swap — move hash + string value from src to dst, drop src.
       const h = hashes.get(src);
@@ -104,9 +126,9 @@ function createMockRedis() {
       return builder;
     }),
     // Helpers for tests
-    _getZset: () => zset,
+    _getZ: (key: string) => getZ(key),
     _getHash: (key: string) => hashes.get(key),
-    _clear: () => { store.clear(); zset = []; hashes.clear(); },
+    _clear: () => { store.clear(); zsets.clear(); hashes.clear(); },
   };
   return mock;
 }
@@ -212,7 +234,7 @@ function createMockPayoutHistoryRepo() {
 
 // ── Service Factory ─────────────────────────────────────────────
 
-function createService(opts: { feeAddress?: string; feePercent?: string; port?: string; weightBudget?: string } = {}) {
+function createService(opts: { feeAddress?: string; feePercent?: string; port?: string; weightBudget?: string; bucketShares?: string } = {}) {
   const redis = createMockRedis();
   const balanceBacking = createMockBalanceBacking();
   const balanceService = balanceBacking.service;
@@ -229,6 +251,7 @@ function createService(opts: { feeAddress?: string; feePercent?: string; port?: 
         PPLNS_FEE_PERCENT: opts.feePercent ?? '2',
         PPLNS_PORT: opts.port ?? '3340',
         ...(opts.weightBudget ? { PPLNS_COINBASE_WEIGHT_BUDGET: opts.weightBudget } : {}),
+        ...(opts.bucketShares ? { PPLNS_BUCKET_SHARES: opts.bucketShares } : {}),
       };
       return config[key];
     }),
@@ -274,17 +297,24 @@ describe('PplnsService', () => {
   // ── Share Recording ──────────────────────────────────────────
 
   describe('recordShare', () => {
-    it('should add shares to the Redis sorted set', async () => {
+    it('aggregates shares into the round bucket + by-address hash', async () => {
       const { service, redis } = createService();
       service.setNetworkDifficulty(1000);
 
       await service.recordShare('bc1qminera', 500);
       await service.recordShare('bc1qminerb', 300);
 
-      const entries = await redis.zRange('pplns:shares', 0, -1);
-      expect(entries).toHaveLength(2);
-      expect(entries[0]).toContain('bc1qminera:500:');
-      expect(entries[1]).toContain('bc1qminerb:300:');
+      // Both shares land in bucket 0 (default 10000 shares/bucket), stored as
+      // per-address sums — no per-share entries.
+      const bucket = redis._getHash('pplns:bucket:0');
+      expect(parseFloat(bucket!.get('bc1qminera') ?? '0')).toBe(500);
+      expect(parseFloat(bucket!.get('bc1qminerb') ?? '0')).toBe(300);
+      // The bucket index zset holds bucket 0 once (deduped).
+      expect(await redis.zRange('pplns:buckets', 0, -1)).toEqual(['0']);
+      // The authoritative aggregate mirrors it.
+      const hash = redis._getHash('pplns:window:by-address');
+      expect(parseFloat(hash!.get('bc1qminera') ?? '0')).toBe(500);
+      expect(parseFloat(hash!.get('bc1qminerb') ?? '0')).toBe(300);
     });
 
     // Regression for H1: bech32 input must be normalised to lowercase
@@ -296,11 +326,6 @@ describe('PplnsService', () => {
 
       await service.recordShare('BC1QMINERA', 500);
       await service.recordShare('bc1qMinerA', 250);
-
-      const entries = await redis.zRange('pplns:shares', 0, -1);
-      expect(entries).toHaveLength(2);
-      expect(entries[0]).toContain('bc1qminera:500:');
-      expect(entries[1]).toContain('bc1qminera:250:');
 
       const hash = await redis.hGetAll('pplns:window:by-address');
       expect(parseFloat(hash['bc1qminera'] ?? '0')).toBeCloseTo(750);
@@ -322,28 +347,29 @@ describe('PplnsService', () => {
   // ── Window Trimming ──────────────────────────────────────────
 
   describe('trimWindow', () => {
-    it('should trim oldest shares when window exceeds N', async () => {
-      const { service, redis } = createService();
-      // Window size = 4 * 100 = 400
-      service.setNetworkDifficulty(100);
+    it('should trim oldest buckets when window exceeds N', async () => {
+      // 1 share/bucket → finest trim (bucket trim == per-share trim).
+      const { service, redis } = createService({ bucketShares: '1' });
+      service.setNetworkDifficulty(100); // window = 400
 
-      // Add 500 total difficulty (exceeds 400 window)
       await recordShares(service, [
         { address: 'A', difficulty: 100 },
         { address: 'B', difficulty: 100 },
         { address: 'C', difficulty: 100 },
         { address: 'D', difficulty: 100 },
-        { address: 'E', difficulty: 100 },
+        { address: 'E', difficulty: 100 }, // total 500 > 400 → oldest (A) trimmed
       ]);
 
-      // Oldest share(s) should have been trimmed
-      const entries = await redis.zRange('pplns:shares', 0, -1);
-      const totalDiff = entries.reduce((sum: number, e: string) => sum + parseFloat(e.split(':')[1]), 0);
-      expect(totalDiff).toBeLessThanOrEqual(400);
+      // Window held back to ≤ target; the oldest miner aged out.
+      const total = parseFloat(await redis.get('pplns:window:total') ?? '0');
+      expect(total).toBeLessThanOrEqual(400);
+      const hash = redis._getHash('pplns:window:by-address');
+      expect(hash!.get('A')).toBeUndefined(); // oldest share aged out + cleaned
+      expect(parseFloat(hash!.get('E') ?? '0')).toBe(100);
     });
 
-    it('should keep window total in sync', async () => {
-      const { service, redis } = createService();
+    it('should keep window total in sync after trim', async () => {
+      const { service, redis } = createService({ bucketShares: '1' });
       service.setNetworkDifficulty(100); // window = 400
 
       await recordShares(service, [
@@ -353,14 +379,16 @@ describe('PplnsService', () => {
       ]);
 
       const stored = parseFloat(await redis.get('pplns:window:total') ?? '0');
-      const entries = await redis.zRange('pplns:shares', 0, -1);
-      const actual = entries.reduce((sum: number, e: string) => sum + parseFloat(e.split(':')[1]), 0);
-
+      // The stored total must equal the sum of the live by-address aggregate.
+      const hash = redis._getHash('pplns:window:by-address')!;
+      let actual = 0;
+      for (const v of hash.values()) actual += parseFloat(v) || 0;
       expect(Math.abs(stored - actual)).toBeLessThan(0.01);
+      expect(stored).toBeLessThanOrEqual(400);
     });
 
     it('should not trim when window is not full', async () => {
-      const { service, redis } = createService();
+      const { service, redis } = createService({ bucketShares: '1' });
       service.setNetworkDifficulty(1000); // window = 4000
 
       await recordShares(service, [
@@ -368,43 +396,44 @@ describe('PplnsService', () => {
         { address: 'B', difficulty: 100 },
       ]);
 
-      const entries = await redis.zRange('pplns:shares', 0, -1);
-      expect(entries).toHaveLength(2);
+      // Nothing trimmed: both miners present, total 200.
+      const hash = redis._getHash('pplns:window:by-address')!;
+      expect(parseFloat(hash.get('A') ?? '0')).toBe(100);
+      expect(parseFloat(hash.get('B') ?? '0')).toBe(100);
+      expect(parseFloat(await redis.get('pplns:window:total') ?? '0')).toBe(200);
     });
   });
 
   // ── Deployment migration ─────────────────────────────────────
 
   describe('deployment-migration: aggregate bootstrap', () => {
-    it('onModuleInit rebuilds the aggregate from raw shares when hash is empty', async () => {
-      // Simulate a pre-aggregate-rollout Redis: raw sorted set has
-      // shares, hash doesn't exist. Without the bootstrap rebuild, the
-      // first getPayoutDistribution after deploy would treat the empty
-      // hash as "current window has no miners" — silently excluding
-      // every pre-deploy miner. bootstrap check must populate the hash.
+    it('onModuleInit migrates a legacy per-share zset into a bucket + aggregate', async () => {
+      // Simulate a pre-bucket Redis: legacy per-share zset has shares, no
+      // buckets, no aggregate. Migration must rebuild the window into a single
+      // legacy bucket + the by-address aggregate, and drop the orphaned zset —
+      // without silently excluding any pre-deploy miner.
       const { service, redis } = createService();
       service.setNetworkDifficulty(10_000_000);
 
-      // Seed the raw set directly, bypassing recordShare (so the hash
-      // stays empty, matching a pre-deploy Redis state).
       await redis.zAdd('pplns:shares', { score: 1, value: 'bc1qa:100:1000' });
       await redis.zAdd('pplns:shares', { score: 2, value: 'bc1qb:200:2000' });
       await redis.zAdd('pplns:shares', { score: 3, value: 'bc1qa:50:3000' });
       expect(redis._getHash('pplns:window:by-address')).toBeUndefined();
 
-      // Trigger onModuleInit explicitly. The existing createService
-      // bypasses it by manually wiring redis, so call it ourselves to
-      // exercise the bootstrap path.
       await (service as any).onModuleInit();
 
+      // Aggregate rebuilt: A had 100 + 50 = 150; B had 200.
       const hash = redis._getHash('pplns:window:by-address');
       expect(hash).toBeDefined();
-      // A had 100 + 50 = 150; B had 200.
       expect(parseFloat(hash!.get('bc1qa') ?? '0')).toBeCloseTo(150);
       expect(parseFloat(hash!.get('bc1qb') ?? '0')).toBeCloseTo(200);
+      // A legacy bucket now holds the same window, and the orphaned per-share
+      // zset is gone.
+      expect((await redis.zRange('pplns:buckets', 0, -1)).length).toBe(1);
+      expect((await redis.zCard('pplns:shares'))).toBe(0);
+      expect(parseFloat(await redis.get('pplns:window:total') ?? '0')).toBeCloseTo(350);
 
-      // And getPayoutDistribution now sees both miners (would have
-      // silently excluded them pre-fix).
+      // Distribution sees both miners.
       const dist = await service.getPayoutDistribution(100_000_000);
       expect(dist.find(d => d.address === 'bc1qa')).toBeDefined();
       expect(dist.find(d => d.address === 'bc1qb')).toBeDefined();
@@ -446,30 +475,24 @@ describe('PplnsService', () => {
       expect(parseFloat(hash!.get('bc1qb') ?? '0')).toBeCloseTo(200);
     });
 
-    it('trimWindow decrements the aggregate for removed shares', async () => {
-      const { service, redis } = createService();
-      // Small window so trim actually fires.
-      service.setNetworkDifficulty(10);
+    it('trimWindow decrements the aggregate when buckets age out', async () => {
+      // 1 share/bucket → trim ages out one share's worth at a time.
+      const { service, redis } = createService({ bucketShares: '1' });
+      service.setNetworkDifficulty(10); // window = 40
 
-      // Fill >> windowSize (4 * 10 = 40) so trim is forced.
+      // Fill >> windowSize so trim is forced.
       for (let i = 0; i < 150; i++) {
         await service.recordShare('bc1qa', 1);
       }
 
       const hash = redis._getHash('pplns:window:by-address');
-      // After trim the aggregate for bc1qa should equal the total of
-      // entries still in the window — NOT 150 (untrimmed total). Upper
-      // bound is windowSize + one batch's worth of residual (trim
-      // condition is `total > windowSize`, not `<=`).
+      // After trim the aggregate is the in-window total, NOT 150. The trim
+      // condition is `total > windowSize`, so it settles at the window size.
       const aggA = parseFloat(hash!.get('bc1qa') ?? '0');
-      expect(aggA).toBeLessThanOrEqual(100);
+      expect(aggA).toBeLessThanOrEqual(40);
       expect(aggA).toBeGreaterThan(0);
-
-      // And the aggregate must match the actual current window contents.
-      const entries = await redis.zRange('pplns:shares', 0, -1);
-      const expected = entries.reduce((s: number, e: string) =>
-        s + (parseFloat(e.split(':')[1]) || 0), 0);
-      expect(aggA).toBeCloseTo(expected);
+      // Aggregate matches the window total exactly (single miner).
+      expect(aggA).toBeCloseTo(parseFloat(await redis.get('pplns:window:total') ?? '0'));
     });
 
     it('getPayoutDistribution reads the aggregate (not the raw zset)', async () => {
@@ -496,8 +519,8 @@ describe('PplnsService', () => {
     });
   });
 
-  describe('recalculateWindow (atomic rebuild)', () => {
-    it('rebuilds the aggregate + total from the raw zset', async () => {
+  describe('recalculateWindow (atomic rebuild from buckets)', () => {
+    it('rebuilds the aggregate + total from the live buckets', async () => {
       const { service, redis } = createService();
       service.setNetworkDifficulty(10_000_000); // huge window → no trim
       await recordShares(service, [
@@ -533,36 +556,105 @@ describe('PplnsService', () => {
       await (service as any).recalculateWindow();
 
       const hash = redis._getHash('pplns:window:by-address');
-      expect(hash!.size).toBe(3); // all three miners restored from the raw zset
+      expect(hash!.size).toBe(3); // all three miners restored from the buckets
       expect(parseFloat(hash!.get('bc1qa') ?? '0')).toBeCloseTo(1000);
       expect(parseFloat(hash!.get('bc1qb') ?? '0')).toBeCloseTo(2000);
       expect(parseFloat(hash!.get('bc1qc') ?? '0')).toBeCloseTo(3000);
     });
 
-    it('aborts and keeps the live aggregate when the read is partial', async () => {
+    it('returns null (no swap) when there are no buckets', async () => {
+      // The bucket design removes the old partial-read corruption class: a
+      // concurrently-deleted bucket just contributes nothing. With no buckets
+      // at all, recalc is a no-op and leaves the live aggregate untouched.
       const { service, redis } = createService();
       service.setNetworkDifficulty(10_000_000);
-      await recordShares(service, [
-        { address: 'bc1qa', difficulty: 100 },
-        { address: 'bc1qb', difficulty: 200 },
-      ]);
-
-      // A known-good live hash that MUST remain untouched on a partial read.
-      await redis.del('pplns:window:by-address');
       await redis.hSet('pplns:window:by-address', { bc1qa: '100', bc1qb: '200' });
-
-      // Force the guard: zCard reports far more than zRange can return, so the
-      // streamed read covers < 99 % of the claimed set.
-      redis.zCard.mockResolvedValueOnce(1000);
 
       const result = await (service as any).recalculateWindow();
       expect(result).toBeNull();
 
-      // No DEL, no partial swap — the live aggregate is exactly as seeded.
       const hash = redis._getHash('pplns:window:by-address');
       expect(hash!.size).toBe(2);
       expect(parseFloat(hash!.get('bc1qa') ?? '0')).toBeCloseTo(100);
       expect(parseFloat(hash!.get('bc1qb') ?? '0')).toBeCloseTo(200);
+    });
+  });
+
+  // ── Equivalence: bucketed window vs exact per-share sliding window ──
+  //
+  // The whole point of bucketing is to produce the SAME payout as the old
+  // per-share storage. This replays one deterministic share stream through
+  // both the bucketed service and an independent, exact per-share FIFO
+  // sliding window trimmed to the same windowSize, then asserts the per-miner
+  // window proportions (the core PPLNS quantity the coinbase split derives
+  // from) match within a tight tolerance. The only divergence is the
+  // bucket-granular trim boundary.
+  describe('equivalence with exact per-share sliding window', () => {
+    it('bucketed proportions match the exact window within a fraction of a percent', async () => {
+      const BUCKET = 20;
+      const WINDOW = 500_000;
+      const { service } = createService({ bucketShares: String(BUCKET) });
+      service.setNetworkDifficulty(WINDOW / 4); // getWindowSize() = 4×netdiff = WINDOW
+
+      // Deterministic stream (LCG, no Math.random): 5 miners, varied difficulty.
+      const miners = ['bc1qa', 'bc1qb', 'bc1qc', 'bc1qd', 'bc1qe'];
+      let seed = 1234567;
+      const rng = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+      const shares: { address: string; difficulty: number }[] = [];
+      for (let i = 0; i < 6000; i++) {
+        shares.push({
+          address: miners[Math.floor(rng() * miners.length)],
+          difficulty: 50 + Math.floor(rng() * 200), // 50..249
+        });
+      }
+
+      // Feed the bucketed service.
+      for (const s of shares) await service.recordShare(s.address, s.difficulty);
+      const svc = await (service as any).readWindowByAddress() as Map<string, number>;
+      let svcTotal = 0; for (const v of svc.values()) svcTotal += v;
+
+      // Independent reference: exact per-share FIFO, trimmed to WINDOW.
+      const fifo: { address: string; difficulty: number }[] = [];
+      let refTotal = 0;
+      for (const s of shares) {
+        fifo.push(s); refTotal += s.difficulty;
+        while (refTotal > WINDOW) { refTotal -= fifo.shift()!.difficulty; }
+      }
+      const ref = new Map<string, number>();
+      for (const s of fifo) ref.set(s.address, (ref.get(s.address) ?? 0) + s.difficulty);
+      let refTot = 0; for (const v of ref.values()) refTot += v;
+
+      // Sanity: trimming actually happened (window << total work fed in).
+      const fedTotal = shares.reduce((s, x) => s + x.difficulty, 0);
+      expect(svcTotal).toBeLessThan(fedTotal * 0.8);
+
+      // Compare per-miner proportions.
+      let maxPctDiff = 0;
+      for (const addr of miners) {
+        const svcPct = (svc.get(addr) ?? 0) / svcTotal * 100;
+        const refPct = (ref.get(addr) ?? 0) / refTot * 100;
+        maxPctDiff = Math.max(maxPctDiff, Math.abs(svcPct - refPct));
+      }
+      // eslint-disable-next-line no-console
+      console.log(`[PPLNS equivalence] max per-miner proportion diff = ${maxPctDiff.toFixed(4)} pct points`);
+      expect(maxPctDiff).toBeLessThan(0.5);
+
+      // And the derived coinbase sats track within a small relative tolerance.
+      const reward = 312_500_000;
+      const svcSats = new Map<string, number>();
+      for (const [a, d] of svc) svcSats.set(a, Math.floor(reward * d / svcTotal));
+      const refSats = new Map<string, number>();
+      for (const [a, d] of ref) refSats.set(a, Math.floor(reward * d / refTot));
+      for (const addr of miners) {
+        const s = svcSats.get(addr) ?? 0;
+        const r = refSats.get(addr) ?? 0;
+        // A miner's absolute payout error = reward × their proportion error,
+        // which the proportion assertion already bounds at < 0.5 pct points.
+        // So no miner's sats deviate by more than 0.5 % of the block reward
+        // (measured here: ~0.1 %). For prod (bucket 10000, millions of shares /
+        // thousands of buckets) the boundary error is far smaller still.
+        expect(Math.abs(s - r)).toBeLessThan(reward * 0.005 + 10);
+      }
     });
   });
 

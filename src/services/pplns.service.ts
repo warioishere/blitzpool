@@ -39,28 +39,35 @@ import { InflightResultCache } from '../utils/inflight-result-cache';
  */
 
 const PPLNS_WINDOW_FACTOR = 4;
+// Legacy per-share zset — NO LONGER WRITTEN. Kept only so the one-time startup
+// migration can read its contents + delete it. Window storage is now bucketed.
 const REDIS_KEY_SHARES = 'pplns:shares';
 const REDIS_KEY_COUNTER = 'pplns:counter';
 const REDIS_KEY_WINDOW_TOTAL = 'pplns:window:total';
-// Per-address diff-1 aggregate for the current window. Maintained in
-// lock-step with REDIS_KEY_SHARES: recordShare increments, trimWindow
-// decrements. Hot-path readers use hGetAll on this hash instead of
-// zRange 0 -1 over the raw share set, so lookup cost is O(N distinct
-// miners) rather than O(M individual shares). At 2 000 miners ×
-// ~1 share/second the raw set holds >1M entries in a normal window —
-// the aggregate is a handful of kilobytes.
+// Bucketed window storage: shares are aggregated per-address into fixed-size
+// COUNT buckets — every PPLNS_BUCKET_SHARES accepted shares form one bucket
+// (bucketId = floor(counter / bucketShares)). The sliding window trims whole
+// oldest buckets instead of individual shares. REDIS_KEY_BUCKETS is a zset of
+// live bucket ids (score = bucketId) for FIFO ordering; each bucket is a hash
+// `pplns:bucket:<id>` of address -> Σdiff. Memory is O(buckets × miners)
+// instead of O(shares): with N miners the per-share set held the whole window
+// (>1M entries under load), the bucketed form holds (windowShares/bucketShares)
+// × N. See PPLNS_BUCKET_SHARES (env override).
+const REDIS_KEY_BUCKETS = 'pplns:buckets';
+const bucketKey = (bucketId: string | number): string => `pplns:bucket:${bucketId}`;
+const DEFAULT_BUCKET_SHARES = 10_000;
+// Per-address diff-1 aggregate for the current window — the AUTHORITATIVE
+// distribution source. Maintained lock-step with the buckets: recordShare
+// increments it, trimWindow decrements it when a bucket ages out. Hot-path
+// readers hGetAll this hash (O(N distinct miners)) instead of scanning shares.
 //
-// Drift: hIncrByFloat accumulates float error over very long runs. Same
-// failsafe as REDIS_KEY_WINDOW_TOTAL — every 1000 trims we do a full
-// recalculate from REDIS_KEY_SHARES to reset accumulated drift.
+// Drift: hIncrByFloat accumulates float error over very long runs. Failsafe:
+// every 100000 trims we recalculate from the live buckets to reset drift.
 const REDIS_KEY_WINDOW_BY_ADDRESS = 'pplns:window:by-address';
 // Temp key the window recalc builds into before an atomic RENAME swap, so the
 // live aggregate is never observed empty/partial during a rebuild.
 const REDIS_KEY_WINDOW_REBUILD = 'pplns:window:by-address:rebuild';
-// Index-window size for the streamed recalc read. Bounds memory + Redis block
-// time: instead of one ZRANGE 0 -1 pulling the whole multi-million-entry set
-// (~1 GB of JS strings, multi-second single-thread block), we walk it in
-// chunks and aggregate incrementally.
+// Index-window size for the streamed legacy per-share read during migration.
 const REBUILD_CHUNK_SIZE = 100_000;
 
 // Coinbase snapshot — the distribution that was actually used to build
@@ -102,6 +109,8 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
     private jobSubscription: Subscription | null = null;
     private readonly coinbaseWeightBudget: number;
     private readonly minPayoutSats: number;
+    /** Shares per count-bucket (PPLNS_BUCKET_SHARES, default 10000). */
+    private readonly bucketShares: number;
 
     // Distribution cache with TTL + in-flight dedup. See
     // src/utils/inflight-result-cache.ts. Key is the blockRewardSats so a
@@ -135,6 +144,8 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         this.feePercent = parseFloat(this.configService.get('PPLNS_FEE_PERCENT') ?? '2');
         this.coinbaseWeightBudget = parseInt(this.configService.get('PPLNS_COINBASE_WEIGHT_BUDGET') ?? DEFAULT_COINBASE_WEIGHT_BUDGET.toString(), 10) || DEFAULT_COINBASE_WEIGHT_BUDGET;
         this.minPayoutSats = resolveMinPayoutSats(this.configService.get('PPLNS_MIN_PAYOUT_SATS'));
+        const bucketRaw = parseInt(this.configService.get('PPLNS_BUCKET_SHARES') ?? String(DEFAULT_BUCKET_SHARES), 10);
+        this.bucketShares = Number.isFinite(bucketRaw) && bucketRaw > 0 ? bucketRaw : DEFAULT_BUCKET_SHARES;
         this.enabled = !!this.configService.get('PPLNS_PORT');
     }
 
@@ -153,24 +164,12 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
             console.error('[PPLNS] Failed to access Redis client:', error);
         }
 
-        // Deployment migration: pre-aggregate rollouts have a populated
-        // raw share set but no pplns:window:by-address hash. The first
-        // post-deploy recordShare would otherwise populate the hash with
-        // a single entry, and the next getPayoutDistribution would read
-        // that lone entry as "the whole window" — silently excluding
-        // every pre-deploy miner from the distribution.
+        // One-time migration to bucketed window storage (+ cold-start repair).
         if (this.redis) {
             try {
-                const aggEmpty = Object.keys((await this.redis.hGetAll(REDIS_KEY_WINDOW_BY_ADDRESS)) ?? {}).length === 0;
-                const rawCount = typeof this.redis.zCard === 'function'
-                    ? await this.redis.zCard(REDIS_KEY_SHARES)
-                    : (await this.redis.zRange(REDIS_KEY_SHARES, 0, -1) ?? []).length;
-                if (aggEmpty && rawCount > 0) {
-                    console.log(`[PPLNS] Rebuilding window-by-address aggregate from ${rawCount} raw shares (deployment migration or post-flush cold start)`);
-                    await this.recalculateWindow();
-                }
+                await this.migrateToBuckets();
             } catch (error) {
-                console.warn('[PPLNS] Aggregate bootstrap check failed:', (error as Error).message);
+                console.warn('[PPLNS] Bucket migration/bootstrap failed:', (error as Error).message);
             }
         }
 
@@ -323,24 +322,26 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         address = normalizeBtcAddress(address);
         if (!address) return;
 
-        // INCR has to land first because its return value becomes the zAdd
-        // score (deterministic ordering for trim). The remaining three
-        // writes go into one MULTI/EXEC: one round-trip instead of three,
-        // and the zset / total / per-address aggregate update atomically
-        // on this connection. Tightens consistency between the raw share
-        // set and the WINDOW_BY_ADDRESS hash that the hot read paths now
-        // depend on. The fallback handles redis clients without multi()
-        // (e.g. minimal test harnesses) — semantically identical, slower.
+        // INCR drives the bucket id (floor(counter / bucketShares)) so shares
+        // group into fixed-size count buckets in submission order. The four
+        // writes go into one MULTI/EXEC: the bucket hash (per-address Σdiff for
+        // this slice), the buckets index zset (FIFO ordering for the trim), the
+        // window total, and the WINDOW_BY_ADDRESS aggregate the hot read paths
+        // depend on — all atomic on this connection. The fallback handles redis
+        // clients without multi() (minimal test harnesses) — same semantics.
         const counter = await this.redis.incr(REDIS_KEY_COUNTER);
-        const entry = `${address}:${difficulty}:${Date.now()}`;
+        const bucketId = Math.floor(counter / this.bucketShares);
+        const bKey = bucketKey(bucketId);
         if (typeof this.redis.multi === 'function') {
             await this.redis.multi()
-                .zAdd(REDIS_KEY_SHARES, { score: counter, value: entry })
+                .hIncrByFloat(bKey, address, difficulty)
+                .zAdd(REDIS_KEY_BUCKETS, { score: bucketId, value: String(bucketId) })
                 .incrByFloat(REDIS_KEY_WINDOW_TOTAL, difficulty)
                 .hIncrByFloat(REDIS_KEY_WINDOW_BY_ADDRESS, address, difficulty)
                 .exec();
         } else {
-            await this.redis.zAdd(REDIS_KEY_SHARES, { score: counter, value: entry });
+            await this.redis.hIncrByFloat(bKey, address, difficulty);
+            await this.redis.zAdd(REDIS_KEY_BUCKETS, { score: bucketId, value: String(bucketId) });
             await this.redis.incrByFloat(REDIS_KEY_WINDOW_TOTAL, difficulty);
             await this.redis.hIncrByFloat(REDIS_KEY_WINDOW_BY_ADDRESS, address, difficulty);
         }
@@ -362,38 +363,41 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
         let total = parseFloat(totalStr) || 0;
 
         while (total > windowSize) {
-            const oldest = await this.redis.zRange(REDIS_KEY_SHARES, 0, 99);
-            if (!oldest || oldest.length === 0) break;
+            // Oldest two bucket ids. Never trim the newest (currently-filling)
+            // bucket — new shares keep landing in it — so stop when only one
+            // bucket remains. The window then holds at most one bucket above
+            // the target (the bucket-granular overshoot).
+            const oldest = await this.redis.zRange(REDIS_KEY_BUCKETS, 0, 1);
+            if (!oldest || oldest.length < 2) break;
+            const bucketId = oldest[0];
+            const bKey = bucketKey(bucketId);
 
+            const bucket = (await this.redis.hGetAll(bKey)) ?? {};
             let removedDiff = 0;
-            const removedByAddr = new Map<string, number>();
-            for (const entry of oldest) {
-                const parts = entry.split(':');
-                const diff = parseFloat(parts[1]) || 0;
+            const removedByAddr: Array<[string, number]> = [];
+            for (const [addr, dStr] of Object.entries(bucket)) {
+                const diff = parseFloat(dStr as string) || 0;
+                if (diff === 0) continue;
                 removedDiff += diff;
-                removedByAddr.set(parts[0], (removedByAddr.get(parts[0]) ?? 0) + diff);
+                removedByAddr.push([addr, diff]);
             }
 
-            await this.redis.zRemRangeByRank(REDIS_KEY_SHARES, 0, oldest.length - 1);
+            // Decrement the per-address aggregate by this bucket's contribution,
+            // hDel-ing any address that drops to ~0 so the hash doesn't retain
+            // dead zero-fields for long-gone miners (that retention would defeat
+            // the bounded-memory goal). Trim only fires when the window is full,
+            // so the per-op cost here is off the hot path.
+            for (const [addr, d] of removedByAddr) {
+                const remaining = await this.redis.hIncrByFloat(REDIS_KEY_WINDOW_BY_ADDRESS, addr, -d);
+                if (Math.abs(parseFloat(remaining) || 0) < 1e-9) {
+                    await this.redis.hDel(REDIS_KEY_WINDOW_BY_ADDRESS, addr);
+                }
+            }
+
+            // Drop the bucket + its index entry.
+            await this.redis.del(bKey);
+            await this.redis.zRem(REDIS_KEY_BUCKETS, String(bucketId));
             total -= removedDiff;
-
-            // Pipeline the per-address aggregate decrements: one round-trip
-            // per trim iteration instead of N (where N is the number of
-            // distinct addresses among the 100 oldest shares). Even with
-            // small N this matters because it runs on every accepted PPLNS
-            // share (recordShare → trimWindow → here) and the savings
-            // compound across share rate.
-            if (typeof this.redis.multi === 'function' && removedByAddr.size > 0) {
-                const pipeline = this.redis.multi();
-                for (const [addr, d] of removedByAddr) {
-                    pipeline.hIncrByFloat(REDIS_KEY_WINDOW_BY_ADDRESS, addr, -d);
-                }
-                await pipeline.exec();
-            } else {
-                for (const [addr, d] of removedByAddr) {
-                    await this.redis.hIncrByFloat(REDIS_KEY_WINDOW_BY_ADDRESS, addr, -d);
-                }
-            }
         }
 
         this.trimCounter++;
@@ -444,12 +448,117 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
      * (empty source or aborted read) — caller keeps the running total.
      */
     private async recalculateWindow(): Promise<number | null> {
-        const expected = await this.redis.zCard(REDIS_KEY_SHARES);
-        if (!expected || expected <= 0) return null; // nothing to rebuild from
+        const byAddr = await this.sumBuckets();
+        if (byAddr === null) return null; // no buckets — nothing to rebuild from
 
-        const byAddr = new Map<string, number>();
         let total = 0;
-        let seen = 0;
+        for (const d of byAddr.values()) total += d;
+
+        // Build into the temp key, then atomically swap it over the live hash so
+        // the aggregate is never observed empty/partial during the rebuild.
+        await this.redis.del(REDIS_KEY_WINDOW_REBUILD);
+        if (byAddr.size === 0) {
+            await this.redis.del(REDIS_KEY_WINDOW_BY_ADDRESS);
+            return total;
+        }
+        const fields: Record<string, string> = {};
+        for (const [addr, diff] of byAddr) {
+            fields[addr] = diff.toString();
+        }
+        await this.redis.hSet(REDIS_KEY_WINDOW_REBUILD, fields);
+        await this.redis.rename(REDIS_KEY_WINDOW_REBUILD, REDIS_KEY_WINDOW_BY_ADDRESS);
+        return total;
+    }
+
+    /**
+     * Sum every live bucket into a per-address map. Returns null when there are
+     * no buckets at all (so callers can distinguish "empty window" from "all
+     * buckets summed to zero"). A bucket id present in the index but already
+     * deleted by a concurrent trim just contributes nothing — no corruption.
+     */
+    private async sumBuckets(): Promise<Map<string, number> | null> {
+        const bucketIds = await this.redis.zRange(REDIS_KEY_BUCKETS, 0, -1);
+        if (!bucketIds || bucketIds.length === 0) return null;
+        const byAddr = new Map<string, number>();
+        for (const id of bucketIds) {
+            const bucket = (await this.redis.hGetAll(bucketKey(id))) ?? {};
+            for (const [addr, dStr] of Object.entries(bucket)) {
+                const diff = parseFloat(dStr as string) || 0;
+                if (diff > 0) byAddr.set(addr, (byAddr.get(addr) ?? 0) + diff);
+            }
+        }
+        return byAddr;
+    }
+
+    /**
+     * One-time startup migration to bucketed window storage (+ cold-start
+     * repair). If live buckets already exist, only rebuilds the by-address
+     * aggregate when it's gone cold. Otherwise this is the first boot on the
+     * bucketed code: seed a single "legacy" bucket holding the entire current
+     * window — taken from the maintained by-address hash, or (very old deploy
+     * where only the per-share zset survived) rebuilt from that — so the slide
+     * can age it out later, then drop the orphaned per-share set. O(miners),
+     * except the rare zset-rebuild path which streams the old set once.
+     */
+    private async migrateToBuckets(): Promise<void> {
+        const hasBuckets = (await this.redis.zCard(REDIS_KEY_BUCKETS)) > 0;
+        if (hasBuckets) {
+            const aggEmpty = Object.keys((await this.redis.hGetAll(REDIS_KEY_WINDOW_BY_ADDRESS)) ?? {}).length === 0;
+            if (aggEmpty) {
+                console.log('[PPLNS] Rebuilding window-by-address aggregate from buckets (cold start)');
+                await this.recalculateWindow();
+            }
+            return;
+        }
+
+        // No buckets yet — first boot on bucketed code. Get the current window
+        // per-address from the maintained aggregate, else the legacy zset.
+        const byAddr = new Map<string, number>();
+        const hash = (await this.redis.hGetAll(REDIS_KEY_WINDOW_BY_ADDRESS)) ?? {};
+        for (const [addr, dStr] of Object.entries(hash)) {
+            const d = parseFloat(dStr as string) || 0;
+            if (d > 0) byAddr.set(addr, d);
+        }
+        if (byAddr.size === 0) {
+            for (const [addr, d] of await this.legacyWindowFromShares()) byAddr.set(addr, d);
+        }
+
+        if (byAddr.size === 0) {
+            await this.redis.del(REDIS_KEY_SHARES); // fresh Redis / nothing to migrate
+            return;
+        }
+
+        // Seed one legacy bucket = the whole current window. bucketId derives
+        // from the current counter so subsequent shares append to later buckets.
+        const counter = parseInt((await this.redis.get(REDIS_KEY_COUNTER)) ?? '0', 10) || 0;
+        const bucketId = Math.floor(counter / this.bucketShares);
+        const fields: Record<string, string> = {};
+        let total = 0;
+        for (const [addr, d] of byAddr) { fields[addr] = d.toString(); total += d; }
+        await this.redis.hSet(bucketKey(bucketId), fields);
+        await this.redis.zAdd(REDIS_KEY_BUCKETS, { score: bucketId, value: String(bucketId) });
+        // Re-sync the authoritative aggregate + total to the migrated window.
+        await this.redis.del(REDIS_KEY_WINDOW_REBUILD);
+        await this.redis.hSet(REDIS_KEY_WINDOW_REBUILD, fields);
+        await this.redis.rename(REDIS_KEY_WINDOW_REBUILD, REDIS_KEY_WINDOW_BY_ADDRESS);
+        await this.redis.set(REDIS_KEY_WINDOW_TOTAL, total.toString());
+        // Drop the now-orphaned per-share set. UNLINK (non-blocking) when the
+        // client supports it — the legacy key can hold millions of entries and
+        // a blocking DEL would stall Redis at startup.
+        if (typeof this.redis.unlink === 'function') {
+            await this.redis.unlink(REDIS_KEY_SHARES);
+        } else {
+            await this.redis.del(REDIS_KEY_SHARES);
+        }
+        console.log(`[PPLNS] Migrated ${byAddr.size} miners (${total.toFixed(0)} diff) into legacy bucket ${bucketId}; dropped per-share set`);
+    }
+
+    /** Stream the legacy per-share zset into a per-address map (migration only). */
+    private async legacyWindowFromShares(): Promise<Map<string, number>> {
+        const out = new Map<string, number>();
+        if (typeof this.redis.zCard !== 'function') return out;
+        const expected = await this.redis.zCard(REDIS_KEY_SHARES);
+        if (!expected || expected <= 0) return out;
         for (let start = 0; start < expected; start += REBUILD_CHUNK_SIZE) {
             const entries = await this.redis.zRange(REDIS_KEY_SHARES, start, start + REBUILD_CHUNK_SIZE - 1);
             if (!entries || entries.length === 0) break;
@@ -460,37 +569,11 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
                 const diff = parseFloat(c2 === -1 ? entry.slice(c1 + 1) : entry.slice(c1 + 1, c2)) || 0;
                 if (diff > 0) {
                     const addr = entry.slice(0, c1);
-                    byAddr.set(addr, (byAddr.get(addr) ?? 0) + diff);
-                    total += diff;
+                    out.set(addr, (out.get(addr) ?? 0) + diff);
                 }
             }
-            seen += entries.length;
         }
-
-        // Never swap in a partial aggregate over good live data. Tolerate a 1 %
-        // shortfall (concurrent trim removing oldest entries shifts indices
-        // during the streamed read); reject anything grossly truncated.
-        if (seen < expected * 0.99) {
-            console.warn(`[PPLNS] window recalc aborted — read ${seen}/${expected} shares (partial); keeping live aggregate`);
-            return null;
-        }
-
-        // Build into the temp key, then atomically swap it over the live hash.
-        await this.redis.del(REDIS_KEY_WINDOW_REBUILD);
-        if (byAddr.size === 0) {
-            // Source had only non-positive diffs — clear the live hash to match.
-            await this.redis.del(REDIS_KEY_WINDOW_BY_ADDRESS);
-            return total;
-        }
-        // Single hSet with the whole field map — one round-trip, no per-field
-        // pipeline. RENAME then swaps it in atomically.
-        const fields: Record<string, string> = {};
-        for (const [addr, diff] of byAddr) {
-            fields[addr] = diff.toString();
-        }
-        await this.redis.hSet(REDIS_KEY_WINDOW_REBUILD, fields);
-        await this.redis.rename(REDIS_KEY_WINDOW_REBUILD, REDIS_KEY_WINDOW_BY_ADDRESS);
-        return total;
+        return out;
     }
 
     private async readWindowByAddress(): Promise<Map<string, number>> {
@@ -501,13 +584,9 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
             if (diff > 0) out.set(addr, diff);
         }
         if (out.size > 0) return out;
-        const entries = await this.redis.zRange(REDIS_KEY_SHARES, 0, -1);
-        for (const entry of (entries ?? [])) {
-            const parts = entry.split(':');
-            const diff = parseFloat(parts[1]) || 0;
-            out.set(parts[0], (out.get(parts[0]) ?? 0) + diff);
-        }
-        return out;
+        // Cold-cache fallback: aggregate empty → rebuild from the live buckets.
+        const fromBuckets = await this.sumBuckets();
+        return fromBuckets ?? out;
     }
 
     // ── Payout Distribution ──────────────────────────────────────
@@ -923,12 +1002,10 @@ export class PplnsService implements OnModuleInit, OnModuleDestroy {
             return { totalShares: 0, windowSize: 0, minerCount: 0 };
         }
 
-        // Read the per-address aggregate hash instead of zRange-ing the raw
-        // share set. The hash is maintained lock-step with REDIS_KEY_SHARES
-        // by recordShare/trimWindow and falls back to the raw set if empty
-        // (see readWindowByAddress). distinct-address count and total stay
-        // semantically identical to the previous zRange-based path; cost
-        // drops from O(N shares) to O(N distinct miners).
+        // Read the per-address aggregate hash (the authoritative window state,
+        // maintained lock-step with the buckets by recordShare/trimWindow;
+        // falls back to summing the buckets if empty). distinct-address count
+        // and total are O(N distinct miners).
         const totalStr = await this.redis.get(REDIS_KEY_WINDOW_TOTAL);
         const byAddr = await this.readWindowByAddress();
 
