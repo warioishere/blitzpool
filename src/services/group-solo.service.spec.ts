@@ -1551,5 +1551,20 @@ describe('GroupSoloService', () => {
             await (service as any).cleanupLegacyShareKeys();
             expect(redis._hashes.has('groupsolo:g1:by-address')).toBe(true);
         });
+
+        it('skips the scan on later restarts once the done-flag is set', async () => {
+            const { service, redis } = makeService();
+            // First run cleans + sets the flag.
+            redis._zsets.set('groupsolo:g1:shares', [{ score: 1, value: 'bc1qa:100' }]);
+            await (service as any).cleanupLegacyShareKeys();
+            expect(redis._zsets.has('groupsolo:g1:shares')).toBe(false);
+            expect(redis._store.get('groupsolo:legacy-share-cleanup-done')).toBe('1');
+
+            // A later call short-circuits on the flag — a stray orphan is NOT
+            // scanned/removed (proves later restarts cost just the GET).
+            redis._zsets.set('groupsolo:g9:shares', [{ score: 1, value: 'bc1qz:1' }]);
+            await (service as any).cleanupLegacyShareKeys();
+            expect(redis._zsets.has('groupsolo:g9:shares')).toBe(true);
+        });
     });
 });

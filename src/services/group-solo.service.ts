@@ -117,6 +117,9 @@ export class GroupSoloService implements OnModuleInit {
      * snapshots don't pile up forever.
      */
 
+    /** Redis flag marking the one-time legacy per-share key cleanup as done. */
+    private static readonly LEGACY_CLEANUP_FLAG = 'groupsolo:legacy-share-cleanup-done';
+
     /** Per-group block-found reentrancy guard. */
     private blockFoundLocks = new Set<string>();
 
@@ -216,6 +219,12 @@ export class GroupSoloService implements OnModuleInit {
      */
     private async cleanupLegacyShareKeys(): Promise<void> {
         if (!this.redis) return;
+        // One-time guard: once cleaned, every later restart is a single GET
+        // instead of a keyspace SCAN. The new code never writes :shares /
+        // :counter, so orphans can't reappear — the flag is safe to trust.
+        try {
+            if (await this.redis.get(GroupSoloService.LEGACY_CLEANUP_FLAG)) return;
+        } catch { /* flag read failed — fall through and attempt the scan */ }
         for (const pattern of ['groupsolo:*:shares', 'groupsolo:*:counter']) {
             try {
                 let cursor = 0;
@@ -239,6 +248,8 @@ export class GroupSoloService implements OnModuleInit {
                 console.warn(`[GroupSolo] legacy key cleanup (${pattern}) failed:`, (err as Error).message);
             }
         }
+        // Mark done so future restarts skip the scan (O(1) GET above).
+        try { await this.redis.set(GroupSoloService.LEGACY_CLEANUP_FLAG, '1'); } catch { /* non-fatal */ }
     }
 
     isEnabled(): boolean {
