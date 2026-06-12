@@ -99,7 +99,7 @@ services:
       valkey-server
       --appendonly yes
       --appendfsync everysec
-      --maxmemory ${REDIS_MAX_MEMORY:-4096mb}
+      --maxmemory ${REDIS_MAX_MEMORY:-6144mb}
       --maxmemory-policy volatile-lru
       --io-threads 2
       --io-threads-do-reads yes
