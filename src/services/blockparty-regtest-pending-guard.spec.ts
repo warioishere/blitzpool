@@ -106,7 +106,9 @@ describe('Blockparty Regtest — pending-party fee-route guard', () => {
                 }
             }
             if (!wallets.includes('default')) {
-                try { await rpcCall('createwallet', ['default']); } catch { /* exists */ }
+                // 'default' may exist on disk but be unloaded — load it; create only if absent.
+                try { await rpcCall('loadwallet', ['default']); }
+                catch { try { await rpcCall('createwallet', ['default']); } catch { /* race / already loaded */ } }
             }
             // BIP34 gate (heights 1..16 encode as OP_N).
             if (info.blocks < 17) {

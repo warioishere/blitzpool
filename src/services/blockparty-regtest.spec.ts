@@ -156,7 +156,9 @@ describe('Blockparty Regtest — End-to-End with Bitcoin Core', () => {
                 }
             }
             if (!wallets.includes('default')) {
-                try { await rpcCall('createwallet', ['default']); } catch { /* already exists */ }
+                // 'default' may exist on disk but be unloaded — load it; create only if absent.
+                try { await rpcCall('loadwallet', ['default']); }
+                catch { try { await rpcCall('createwallet', ['default']); } catch { /* race / already loaded */ } }
             }
             // BIP34 coinbase scriptSig — same reason as the group-solo regtest:
             // heights 1..16 encode as OP_N, which our coinbase builder doesn't emit.

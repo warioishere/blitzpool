@@ -185,7 +185,9 @@ describe('Blockparty Regtest — mixed-address-type coinbase', () => {
                 }
             }
             if (!wallets.includes('default')) {
-                try { await rpcCall('createwallet', ['default']); } catch { /* already exists */ }
+                // 'default' may exist on disk but be unloaded — load it; create only if absent.
+                try { await rpcCall('loadwallet', ['default']); }
+                catch { try { await rpcCall('createwallet', ['default']); } catch { /* race / already loaded */ } }
             }
             // BIP34 gate: coinbase scriptSig encodes heights 1..16 as OP_N,
             // which our builder doesn't emit. Mirror of blockparty-regtest.spec.ts.
