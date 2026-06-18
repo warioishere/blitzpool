@@ -1889,6 +1889,97 @@ describe('StratumV2Client', () => {
     });
 
     /**
+     * Fix A — vardiff must NOT re-broadcast a job (frozen-ntime fix).
+     *
+     * On a difficulty change the pool sends SetTarget only. The previous
+     * code additionally forced `clearJobs=true` and broadcast a synthetic
+     * job, which emitted a fake SetNewPrevHash (same prev_hash, frozen
+     * header_timestamp, new jobId). Firmware reads SetNewPrevHash as a new
+     * block, resets, and re-mines the identical header → session
+     * best-difficulty freezes. SetTarget alone is the complete SV2
+     * difficulty-change mechanism (applies to future shares on the current
+     * job). Mirrors StratumV1Client.checkDifficulty (public-pool #39).
+     */
+    it('checkDifficultyAllChannels sends SetTarget but does NOT re-broadcast a job on diff change (frozen-ntime fix)', async () => {
+      const { socket, client } = await setupExtendedHandshakenClient();
+
+      const channel: any = {
+        channelId: 1, channelType: 'extended',
+        extranoncePrefix: Buffer.from('00000001', 'hex'),
+        extranonceSize: 4, sessionDifficulty: 16384,
+        jobIdToDifficulty: new Map(), jobIdToMerkleRoot: new Map(),
+        extendedJobs: new Map(),
+        latestExtendedPrevHash: Buffer.alloc(32),
+        latestExtendedNBits: 0, latestExtendedMinNtime: 0,
+        acceptedShareCount: 0, acceptedShareDifficultySum: 0n,
+        acceptedShareDifficultyFloat: 0,
+        miningSubmissionHashes: new Set<string>(),
+        declaredMaxTarget: Buffer.alloc(32, 0xff),
+      };
+      (client as any).channels.set(1, channel);
+      (client as any).primaryChannelId = 1;
+      (client as any).sessionDifficulty = 16384;
+
+      // Force a vardiff ratchet (suggested != current).
+      (client as any).statistics.getSuggestedDifficulty = jest.fn().mockReturnValue(32768);
+
+      const broadcastSpy = jest.spyOn(client as any, 'broadcastNewJobToAllChannels').mockResolvedValue(undefined);
+      const sendFrameSpy = jest.spyOn(client as any, 'sendFrame').mockResolvedValue(undefined);
+
+      await (client as any).checkDifficultyAllChannels();
+
+      // SetTarget went out…
+      const sentTypes = sendFrameSpy.mock.calls.map(c => c[0]);
+      expect(sentTypes).toContain(Sv2MsgType.SET_TARGET);
+      // …but no job re-broadcast (which is what carried the fake SetNewPrevHash).
+      expect(broadcastSpy).not.toHaveBeenCalled();
+      // …and the difficulty actually ratcheted.
+      expect((client as any).sessionDifficulty).toBe(32768);
+
+      socket.destroy();
+    });
+
+    /**
+     * Fix B — content signature discriminates exactly the fields the miner
+     * hashes over, so a byte-identical periodic refresh is suppressed while
+     * any genuine change (version, prev_hash, nBits, coinbase, merkle) is
+     * not. `lastSentJobSignature` gates re-issue in the extended + standard
+     * send paths; a stable, field-sensitive signature is the contract.
+     */
+    it('computeJobSignature is stable for identical work and differs on any field change (dedup primitive)', async () => {
+      const { socket, client } = await setupExtendedHandshakenClient();
+      const sig = (...a: any[]) => (client as any).computeJobSignature(...a);
+
+      const version = 0x20000000;
+      const prevHash = Buffer.alloc(32, 0xaa);
+      const nBits = 0x207fffff;
+      const merklePath = [Buffer.alloc(32, 0x11), Buffer.alloc(32, 0x22)];
+      const cbPrefix = Buffer.from('0100000001', 'hex');
+      const cbSuffix = Buffer.from('ffffffff0100f2052a', 'hex');
+
+      const base = sig(version, prevHash, nBits, merklePath, cbPrefix, cbSuffix);
+      // Identical inputs (fresh buffers) → identical signature.
+      expect(sig(version, Buffer.alloc(32, 0xaa), nBits,
+        [Buffer.alloc(32, 0x11), Buffer.alloc(32, 0x22)], Buffer.from('0100000001', 'hex'),
+        Buffer.from('ffffffff0100f2052a', 'hex'))).toBe(base);
+
+      // Each field independently changes the signature.
+      expect(sig(0x20000004, prevHash, nBits, merklePath, cbPrefix, cbSuffix)).not.toBe(base);
+      expect(sig(version, Buffer.alloc(32, 0xbb), nBits, merklePath, cbPrefix, cbSuffix)).not.toBe(base);
+      expect(sig(version, prevHash, 0x1d00ffff, merklePath, cbPrefix, cbSuffix)).not.toBe(base);
+      expect(sig(version, prevHash, nBits, [Buffer.alloc(32, 0x11), Buffer.alloc(32, 0x33)], cbPrefix, cbSuffix)).not.toBe(base);
+      expect(sig(version, prevHash, nBits, merklePath, Buffer.from('02', 'hex'), cbSuffix)).not.toBe(base);
+      expect(sig(version, prevHash, nBits, merklePath, cbPrefix, Buffer.from('00', 'hex'))).not.toBe(base);
+
+      // Standard-channel form: single merkle-root Buffer, no prefix/suffix.
+      const std = sig(version, prevHash, nBits, Buffer.alloc(32, 0x99));
+      expect(sig(version, prevHash, nBits, Buffer.alloc(32, 0x99))).toBe(std);
+      expect(sig(version, prevHash, nBits, Buffer.alloc(32, 0x88))).not.toBe(std);
+
+      socket.destroy();
+    });
+
+    /**
      * SV2 spec §5.3.14 distinguishes `stale-share` (job WAS known, since
      * superseded) from `invalid-job-id` (genuinely unknown). Pre-refactor
      * the channel's `extendedJobs` map was wiped on `clearJobs=true`

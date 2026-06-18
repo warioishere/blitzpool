@@ -1217,6 +1217,36 @@ export class StratumV2Client {
     }
   }
 
+  /**
+   * Content signature of a mining job, used to suppress re-issuing
+   * byte-identical work under a fresh jobId (see `lastSentJobSignature`).
+   * Captures everything the miner hashes over: version, prev_hash, nBits and
+   * either the coinbase prefix/suffix + merkle path (extended channels) or the
+   * merkle root (standard channels, passed as a single Buffer with no
+   * prefix/suffix). Built from already-serialised buffers, so it reflects
+   * payout changes too, not just bitcoin-template changes.
+   */
+  private computeJobSignature(
+    version: number,
+    prevHash: Buffer,
+    nBits: number,
+    merkle: Buffer | Buffer[],
+    coinbasePrefix?: Buffer,
+    coinbaseSuffix?: Buffer,
+  ): string {
+    const merkleHex = Array.isArray(merkle)
+      ? merkle.map(b => b.toString('hex')).join(',')
+      : merkle.toString('hex');
+    return [
+      version.toString(16),
+      prevHash.toString('hex'),
+      nBits.toString(16),
+      merkleHex,
+      coinbasePrefix ? coinbasePrefix.toString('hex') : '',
+      coinbaseSuffix ? coinbaseSuffix.toString('hex') : '',
+    ].join('|');
+  }
+
   // ── Send Extended Mining Job ────────────────────────────────────
 
   private async sendNewExtendedMiningJobFromTemplate(sendPrevHash: boolean, jobTemplate: IJobTemplate, channelId?: number): Promise<void> {
@@ -1250,7 +1280,6 @@ export class StratumV2Client {
           payoutInformation,
           stored.jobTemplate,
         );
-        this.stratumV1JobsService.addJob(job);
 
         // Extract non-witness coinbase prefix/suffix from MiningJob
         // Patch the scriptSig length varint if this channel's total extranonce
@@ -1259,6 +1288,19 @@ export class StratumV2Client {
         const totalExtranonceBytes = (channel.extranoncePrefix?.length ?? 0) + channel.extranonceSize;
         const coinbasePrefix = patchCoinbasePrefixVarint(job.getCoinbasePrefixBuffer(), totalExtranonceBytes);
         const coinbaseSuffix = job.getCoinbaseSuffixBuffer();
+
+        // Fix B: suppress a periodic refresh that produces byte-identical
+        // work. `getNextId()` only reads the counter (addJob bumps it), so
+        // skipping here leaves the id for the next genuine job. A real block
+        // change carries sendPrevHash=true and is never suppressed.
+        const signature = this.computeJobSignature(
+          stored.template.version, stored.prevHash.prevHash, stored.prevHash.nBits,
+          stored.template.merklePath, coinbasePrefix, coinbaseSuffix,
+        );
+        if (!sendPrevHash && channel.lastSentJobSignature === signature) return;
+        channel.lastSentJobSignature = signature;
+
+        this.stratumV1JobsService.addJob(job);
 
         const jobPayload = serializeNewExtendedMiningJob({
           channelId: targetChannelId,
@@ -1342,7 +1384,6 @@ export class StratumV2Client {
       payoutInformation,
       jobTemplate,
     );
-    this.stratumV1JobsService.addJob(job);
 
     // Build merkle path from merkle_branch
     const merklePath = merkleBranchToBuffers(jobTemplate.merkle_branch);
@@ -1354,6 +1395,19 @@ export class StratumV2Client {
     const totalExtranonceBytes = (channel.extranoncePrefix?.length ?? 0) + channel.extranonceSize;
     const coinbasePrefix = patchCoinbasePrefixVarint(job.getCoinbasePrefixBuffer(), totalExtranonceBytes);
     const coinbaseSuffix = job.getCoinbaseSuffixBuffer();
+
+    // Fix B: suppress a periodic refresh that produces byte-identical work
+    // (see lastSentJobSignature). A real block change carries sendPrevHash=true
+    // and is never suppressed.
+    const prevHashForSig = jobTemplate.block.prevHash ? Buffer.from(jobTemplate.block.prevHash) : Buffer.alloc(32);
+    const signature = this.computeJobSignature(
+      jobTemplate.block.version, prevHashForSig, jobTemplate.block.bits,
+      merklePath, coinbasePrefix, coinbaseSuffix,
+    );
+    if (!sendPrevHash && channel.lastSentJobSignature === signature) return;
+    channel.lastSentJobSignature = signature;
+
+    this.stratumV1JobsService.addJob(job);
 
     const jobPayload = serializeNewExtendedMiningJob({
       channelId,
@@ -2142,8 +2196,6 @@ export class StratumV2Client {
       jobTemplate,
     );
 
-    this.stratumV1JobsService.addJob(job);
-
     // Build SV2 NewMiningJob message
     // For standard channels, the merkle root MUST include the channel's extranonce prefix.
     // The miner receives this fixed merkle root and builds headers from it directly.
@@ -2156,6 +2208,18 @@ export class StratumV2Client {
     // Only the merkle root is needed for NewMiningJob — `computeShareMerkleRoot`
     // skips the full Block allocation that `copyAndUpdateBlock` would do.
     const merkleRoot = job.computeShareMerkleRoot(jobTemplate, extraNonce1, extraNonce2);
+
+    // Fix B: suppress a periodic refresh that produces byte-identical work
+    // (see lastSentJobSignature). A real block change carries sendPrevHash=true
+    // and is never suppressed.
+    const prevHashForSig = jobTemplate.block.prevHash ? Buffer.from(jobTemplate.block.prevHash) : Buffer.alloc(32);
+    const signature = this.computeJobSignature(
+      jobTemplate.block.version, prevHashForSig, jobTemplate.block.bits, merkleRoot,
+    );
+    if (!sendPrevHash && channel.lastSentJobSignature === signature) return;
+    channel.lastSentJobSignature = signature;
+
+    this.stratumV1JobsService.addJob(job);
 
     const jobPayload = serializeNewMiningJob({
       channelId: targetChannelId,
@@ -2428,12 +2492,16 @@ export class StratumV2Client {
         }
       }
 
-      // Send new job with clearJobs after difficulty change
-      if (this.channels.size > 0) {
-        const jobTemplate = await firstValueFrom(this.stratumV1JobsService.newMiningJob$);
-        jobTemplate.blockData.clearJobs = true;
-        await this.broadcastNewJobToAllChannels(jobTemplate, true);
-      }
+      // No job re-broadcast on diff change. In SV2 the SetTarget above is the
+      // complete difficulty-change mechanism — it applies to future share
+      // submissions on the existing job, no new job required. The previous
+      // code forced `clearJobs=true` and broadcast a synthetic job, which
+      // emitted a fake SetNewPrevHash (same prev_hash, frozen header_timestamp
+      // from the cached template, new jobId). Firmware reads SetNewPrevHash as
+      // a new block, resets, and re-mines the identical header → session
+      // best-difficulty freezes. This mirrors the SV1 lesson in
+      // StratumV1Client.checkDifficulty ("No forced clean_jobs=true on diff
+      // change", public-pool issue #39).
     }
   }
 

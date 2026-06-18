@@ -65,4 +65,16 @@ export interface StratumV2ChannelState {
   declaredMaxTarget: Buffer;  // SV2 spec: client's declared maximum target — pool must not assign easier targets
   isJdClient?: boolean; // JD clients manage their own jobs via Job Declaration Protocol
   firstShareLogged?: boolean; // One-shot flag for logging actual extranonce length on first share
+
+  /**
+   * Signature of the last mining job actually sent on this channel
+   * (version + prev_hash + nBits + coinbase prefix/suffix + merkle path,
+   * or merkle root for standard channels). A periodic template refresh that
+   * produces byte-identical work is suppressed instead of re-issued under a
+   * fresh jobId — a new jobId for unchanged work makes firmware (e.g. Bitaxe)
+   * reset its extranonce search and re-mine the identical header, freezing
+   * session best-difficulty. Reset implicitly on a real block change, which
+   * always carries a new prev_hash → new signature → never suppressed.
+   */
+  lastSentJobSignature?: string;
 }
