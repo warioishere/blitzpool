@@ -1,3 +1,5 @@
+// Copyright (c) 2025-2026 warioishere (blitzpool). Licensed under GPL-3.0-or-later.
+
 // ── Template Distribution Service ──────────────────────────────────
 // Wraps existing job templates into SV2 TDP-format data structures.
 // Provides an internal API consumed by extended channels and JDP.

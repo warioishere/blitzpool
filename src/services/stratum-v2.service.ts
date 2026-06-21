@@ -1,3 +1,5 @@
+// Copyright (c) 2025-2026 warioishere (blitzpool). Licensed under GPL-3.0-or-later.
+
 import { Injectable, OnModuleInit, Inject, forwardRef } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Interval } from '@nestjs/schedule';

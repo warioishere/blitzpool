@@ -1,3 +1,5 @@
+// Copyright (c) 2025-2026 warioishere (blitzpool). Licensed under GPL-3.0-or-later.
+
 // ── SV2 Extranonce Manager ──────────────────────────────────────────
 // Manages extranonce prefix allocation for extended mining channels.
 // Ensures no two channels share the same prefix to prevent hash collisions.

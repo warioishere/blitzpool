@@ -1,3 +1,5 @@
+// Copyright (c) 2025-2026 warioishere (blitzpool). Licensed under GPL-3.0-or-later.
+
 // ── SV2 Protocol Constants ──────────────────────────────────────────
 
 /** Standard (unencrypted) frame header: 2-byte ext+type + 3-byte length + 1-byte channel bit = 6 */

@@ -1,3 +1,5 @@
+// Copyright (c) 2025-2026 warioishere (blitzpool). Licensed under GPL-3.0-or-later.
+
 import { BeforeInsert, Column, Entity, Index, PrimaryGeneratedColumn } from 'typeorm';
 
 import { epochMsTransformer } from '../utils/epoch-ms-transformer';

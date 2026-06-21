@@ -1,3 +1,5 @@
+// Copyright (c) 2025-2026 warioishere (blitzpool). Licensed under GPL-3.0-or-later.
+
 // ── SipHash-2-4 ────────────────────────────────────────────────────
 // Pure TypeScript implementation of SipHash-2-4 for SV2 JDP short
 // transaction IDs. Produces 8-byte (64-bit) hashes, truncated to

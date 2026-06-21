@@ -1,3 +1,5 @@
+// Copyright (c) 2025-2026 warioishere (blitzpool). Licensed under GPL-3.0-or-later.
+
 import { ConfigService } from '@nestjs/config';
 import * as bitcoinjs from 'bitcoinjs-lib';
 import { getAddressInfo } from 'bitcoin-address-validation';

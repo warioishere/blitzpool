@@ -1,3 +1,5 @@
+// Copyright (c) 2025-2026 warioishere (blitzpool). Licensed under GPL-3.0-or-later.
+
 // ── SV2 Binary Codec ────────────────────────────────────────────────
 // Sequential Buffer reader / accumulator-pattern writer for all SV2
 // data types.  All multi-byte integers are little-endian per spec.

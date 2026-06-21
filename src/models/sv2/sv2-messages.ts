@@ -1,3 +1,5 @@
+// Copyright (c) 2025-2026 warioishere (blitzpool). Licensed under GPL-3.0-or-later.
+
 // ── SV2 Mining Protocol Messages ────────────────────────────────────
 // Interfaces + serialize/deserialize for each message needed for
 // standard mining channels.

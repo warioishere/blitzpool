@@ -1,3 +1,5 @@
+// Copyright (c) 2025-2026 warioishere (blitzpool). Licensed under GPL-3.0-or-later.
+
 // ── Job Declaration Service ────────────────────────────────────────
 // NestJS service managing JDP connections. Acts as a Job Declarator
 // Server (JDS), accepting custom block templates from miners.

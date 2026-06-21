@@ -1,3 +1,5 @@
+// Copyright (c) 2025-2026 warioishere (blitzpool). Licensed under GPL-3.0-or-later.
+
 // ── SV2 Job Declaration Protocol (JDP) Messages ────────────────────
 // Interfaces + serialize/deserialize for all JDP message types and
 // the Mining Protocol custom job bridge messages.

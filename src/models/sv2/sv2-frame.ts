@@ -1,3 +1,5 @@
+// Copyright (c) 2025-2026 warioishere (blitzpool). Licensed under GPL-3.0-or-later.
+
 // ── SV2 Frame Encoding / Decoding ───────────────────────────────────
 // Handles 6-byte frame headers, encrypted framing with ChaCha20-Poly1305
 // AEAD chunking, and incremental TCP reassembly.

@@ -1,3 +1,5 @@
+// Copyright (c) 2025-2026 warioishere (blitzpool). Licensed under GPL-3.0-or-later.
+
 // ── Job Declaration Client (JDC connection handler) ────────────────
 // Manages a single JDP connection from a Job Declarator Client (JDC)
 // to the pool acting as a Job Declarator Server (JDS).

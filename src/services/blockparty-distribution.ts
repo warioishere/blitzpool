@@ -1,3 +1,5 @@
+// Copyright (c) 2025-2026 warioishere (blitzpool). Licensed under GPL-3.0-or-later.
+
 import { CoinbaseDistributionEntry, DUST_LIMIT_SATS } from './coinbase-distribution';
 
 export interface BlockpartyMemberInput {

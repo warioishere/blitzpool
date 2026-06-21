@@ -1,3 +1,5 @@
+// Copyright (c) 2025-2026 warioishere (blitzpool). Licensed under GPL-3.0-or-later.
+
 // ── SV2 Noise NX Handshake & Encrypted Transport ────────────────────
 // Implements Noise_NX_Secp256k1+EllSwift_ChaChaPoly_SHA256 for SV2.
 // Server (responder) side: receives Act 1, sends Act 2, then
