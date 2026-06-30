@@ -364,9 +364,13 @@ export class GroupSoloService implements OnModuleInit {
      * is keyed per-finderAddress so onBlockFound can reconstruct the exact
      * on-chain split for whichever miner actually finds the block.
      *
-     * `finderAddress` may be omitted (e.g. unauthorized session, JDP path
-     * which is excluded for Group-Solo). In that case no bonus output is
-     * emitted and the snapshot is stored under the legacy "__none__" key.
+     * `finderAddress` may be omitted (e.g. unauthorized session). In that
+     * case no bonus output is emitted and the snapshot is stored under
+     * the legacy "__none__" key. The JDP path DOES pass finderAddress
+     * (the JDP miner is the prospective block-finder by construction),
+     * but only when ext 0x0003 (Coinbase Output Weights) has been
+     * negotiated — without that extension JDP stays single-output per
+     * §6.4.3 and Group-Solo isn't expressible.
      */
     async getPayoutDistribution(
         groupId: string,

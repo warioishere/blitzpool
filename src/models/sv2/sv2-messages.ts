@@ -427,36 +427,19 @@ export function deserializeUpdateChannelError(reader: BufferReader): Sv2UpdateCh
 }
 
 // ── Extension 1: Extensions Negotiation (extension_type = 0x0001) ───
-// Spec: extensions/0x0001-extensions-negotiation.md
-// RequestExtensions     msgType 0x00  (client → pool)
-// RequestExtensions.Success msgType 0x01  (pool → client)
-// RequestExtensions.Error   msgType 0x02  (pool → client)
-
-export const SV2_EXTENSION_NEGOTIATION_ID = 0x0001;
-
-export interface Sv2RequestExtensions {
-  requestId: number;            // U16
-  requestedExtensions: number[]; // SEQ0_64K[U16]
-}
-
-export function deserializeRequestExtensions(reader: BufferReader): Sv2RequestExtensions {
-  return {
-    requestId: reader.readU16(),
-    requestedExtensions: reader.readSeq0_64K((r) => r.readU16()),
-  };
-}
-
-export interface Sv2RequestExtensionsSuccess {
-  requestId: number;             // U16
-  supportedExtensions: number[]; // SEQ0_64K[U16]
-}
-
-export function serializeRequestExtensionsSuccess(msg: Sv2RequestExtensionsSuccess): Buffer {
-  const w = new BufferWriter();
-  w.writeU16(msg.requestId);
-  w.writeSeq0_64K(msg.supportedExtensions, (writer, ext) => writer.writeU16(ext));
-  return w.toBuffer();
-}
+// Single source of truth lives in sv2-extensions-messages.ts; we
+// re-export for backwards compatibility of pre-existing call sites
+// in StratumV2Client. New code should import from sv2-extensions-
+// messages directly.
+export {
+  Sv2RequestExtensions,
+  Sv2RequestExtensionsSuccess,
+  Sv2RequestExtensionsError,
+  deserializeRequestExtensions,
+  serializeRequestExtensionsSuccess,
+  serializeRequestExtensionsError,
+} from './sv2-extensions-messages';
+export { SV2_EXTENSION_TYPE_NEGOTIATION as SV2_EXTENSION_NEGOTIATION_ID } from './sv2-constants';
 
 // ── Reconnect (0x04) ────────────────────────────────────────────────
 

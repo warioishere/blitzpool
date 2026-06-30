@@ -26,6 +26,27 @@ export const SV2_CHANNEL_MSG_FLAG = 0x8000;
 /** Protocol identifier string used in SetupConnection */
 export const SV2_PROTOCOL_NAME = 'MiningProtocol';
 
+// ── Extension Type Identifiers (sv2-spec §3.4.1) ───────────────────
+// Each extension owns a 16-bit ID. The frame header's `extension_type`
+// field carries it for messages introduced by that extension.
+
+/** Extension 0x0001 — Extensions Negotiation (defines RequestExtensions et al.) */
+export const SV2_EXTENSION_TYPE_NEGOTIATION = 0x0001;
+
+/** Extension 0x0002 — Worker-Specific Hashrate Tracking (TLV on SubmitSharesExtended) */
+export const SV2_EXTENSION_TYPE_WORKER_ID = 0x0002;
+
+/** Field type ID inside the 0x0002 TLV (only field currently defined). */
+export const SV2_FIELD_TYPE_USER_IDENTITY = 0x01;
+
+/** Max bytes for the 0x0002 user_identity TLV value (spec §1.1). */
+export const SV2_USER_IDENTITY_MAX_BYTES = 32;
+
+/** Extension 0x0003 — Dynamic Coinbase Outputs.
+ *  Introduces three new messages (RequestCoinbaseOutputs / .Success / .Error)
+ *  in the 0x0003 namespace; frame extension_type = 0x0003 for all three. */
+export const SV2_EXTENSION_TYPE_DYNAMIC_COINBASE_OUTPUTS = 0x0003;
+
 // ── Noise NX Handshake Constants ────────────────────────────────────
 
 /** Noise NX protocol name used to initialize h (ChaCha20-Poly1305) */
@@ -89,6 +110,20 @@ export enum Sv2MsgType {
 
   // Reconnect
   RECONNECT = 0x04,
+
+  // Extensions Negotiation (sv2-spec extension 0x0001)
+  // Messages carry extension_type = SV2_EXTENSION_TYPE_NEGOTIATION
+  // in the frame header (NOT extension_type = 0x0000).
+  EXT_REQUEST_EXTENSIONS = 0x00,
+  EXT_REQUEST_EXTENSIONS_SUCCESS = 0x01,
+  EXT_REQUEST_EXTENSIONS_ERROR = 0x02,
+
+  // Dynamic Coinbase Outputs (sv2-spec extension 0x0003)
+  // Messages carry extension_type = SV2_EXTENSION_TYPE_DYNAMIC_COINBASE_OUTPUTS.
+  // Message-type codes are extension-local (0x00/0x01/0x02).
+  EXT_REQUEST_COINBASE_OUTPUTS = 0x00,
+  EXT_REQUEST_COINBASE_OUTPUTS_SUCCESS = 0x01,
+  EXT_REQUEST_COINBASE_OUTPUTS_ERROR = 0x02,
 
   // Job Declaration Protocol
   JDP_ALLOCATE_MINING_JOB_TOKEN = 0x50,
